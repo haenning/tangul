@@ -7,7 +7,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Editor, EditorState},
-    spinner::Spinner,
     table::{DataTable, TableState},
     v_flex,
 };
@@ -320,10 +319,10 @@ impl QueryTab {
         }
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    /// Timing and row count of the last run, shown in the workspace status bar.
+    pub fn status_text(&self, cx: &App) -> SharedString {
         let rows = self.table.read(cx).delegate().result.row_count();
-        let text: SharedString = match &self.status {
+        match &self.status {
             Status::Idle => "".into(),
             Status::Running => format!("Running… {rows} rows").into(),
             Status::Done {
@@ -342,20 +341,7 @@ impl QueryTab {
                 }
                 s.into()
             }
-        };
-        h_flex()
-            .h_7()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_t_1()
-            .border_color(theme.border)
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .when(self.running.is_some(), |this| {
-                this.child(Spinner::new().xsmall())
-            })
-            .child(text)
+        }
     }
 }
 
@@ -379,8 +365,7 @@ impl Render for QueryTab {
                     .min_h_0()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().min_h_0().child(self.render_results(cx)))
-                    .child(self.render_footer(cx)),
+                    .child(div().flex_1().min_h_0().child(self.render_results(cx))),
             )
     }
 }

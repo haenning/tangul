@@ -10,6 +10,7 @@ use gpui_kit::component::{
     h_flex,
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
+    spinner::Spinner,
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -1239,16 +1240,28 @@ impl Workspace {
                 format!("{} — {status}", conn.name).into()
             })
             .unwrap_or_else(|| "Not connected".into());
+        // Timing and row count of the active tab, right-aligned.
+        let (query_text, running) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| {
+                let t = tab.read(cx);
+                (t.status_text(cx), t.is_running())
+            })
+            .unwrap_or_default();
         h_flex()
             .h_6()
             .px_3()
+            .gap_2()
             .items_center()
             .border_t_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child(text)
+            .child(div().flex_1().min_w_0().truncate().child(text))
+            .when(running, |this| this.child(Spinner::new().xsmall()))
+            .child(query_text)
     }
 }
 
