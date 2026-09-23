@@ -206,47 +206,60 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
     assert_eq!(h.run(tab_a, "SELECT 1").await.error, None);
 }
 
-/// The seed data has `orders.user_id` referencing `users.id` in schema `schema`.
-async fn schema_checks(driver: DriverKind, cfg: ConnectConfig, schema: &str) {
-    let (engine, events) = rusdb_engine::start();
-    engine.send(Command::Connect {
-        conn: ConnId(1),
-        driver,
-        cfg,
-        ssh: None,
-    });
+/// Creates `rusdb_fk_test.parent` / `.child` (child.parent_id → parent.id) and checks
+/// the columns and foreign key the schema loader reports. Self-contained: the CI
+/// service databases have no seed data.
+async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
+    // MySQL's schemas are databases; neither DROP SCHEMA variant runs on both.
+    let drop = match driver {
+        DriverKind::Postgres => "DROP SCHEMA IF EXISTS rusdb_fk_test CASCADE",
+        DriverKind::Mysql => "DROP SCHEMA IF EXISTS rusdb_fk_test",
+    };
+    let mut h = Harness::connect(driver, cfg).await;
+    let tab = TabId(1);
+    let setup = format!(
+        "{drop}; CREATE SCHEMA rusdb_fk_test; \
+         CREATE TABLE rusdb_fk_test.parent (id INT PRIMARY KEY); \
+         CREATE TABLE rusdb_fk_test.child (id INT PRIMARY KEY, parent_id INT NOT NULL, \
+           FOREIGN KEY (parent_id) REFERENCES rusdb_fk_test.parent (id))"
+    );
+    assert_eq!(h.run(tab, &setup).await.error, None);
+
+    h.engine.send(Command::RefreshSchema { conn: h.conn });
     let info = loop {
-        let ev = tokio::time::timeout(Duration::from_secs(20), events.recv())
-            .await
-            .expect("timeout waiting for schema")
-            .expect("engine gone");
-        match ev {
-            Event::Schema { result, .. } => break result.expect("schema failed"),
-            Event::ConnectFailed { error, .. } => panic!("connect failed: {error}"),
-            _ => {}
+        if let Event::Schema { result, .. } = h.next().await {
+            let info = result.expect("schema failed");
+            // Skip a schema load that started before the tables existed.
+            if info.tables.iter().any(|t| t.schema == "rusdb_fk_test") {
+                break info;
+            }
         }
     };
-    let col = info
-        .columns
-        .iter()
-        .find(|c| c.schema == schema && c.table == "orders" && c.name == "user_id")
-        .expect("orders.user_id column");
-    assert!(!col.nullable);
-    assert!(
+    let col = |table: &str, name: &str| {
         info.columns
             .iter()
-            .any(|c| c.table == "users" && c.name == "id" && c.primary_key)
-    );
+            .find(|c| c.schema == "rusdb_fk_test" && c.table == table && c.name == name)
+            .unwrap_or_else(|| panic!("column {table}.{name}"))
+    };
+    assert!(!col("child", "parent_id").nullable);
+    assert!(!col("child", "parent_id").primary_key);
+    assert!(col("parent", "id").primary_key);
     let fk = info
         .foreign_keys
         .iter()
-        .find(|f| f.schema == schema && f.table == "orders")
-        .expect("orders foreign key");
-    assert_eq!(fk.columns, ["user_id"]);
+        .find(|f| f.schema == "rusdb_fk_test" && f.table == "child")
+        .expect("child foreign key");
+    assert_eq!(fk.columns, ["parent_id"]);
     assert_eq!(
-        (fk.ref_table.as_str(), &fk.ref_columns[..]),
-        ("users", &["id".to_string()][..])
+        (
+            fk.ref_schema.as_str(),
+            fk.ref_table.as_str(),
+            &fk.ref_columns[..]
+        ),
+        ("rusdb_fk_test", "parent", &["id".to_string()][..])
     );
+
+    assert_eq!(h.run(tab, drop).await.error, None);
 }
 
 #[tokio::test]
@@ -256,7 +269,7 @@ async fn postgres() {
         return;
     };
     common_checks(DriverKind::Postgres, cfg.clone(), "SELECT pg_sleep(30)").await;
-    schema_checks(DriverKind::Postgres, cfg.clone(), "app").await;
+    schema_checks(DriverKind::Postgres, cfg.clone()).await;
 
     let mut h = Harness::connect(DriverKind::Postgres, cfg).await;
     let out = h
@@ -278,7 +291,7 @@ async fn mysql() {
         return;
     };
     common_checks(DriverKind::Mysql, cfg.clone(), "SELECT SLEEP(30)").await;
-    schema_checks(DriverKind::Mysql, cfg.clone(), "app").await;
+    schema_checks(DriverKind::Mysql, cfg.clone()).await;
 
     let mut h = Harness::connect(DriverKind::Mysql, cfg).await;
     let out = h
