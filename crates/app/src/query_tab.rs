@@ -13,6 +13,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rusdb_assist::related::RelatedLink;
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
 use rusdb_engine::{Command, EngineHandle, ExecEvent, QueryEvent};
 
@@ -31,6 +32,9 @@ pub enum TabEvent {
     Run(String),
     /// The user wants to save the editor's SQL as a bookmark.
     Bookmark(String),
+    /// Open (and run) a query for rows related to the selected ones, on this tab's
+    /// connection.
+    OpenRelated { title: String, sql: String },
 }
 
 enum Status {
@@ -81,10 +85,13 @@ impl QueryTab {
                 .default_value(sql.to_string())
                 .placeholder("SELECT ...   (⌘↵ to run)")
         });
+        let delegate = ResultsDelegate::new(cx.weak_entity());
         let table = cx.new(|cx| {
-            TableState::new(ResultsDelegate::default(), window, cx)
+            TableState::new(delegate, window, cx)
                 .sortable(false)
                 .col_movable(false)
+                // Rows are selected by the delegate (multi-selection).
+                .row_selectable(false)
         });
         Self {
             id,
@@ -116,6 +123,16 @@ impl QueryTab {
 
     pub fn sql(&self, cx: &App) -> String {
         self.editor.read(cx).value().to_string()
+    }
+
+    pub fn result_columns(&self, cx: &App) -> Vec<String> {
+        self.table.read(cx).delegate().column_names()
+    }
+
+    /// Foreign-key links offered in the result rows' context menu.
+    pub fn set_related(&mut self, links: Vec<RelatedLink>, cx: &mut Context<Self>) {
+        self.table
+            .update(cx, |t, _| t.delegate_mut().related = links);
     }
 
     /// Rows returned by the last result set, or affected by the last statement.

@@ -5,6 +5,7 @@ pub mod analyze;
 pub mod complete;
 pub mod grammar;
 pub mod lexer;
+pub mod related;
 pub mod schema;
 pub mod suggest;
 pub mod usage;

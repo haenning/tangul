@@ -127,7 +127,7 @@ crates/
 
 ### Next candidates
 2. Resizable editor/results split; results per statement (currently last result set).
-3. Cell detail view + copy (cell / row / TSV).
+3. Cell detail view (copy cell/rows as TSV is done).
 4. Columns/indexes in the sidebar (columns are loaded already, see D6b).
 5. Fetch more rows via server-side cursors instead of discarding beyond the limit.
 6. Homebrew tap; `.app` bundle (`cargo-bundle`); signing/notarization much later.

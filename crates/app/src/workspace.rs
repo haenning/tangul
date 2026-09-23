@@ -13,7 +13,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
-    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
     spinner::Spinner,
     tab::{Tab, TabBar},
@@ -23,6 +23,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
     lexer::fingerprint,
+    related::related_links,
     schema::SchemaIndex,
     suggest::{QuerySuggestion, one_line, suggest_for_table},
     usage::{Usage, learn},
@@ -324,6 +325,18 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            TabEvent::OpenRelated { title, sql } => {
+                // Same connection as the tab the rows came from.
+                let conn = tab.read(cx).conn.clone();
+                let new = self.add_tab(sql, window, cx);
+                new.update(cx, |t, cx| {
+                    t.title = title.clone().into();
+                    if let Some(conn) = conn {
+                        t.set_conn(conn, cx);
+                        cx.emit(TabEvent::Run(sql.clone()));
+                    }
+                });
+            }
             TabEvent::Bookmark(sql) => {
                 let existing = tab.read(cx).bookmark_id.clone();
                 self.open_bookmark_dialog(existing, sql.clone(), Some(tab.clone()), window, cx);
@@ -508,6 +521,12 @@ impl Workspace {
             eprintln!("could not record history: {e:#}");
         }
         if succeeded {
+            // Offer related rows (foreign keys) in the result's context menu.
+            if let (Some(tab), Some(state)) = (&tab, self.conns.get(&run.user_id)) {
+                let columns = tab.read(cx).result_columns(cx);
+                let links = related_links(&run.sql, &columns, &state.schema);
+                tab.update(cx, |t, cx| t.set_related(links, cx));
+            }
             if let Some(state) = self.conns.get(&run.user_id) {
                 let learned = learn(&run.sql, &state.schema);
                 let now = now_ms() / 1000;
@@ -706,22 +725,51 @@ impl Workspace {
         }
     }
 
-    fn open_table(&mut self, table: &TableInfo, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(driver) = self.active_database().map(|db| db.driver) else {
-            return;
-        };
+    /// `schema.table`, both quoted, for the active connection's dialect.
+    fn qualified_name(&self, table: &TableInfo) -> Option<String> {
+        let driver = self.active_database()?.driver;
         let q = |s: &str| match driver {
             DriverKind::Postgres => format!("\"{}\"", s.replace('"', "\"\"")),
             DriverKind::Mysql => format!("`{}`", s.replace('`', "``")),
         };
-        let sql = format!(
-            "SELECT * FROM {}.{} LIMIT 100",
-            q(&table.schema),
-            q(&table.name)
+        Some(format!("{}.{}", q(&table.schema), q(&table.name)))
+    }
+
+    fn open_table(&mut self, table: &TableInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.qualified_name(table) else {
+            return;
+        };
+        self.run_in_new_tab(
+            &table.name,
+            format!("SELECT * FROM {name} LIMIT 100"),
+            window,
+            cx,
         );
+    }
+
+    fn count_table(&mut self, table: &TableInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.qualified_name(table) else {
+            return;
+        };
+        self.run_in_new_tab(
+            &table.name,
+            format!("SELECT COUNT(*) FROM {name}"),
+            window,
+            cx,
+        );
+    }
+
+    fn run_in_new_tab(
+        &mut self,
+        title: &str,
+        sql: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tab = self.add_tab(&sql, window, cx);
+        let title: SharedString = title.to_string().into();
         tab.update(cx, |t, cx| {
-            t.title = table.name.clone().into();
+            t.title = title;
             cx.emit(TabEvent::Run(sql));
         });
     }
@@ -1189,9 +1237,14 @@ impl Workspace {
                             .on_click(|_, _, cx| cx.stop_propagation())
                             .child(suggestions),
                     )
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.open_table(&table, window, cx)),
-                    )
+                    .on_click({
+                        let table = table.clone();
+                        cx.listener(move |this, _, window, cx| this.open_table(&table, window, cx))
+                    })
+                    .context_menu({
+                        let weak = cx.entity().downgrade();
+                        move |menu, _, cx| table_menu(menu, &table, &weak, cx)
+                    })
                     .into_any_element()
             }
         }
@@ -1971,4 +2024,34 @@ fn ago(ms: i64) -> String {
         3_600..86_400 => format!("{} h ago", secs / 3_600),
         _ => format!("{} d ago", secs / 86_400),
     }
+}
+
+/// Right-click menu of a table or view in the sidebar.
+fn table_menu(
+    menu: PopupMenu,
+    table: &TableInfo,
+    workspace: &WeakEntity<Workspace>,
+    cx: &App,
+) -> PopupMenu {
+    let item =
+        |label: &str, f: fn(&mut Workspace, &TableInfo, &mut Window, &mut Context<Workspace>)| {
+            let (ws, table) = (workspace.clone(), table.clone());
+            PopupMenuItem::new(label.to_string()).on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| f(ws, &table, window, cx));
+            })
+        };
+    let name = workspace
+        .upgrade()
+        .and_then(|ws| ws.read(cx).qualified_name(table))
+        .unwrap_or_else(|| table.name.clone());
+    let copy = |label: &str, text: String| {
+        PopupMenuItem::new(label.to_string()).on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+        })
+    };
+    menu.item(item("Select first 100 rows", Workspace::open_table))
+        .item(item("Count rows", Workspace::count_table))
+        .separator()
+        .item(copy("Copy name", table.name.clone()))
+        .item(copy("Copy qualified name", name))
 }
