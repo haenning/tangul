@@ -17,40 +17,38 @@ fn main() {
     // The engine owns its own tokio runtime thread; the UI only exchanges messages.
     let (engine, events) = rusdb_engine::start();
 
-    gpui_kit::application()
-        .with_assets(assets::AppAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            Theme::change(ThemeMode::Dark, None, cx);
+    application().with_assets(assets::AppAssets).run(move |cx| {
+        init(cx);
+        Theme::change(ThemeMode::Dark, None, cx);
 
-            cx.bind_keys([
-                // Must win over the editor's own `secondary-enter` (newline), hence the
-                // same depth ("Input") and registration after gpui_kit::init.
-                KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
-                KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
-                KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
-                KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
-                KeyBinding::new("secondary-q", Quit, None),
-            ]);
-            cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys([
+            // Must win over the editor's own `secondary-enter` (newline), hence the
+            // same depth ("Input") and registration after gpui_kit::init.
+            KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
+            KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
+            KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
+            KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
+            KeyBinding::new("secondary-q", Quit, None),
+        ]);
+        cx.on_action(|_: &Quit, cx| cx.quit());
 
-            let options = WindowOptions {
-                titlebar: Some(TitleBar::title_bar_options()),
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1280.), px(800.)),
-                    cx,
-                ))),
-                ..Default::default()
-            };
-            cx.spawn(async move |cx| {
-                cx.open_window(options, |window, cx| {
-                    let view = cx.new(|cx| workspace::Workspace::new(engine, events, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-                .expect("failed to open window");
+        let options = WindowOptions {
+            titlebar: Some(TitleBar::title_bar_options()),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(1280.), px(800.)),
+                cx,
+            ))),
+            ..Default::default()
+        };
+        cx.spawn(async move |cx| {
+            cx.open_window(options, |window, cx| {
+                let view = cx.new(|cx| workspace::Workspace::new(engine, events, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
             })
-            .detach();
-            cx.activate(true);
-        });
+            .expect("failed to open window");
+        })
+        .detach();
+        cx.activate(true);
+    });
 }

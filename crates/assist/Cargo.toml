@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 rusdb-core = { version = "0.1.0", path = "../core" }
+
+[lints]
+workspace = true

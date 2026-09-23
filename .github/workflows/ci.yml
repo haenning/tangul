@@ -53,6 +53,19 @@ jobs:
           RUSDB_TEST_MYSQL: root:@127.0.0.1:53306/app
         run: cargo test -p rusdb-core -p rusdb-drivers -p rusdb-engine -p rusdb-assist -p rusdb-tunnel
 
+  # Dependency checks: advisories, licenses, sources (deny.toml) and unused deps.
+  deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-machete
+      - name: cargo-deny
+        run: cargo deny check
+      - name: Unused dependencies
+        run: cargo machete
+
   app:
     runs-on: macos-15
     steps:

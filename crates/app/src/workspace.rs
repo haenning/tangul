@@ -1742,7 +1742,6 @@ impl Workspace {
             .collect();
         let db_menu = {
             let weak = weak.clone();
-            let active_db = active_db.clone();
             Button::new("db-switcher")
                 .label(db.map_or("No database".into(), |d| d.display_name()))
                 .ghost()
