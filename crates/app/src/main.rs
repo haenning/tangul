@@ -17,7 +17,18 @@ fn main() {
     // The engine owns its own tokio runtime thread; the UI only exchanges messages.
     let (engine, events) = rusdb_engine::start();
 
-    application().with_assets(assets::AppAssets).run(move |cx| {
+    let app = application().with_assets(assets::AppAssets);
+    // macOS keeps the app running when its window closes; clicking the Dock icon
+    // then asks for a window again.
+    {
+        let (engine, events) = (engine.clone(), events.clone());
+        app.on_reopen(move |cx| {
+            if cx.windows().is_empty() {
+                open_main_window(engine.clone(), events.clone(), cx);
+            }
+        });
+    }
+    app.run(move |cx| {
         init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
 
@@ -32,23 +43,38 @@ fn main() {
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
-        let options = WindowOptions {
-            titlebar: Some(TitleBar::title_bar_options()),
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(1280.), px(800.)),
-                cx,
-            ))),
-            ..Default::default()
-        };
-        cx.spawn(async move |cx| {
-            cx.open_window(options, |window, cx| {
-                let view = cx.new(|cx| workspace::Workspace::new(engine, events, window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            })
-            .expect("failed to open window");
-        })
-        .detach();
+        open_main_window(engine, events, cx);
         cx.activate(true);
     });
+}
+
+/// Opens the workspace window. Only one exists at a time: the engine's event stream
+/// goes to the workspace that is alive.
+fn open_main_window(
+    engine: rusdb_engine::EngineHandle,
+    events: async_channel::Receiver<rusdb_engine::Event>,
+    cx: &mut App,
+) {
+    let options = WindowOptions {
+        // The title is not drawn (custom title bar) but names the window in the
+        // Dock's and the Window menu's window list.
+        titlebar: Some(TitlebarOptions {
+            title: Some("rusdb".into()),
+            ..TitleBar::title_bar_options()
+        }),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(1280.), px(800.)),
+            cx,
+        ))),
+        ..Default::default()
+    };
+    cx.spawn(async move |cx| {
+        cx.open_window(options, |window, cx| {
+            let view = cx.new(|cx| workspace::Workspace::new(engine, events, window, cx));
+            cx.new(|cx| Root::new(view, window, cx))
+        })
+        .expect("failed to open window");
+    })
+    .detach();
 }
