@@ -1,0 +1,49 @@
+# cargo-deny: `make lint` and CI. https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# The app ships for macOS; Linux targets are for dev builds and CI.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+all-features = false
+
+[advisories]
+# RustSec database. Vulnerabilities fail. Unmaintained crates only fail when we
+# depend on them directly; deep in GPUI's tree there is nothing we can change.
+yanked = "deny"
+unmaintained = "workspace"
+ignore = [
+    # Marvin attack on `rsa` (via russh, for RSA SSH keys). No fixed version exists.
+    # It needs many timing observations of private-key operations; the client signs
+    # once per SSH login. Dropping it would break RSA keys. Revisit when rsa 0.10 ships.
+    { id = "RUSTSEC-2023-0071", reason = "no fix; one RSA signature per SSH login" },
+]
+
+[licenses]
+# Permissive licenses plus MPL-2.0 (file-level copyleft, fine for an Apache-2.0 app).
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "bzip2-1.0.6",
+]
+confidence-threshold = 0.8
+
+[bans]
+# GPUI's tree pulls in several versions of many crates; nothing actionable here.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

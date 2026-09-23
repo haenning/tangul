@@ -1,11 +1,15 @@
 //! Integration tests against real servers. Skipped unless the env vars are set, e.g.:
 //!   RUSDB_TEST_PG=postgres:@127.0.0.1:55432/postgres
 //!   RUSDB_TEST_MYSQL=root:@127.0.0.1:53306/app
-//! (`make test-live` starts the databases from docker-compose.yml and sets both.)
+//!   RUSDB_TEST_SSH=rusdb:rusdb@127.0.0.1:52222  (bastion that reaches postgres:5432)
+//! (`make test-live` starts the databases from docker-compose.yml and sets all three.)
 
 use std::time::Duration;
 
-use rusdb_core::{ConnId, ConnectConfig, DriverKind, QueryId, ResultSet, TabId, TlsMode};
+use rusdb_core::{
+    ConnId, ConnectConfig, DriverKind, QueryId, ResultSet, SshAuth, SshConfig, SshTarget, TabId,
+    TlsMode,
+};
 use rusdb_engine::{Command, EngineHandle, Event, ExecEvent, QueryEvent};
 
 fn config(var: &str) -> Option<ConnectConfig> {
@@ -43,7 +47,12 @@ impl Harness {
     async fn connect(driver: DriverKind, cfg: ConnectConfig) -> Self {
         let (engine, events) = rusdb_engine::start();
         let conn = ConnId(1);
-        engine.send(Command::Connect { conn, driver, cfg });
+        engine.send(Command::Connect {
+            conn,
+            driver,
+            cfg,
+            ssh: None,
+        });
         let mut h = Self {
             engine,
             events,
@@ -197,6 +206,49 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
     assert_eq!(h.run(tab_a, "SELECT 1").await.error, None);
 }
 
+/// The seed data has `orders.user_id` referencing `users.id` in schema `schema`.
+async fn schema_checks(driver: DriverKind, cfg: ConnectConfig, schema: &str) {
+    let (engine, events) = rusdb_engine::start();
+    engine.send(Command::Connect {
+        conn: ConnId(1),
+        driver,
+        cfg,
+        ssh: None,
+    });
+    let info = loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), events.recv())
+            .await
+            .expect("timeout waiting for schema")
+            .expect("engine gone");
+        match ev {
+            Event::Schema { result, .. } => break result.expect("schema failed"),
+            Event::ConnectFailed { error, .. } => panic!("connect failed: {error}"),
+            _ => {}
+        }
+    };
+    let col = info
+        .columns
+        .iter()
+        .find(|c| c.schema == schema && c.table == "orders" && c.name == "user_id")
+        .expect("orders.user_id column");
+    assert!(!col.nullable);
+    assert!(
+        info.columns
+            .iter()
+            .any(|c| c.table == "users" && c.name == "id" && c.primary_key)
+    );
+    let fk = info
+        .foreign_keys
+        .iter()
+        .find(|f| f.schema == schema && f.table == "orders")
+        .expect("orders foreign key");
+    assert_eq!(fk.columns, ["user_id"]);
+    assert_eq!(
+        (fk.ref_table.as_str(), &fk.ref_columns[..]),
+        ("users", &["id".to_string()][..])
+    );
+}
+
 #[tokio::test]
 async fn postgres() {
     let Some(cfg) = config("RUSDB_TEST_PG") else {
@@ -204,6 +256,7 @@ async fn postgres() {
         return;
     };
     common_checks(DriverKind::Postgres, cfg.clone(), "SELECT pg_sleep(30)").await;
+    schema_checks(DriverKind::Postgres, cfg.clone(), "app").await;
 
     let mut h = Harness::connect(DriverKind::Postgres, cfg).await;
     let out = h
@@ -225,6 +278,7 @@ async fn mysql() {
         return;
     };
     common_checks(DriverKind::Mysql, cfg.clone(), "SELECT SLEEP(30)").await;
+    schema_checks(DriverKind::Mysql, cfg.clone(), "app").await;
 
     let mut h = Harness::connect(DriverKind::Mysql, cfg).await;
     let out = h
@@ -239,4 +293,128 @@ async fn mysql() {
     // Binary data is shown as hex instead of broken UTF-8.
     let out = h.run(TabId(1), "SELECT UNHEX('DEADBEEF') AS b").await;
     assert_eq!(out.result.unwrap().cell(0, 0), Some("0xdeadbeef"));
+}
+
+/// Through the SSH bastion to Postgres: an unknown host key is reported (not
+/// accepted), and after trusting it the connection works.
+#[tokio::test]
+async fn ssh_tunnel() {
+    let Some(url) = std::env::var("RUSDB_TEST_SSH").ok() else {
+        eprintln!("RUSDB_TEST_SSH not set, skipping");
+        return;
+    };
+    let (creds, hostport) = url.split_once('@').expect("user:pw@host:port");
+    let (user, password) = creds.split_once(':').expect("user:pw");
+    let (host, port) = hostport.split_once(':').expect("host:port");
+    let known_hosts =
+        std::env::temp_dir().join(format!("rusdb-known-hosts-{}", std::process::id()));
+    let _ = std::fs::remove_file(&known_hosts);
+    // SAFETY: only this test reads the variable (in the tunnel code it starts).
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("RUSDB_KNOWN_HOSTS", &known_hosts)
+    };
+
+    let ssh = SshTarget {
+        config: SshConfig {
+            host: host.into(),
+            port: port.parse().unwrap(),
+            user: user.into(),
+            auth: SshAuth::Password,
+            key_path: String::new(),
+        },
+        secret: Some(password.into()),
+    };
+    let cfg = ConnectConfig {
+        host: "postgres".into(),
+        port: 5432,
+        user: "postgres".into(),
+        password: None,
+        database: "postgres".into(),
+        tls: TlsMode::Disable,
+    };
+    let (engine, events) = rusdb_engine::start();
+    let connect = |ssh: &SshTarget| Command::Connect {
+        conn: ConnId(1),
+        driver: DriverKind::Postgres,
+        cfg: cfg.clone(),
+        ssh: Some(ssh.clone()),
+    };
+    let next = || async {
+        tokio::time::timeout(Duration::from_secs(30), events.recv())
+            .await
+            .expect("timeout")
+            .expect("engine gone")
+    };
+
+    engine.send(connect(&ssh));
+    let (host, port, key) = loop {
+        match next().await {
+            Event::HostKeyUnknown {
+                host,
+                port,
+                key,
+                fingerprint,
+                ..
+            } => {
+                assert!(fingerprint.starts_with("SHA256:"));
+                break (host, port, key);
+            }
+            Event::Connected { .. } => panic!("unknown host key was accepted"),
+            Event::ConnectFailed { error, .. } => panic!("connect failed: {error}"),
+            _ => {}
+        }
+    };
+    engine.send(Command::TrustHostKey { host, port, key });
+    engine.send(connect(&ssh));
+    loop {
+        match next().await {
+            Event::Connected { .. } => break,
+            Event::ConnectFailed { error, .. } => panic!("connect failed: {error}"),
+            Event::HostKeyUnknown { .. } => panic!("trusted key not found"),
+            _ => {}
+        }
+    }
+    engine.send(Command::Execute {
+        query: QueryId(1),
+        tab: TabId(1),
+        conn: ConnId(1),
+        sql: "SELECT 42".into(),
+    });
+    loop {
+        if let Event::Query {
+            event: QueryEvent::Finished { error, .. },
+            ..
+        } = next().await
+        {
+            assert_eq!(error, None);
+            break;
+        }
+    }
+
+    // Wrong password: a clear auth error, no hang.
+    let bad = SshTarget {
+        secret: Some("wrong".into()),
+        ..ssh
+    };
+    engine.send(Command::Connect {
+        conn: ConnId(2),
+        driver: DriverKind::Postgres,
+        cfg: cfg.clone(),
+        ssh: Some(bad),
+    });
+    loop {
+        match next().await {
+            Event::ConnectFailed {
+                conn: ConnId(2),
+                error,
+            } => {
+                assert!(error.contains("authentication"), "{error}");
+                break;
+            }
+            Event::Connected { conn: ConnId(2) } => panic!("wrong password accepted"),
+            _ => {}
+        }
+    }
+    let _ = std::fs::remove_file(&known_hosts);
 }

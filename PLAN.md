@@ -46,10 +46,15 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 - `TODO(reserve-connection)`: a tab button to pin a connection permanently (out of scope).
 - The status bar shows `open/max · idle · in transaction` for the active profile.
 
-### D4 — SSH tunnel via `russh` (not implemented yet)
-- One SSH session per profile, each DB connection = one `direct-tcpip` channel; local
-  `127.0.0.1:0` listener, so drivers stay unchanged. Auth: password, key, ssh-agent.
-  Verify `known_hosts`, never auto-accept. Hooks: `TODO(ssh)` in profile/form.
+### D4 — SSH tunnel via `russh` (`crates/tunnel`)
+- One SSH session per database pool, each DB connection = one `direct-tcpip` channel; local
+  `127.0.0.1:0` listener, so drivers stay unchanged. Auth: ssh-agent, key file (optional
+  passphrase), password; secrets in the Keychain (`ssh:<database id>`).
+- Opened lazily by the pool; a dead session is re-opened on the next connection.
+- Host keys are checked against `~/.ssh/known_hosts`, never accepted silently: an unknown
+  key asks the user (fingerprint dialog, "Trust & connect" appends it); a changed key is
+  an error. `RUSDB_KNOWN_HOSTS` overrides the file (tests).
+- ring crypto backend (no aws-lc/cmake build dependency).
 
 ### D5 — Result storage
 - One `String` arena + `u32` end offsets + null flags per result (no allocation per cell).
@@ -60,7 +65,18 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 - Profiles: TOML in `~/Library/Application Support/rusdb/profiles.toml`.
 - Passwords: macOS Keychain (`keyring`, service `rusdb`). On Linux (dev only) an
   in-memory mock store is used → passwords are not persisted there.
-- "User management" = multiple profiles per server (different users). No role/grant UI.
+- "User management" = multiple users per saved database, switched from the title bar. No role/grant UI.
+
+### D6b — Local data & SQL assistance
+- `local.db` (SQLite via `rusqlite`, bundled) next to `profiles.toml`: bookmarks, query
+  history (full SQL + fingerprint with literals replaced by `?`), learned usage and a
+  per-user schema cache (JSON). Schema migrations via `PRAGMA user_version`.
+- `crates/assist` is UI-free and unit-tested: forgiving lexer, clause-keyword based
+  statement analysis (tables/aliases/columns/joins), completion, usage "frecency"
+  (count decayed by age) and per-table query suggestions.
+- Completion: tables after FROM/JOIN, columns in scope (by alias), FK- and history-based
+  join conditions, keywords; ranked by match quality + usage.
+- AI assistance later, via ACP (Agent Client Protocol) — not planned for now.
 
 ### D7 — UI: GPUI + gpui-component, kept deliberately plain
 - Editor: gpui-component code editor (tree-sitter SQL highlighting, line numbers).
@@ -76,7 +92,7 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
   forces a license: all are permissive; the only copyleft ones are MPL-2.0 (file-level,
   fine to use).
 - Zed's own editor/app crates are GPL-3.0: don't copy code from them.
-- Distribution: Homebrew (tap building from source) first; signing/notarization later.
+- Distribution: universal DMG via tag-based GitHub releases (ad-hoc signed); Developer ID signing, notarization and a Homebrew cask later.
 
 ---
 
@@ -84,10 +100,12 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 
 ```
 crates/
-  core/     # ids, Profile, ResultSet arena, TableInfo — no I/O
+  core/     # ids, Database/DbUser, ResultSet arena, SchemaInfo — no I/O
   drivers/  # Driver/Session traits, postgres.rs, mysql.rs
   engine/   # tokio thread, Command/Event, pool (D3); live integration tests
-  app/      # GPUI binary `rusdb`: workspace, query tab, results grid, connection form
+  assist/   # SQL lexer, analysis, completion, usage ranking, suggestions — no UI/I/O
+  tunnel/   # SSH tunnels (russh): lazy session, local listener, known_hosts checks
+  app/      # GPUI binary `rusdb`: workspace, query tab, results grid, forms, local.db
 ```
 
 ---
@@ -104,15 +122,16 @@ crates/
 | **M5** | **Query tab: editor, ⌘↵, streamed results, errors, cancel** | ✅ **first query** |
 | M6 | MySQL driver | ✅ |
 | M7 | Schema sidebar (schema → tables/views, click opens `SELECT * … LIMIT 100`) | ✅ basic (no columns yet) |
-| M8 | SSH tunnel | ⏳ next |
+| M8 | SSH tunnel; auto-connect to the last used connection at startup | ✅ |
+| M9 | Bookmarks, history, completion, learned suggestions (local.db) | ✅ |
 
 ### Next candidates
-1. SSH tunnel (M8).
 2. Resizable editor/results split; results per statement (currently last result set).
-3. Cell detail view + copy (cell / row / TSV).
-4. Columns/indexes in the sidebar (lazy per table).
+3. Cell detail view (copy cell/rows as TSV is done).
+4. Columns/indexes in the sidebar (columns are loaded already, see D6b).
 5. Fetch more rows via server-side cursors instead of discarding beyond the limit.
-6. Homebrew tap; `.app` bundle (`cargo-bundle`); signing/notarization much later.
+6. Developer ID signing + notarization (removes the first-start Gatekeeper step);
+   Homebrew cask. `.app`/DMG bundling and tag-based GitHub releases exist already.
 
 ---
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/drivers", "crates/engine", "crates/app"]
+members = ["crates/core", "crates/drivers", "crates/engine", "crates/assist", "crates/tunnel", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ license = "Apache-2.0"
 rusdb-core = { path = "crates/core" }
 rusdb-drivers = { path = "crates/drivers" }
 rusdb-engine = { path = "crates/engine" }
+rusdb-assist = { path = "crates/assist" }
 
 anyhow = "1"
 async-trait = "0.1"
@@ -27,3 +28,19 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Shared lint rules; each crate opts in with `[lints] workspace = true`.
+# `make lint` / CI run clippy with warnings as errors.
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+# Logs go to stderr; stdout stays clean.
+print_stdout = "warn"
+mem_forget = "warn"
+needless_collect = "warn"
+redundant_clone = "warn"

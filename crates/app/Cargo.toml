@@ -9,9 +9,13 @@ anyhow.workspace = true
 async-channel.workspace = true
 dirs = "7.0.0"
 gpui-kit = { version = "=0.6.6", features = ["tree-sitter-sql"] }
+lsp-types = { version = "0.97.0", features = ["proposed"] }
+rusdb-assist = { version = "0.1.0", path = "../assist" }
 rusdb-core = { version = "0.1.0", path = "../core" }
 rusdb-engine = { version = "0.1.0", path = "../engine" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0.151"
 toml = "1.1.6"
 
 # Passwords live in the macOS Keychain. Other platforms get keyring's in-memory mock
@@ -21,3 +25,6 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 keyring = "3"
+
+[lints]
+workspace = true

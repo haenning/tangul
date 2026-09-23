@@ -9,7 +9,11 @@ anyhow.workspace = true
 async-channel.workspace = true
 rusdb-core = { version = "0.1.0", path = "../core" }
 rusdb-drivers = { version = "0.1.0", path = "../drivers" }
+rusdb-tunnel = { version = "0.1.0", path = "../tunnel" }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true

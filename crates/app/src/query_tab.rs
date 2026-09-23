@@ -1,22 +1,23 @@
 //! One query tab: SQL editor on top, results below.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Editor, EditorState},
-    spinner::Spinner,
+    input::{CompletionProvider, Editor, EditorState},
     table::{DataTable, TableState},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rusdb_assist::related::RelatedLink;
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
 use rusdb_engine::{Command, EngineHandle, ExecEvent, QueryEvent};
 
-use crate::{RunQuery, results::ResultsDelegate};
+use crate::{BookmarkQuery, RunQuery, assets::Lucide, results::ResultsDelegate};
 
 /// Connection a tab runs against.
 #[derive(Clone)]
@@ -29,6 +30,11 @@ pub struct TabConn {
 pub enum TabEvent {
     /// The user wants to run this SQL; the workspace assigns a QueryId.
     Run(String),
+    /// The user wants to save the editor's SQL as a bookmark.
+    Bookmark(String),
+    /// Open (and run) a query for rows related to the selected ones, on this tab's
+    /// connection.
+    OpenRelated { title: String, sql: String },
 }
 
 enum Status {
@@ -45,6 +51,10 @@ pub struct QueryTab {
     pub id: TabId,
     pub title: SharedString,
     pub conn: Option<TabConn>,
+    /// Bookmark this tab was opened from or saved as; bookmarking again updates it.
+    pub bookmark_id: Option<String>,
+    /// Times the last query was run successfully, when it is worth bookmarking.
+    pub bookmark_hint: Option<u32>,
     engine: EngineHandle,
     editor: Entity<EditorState>,
     table: Entity<TableState<ResultsDelegate>>,
@@ -75,15 +85,20 @@ impl QueryTab {
                 .default_value(sql.to_string())
                 .placeholder("SELECT ...   (⌘↵ to run)")
         });
+        let delegate = ResultsDelegate::new(cx.weak_entity());
         let table = cx.new(|cx| {
-            TableState::new(ResultsDelegate::default(), window, cx)
+            TableState::new(delegate, window, cx)
                 .sortable(false)
                 .col_movable(false)
+                // Rows are selected by the delegate (multi-selection).
+                .row_selectable(false)
         });
         Self {
             id,
             title: format!("Query {}", id.0).into(),
             conn,
+            bookmark_id: None,
+            bookmark_hint: None,
             engine,
             editor,
             table,
@@ -99,6 +114,34 @@ impl QueryTab {
     pub fn focus_editor(tab: &Entity<Self>, window: &mut Window, cx: &mut App) {
         let editor = tab.read(cx).editor.clone();
         editor.update(cx, |e, cx| e.focus(window, cx));
+    }
+
+    pub fn set_completion(&self, provider: Rc<dyn CompletionProvider>, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |e, _| e.lsp_mut().completion_provider = Some(provider));
+    }
+
+    pub fn sql(&self, cx: &App) -> String {
+        self.editor.read(cx).value().to_string()
+    }
+
+    pub fn result_columns(&self, cx: &App) -> Vec<String> {
+        self.table.read(cx).delegate().column_names()
+    }
+
+    /// Foreign-key links offered in the result rows' context menu.
+    pub fn set_related(&mut self, links: Vec<RelatedLink>, cx: &mut Context<Self>) {
+        self.table
+            .update(cx, |t, _| t.delegate_mut().related = links);
+    }
+
+    /// Rows returned by the last result set, or affected by the last statement.
+    pub fn row_count(&self, cx: &App) -> Option<u64> {
+        if self.has_result_set {
+            Some(self.table.read(cx).delegate().result.row_count() as u64)
+        } else {
+            self.last_rows
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -141,6 +184,13 @@ impl QueryTab {
             return;
         }
         cx.emit(TabEvent::Run(sql.to_string()));
+    }
+
+    fn bookmark(&mut self, _: &BookmarkQuery, _: &mut Window, cx: &mut Context<Self>) {
+        let sql = self.sql(cx);
+        if !sql.trim().is_empty() {
+            cx.emit(TabEvent::Bookmark(sql));
+        }
     }
 
     /// Called by the workspace once the query was sent to the engine.
@@ -224,7 +274,7 @@ impl QueryTab {
         };
         let conn_label: SharedString = match &self.conn {
             Some(c) => format!("{} · {}", c.name, c.driver.label()).into(),
-            None => "No connection — pick one in the sidebar".into(),
+            None => "No connection — pick one in the title bar".into(),
         };
 
         h_flex()
@@ -250,6 +300,31 @@ impl QueryTab {
                         .bg(theme.warning)
                         .text_color(theme.warning_foreground)
                         .child("in transaction"),
+                )
+            })
+            .child(div().flex_1())
+            .child({
+                let hint = self.bookmark_hint.filter(|_| self.bookmark_id.is_none());
+                let button = Button::new("bookmark")
+                    .icon(Icon::new(Lucide::Bookmark))
+                    .label(match (&self.bookmark_id, hint) {
+                        (Some(_), _) => "Update bookmark".to_string(),
+                        (None, Some(n)) => format!("Bookmark · run {n}×"),
+                        (None, None) => "Bookmark".to_string(),
+                    })
+                    .small()
+                    .tooltip(if hint.is_some() {
+                        "You run this query often — save it as a bookmark (⌘D)"
+                    } else {
+                        "Save query as bookmark (⌘D)"
+                    });
+                let button = if hint.is_some() {
+                    button.outline()
+                } else {
+                    button.ghost()
+                };
+                button.on_click(
+                    cx.listener(|this, _, window, cx| this.bookmark(&BookmarkQuery, window, cx)),
                 )
             })
     }
@@ -290,10 +365,10 @@ impl QueryTab {
         }
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    /// Timing and row count of the last run, shown in the workspace status bar.
+    pub fn status_text(&self, cx: &App) -> SharedString {
         let rows = self.table.read(cx).delegate().result.row_count();
-        let text: SharedString = match &self.status {
+        match &self.status {
             Status::Idle => "".into(),
             Status::Running => format!("Running… {rows} rows").into(),
             Status::Done {
@@ -312,20 +387,7 @@ impl QueryTab {
                 }
                 s.into()
             }
-        };
-        h_flex()
-            .h_7()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_t_1()
-            .border_color(theme.border)
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .when(self.running.is_some(), |this| {
-                this.child(Spinner::new().xsmall())
-            })
-            .child(text)
+        }
     }
 }
 
@@ -334,6 +396,7 @@ impl Render for QueryTab {
         v_flex()
             .size_full()
             .on_action(cx.listener(Self::run))
+            .on_action(cx.listener(Self::bookmark))
             .child(self.render_toolbar(cx))
             .child(
                 div()
@@ -348,8 +411,7 @@ impl Render for QueryTab {
                     .min_h_0()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().min_h_0().child(self.render_results(cx)))
-                    .child(self.render_footer(cx)),
+                    .child(div().flex_1().min_h_0().child(self.render_results(cx))),
             )
     }
 }
