@@ -2,7 +2,6 @@
 //! (`~/Library/Application Support/rusdb/profiles.toml` on macOS, overridable with
 //! `RUSDB_CONFIG_DIR`, used by `make run-dev`).
 //! Passwords go to the Keychain (one entry per user), never into the file.
-//! Bookmarked queries live next to it in `bookmarks.toml`.
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -67,27 +66,9 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
     }
 }
 
-/// A named, saved query.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Bookmark {
-    pub id: String,
-    pub name: String,
-    pub sql: String,
-    /// Database the bookmark belongs to; `None` shows it for every database.
-    #[serde(default)]
-    pub database_id: Option<String>,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct BookmarksFile {
-    #[serde(default)]
-    bookmarks: Vec<Bookmark>,
-}
-
 pub struct Store {
     path: Option<PathBuf>,
     pub databases: Vec<Database>,
-    pub bookmarks: Vec<Bookmark>,
     /// Session cache so the Keychain is hit once per profile, and so passwords work
     /// on platforms where only the mock keyring store is available.
     passwords: HashMap<String, String>,
@@ -113,21 +94,9 @@ impl Store {
         let migrated = !file.profiles.is_empty();
         let mut databases = file.databases;
         migrate(file.profiles, &mut databases);
-        let bookmarks = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p.with_file_name("bookmarks.toml")).ok())
-            .and_then(|s| match toml::from_str::<BookmarksFile>(&s) {
-                Ok(f) => Some(f.bookmarks),
-                Err(e) => {
-                    eprintln!("ignoring invalid bookmarks file: {e}");
-                    None
-                }
-            })
-            .unwrap_or_default();
         let store = Self {
             path,
             databases,
-            bookmarks,
             passwords: HashMap::new(),
         };
         if migrated && let Err(e) = store.save() {
@@ -191,48 +160,9 @@ impl Store {
         self.save()
     }
 
-    /// Bookmarks shown for a database: its own plus the global ones, by name.
-    pub fn bookmarks_for(&self, db_id: Option<&str>) -> Vec<&Bookmark> {
-        let mut list: Vec<&Bookmark> = self
-            .bookmarks
-            .iter()
-            .filter(|b| b.database_id.is_none() || b.database_id.as_deref() == db_id)
-            .collect();
-        list.sort_by_key(|b| b.name.to_lowercase());
-        list
-    }
-
-    pub fn bookmark(&self, id: &str) -> Option<&Bookmark> {
-        self.bookmarks.iter().find(|b| b.id == id)
-    }
-
-    /// Inserts or replaces a bookmark (matched by id).
-    pub fn upsert_bookmark(&mut self, bookmark: Bookmark) -> Result<()> {
-        match self.bookmarks.iter_mut().find(|b| b.id == bookmark.id) {
-            Some(existing) => *existing = bookmark,
-            None => self.bookmarks.push(bookmark),
-        }
-        self.save_bookmarks()
-    }
-
-    pub fn delete_bookmark(&mut self, id: &str) -> Result<()> {
-        self.bookmarks.retain(|b| b.id != id);
-        self.save_bookmarks()
-    }
-
-    fn save_bookmarks(&self) -> Result<()> {
-        let path = self.path.as_ref().context("no config directory")?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let file = BookmarksFile {
-            bookmarks: self.bookmarks.clone(),
-        };
-        std::fs::write(
-            path.with_file_name("bookmarks.toml"),
-            toml::to_string_pretty(&file)?,
-        )?;
-        Ok(())
+    /// The config directory (where `profiles.toml` lives).
+    pub fn dir(&self) -> Option<&std::path::Path> {
+        self.path.as_deref().and_then(|p| p.parent())
     }
 
     pub fn password(&mut self, user_id: &str) -> Option<String> {
@@ -301,33 +231,5 @@ mod tests {
         let users: Vec<_> = dbs[0].users.iter().map(|u| (&*u.id, &*u.user)).collect();
         assert_eq!(users, [("a", "admin"), ("b", "readonly")]);
         assert_eq!(dbs[1].users[0].id, "c");
-    }
-
-    #[test]
-    fn bookmarks_for_includes_global_and_own() {
-        let b = |id: &str, name: &str, db: Option<&str>| Bookmark {
-            id: id.into(),
-            name: name.into(),
-            sql: "select 1".into(),
-            database_id: db.map(Into::into),
-        };
-        let store = Store {
-            path: None,
-            databases: Vec::new(),
-            bookmarks: vec![
-                b("1", "zeta", Some("pg")),
-                b("2", "Alpha", None),
-                b("3", "other", Some("mysql")),
-            ],
-            passwords: HashMap::new(),
-        };
-        let ids: Vec<_> = store
-            .bookmarks_for(Some("pg"))
-            .iter()
-            .map(|b| &*b.id)
-            .collect();
-        assert_eq!(ids, ["2", "1"]);
-        let ids: Vec<_> = store.bookmarks_for(None).iter().map(|b| &*b.id).collect();
-        assert_eq!(ids, ["2"]);
     }
 }

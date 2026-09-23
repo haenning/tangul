@@ -1,6 +1,8 @@
 mod assets;
 mod bookmark_form;
+mod completion;
 mod connection_form;
+mod local;
 mod query_tab;
 mod results;
 mod store;

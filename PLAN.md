@@ -62,6 +62,17 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
   in-memory mock store is used → passwords are not persisted there.
 - "User management" = multiple users per saved database, switched from the title bar. No role/grant UI.
 
+### D6b — Local data & SQL assistance
+- `local.db` (SQLite via `rusqlite`, bundled) next to `profiles.toml`: bookmarks, query
+  history (full SQL + fingerprint with literals replaced by `?`), learned usage and a
+  per-user schema cache (JSON). Schema migrations via `PRAGMA user_version`.
+- `crates/assist` is UI-free and unit-tested: forgiving lexer, clause-keyword based
+  statement analysis (tables/aliases/columns/joins), completion, usage "frecency"
+  (count decayed by age) and per-table query suggestions.
+- Completion: tables after FROM/JOIN, columns in scope (by alias), FK- and history-based
+  join conditions, keywords; ranked by match quality + usage.
+- AI assistance later, via ACP (Agent Client Protocol) — not planned for now.
+
 ### D7 — UI: GPUI + gpui-component, kept deliberately plain
 - Editor: gpui-component code editor (tree-sitter SQL highlighting, line numbers).
   Its engine has multi-cursor support (`AddCursorAbove/Below`, bound to ⌘⌥↑/↓ on macOS);
@@ -84,10 +95,11 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 
 ```
 crates/
-  core/     # ids, Profile, ResultSet arena, TableInfo — no I/O
+  core/     # ids, Database/DbUser, ResultSet arena, SchemaInfo — no I/O
   drivers/  # Driver/Session traits, postgres.rs, mysql.rs
   engine/   # tokio thread, Command/Event, pool (D3); live integration tests
-  app/      # GPUI binary `rusdb`: workspace, query tab, results grid, connection form
+  assist/   # SQL lexer, analysis, completion, usage ranking, suggestions — no UI/I/O
+  app/      # GPUI binary `rusdb`: workspace, query tab, results grid, forms, local.db
 ```
 
 ---
@@ -105,12 +117,13 @@ crates/
 | M6 | MySQL driver | ✅ |
 | M7 | Schema sidebar (schema → tables/views, click opens `SELECT * … LIMIT 100`) | ✅ basic (no columns yet) |
 | M8 | SSH tunnel | ⏳ next |
+| M9 | Bookmarks, history, completion, learned suggestions (local.db) | ✅ |
 
 ### Next candidates
 1. SSH tunnel (M8).
 2. Resizable editor/results split; results per statement (currently last result set).
 3. Cell detail view + copy (cell / row / TSV).
-4. Columns/indexes in the sidebar (lazy per table).
+4. Columns/indexes in the sidebar (columns are loaded already, see D6b).
 5. Fetch more rows via server-side cursors instead of discarding beyond the limit.
 6. Homebrew tap; `.app` bundle (`cargo-bundle`); signing/notarization much later.
 
