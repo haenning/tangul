@@ -27,6 +27,13 @@ pub struct Lease {
     _permit: OwnedSemaphorePermit,
 }
 
+impl Lease {
+    /// Frees the pool slot right away and returns the session for closing.
+    pub fn into_session(self) -> Box<dyn Session> {
+        self.session
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PoolStats {
     /// Open server connections (idle + pinned + in use).

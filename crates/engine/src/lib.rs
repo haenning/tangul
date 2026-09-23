@@ -21,6 +21,8 @@ use tokio::sync::mpsc;
 pub const ROW_LIMIT: usize = 10_000;
 /// Max server connections per profile (tabs + schema browsing share them).
 pub const MAX_CONNECTIONS: usize = 4;
+/// Upper bound for a graceful disconnect; after that the socket is simply dropped.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum Command {
@@ -334,18 +336,20 @@ async fn load_schema(pool: &Pool) -> Result<Vec<TableInfo>, String> {
     result
 }
 
-/// Closes sessions in the background. With `report`, pool stats are sent once the
-/// sessions (and their pool slots) are gone.
+/// Frees the pool slots immediately (reported via stats if `report` is set) and closes
+/// the sessions in the background. A slow or hanging server disconnect must neither block
+/// the pool nor delay the stats.
 fn close_all(leases: Vec<Lease>, report: Option<(Events, ConnId, Arc<Pool>)>) {
     if leases.is_empty() {
         return;
     }
+    let sessions: Vec<_> = leases.into_iter().map(Lease::into_session).collect();
+    if let Some((events, conn, pool)) = report {
+        send_stats(&events, conn, &pool);
+    }
     tokio::spawn(async move {
-        for lease in leases {
-            lease.session.close().await;
-        }
-        if let Some((events, conn, pool)) = report {
-            send_stats(&events, conn, &pool);
+        for session in sessions {
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, session.close()).await;
         }
     });
 }
