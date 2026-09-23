@@ -1,12 +1,13 @@
-//! Connection profiles as TOML in the config dir
+//! Saved databases (each with its users) as TOML in the config dir
 //! (`~/Library/Application Support/rusdb/profiles.toml` on macOS, overridable with
 //! `RUSDB_CONFIG_DIR`, used by `make run-dev`).
-//! Passwords go to the Keychain, never into the file.
+//! Passwords go to the Keychain (one entry per user), never into the file.
+//! Bookmarked queries live next to it in `bookmarks.toml`.
 
 use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context as _, Result};
-use rusdb_core::Profile;
+use rusdb_core::{Database, DbUser, DriverKind, TlsMode};
 use serde::{Deserialize, Serialize};
 
 const KEYCHAIN_SERVICE: &str = "rusdb";
@@ -14,12 +15,79 @@ const KEYCHAIN_SERVICE: &str = "rusdb";
 #[derive(Default, Serialize, Deserialize)]
 struct ProfilesFile {
     #[serde(default)]
-    profiles: Vec<Profile>,
+    databases: Vec<Database>,
+    /// Pre-0.2 format: one flat entry per server+user. Migrated on load.
+    #[serde(default, skip_serializing)]
+    profiles: Vec<LegacyProfile>,
+}
+
+#[derive(Deserialize)]
+struct LegacyProfile {
+    id: String,
+    name: String,
+    driver: DriverKind,
+    host: String,
+    port: u16,
+    user: String,
+    #[serde(default)]
+    database: String,
+    #[serde(default)]
+    tls: TlsMode,
+}
+
+/// Groups legacy profiles by connection target. The profile id becomes the user id,
+/// so passwords already in the Keychain keep working.
+fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
+    for p in profiles {
+        let user = DbUser {
+            id: p.id.clone(),
+            user: p.user,
+        };
+        let existing = databases.iter_mut().find(|d| {
+            d.driver == p.driver && d.host == p.host && d.port == p.port && d.database == p.database
+        });
+        match existing {
+            Some(db) => {
+                if db.name.is_empty() {
+                    db.name = p.name;
+                }
+                db.users.push(user);
+            }
+            None => databases.push(Database {
+                id: p.id,
+                name: p.name,
+                driver: p.driver,
+                host: p.host,
+                port: p.port,
+                database: p.database,
+                tls: p.tls,
+                users: vec![user],
+            }),
+        }
+    }
+}
+
+/// A named, saved query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub id: String,
+    pub name: String,
+    pub sql: String,
+    /// Database the bookmark belongs to; `None` shows it for every database.
+    #[serde(default)]
+    pub database_id: Option<String>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct BookmarksFile {
+    #[serde(default)]
+    bookmarks: Vec<Bookmark>,
 }
 
 pub struct Store {
     path: Option<PathBuf>,
-    pub profiles: Vec<Profile>,
+    pub databases: Vec<Database>,
+    pub bookmarks: Vec<Bookmark>,
     /// Session cache so the Keychain is hit once per profile, and so passwords work
     /// on platforms where only the mock keyring store is available.
     passwords: HashMap<String, String>,
@@ -31,22 +99,45 @@ impl Store {
             .map(PathBuf::from)
             .or_else(|| dirs::config_dir().map(|d| d.join("rusdb")));
         let path = dir.map(|d| d.join("profiles.toml"));
-        let profiles = path
+        let file = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| match toml::from_str::<ProfilesFile>(&s) {
-                Ok(f) => Some(f.profiles),
+                Ok(f) => Some(f),
                 Err(e) => {
                     eprintln!("ignoring invalid profiles file: {e}");
                     None
                 }
             })
             .unwrap_or_default();
-        Self {
+        let migrated = !file.profiles.is_empty();
+        let mut databases = file.databases;
+        migrate(file.profiles, &mut databases);
+        let bookmarks = path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p.with_file_name("bookmarks.toml")).ok())
+            .and_then(|s| match toml::from_str::<BookmarksFile>(&s) {
+                Ok(f) => Some(f.bookmarks),
+                Err(e) => {
+                    eprintln!("ignoring invalid bookmarks file: {e}");
+                    None
+                }
+            })
+            .unwrap_or_default();
+        let store = Self {
             path,
-            profiles,
+            databases,
+            bookmarks,
             passwords: HashMap::new(),
+        };
+        if migrated && let Err(e) = store.save() {
+            eprintln!("could not write migrated profiles file: {e:#}");
         }
+        store
+    }
+
+    pub fn database(&self, id: &str) -> Option<&Database> {
+        self.databases.iter().find(|d| d.id == id)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -55,46 +146,188 @@ impl Store {
             std::fs::create_dir_all(dir)?;
         }
         let file = ProfilesFile {
-            profiles: self.profiles.clone(),
+            databases: self.databases.clone(),
+            profiles: Vec::new(),
         };
         std::fs::write(path, toml::to_string_pretty(&file)?)?;
         Ok(())
     }
 
-    /// Inserts or replaces a profile (matched by id) and stores its password.
-    pub fn upsert(&mut self, profile: Profile, password: Option<String>) -> Result<()> {
-        if let Some(pw) = password {
-            if let Err(e) = keychain(&profile.id).and_then(|k| Ok(k.set_password(&pw)?)) {
-                eprintln!("keychain write failed: {e:#}");
+    /// Inserts or replaces a database's connection settings (matched by id).
+    /// The users of an existing database are kept.
+    pub fn upsert_database(&mut self, mut db: Database) -> Result<()> {
+        match self.databases.iter_mut().find(|d| d.id == db.id) {
+            Some(existing) => {
+                db.users = std::mem::take(&mut existing.users);
+                *existing = db;
             }
-            self.passwords.insert(profile.id.clone(), pw);
-        }
-        match self.profiles.iter_mut().find(|p| p.id == profile.id) {
-            Some(existing) => *existing = profile,
-            None => self.profiles.push(profile),
+            None => self.databases.push(db),
         }
         self.save()
     }
 
-    pub fn password(&mut self, profile_id: &str) -> Option<String> {
-        if let Some(pw) = self.passwords.get(profile_id) {
+    /// Inserts or replaces a user of a database (matched by id) and stores its password.
+    pub fn upsert_user(
+        &mut self,
+        db_id: &str,
+        user: DbUser,
+        password: Option<String>,
+    ) -> Result<()> {
+        let db = self
+            .databases
+            .iter_mut()
+            .find(|d| d.id == db_id)
+            .context("unknown database")?;
+        if let Some(pw) = password {
+            if let Err(e) = keychain(&user.id).and_then(|k| Ok(k.set_password(&pw)?)) {
+                eprintln!("keychain write failed: {e:#}");
+            }
+            self.passwords.insert(user.id.clone(), pw);
+        }
+        match db.users.iter_mut().find(|u| u.id == user.id) {
+            Some(existing) => *existing = user,
+            None => db.users.push(user),
+        }
+        self.save()
+    }
+
+    /// Bookmarks shown for a database: its own plus the global ones, by name.
+    pub fn bookmarks_for(&self, db_id: Option<&str>) -> Vec<&Bookmark> {
+        let mut list: Vec<&Bookmark> = self
+            .bookmarks
+            .iter()
+            .filter(|b| b.database_id.is_none() || b.database_id.as_deref() == db_id)
+            .collect();
+        list.sort_by_key(|b| b.name.to_lowercase());
+        list
+    }
+
+    pub fn bookmark(&self, id: &str) -> Option<&Bookmark> {
+        self.bookmarks.iter().find(|b| b.id == id)
+    }
+
+    /// Inserts or replaces a bookmark (matched by id).
+    pub fn upsert_bookmark(&mut self, bookmark: Bookmark) -> Result<()> {
+        match self.bookmarks.iter_mut().find(|b| b.id == bookmark.id) {
+            Some(existing) => *existing = bookmark,
+            None => self.bookmarks.push(bookmark),
+        }
+        self.save_bookmarks()
+    }
+
+    pub fn delete_bookmark(&mut self, id: &str) -> Result<()> {
+        self.bookmarks.retain(|b| b.id != id);
+        self.save_bookmarks()
+    }
+
+    fn save_bookmarks(&self) -> Result<()> {
+        let path = self.path.as_ref().context("no config directory")?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let file = BookmarksFile {
+            bookmarks: self.bookmarks.clone(),
+        };
+        std::fs::write(
+            path.with_file_name("bookmarks.toml"),
+            toml::to_string_pretty(&file)?,
+        )?;
+        Ok(())
+    }
+
+    pub fn password(&mut self, user_id: &str) -> Option<String> {
+        if let Some(pw) = self.passwords.get(user_id) {
             return Some(pw.clone());
         }
-        let pw = keychain(profile_id).ok()?.get_password().ok()?;
-        self.passwords.insert(profile_id.to_string(), pw.clone());
+        let pw = keychain(user_id).ok()?.get_password().ok()?;
+        self.passwords.insert(user_id.to_string(), pw.clone());
         Some(pw)
     }
 }
 
-fn keychain(profile_id: &str) -> Result<keyring::Entry> {
-    Ok(keyring::Entry::new(KEYCHAIN_SERVICE, profile_id)?)
+fn keychain(user_id: &str) -> Result<keyring::Entry> {
+    Ok(keyring::Entry::new(KEYCHAIN_SERVICE, user_id)?)
 }
 
-/// Unique enough id for a new profile without pulling in a uuid crate.
-pub fn new_profile_id() -> String {
+/// Unique enough id for a new database or user without pulling in a uuid crate.
+pub fn new_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     format!("p{nanos:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_legacy_profiles_by_target() {
+        let file: ProfilesFile = toml::from_str(
+            r#"
+            [[profiles]]
+            id = "a"
+            name = "prod"
+            driver = "postgres"
+            host = "db"
+            port = 5432
+            user = "admin"
+            database = "app"
+
+            [[profiles]]
+            id = "b"
+            name = ""
+            driver = "postgres"
+            host = "db"
+            port = 5432
+            user = "readonly"
+            database = "app"
+
+            [[profiles]]
+            id = "c"
+            name = "other"
+            driver = "mysql"
+            host = "db"
+            port = 3306
+            user = "root"
+            "#,
+        )
+        .unwrap();
+        let mut dbs = file.databases;
+        migrate(file.profiles, &mut dbs);
+        assert_eq!(dbs.len(), 2);
+        assert_eq!(dbs[0].name, "prod");
+        let users: Vec<_> = dbs[0].users.iter().map(|u| (&*u.id, &*u.user)).collect();
+        assert_eq!(users, [("a", "admin"), ("b", "readonly")]);
+        assert_eq!(dbs[1].users[0].id, "c");
+    }
+
+    #[test]
+    fn bookmarks_for_includes_global_and_own() {
+        let b = |id: &str, name: &str, db: Option<&str>| Bookmark {
+            id: id.into(),
+            name: name.into(),
+            sql: "select 1".into(),
+            database_id: db.map(Into::into),
+        };
+        let store = Store {
+            path: None,
+            databases: Vec::new(),
+            bookmarks: vec![
+                b("1", "zeta", Some("pg")),
+                b("2", "Alpha", None),
+                b("3", "other", Some("mysql")),
+            ],
+            passwords: HashMap::new(),
+        };
+        let ids: Vec<_> = store
+            .bookmarks_for(Some("pg"))
+            .iter()
+            .map(|b| &*b.id)
+            .collect();
+        assert_eq!(ids, ["2", "1"]);
+        let ids: Vec<_> = store.bookmarks_for(None).iter().map(|b| &*b.id).collect();
+        assert_eq!(ids, ["2"]);
+    }
 }

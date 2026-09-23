@@ -8,7 +8,7 @@ pub use result::*;
 
 use std::fmt;
 
-/// Identifies an open connection (one per profile at the moment).
+/// Identifies an open connection (one per database user at the moment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConnId(pub u64);
 
@@ -34,7 +34,7 @@ pub struct TableInfo {
     pub kind: TableKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TableKind {
     Table,
     View,
