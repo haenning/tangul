@@ -1,0 +1,23 @@
+[package]
+name = "rusdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+dirs = "7.0.0"
+gpui-kit = { version = "=0.6.6", features = ["tree-sitter-sql"] }
+rusdb-core = { version = "0.1.0", path = "../core" }
+rusdb-engine = { version = "0.1.0", path = "../engine" }
+serde = { workspace = true, features = ["derive"] }
+toml = "1.1.6"
+
+# Passwords live in the macOS Keychain. Other platforms get keyring's in-memory mock
+# store (dev only; passwords are not persisted there).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+keyring = "3"

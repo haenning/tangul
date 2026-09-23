@@ -1,0 +1,33 @@
+# Local development databases (see Makefile: `make db-up`).
+# Ports are non-default and bound to localhost only, so they don't clash with a locally
+# installed Postgres/MySQL and aren't reachable from the network. Auth is passwordless
+# on purpose: these are throwaway dev databases.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports: ["127.0.0.1:55432:5432"]
+    volumes:
+      - ./dev/seed/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: app
+    ports: ["127.0.0.1:53306:3306"]
+    volumes:
+      - ./dev/seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      # TCP ping: the init phase runs without networking, so this only succeeds once
+      # the seed has finished and the real server is up.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 2s
+      retries: 60
+
+  # TODO(ssh): openssh-server container for tunnel tests.

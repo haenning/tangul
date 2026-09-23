@@ -1,0 +1,16 @@
+[package]
+name = "rusdb-drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+mysql_async = { version = "0.37.1", default-features = false, features = ["minimal", "native-tls-tls"] }
+native-tls = "0.2.18"
+postgres-native-tls = "0.5.3"
+rusdb-core = { version = "0.1.0", path = "../core" }
+tokio = { workspace = true, features = ["rt", "net", "macros", "rt-multi-thread"] }
+tokio-postgres = "0.7.18"
