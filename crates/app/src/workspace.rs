@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::component::{
@@ -146,7 +147,6 @@ pub struct Workspace {
     active_tab: usize,
     queries: HashMap<QueryId, RunningQuery>,
     sidebar_rows: Vec<SidebarRow>,
-    next_id: u64,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -208,7 +208,6 @@ impl Workspace {
             active_tab: 0,
             queries: HashMap::new(),
             sidebar_rows: Vec::new(),
-            next_id: 0,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub],
             _pump: pump,
@@ -235,9 +234,11 @@ impl Workspace {
         this
     }
 
+    /// Ids are unique for the whole app run, not per window, so a reopened window
+    /// never collides with sessions or queries of a closed one.
     fn next_id(&mut self) -> u64 {
-        self.next_id += 1;
-        self.next_id
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        NEXT.fetch_add(1, Ordering::Relaxed)
     }
 
     fn active_database(&self) -> Option<&Database> {
@@ -1880,6 +1881,15 @@ impl Workspace {
             .child(div().flex_1().min_w_0().truncate().child(text))
             .when(running, |this| this.child(Spinner::new().xsmall()))
             .child(query_text)
+    }
+}
+
+impl Drop for Workspace {
+    /// The window closed: close its connections (the app itself keeps running).
+    fn drop(&mut self) {
+        for state in self.conns.values() {
+            self.engine.send(Command::Disconnect { conn: state.id });
+        }
     }
 }
 
