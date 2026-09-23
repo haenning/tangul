@@ -9,7 +9,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::store::{Bookmark, new_id};
+use crate::local::Bookmark;
+use crate::store::new_id;
 
 pub struct BookmarkForm {
     id: Option<String>,

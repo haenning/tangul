@@ -1,12 +1,13 @@
 //! One query tab: SQL editor on top, results below.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Editor, EditorState},
+    input::{CompletionProvider, Editor, EditorState},
     table::{DataTable, TableState},
     v_flex,
 };
@@ -48,6 +49,8 @@ pub struct QueryTab {
     pub conn: Option<TabConn>,
     /// Bookmark this tab was opened from or saved as; bookmarking again updates it.
     pub bookmark_id: Option<String>,
+    /// Times the last query was run successfully, when it is worth bookmarking.
+    pub bookmark_hint: Option<u32>,
     engine: EngineHandle,
     editor: Entity<EditorState>,
     table: Entity<TableState<ResultsDelegate>>,
@@ -88,6 +91,7 @@ impl QueryTab {
             title: format!("Query {}", id.0).into(),
             conn,
             bookmark_id: None,
+            bookmark_hint: None,
             engine,
             editor,
             table,
@@ -103,6 +107,24 @@ impl QueryTab {
     pub fn focus_editor(tab: &Entity<Self>, window: &mut Window, cx: &mut App) {
         let editor = tab.read(cx).editor.clone();
         editor.update(cx, |e, cx| e.focus(window, cx));
+    }
+
+    pub fn set_completion(&self, provider: Rc<dyn CompletionProvider>, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |e, _| e.lsp_mut().completion_provider = Some(provider));
+    }
+
+    pub fn sql(&self, cx: &App) -> String {
+        self.editor.read(cx).value().to_string()
+    }
+
+    /// Rows returned by the last result set, or affected by the last statement.
+    pub fn row_count(&self, cx: &App) -> Option<u64> {
+        if self.has_result_set {
+            Some(self.table.read(cx).delegate().result.row_count() as u64)
+        } else {
+            self.last_rows
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -148,7 +170,7 @@ impl QueryTab {
     }
 
     fn bookmark(&mut self, _: &BookmarkQuery, _: &mut Window, cx: &mut Context<Self>) {
-        let sql = self.editor.read(cx).value().to_string();
+        let sql = self.sql(cx);
         if !sql.trim().is_empty() {
             cx.emit(TabEvent::Bookmark(sql));
         }
@@ -264,23 +286,30 @@ impl QueryTab {
                 )
             })
             .child(div().flex_1())
-            .child(
-                Button::new("bookmark")
+            .child({
+                let hint = self.bookmark_hint.filter(|_| self.bookmark_id.is_none());
+                let button = Button::new("bookmark")
                     .icon(Icon::new(Lucide::Bookmark))
-                    .label(if self.bookmark_id.is_some() {
-                        "Update bookmark"
-                    } else {
-                        "Bookmark"
+                    .label(match (&self.bookmark_id, hint) {
+                        (Some(_), _) => "Update bookmark".to_string(),
+                        (None, Some(n)) => format!("Bookmark · run {n}×"),
+                        (None, None) => "Bookmark".to_string(),
                     })
-                    .ghost()
                     .small()
-                    .tooltip("Save query as bookmark (⌘D)")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.bookmark(&BookmarkQuery, window, cx)
-                        }),
-                    ),
-            )
+                    .tooltip(if hint.is_some() {
+                        "You run this query often — save it as a bookmark (⌘D)"
+                    } else {
+                        "Save query as bookmark (⌘D)"
+                    });
+                let button = if hint.is_some() {
+                    button.outline()
+                } else {
+                    button.ghost()
+                };
+                button.on_click(
+                    cx.listener(|this, _, window, cx| this.bookmark(&BookmarkQuery, window, cx)),
+                )
+            })
     }
 
     fn render_results(&self, cx: &mut Context<Self>) -> AnyElement {

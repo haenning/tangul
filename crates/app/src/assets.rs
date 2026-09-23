@@ -9,7 +9,7 @@ use gpui_kit::{AssetSource, Result, SharedString};
 /// component defaults) are embedded.
 pub use gpui_kit::assets::IconName as Lucide;
 
-gpui_kit::assets::icon_assets!(ExtraIcons, [Bookmark, Database, Pencil, Table]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [Bookmark, Database, Lightbulb, Pencil, Table]);
 
 pub struct AppAssets;
 

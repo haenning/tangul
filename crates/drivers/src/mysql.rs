@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use mysql_async::{
     Conn, Opts, OptsBuilder, Row, SslOpts, Value, consts::StatusFlags, prelude::Queryable,
 };
-use rusdb_core::{ColumnInfo, ConnectConfig, RowBatch, TableInfo, TableKind, TlsMode};
+use rusdb_core::{
+    ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
+};
 
 use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink};
 
@@ -115,6 +117,59 @@ impl Session for MysqlSession {
                     TableKind::Table
                 },
             })
+            .collect())
+    }
+
+    async fn list_columns(&mut self) -> Result<Vec<ColumnMeta>> {
+        const SQL: &str = "SELECT table_schema, table_name, column_name, column_type, \
+              is_nullable = 'YES', column_key = 'PRI' \
+            FROM information_schema.columns \
+            WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys') \
+            ORDER BY table_schema, table_name, ordinal_position";
+        let rows: Vec<(String, String, String, String, i64, i64)> = self.conn()?.query(SQL).await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(schema, table, name, data_type, nullable, pk)| ColumnMeta {
+                    schema,
+                    table,
+                    name,
+                    data_type,
+                    nullable: nullable != 0,
+                    primary_key: pk != 0,
+                },
+            )
+            .collect())
+    }
+
+    async fn list_foreign_keys(&mut self) -> Result<Vec<ForeignKey>> {
+        // GROUP_CONCAT's SEPARATOR must be a literal; CHAR(31) is not allowed there.
+        const SQL: &str = "SELECT constraint_name, table_schema, table_name, \
+              referenced_table_schema, referenced_table_name, \
+              GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ','), \
+              GROUP_CONCAT(referenced_column_name ORDER BY ordinal_position SEPARATOR ',') \
+            FROM information_schema.key_column_usage \
+            WHERE referenced_table_name IS NOT NULL \
+              AND table_schema NOT IN ('mysql','information_schema','performance_schema','sys') \
+            GROUP BY constraint_name, table_schema, table_name, \
+              referenced_table_schema, referenced_table_name \
+            ORDER BY 2, 3, 1";
+        type Row = (String, String, String, String, String, String, String);
+        let rows: Vec<Row> = self.conn()?.query(SQL).await?;
+        let split = |s: String| s.split(',').map(String::from).collect();
+        Ok(rows
+            .into_iter()
+            .map(
+                |(name, schema, table, ref_schema, ref_table, cols, ref_cols)| ForeignKey {
+                    name,
+                    schema,
+                    table,
+                    columns: split(cols),
+                    ref_schema,
+                    ref_table,
+                    ref_columns: split(ref_cols),
+                },
+            )
             .collect())
     }
 

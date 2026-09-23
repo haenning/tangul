@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/drivers", "crates/engine", "crates/app"]
+members = ["crates/core", "crates/drivers", "crates/engine", "crates/assist", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ license = "Apache-2.0"
 rusdb-core = { path = "crates/core" }
 rusdb-drivers = { path = "crates/drivers" }
 rusdb-engine = { path = "crates/engine" }
+rusdb-assist = { path = "crates/assist" }
 
 anyhow = "1"
 async-trait = "0.1"

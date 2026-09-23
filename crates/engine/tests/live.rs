@@ -197,6 +197,48 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
     assert_eq!(h.run(tab_a, "SELECT 1").await.error, None);
 }
 
+/// The seed data has `orders.user_id` referencing `users.id` in schema `schema`.
+async fn schema_checks(driver: DriverKind, cfg: ConnectConfig, schema: &str) {
+    let (engine, events) = rusdb_engine::start();
+    engine.send(Command::Connect {
+        conn: ConnId(1),
+        driver,
+        cfg,
+    });
+    let info = loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), events.recv())
+            .await
+            .expect("timeout waiting for schema")
+            .expect("engine gone");
+        match ev {
+            Event::Schema { result, .. } => break result.expect("schema failed"),
+            Event::ConnectFailed { error, .. } => panic!("connect failed: {error}"),
+            _ => {}
+        }
+    };
+    let col = info
+        .columns
+        .iter()
+        .find(|c| c.schema == schema && c.table == "orders" && c.name == "user_id")
+        .expect("orders.user_id column");
+    assert!(!col.nullable);
+    assert!(
+        info.columns
+            .iter()
+            .any(|c| c.table == "users" && c.name == "id" && c.primary_key)
+    );
+    let fk = info
+        .foreign_keys
+        .iter()
+        .find(|f| f.schema == schema && f.table == "orders")
+        .expect("orders foreign key");
+    assert_eq!(fk.columns, ["user_id"]);
+    assert_eq!(
+        (fk.ref_table.as_str(), &fk.ref_columns[..]),
+        ("users", &["id".to_string()][..])
+    );
+}
+
 #[tokio::test]
 async fn postgres() {
     let Some(cfg) = config("RUSDB_TEST_PG") else {
@@ -204,6 +246,7 @@ async fn postgres() {
         return;
     };
     common_checks(DriverKind::Postgres, cfg.clone(), "SELECT pg_sleep(30)").await;
+    schema_checks(DriverKind::Postgres, cfg.clone(), "app").await;
 
     let mut h = Harness::connect(DriverKind::Postgres, cfg).await;
     let out = h
@@ -225,6 +268,7 @@ async fn mysql() {
         return;
     };
     common_checks(DriverKind::Mysql, cfg.clone(), "SELECT SLEEP(30)").await;
+    schema_checks(DriverKind::Mysql, cfg.clone(), "app").await;
 
     let mut h = Harness::connect(DriverKind::Mysql, cfg).await;
     let out = h

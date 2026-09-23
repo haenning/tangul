@@ -12,7 +12,7 @@ use std::{
 
 pub use pool::PoolStats;
 use pool::{Lease, Pool};
-use rusdb_core::{ConnId, ConnectConfig, DriverKind, QueryId, TabId, TableInfo};
+use rusdb_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, TabId};
 pub use rusdb_drivers::ExecEvent;
 use rusdb_drivers::{CancelHandle, driver_for};
 use tokio::sync::mpsc;
@@ -65,7 +65,7 @@ pub enum Event {
     },
     Schema {
         conn: ConnId,
-        result: Result<Vec<TableInfo>, String>,
+        result: Result<SchemaInfo, String>,
     },
     Query {
         query: QueryId,
@@ -170,13 +170,13 @@ impl Engine {
                 let events = self.events.clone();
                 tokio::spawn(async move {
                     match load_schema(&pool).await {
-                        Ok(tables) => {
+                        Ok(schema) => {
                             send(&events, Event::Connected { conn });
                             send(
                                 &events,
                                 Event::Schema {
                                     conn,
-                                    result: Ok(tables),
+                                    result: Ok(schema),
                                 },
                             );
                         }
@@ -325,13 +325,29 @@ async fn execute(
     send_stats(&events, conn, &pool);
 }
 
-async fn load_schema(pool: &Pool) -> Result<Vec<TableInfo>, String> {
+/// Tables are required; columns and foreign keys are best effort (they only feed
+/// SQL assistance, and a restricted user may not be allowed to read them).
+async fn load_schema(pool: &Pool) -> Result<SchemaInfo, String> {
     let mut lease = pool.acquire(None).await.map_err(|e| format!("{e:#}"))?;
-    let result = lease
-        .session
-        .list_tables()
-        .await
-        .map_err(|e| format!("{e:#}"));
+    let session = &mut lease.session;
+    let result = match session.list_tables().await {
+        Ok(tables) => {
+            let columns = session.list_columns().await.unwrap_or_else(|e| {
+                eprintln!("could not load columns: {e:#}");
+                Vec::new()
+            });
+            let foreign_keys = session.list_foreign_keys().await.unwrap_or_else(|e| {
+                eprintln!("could not load foreign keys: {e:#}");
+                Vec::new()
+            });
+            Ok(SchemaInfo {
+                tables,
+                columns,
+                foreign_keys,
+            })
+        }
+        Err(e) => Err(format!("{e:#}")),
+    };
     pool.release(None, lease);
     result
 }

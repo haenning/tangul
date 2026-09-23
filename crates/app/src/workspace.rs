@@ -2,12 +2,17 @@
 //! schema sidebar of the active connection, query tabs, status bar.
 //! Routes engine events to the tab that started the query.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable as _, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
     spinner::Spinner,
@@ -16,26 +21,63 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_core::{ConnId, Database, DbUser, DriverKind, QueryId, TabId, TableInfo, TableKind};
+use rusdb_assist::{
+    lexer::fingerprint,
+    schema::SchemaIndex,
+    suggest::{QuerySuggestion, one_line, suggest_for_table},
+    usage::{Usage, learn},
+};
+use rusdb_core::{
+    ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo, TableKind,
+};
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
 use crate::{
     CloseTab, NewTab,
     assets::Lucide,
     bookmark_form::BookmarkForm,
+    completion::{AssistData, SharedAssist, SqlCompletion},
     connection_form::{ConnectionForm, FormMode, FormOutput},
+    local::{Bookmark, HistoryEntry, Local, NewHistory},
     query_tab::{QueryTab, TabConn, TabEvent},
-    store::{Bookmark, Store},
+    store::Store,
 };
 
 const SIDEBAR_WIDTH: f32 = 260.;
 const ROW_HEIGHT: f32 = 26.;
 const BOOKMARK_ROW_HEIGHT: f32 = 40.;
+const HISTORY_LIMIT: usize = 300;
+/// Successful runs after which the toolbar suggests bookmarking a query.
+const BOOKMARK_HINT_RUNS: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq)]
 enum SidebarView {
     Schema,
     Bookmarks,
+    History,
+}
+
+impl SidebarView {
+    const ALL: [SidebarView; 3] = [
+        SidebarView::Schema,
+        SidebarView::Bookmarks,
+        SidebarView::History,
+    ];
+}
+
+/// A query sent to the engine, kept until it finishes to record it in history.
+struct RunningQuery {
+    tab: WeakEntity<QueryTab>,
+    sql: String,
+    user_id: String,
+    /// Unix milliseconds.
+    started_at: i64,
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 #[derive(Clone, PartialEq)]
@@ -48,7 +90,8 @@ enum ConnStatus {
 struct ConnState {
     id: ConnId,
     status: ConnStatus,
-    tables: Vec<TableInfo>,
+    /// Tables, columns and foreign keys (from the cache until the server answered).
+    schema: Arc<SchemaIndex>,
     stats: PoolStats,
 }
 
@@ -74,6 +117,13 @@ enum SidebarRow {
 pub struct Workspace {
     engine: EngineHandle,
     store: Store,
+    local: Local,
+    /// Schema and usage per connection, shared with the editors' completion.
+    assist: SharedAssist,
+    /// Learned usage by database id.
+    usage: HashMap<String, Arc<Usage>>,
+    history: Vec<HistoryEntry>,
+    history_search: Entity<InputState>,
     /// Connection state by user id.
     conns: HashMap<String, ConnState>,
     conn_users: HashMap<ConnId, String>,
@@ -87,7 +137,7 @@ pub struct Workspace {
     sidebar_view: SidebarView,
     tabs: Vec<Entity<QueryTab>>,
     active_tab: usize,
-    queries: HashMap<QueryId, WeakEntity<QueryTab>>,
+    queries: HashMap<QueryId, RunningQuery>,
     sidebar_rows: Vec<SidebarRow>,
     next_id: u64,
     focus_handle: FocusHandle,
@@ -121,9 +171,25 @@ impl Workspace {
             }
         });
 
+        let store = Store::load();
+        let local = Local::open(store.dir());
+        let history_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search history"));
+        let search_sub = cx.subscribe(
+            &history_search,
+            |this: &mut Self, _, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.refresh_history(cx);
+                }
+            },
+        );
         let mut this = Self {
             engine,
-            store: Store::load(),
+            store,
+            local,
+            assist: Rc::new(RefCell::new(HashMap::new())),
+            usage: HashMap::new(),
+            history: Vec::new(),
+            history_search,
             conns: HashMap::new(),
             conn_users: HashMap::new(),
             active_db: None,
@@ -137,7 +203,7 @@ impl Workspace {
             sidebar_rows: Vec::new(),
             next_id: 0,
             focus_handle: cx.focus_handle(),
-            _subscriptions: Vec::new(),
+            _subscriptions: vec![search_sub],
             _pump: pump,
         };
         if let Some(db) = this.store.databases.first() {
@@ -191,6 +257,11 @@ impl Workspace {
         let conn = self.active_user.as_deref().and_then(|p| self.tab_conn(p));
         let engine = self.engine.clone();
         let tab = cx.new(|cx| QueryTab::new(id, conn, sql, engine, window, cx));
+        let provider = Rc::new(SqlCompletion {
+            data: self.assist.clone(),
+            tab: tab.downgrade(),
+        });
+        tab.update(cx, |t, cx| t.set_completion(provider, cx));
         self._subscriptions
             .push(cx.subscribe_in(&tab, window, Self::on_tab_event));
         self.tabs.push(tab.clone());
@@ -246,7 +317,16 @@ impl Workspace {
                     return;
                 };
                 let query = QueryId(self.next_id());
-                self.queries.insert(query, tab.downgrade());
+                let user_id = self.conn_users.get(&conn.id).cloned().unwrap_or_default();
+                self.queries.insert(
+                    query,
+                    RunningQuery {
+                        tab: tab.downgrade(),
+                        sql: sql.clone(),
+                        user_id,
+                        started_at: now_ms(),
+                    },
+                );
                 self.engine.send(Command::Execute {
                     query,
                     tab: tab.read(cx).id,
@@ -270,7 +350,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let existing = existing.and_then(|id| self.store.bookmark(&id)).cloned();
+        let existing = existing.and_then(|id| self.local.bookmark(&id));
         let title = if existing.is_some() {
             "Update bookmark"
         } else {
@@ -289,6 +369,7 @@ impl Workspace {
                     if let Some(tab) = &tab {
                         tab.update(cx, |t, cx| {
                             t.bookmark_id = Some(bookmark.id.clone());
+                            t.bookmark_hint = None;
                             t.title = bookmark.name.clone().into();
                             cx.notify();
                         });
@@ -320,7 +401,7 @@ impl Workspace {
                 tab.update(cx, |t, _| t.title = title.clone());
             }
         }
-        if let Err(e) = self.store.upsert_bookmark(bookmark) {
+        if let Err(e) = self.local.upsert_bookmark(&bookmark) {
             window.push_notification(
                 Notification::error(format!("Could not save bookmark: {e:#}")),
                 cx,
@@ -330,7 +411,7 @@ impl Workspace {
     }
 
     fn delete_bookmark(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(e) = self.store.delete_bookmark(id) {
+        if let Err(e) = self.local.delete_bookmark(id) {
             window.push_notification(
                 Notification::error(format!("Could not delete bookmark: {e:#}")),
                 cx,
@@ -346,7 +427,7 @@ impl Workspace {
 
     /// Opens a bookmark in a new tab, optionally running it right away.
     fn open_bookmark(&mut self, id: &str, run: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(bookmark) = self.store.bookmark(id).cloned() else {
+        let Some(bookmark) = self.local.bookmark(id) else {
             return;
         };
         let tab = self.add_tab(&bookmark.sql, window, cx);
@@ -357,6 +438,149 @@ impl Workspace {
                 cx.emit(TabEvent::Run(bookmark.sql.clone()));
             }
         });
+    }
+
+    /// Opens `sql` in a new tab without running it.
+    fn open_sql(&mut self, title: &str, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.add_tab(sql, window, cx);
+        tab.update(cx, |t, _| t.title = title.to_string().into());
+    }
+
+    // ---- history and learning ----------------------------------------------------
+
+    fn refresh_history(&mut self, cx: &mut Context<Self>) {
+        let search = self.history_search.read(cx).value().trim().to_string();
+        self.history = match &self.active_db {
+            Some(db) => self.local.history(db, &search, HISTORY_LIMIT),
+            None => Vec::new(),
+        };
+        cx.notify();
+    }
+
+    /// Records a finished query in history and, if it succeeded, learns from it.
+    fn record_run(
+        &mut self,
+        run: RunningQuery,
+        error: Option<String>,
+        elapsed_ms: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(db_id) = self.find_user(&run.user_id).map(|(db, _)| db.id.clone()) else {
+            return;
+        };
+        let tab = run.tab.upgrade();
+        let rows = tab
+            .as_ref()
+            .and_then(|t| t.read(cx).row_count(cx))
+            .map(|n| n as i64);
+        let fp = fingerprint(&run.sql);
+        let succeeded = error.is_none();
+        let entry = NewHistory {
+            database_id: &db_id,
+            user_id: &run.user_id,
+            sql: &run.sql,
+            fingerprint: &fp,
+            entry: HistoryEntry {
+                sql: run.sql.clone(),
+                started_at: run.started_at,
+                duration_ms: elapsed_ms,
+                rows,
+                error,
+            },
+        };
+        if let Err(e) = self.local.add_history(&entry) {
+            eprintln!("could not record history: {e:#}");
+        }
+        if succeeded {
+            if let Some(state) = self.conns.get(&run.user_id) {
+                let learned = learn(&run.sql, &state.schema);
+                let now = now_ms() / 1000;
+                if let Err(e) = self.local.record_usage(&db_id, &learned, now) {
+                    eprintln!("could not record usage: {e:#}");
+                }
+                self.usage
+                    .insert(db_id.clone(), Arc::new(self.local.usage(&db_id, now)));
+                self.sync_assist_for_db(&db_id);
+            }
+            let runs = self.local.runs(&db_id, &fp);
+            let hint = (runs >= BOOKMARK_HINT_RUNS && !self.local.is_bookmarked(&db_id, &fp))
+                .then_some(runs);
+            if let Some(tab) = tab {
+                tab.update(cx, |t, cx| {
+                    t.bookmark_hint = hint;
+                    cx.notify();
+                });
+            }
+        }
+        if self.active_db.as_deref() == Some(db_id.as_str()) {
+            self.refresh_history(cx);
+        }
+    }
+
+    fn usage_for(&mut self, db_id: &str) -> Arc<Usage> {
+        if let Some(u) = self.usage.get(db_id) {
+            return u.clone();
+        }
+        let u = Arc::new(self.local.usage(db_id, now_ms() / 1000));
+        self.usage.insert(db_id.to_string(), u.clone());
+        u
+    }
+
+    fn schema_index(&self, user_id: &str, info: SchemaInfo) -> Arc<SchemaIndex> {
+        let (driver, default) = self
+            .find_user(user_id)
+            .map(|(db, _)| {
+                (
+                    db.driver,
+                    SchemaIndex::default_schema_for(db.driver, &db.database),
+                )
+            })
+            .unwrap_or((DriverKind::Postgres, None));
+        Arc::new(SchemaIndex::new(info, driver, default))
+    }
+
+    /// Publishes a connection's schema and usage to the completion providers.
+    fn sync_assist(&mut self, user_id: &str) {
+        let Some(db_id) = self.find_user(user_id).map(|(db, _)| db.id.clone()) else {
+            return;
+        };
+        let usage = self.usage_for(&db_id);
+        if let Some(state) = self.conns.get(user_id) {
+            self.assist.borrow_mut().insert(
+                state.id,
+                AssistData {
+                    schema: state.schema.clone(),
+                    usage,
+                },
+            );
+        }
+    }
+
+    fn sync_assist_for_db(&mut self, db_id: &str) {
+        let users: Vec<String> = self
+            .store
+            .database(db_id)
+            .into_iter()
+            .flat_map(|db| &db.users)
+            .filter(|u| self.conns.contains_key(&u.id))
+            .map(|u| u.id.clone())
+            .collect();
+        for u in users {
+            self.sync_assist(&u);
+        }
+    }
+
+    /// Suggestions for a table of the active connection: learned from history first,
+    /// then generated from its keys.
+    fn table_suggestions(&self, table: &TableInfo) -> Vec<QuerySuggestion> {
+        let (Some(state), Some(db)) = (self.active_conn(), self.active_db.as_deref()) else {
+            return Vec::new();
+        };
+        let Some(ix) = state.schema.resolve(Some(&table.schema), &table.name) else {
+            return Vec::new();
+        };
+        let patterns = self.local.patterns(db, 200);
+        suggest_for_table(ix, &state.schema, &patterns)
     }
 
     // ---- connections -----------------------------------------------------------
@@ -373,16 +597,25 @@ impl Workspace {
             None => ConnId(self.next_id()),
         };
         let password = self.store.password(user_id);
+        // Show (and complete against) the cached schema until the server answers.
+        let schema = match self.conns.get(user_id) {
+            Some(state) => state.schema.clone(),
+            None => self.schema_index(
+                user_id,
+                self.local.cached_schema(user_id).unwrap_or_default(),
+            ),
+        };
         self.conns.insert(
             user_id.to_string(),
             ConnState {
                 id,
                 status: ConnStatus::Connecting,
-                tables: Vec::new(),
+                schema,
                 stats: PoolStats::default(),
             },
         );
         self.conn_users.insert(id, user_id.to_string());
+        self.sync_assist(user_id);
         self.engine.send(Command::Connect {
             conn: id,
             driver: db.driver,
@@ -410,6 +643,7 @@ impl Workspace {
         self.active_db = Some(db_id);
         self.active_user = Some(user_id.clone());
         self.assign_active_tab(&user_id, window, cx);
+        self.refresh_history(cx);
         cx.notify();
     }
 
@@ -596,12 +830,19 @@ impl Workspace {
     fn on_engine_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             Event::Query { query, event } => {
-                let finished = matches!(event, QueryEvent::Finished { .. });
-                if let Some(tab) = self.queries.get(&query).and_then(|t| t.upgrade()) {
+                let finished = match &event {
+                    QueryEvent::Finished { elapsed, error, .. } => {
+                        Some((error.clone(), elapsed.as_millis() as i64))
+                    }
+                    QueryEvent::Exec(_) => None,
+                };
+                if let Some(tab) = self.queries.get(&query).and_then(|q| q.tab.upgrade()) {
                     tab.update(cx, |t, cx| t.on_query_event(event, cx));
                 }
-                if finished {
-                    self.queries.remove(&query);
+                if let Some((error, elapsed_ms)) = finished
+                    && let Some(run) = self.queries.remove(&query)
+                {
+                    self.record_run(run, error, elapsed_ms, cx);
                 }
             }
             Event::Connected { conn } => {
@@ -626,9 +867,16 @@ impl Workspace {
                 window.push_notification(Notification::error(error), cx);
             }
             Event::Schema { conn, result } => match result {
-                Ok(tables) => {
-                    if let Some(state) = self.conn_state_mut(conn) {
-                        state.tables = tables;
+                Ok(info) => {
+                    if let Some(user_id) = self.conn_users.get(&conn).cloned() {
+                        if let Err(e) = self.local.save_schema(&user_id, &info) {
+                            eprintln!("could not cache schema: {e:#}");
+                        }
+                        let schema = self.schema_index(&user_id, info);
+                        if let Some(state) = self.conn_state_mut(conn) {
+                            state.schema = schema;
+                        }
+                        self.sync_assist(&user_id);
                     }
                 }
                 Err(e) => window.push_notification(Notification::error(e), cx),
@@ -659,7 +907,7 @@ impl Workspace {
         };
         let mut rows = Vec::new();
         // Drivers return tables ordered by schema, then name.
-        for tables in state.tables.chunk_by(|a, b| a.schema == b.schema) {
+        for tables in state.schema.tables().chunk_by(|a, b| a.schema == b.schema) {
             let schema: SharedString = tables[0].schema.clone().into();
             let expanded = self
                 .expanded_schemas
@@ -768,9 +1016,34 @@ impl Workspace {
                     TableKind::View => Icon::new(IconName::Eye),
                 };
                 let name = table.name.clone();
+                let group: SharedString = format!("table-row-{ix}").into();
+                let weak = cx.entity().downgrade();
+                let menu_table = table.clone();
+                let suggestions = Button::new(("table-suggest", ix))
+                    .icon(Icon::new(Lucide::Lightbulb))
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Suggested queries")
+                    .dropdown_menu(move |menu, _, cx| {
+                        let Some(ws) = weak.upgrade() else {
+                            return menu;
+                        };
+                        let list = ws.read(cx).table_suggestions(&menu_table);
+                        suggestions_menu(menu, &menu_table.name, list, &weak)
+                    });
                 row.pl(px(52.))
+                    .group(group.clone())
                     .child(icon.xsmall().text_color(theme.muted_foreground))
-                    .child(div().min_w_0().truncate().child(name))
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(
+                        div()
+                            .invisible()
+                            .group_hover(group, |s| s.visible())
+                            .id(("table-suggest-wrap", ix))
+                            // Keep the click from also opening the table.
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .child(suggestions),
+                    )
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.open_table(&table, window, cx)),
                     )
@@ -835,7 +1108,10 @@ impl Workspace {
                     this.assign_active_tab(&user_id, window, cx);
                 }))
         };
-        match self.active_conn().map(|c| (&c.status, c.tables.is_empty())) {
+        match self
+            .active_conn()
+            .map(|c| (&c.status, c.schema.tables().is_empty()))
+        {
             None => Some(
                 body.child(message("Not connected.".into()))
                     .child(connect("Connect"))
@@ -862,6 +1138,7 @@ impl Workspace {
         let body = match view {
             SidebarView::Schema => self.render_schema_panel(cx).into_any_element(),
             SidebarView::Bookmarks => self.render_bookmarks_panel(cx).into_any_element(),
+            SidebarView::History => self.render_history_panel(cx).into_any_element(),
         };
         let theme = cx.theme();
         v_flex()
@@ -878,16 +1155,18 @@ impl Workspace {
                     .px_2()
                     .child(Tab::new().label("Schema"))
                     .child(Tab::new().label("Bookmarks"))
-                    .selected_index(match view {
-                        SidebarView::Schema => 0,
-                        SidebarView::Bookmarks => 1,
-                    })
+                    .child(Tab::new().label("History"))
+                    .selected_index(
+                        SidebarView::ALL
+                            .iter()
+                            .position(|v| *v == view)
+                            .unwrap_or(0),
+                    )
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.sidebar_view = if *ix == 0 {
-                            SidebarView::Schema
-                        } else {
-                            SidebarView::Bookmarks
-                        };
+                        this.sidebar_view = SidebarView::ALL[*ix];
+                        if this.sidebar_view == SidebarView::History {
+                            this.refresh_history(cx);
+                        }
                         cx.notify();
                     })),
             )
@@ -950,12 +1229,7 @@ impl Workspace {
 
     fn render_bookmarks_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let bookmarks: Vec<Bookmark> = self
-            .store
-            .bookmarks_for(self.active_db.as_deref())
-            .into_iter()
-            .cloned()
-            .collect();
+        let bookmarks: Vec<Bookmark> = self.local.bookmarks_for(self.active_db.as_deref());
         let count = bookmarks.len();
         v_flex()
             .flex_1()
@@ -992,6 +1266,120 @@ impl Workspace {
                 .px_1()
                 .flex_1(),
             )
+    }
+
+    fn render_history_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let entries = self.history.clone();
+        let count = entries.len();
+        let empty: Option<&str> = if self.active_db.is_none() {
+            Some("Select a database to see its history.")
+        } else if count == 0 && self.history_search.read(cx).value().trim().is_empty() {
+            Some("Queries you run show up here.")
+        } else if count == 0 {
+            Some("No matching queries.")
+        } else {
+            None
+        };
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .child(Input::new(&self.history_search).small()),
+            )
+            .children(empty.map(|text| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(text)
+            }))
+            .child(
+                uniform_list(
+                    "history",
+                    count,
+                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                        range
+                            .map(|ix| this.render_history_row(ix, &entries[ix], cx))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .px_1()
+                .flex_1(),
+            )
+    }
+
+    fn render_history_row(
+        &self,
+        ix: usize,
+        entry: &HistoryEntry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let group: SharedString = format!("history-{ix}").into();
+        let mut detail = format!("{} · {} ms", ago(entry.started_at), entry.duration_ms);
+        if let (Some(rows), None) = (entry.rows, &entry.error) {
+            detail.push_str(&format!(" · {rows} rows"));
+        }
+        let (open_sql, bookmark_sql) = (entry.sql.clone(), entry.sql.clone());
+        h_flex()
+            .id(("history-row", ix))
+            .group(group.clone())
+            .w_full()
+            .h(px(BOOKMARK_ROW_HEIGHT))
+            .px_2()
+            .gap_1p5()
+            .items_center()
+            .rounded(theme.radius)
+            .hover(|s| s.bg(theme.sidebar_accent))
+            .cursor_pointer()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .font_family(theme.mono_font_family.clone())
+                            .child(one_line(&entry.sql, 200)),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(if entry.error.is_some() {
+                                theme.danger
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(match &entry.error {
+                                Some(e) => format!("{detail} · {}", one_line(e, 80)),
+                                None => detail,
+                            }),
+                    ),
+            )
+            .child(
+                div().invisible().group_hover(group, |s| s.visible()).child(
+                    Button::new(("history-bookmark", ix))
+                        .icon(Icon::new(Lucide::Bookmark))
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Bookmark")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.open_bookmark_dialog(None, bookmark_sql.clone(), None, window, cx)
+                        })),
+                ),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_sql("History", &open_sql, window, cx)
+            }))
+            .into_any_element()
     }
 
     fn render_bookmark_row(
@@ -1405,4 +1793,37 @@ fn user_menu(
                 });
             }),
     )
+}
+
+fn suggestions_menu(
+    mut menu: PopupMenu,
+    table: &str,
+    list: Vec<QuerySuggestion>,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    let (learned, generated): (Vec<_>, Vec<_>) = list.into_iter().partition(|q| q.learned);
+    for (heading, items) in [("Your queries", learned), ("Suggested", generated)] {
+        if items.is_empty() {
+            continue;
+        }
+        menu = menu.label(heading);
+        for q in items {
+            let (ws, table, sql) = (workspace.clone(), table.to_string(), q.sql);
+            menu = menu.item(PopupMenuItem::new(q.title).on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.open_sql(&table, &sql, window, cx));
+            }));
+        }
+    }
+    menu.max_w(px(420.))
+}
+
+/// "5 min ago"-style age of a unix-millisecond timestamp.
+fn ago(ms: i64) -> String {
+    let secs = (now_ms() - ms).max(0) / 1000;
+    match secs {
+        0..60 => "just now".into(),
+        60..3_600 => format!("{} min ago", secs / 60),
+        3_600..86_400 => format!("{} h ago", secs / 3_600),
+        _ => format!("{} d ago", secs / 86_400),
+    }
 }
