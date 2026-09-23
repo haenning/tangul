@@ -14,3 +14,6 @@ postgres-native-tls = "0.5.3"
 rusdb-core = { version = "0.1.0", path = "../core" }
 tokio = { workspace = true, features = ["rt", "net", "macros", "rt-multi-thread"] }
 tokio-postgres = "0.7.18"
+
+[lints]
+workspace = true

@@ -92,7 +92,7 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
   forces a license: all are permissive; the only copyleft ones are MPL-2.0 (file-level,
   fine to use).
 - Zed's own editor/app crates are GPL-3.0: don't copy code from them.
-- Distribution: Homebrew (tap building from source) first; signing/notarization later.
+- Distribution: universal DMG via tag-based GitHub releases (ad-hoc signed); Developer ID signing, notarization and a Homebrew cask later.
 
 ---
 
@@ -130,7 +130,8 @@ crates/
 3. Cell detail view (copy cell/rows as TSV is done).
 4. Columns/indexes in the sidebar (columns are loaded already, see D6b).
 5. Fetch more rows via server-side cursors instead of discarding beyond the limit.
-6. Homebrew tap; `.app` bundle (`cargo-bundle`); signing/notarization much later.
+6. Developer ID signing + notarization (removes the first-start Gatekeeper step);
+   Homebrew cask. `.app`/DMG bundling and tag-based GitHub releases exist already.
 
 ---
 

@@ -28,3 +28,19 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Shared lint rules; each crate opts in with `[lints] workspace = true`.
+# `make lint` / CI run clippy with warnings as errors.
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+# Logs go to stderr; stdout stays clean.
+print_stdout = "warn"
+mem_forget = "warn"
+needless_collect = "warn"
+redundant_clone = "warn"

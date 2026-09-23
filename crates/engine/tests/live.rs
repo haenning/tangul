@@ -310,7 +310,10 @@ async fn ssh_tunnel() {
         std::env::temp_dir().join(format!("rusdb-known-hosts-{}", std::process::id()));
     let _ = std::fs::remove_file(&known_hosts);
     // SAFETY: only this test reads the variable (in the tunnel code it starts).
-    unsafe { std::env::set_var("RUSDB_KNOWN_HOSTS", &known_hosts) };
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("RUSDB_KNOWN_HOSTS", &known_hosts)
+    };
 
     let ssh = SshTarget {
         config: SshConfig {

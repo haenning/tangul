@@ -10,3 +10,6 @@ russh = { version = "0.63.3", default-features = false, features = ["ring", "rsa
 rusdb-core = { version = "0.1.0", path = "../core" }
 tokio = { workspace = true, features = ["rt", "net", "sync", "io-util", "macros"] }
 
+
+[lints]
+workspace = true
