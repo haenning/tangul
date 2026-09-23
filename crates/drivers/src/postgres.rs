@@ -199,7 +199,15 @@ async fn run_simple(client: &Client, sql: &str, row_limit: usize, sink: Sink<'_>
 /// Formats server errors like psql does (message, detail, hint, position).
 fn pg_error(e: tokio_postgres::Error) -> anyhow::Error {
     let Some(db) = e.as_db_error() else {
-        return anyhow!(e.to_string());
+        // Client-side errors keep the useful part in the source chain
+        // (e.g. "invalid configuration: password missing").
+        let mut msg = e.to_string();
+        let mut source = std::error::Error::source(&e);
+        while let Some(s) = source {
+            msg.push_str(&format!(": {s}"));
+            source = s.source();
+        }
+        return anyhow!(msg);
     };
     let mut msg = format!("{}: {}", db.severity(), db.message());
     if let Some(d) = db.detail() {

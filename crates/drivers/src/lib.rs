@@ -21,7 +21,9 @@ pub enum ExecEvent {
     ResultStart(Vec<ColumnInfo>),
     Rows(RowBatch),
     /// A statement finished. `rows` = affected or returned rows as reported by the server.
-    StatementDone { rows: u64 },
+    StatementDone {
+        rows: u64,
+    },
     /// The row limit was hit; remaining rows were discarded.
     Truncated,
 }
@@ -71,7 +73,14 @@ pub fn driver_for(kind: DriverKind) -> Arc<dyn Driver> {
 /// transaction-status round-trip after ordinary statements.
 pub(crate) fn may_touch_transaction(sql: &str) -> bool {
     const KEYWORDS: &[&str] = &[
-        "begin", "start", "commit", "rollback", "end", "abort", "savepoint", "release",
+        "begin",
+        "start",
+        "commit",
+        "rollback",
+        "end",
+        "abort",
+        "savepoint",
+        "release",
     ];
     sql.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .any(|w| KEYWORDS.iter().any(|k| w.eq_ignore_ascii_case(k)))

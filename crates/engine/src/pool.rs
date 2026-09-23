@@ -118,7 +118,13 @@ impl Pool {
 
     /// Removes all idle and pinned sessions (disconnect).
     pub fn take_all(&self) -> Vec<Lease> {
-        let mut out: Vec<Lease> = self.idle.lock().unwrap().drain(..).map(|(l, _)| l).collect();
+        let mut out: Vec<Lease> = self
+            .idle
+            .lock()
+            .unwrap()
+            .drain(..)
+            .map(|(l, _)| l)
+            .collect();
         out.extend(self.pinned.lock().unwrap().drain().map(|(_, l)| l));
         out
     }

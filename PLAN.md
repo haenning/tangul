@@ -1,182 +1,118 @@
-# rusdb – Plan: from nothing to first query
+# rusdb – Plan
 
-Target: native macOS desktop DB viewer in Rust + egui. MVP adapters: PostgreSQL, MySQL.
-Goal of this plan: the shortest path to *"connect → type SQL → Cmd+Enter → see rows"*,
-with an architecture that already supports multiple simultaneous connections,
-SSH tunnels and a schema sidebar without rewrites later.
+Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
+(`gpui-component`). MVP adapters: PostgreSQL, MySQL. Look: plain, Zed-like, dark.
 
 ---
 
-## 1. Key decisions (the important part)
+## 1. Key decisions
 
 ### D1 — UI thread never touches the network
-- egui is immediate-mode: `update()` runs every frame and must never block.
-- One **tokio runtime on a background thread**. UI sends `Command`s over an
-  unbounded channel, backend sends `Event`s back and calls `ctx.request_repaint()`.
-- UI state is plain structs owned by the UI thread. No `Arc<Mutex<_>>` shared with the
-  backend → no lock contention, no frame stalls.
-- egui runs in reactive mode (repaint only on input/events) → **0% CPU when idle**.
+- One **tokio runtime on its own thread** (`rusdb-engine`). UI sends `Command`s over an
+  unbounded channel; the engine sends `Event`s back over an `async_channel`, which the UI
+  awaits on GPUI's executor.
+- The UI drains all queued events per wake-up → a stream of row batches causes one
+  re-render, not one per batch.
+- No shared locks between UI and engine.
 
 ```
-┌──────────── UI thread (eframe) ────────────┐        ┌──────── tokio thread ────────┐
-│ Sidebar │ Tabs (editor)  │ Results grid    │ ─Cmd─▶ │ ConnectionManager            │
-│         │                │                 │ ◀─Evt─ │  ├─ Profile A: SSH? + pool   │
-└─────────┴────────────────┴─────────────────┘        │  └─ Profile B: pool          │
+┌──────────── GPUI main thread ──────────────┐        ┌──────── tokio thread ────────┐
+│ Sidebar │ Tabs: editor + results grid      │ ─Cmd─▶ │ Engine                       │
+│         │                                  │ ◀─Evt─ │  ├─ Pool (profile A)         │
+└─────────┴──────────────────────────────────┘        │  └─ Pool (profile B)         │
                                                       └──────────────────────────────┘
 ```
 
-### D2 — Drivers: `tokio-postgres` + `mysql_async`, **not** `sqlx`
-- sqlx is built for compile-time-typed app queries. A DB viewer runs arbitrary SQL with
-  unknown types; sqlx's dynamic decoding is clunky and it hides protocol features we need.
-- `tokio-postgres`: `simple_query_raw` (text protocol, **streamed**), built-in `CancelToken`.
-- `mysql_async`: text protocol `query_iter` (streamed), built-in pool; cancel via
-  `KILL QUERY <id>` on a second connection.
-- **Text protocol for the MVP**: every value arrives as a string → zero type-mapping code,
-  every exotic type (PostGIS, enums, arrays, JSON) renders on day one. Typed/binary
-  decoding (for sorting, editing, export) is a later, additive step.
+### D2 — Drivers: `tokio-postgres` + `mysql_async`, text protocol, not `sqlx`
+- sqlx targets compile-time-typed app queries; a viewer runs arbitrary SQL.
+- Text protocol: every value is a string → any server type renders without mapping code.
+- Rows are streamed in batches of 1000; per result set max `ROW_LIMIT` (10k) rows are kept.
+- Cancel: Postgres `CancelToken`; MySQL `KILL QUERY` over a short-lived second connection.
+- TLS via native-tls (macOS Security framework). `prefer`/`require` encrypt without
+  certificate verification (libpq semantics). Verified modes: TODO.
 
-### D3 — Connection efficiency vs. session semantics (decided)
-"Waste no connections" conflicts with SQL session state: `BEGIN`, `SET search_path`,
-temp tables, `SET @var` only work if consecutive statements hit the **same** connection.
+### D3 — Connection efficiency vs. session semantics (implemented)
+- Per profile one lazy pool (max 4). Nothing opens before first use.
+- A tab **leases a connection only while a statement runs** → idle tabs cost nothing.
+- Schema browsing uses the same pool (no dedicated metadata connection) → a single user
+  with one tab uses exactly **one** server connection.
+- If a statement leaves a **transaction open, the session is pinned to its tab** until
+  COMMIT/ROLLBACK or the tab closes (closing = connection closed = server rollback).
+  - Postgres: tokio-postgres doesn't expose the protocol's transaction status. After
+    statements containing transaction keywords (or while pinned) the driver probes
+    `SELECT now() <> statement_timestamp()`; an error means "aborted txn" → still pinned.
+  - MySQL: `SERVER_STATUS_IN_TRANS` flag from the last OK packet (free).
+- Idle connections close after 60 s.
+- `TODO(reserve-connection)`: a tab button to pin a connection permanently (out of scope).
+- The status bar shows `open/max · idle · in transaction` for the active profile.
 
-Recommendation:
-- Per connection profile: **one lazily opened metadata connection** (sidebar, autocomplete),
-  shared by everything.
-- Per query tab: a connection is **leased on execute** from a small pool (default max 3–5)
-  and **returned after the statement** → idle tabs cost 0 connections.
-- **Tab gets pinned** to its connection when a transaction is open
-  (PG: `ReadyForQuery` txn status / detect `BEGIN`; MySQL: `SERVER_STATUS_IN_TRANS` flag)
-  or when the user reserves it for the tab.
-- **Out of scope for MVP:** a "reserve connection for this tab" button. The lease code gets a
-  `// TODO(reserve-connection): tab-level button to pin a connection permanently` marker at
-  the point where pinning is decided, so the button only needs to set a flag later.
-- Idle pool connections closed after ~60s; nothing opened until first use.
-- Consequence: `SET search_path` in a non-sticky tab may not persist → solved by
-  a per-tab "default schema/database" that is applied on lease (cheap, one round-trip, only
-  when it differs from the connection's current state).
+### D4 — SSH tunnel via `russh` (not implemented yet)
+- One SSH session per profile, each DB connection = one `direct-tcpip` channel; local
+  `127.0.0.1:0` listener, so drivers stay unchanged. Auth: password, key, ssh-agent.
+  Verify `known_hosts`, never auto-accept. Hooks: `TODO(ssh)` in profile/form.
 
-### D4 — SSH tunnel via `russh` (pure Rust, async), one SSH session per profile
-- No shelling out to `ssh`, no local port juggling in the MVP UI.
-- One SSH session per profile, **multiplexed**: each DB connection = one `direct-tcpip`
-  channel over the same SSH session. Local `127.0.0.1:0` listener forwards into channels
-  (works with every driver unchanged).
-- Auth: password, private key file (+passphrase), **ssh-agent** (`SSH_AUTH_SOCK`, covers
-  1Password/Secretive on macOS). `~/.ssh/config` parsing: later.
-- Host key: verify against `~/.ssh/known_hosts`, prompt on unknown (never auto-accept).
+### D5 — Result storage
+- One `String` arena + `u32` end offsets + null flags per result (no allocation per cell).
+- `gpui-component` `DataTable` is virtualized: only visible cells are rendered, read
+  straight from the arena. Long values are cut at 200 chars in the grid.
 
-### D5 — Result storage & rendering built for millions of cells
-- Store a result as **one `String` arena + `Vec<u32>` offsets + null bitmap**, not
-  `Vec<Vec<Option<String>>>` (millions of small allocations = slow + memory heavy).
-- Grid: `egui_extras::TableBuilder` with virtualized rows → only visible rows are laid out.
-  Scroll cost is independent of result size.
-- Rows are **streamed** in batches (e.g. 1000) → first rows visible while the query runs.
-- Hard default limit (e.g. 10k rows, configurable) with "fetch more"; truncate long cells
-  in the grid (full value in a detail panel).
+### D6 — Profiles & secrets
+- Profiles: TOML in `~/Library/Application Support/rusdb/profiles.toml`.
+- Passwords: macOS Keychain (`keyring`, service `rusdb`). On Linux (dev only) an
+  in-memory mock store is used → passwords are not persisted there.
+- "User management" = multiple profiles per server (different users). No role/grant UI.
 
-### D6 — Secrets in macOS Keychain
-- Profiles (host, port, user, db, ssh settings) as TOML in
-  `~/Library/Application Support/rusdb/`.
-- Passwords / key passphrases via `keyring` crate → macOS Keychain. Never in the TOML.
-
-### D7 — Tabs: `egui_dock`
-- Gives draggable/closable tabs and later split views for free. Each tab = editor + its own
-  result pane (results "below tabs" for now, as requested).
-- Each tab holds a `connection_id` → multiple DBs open in parallel from day one.
+### D7 — UI: GPUI + gpui-component, kept deliberately plain
+- Editor: gpui-component code editor (tree-sitter SQL highlighting, line numbers).
+  Its engine has multi-cursor support (`AddCursorAbove/Below`, bound to ⌘⌥↑/↓ on macOS);
+  not yet verified on a Mac. ⌘↵ runs the selection or the whole buffer.
+- Simple own layout (sidebar | tab bar + tab content | status bar), stock components and
+  the default dark theme. No custom styling system.
+- Pinned versions (`gpui-kit = "=0.6.6"`, toolchain 1.98) — GPUI API churn is the main
+  risk, upgrades are deliberate.
+- Zed's own editor is GPL-3.0: don't copy code from it into this Apache-2.0 project.
 
 ---
 
-## 2. Crate layout (cargo workspace)
+## 2. Crate layout
 
 ```
 crates/
-  core/     # ids, Profile, Command/Event enums, ResultSet (arena), Driver trait, errors
-  drivers/  # features: pg, mysql — impl Driver
-  ssh/      # russh tunnel
-  app/      # eframe UI + backend runtime/ConnectionManager (bin: rusdb)
-```
-Split mainly for **compile times**: UI edits don't recompile drivers/ssh.
-
-Core trait (sketch):
-```rust
-#[async_trait]
-trait Session: Send {
-    async fn execute(&mut self, sql: &str, sink: RowSink) -> Result<ExecSummary>; // streams batches
-    fn cancel_handle(&self) -> CancelHandle;
-    fn in_transaction(&self) -> bool;
-}
-#[async_trait]
-trait Driver: Send + Sync {
-    async fn connect(&self, target: SocketAddr, cfg: &ConnCfg) -> Result<Box<dyn Session>>;
-    async fn list_schemas(&self, s: &mut dyn Session) -> Result<Vec<SchemaNode>>;
-    async fn list_children(&self, s: &mut dyn Session, node: &NodeId) -> Result<Vec<SchemaNode>>;
-}
+  core/     # ids, Profile, ResultSet arena, TableInfo — no I/O
+  drivers/  # Driver/Session traits, postgres.rs, mysql.rs
+  engine/   # tokio thread, Command/Event, pool (D3); live integration tests
+  app/      # GPUI binary `rusdb`: workspace, query tab, results grid, connection form
 ```
 
 ---
 
-## 3. Milestones to first visible query
+## 3. Milestones
 
-| # | Milestone | Done when |
-|---|-----------|-----------|
-| M0 | Workspace + eframe window, layout: left sidebar, center `egui_dock` tabs, bottom result pane (dummy data) | window opens, tabs add/close |
-| M1 | `core` types + result arena + virtualized grid with 1M fake rows | smooth scroll with 1M rows |
-| M2 | Backend thread: tokio runtime, Command/Event channels, repaint on event | round-trip "ping" visible in UI |
-| M3 | PG driver: connect, streamed `simple_query_raw`, cancel | integration test vs docker PG |
-| M4 | Connection dialog (host/port/user/password/db), profiles TOML + Keychain, ConnectionManager with lazy pool | connect from UI, status shown |
-| **M5** | **Query tab: SQL editor, Cmd+Enter runs (selection or whole buffer), streamed rows in grid, error display, cancel button** | **🎯 first query with visible results** |
-| M6 | MySQL driver (same trait) | same UI works against MySQL |
-| M7 | Schema sidebar: lazy tree (db → schema → tables/views → columns), uses metadata connection | expand nodes, double-click → `SELECT * … LIMIT 100` in new tab |
-| M8 | SSH tunnel (password/key/agent, known_hosts) | connect to DB behind bastion |
+| # | Milestone | Status |
+|---|-----------|--------|
+| M0 | Workspace, GPUI window, layout | ✅ |
+| M1 | Core types, result arena, virtualized grid | ✅ |
+| M2 | Engine thread, Command/Event bridge | ✅ |
+| M3 | Postgres driver (stream, cancel, errors like psql) | ✅ |
+| M4 | Connection dialog, profiles TOML + Keychain, lazy pool | ✅ |
+| **M5** | **Query tab: editor, ⌘↵, streamed results, errors, cancel** | ✅ **first query** |
+| M6 | MySQL driver | ✅ |
+| M7 | Schema sidebar (schema → tables/views, click opens `SELECT * … LIMIT 100`) | ✅ basic (no columns yet) |
+| M8 | SSH tunnel | ⏳ next |
 
-M0–M5 is the critical path. M6–M8 are independent and can be done in any order.
-
----
-
-## 4. Being fast (dev velocity + runtime)
-
-**Dev velocity**
-- `docker-compose.yml` with Postgres, MySQL and an `openssh-server` container → every
-  feature testable locally, including tunnels.
-- `[profile.dev.package."*"] opt-level = 2` → deps optimized (egui/wgpu usable in debug),
-  own code stays fast to compile.
-- Driver integration tests run headless against docker; UI stays thin.
-- Build UI against fake data first (M1), so perf of the grid is proven before networking.
-
-**Runtime**
-- eframe with `wgpu` backend (Metal on macOS).
-- No work in `update()` besides layout; formatting/parsing happens in the backend.
-- Release profile: `lto = "thin"`, `codegen-units = 1`.
-- Packaging: `cargo-bundle` → `.app`; signing/notarization later.
+### Next candidates
+1. SSH tunnel (M8).
+2. Resizable editor/results split; results per statement (currently last result set).
+3. Cell detail view + copy (cell / row / TSV).
+4. Columns/indexes in the sidebar (lazy per table).
+5. Fetch more rows via server-side cursors instead of discarding beyond the limit.
+6. `.app` bundle (`cargo-bundle`), signing/notarization.
 
 ---
 
-## 5. Resolved
+## 4. Dev workflow
 
-- User management = **connection profiles** (multiple credential sets per server). No
-  role/grant management UI.
-- Session model = D3 as proposed; reserve button deferred (TODO marker).
-- Look & feel: Zed-like clean UI, native AppKit look is **not** a goal.
-
-## 6. Open: UI framework (SQL editor quality)
-
-egui's `TextEdit` is the weak spot: no multi-cursor, basic undo, syntect highlighting slows
-on large buffers. Options:
-
-| Option | Editor | Result grid | Dock/tabs | Risk |
-|---|---|---|---|---|
-| **egui** (current plan) | `TextEdit` / `egui_code_editor` (same limits); real editor = custom widget (rope + tree-sitter), weeks of work | `egui_extras` virtualized table, very fast | `egui_dock` | Editor stays mediocre unless we build one |
-| **GPUI + gpui-component** (Zed's framework) | Built-in code editor, tree-sitter highlighting, LSP hooks, claims stable at 200K lines | Virtualized table (sorting, resizable/fixed columns, cell selection) | Dock with draggable tabs, splits, serializable | Younger ecosystem, API churn, thinner docs; multi-cursor not advertised → verify |
-| **iced** | `text_editor` widget + highlighter; no multi-cursor | No built-in table (community crates) | Pane grid, tabs DIY | More DIY than both above |
-| **Tauri + Svelte + CodeMirror 6** | Best editor by far (multi-cursor, autocomplete, huge ecosystem), your stack | Must be canvas/virtualized; results cross IPC (serialization cost) | Web libs | Not "native Rust UI"; webview memory/latency; hardest to hit "ultra performant" |
-
-**Recommendation: GPUI + gpui-component.** It is literally the Zed look you want, and it
-ships the three hard parts of this app (editor, virtualized table, dock) instead of us
-building them. Backend (D1–D6) is unchanged — only the `app` crate differs.
-
-Mitigation for its risk: a **1–2 day spike** before M0: window + dock with 2 tabs + editor
-with SQL highlighting + table with 1M rows. If it holds up → switch; if not → egui.
-
-## 7. Remaining limits
-
-- **Text protocol:** no client-side typed sorting/editing yet; binary values (bytea/BLOB)
-  show as hex/escaped text.
+- `docker compose up -d` → Postgres 16 + MySQL 8.4 for local testing.
+- `cargo test -p rusdb-engine` with `RUSDB_TEST_PG` / `RUSDB_TEST_MYSQL` set runs the live
+  tests (queries, NULLs, errors, pinning, release, cancel, row limit) against real servers.
+- Deps are optimized in dev builds (`[profile.dev.package."*"] opt-level = 2`).

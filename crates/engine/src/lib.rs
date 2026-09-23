@@ -153,14 +153,20 @@ impl Engine {
             Command::Connect { conn, driver, cfg } => {
                 let pool = Arc::new(Pool::new(driver_for(driver), cfg, MAX_CONNECTIONS));
                 if let Some(old) = self.pools.insert(conn, pool.clone()) {
-                    close_all(old.take_all());
+                    close_all(old.take_all(), None);
                 }
                 let events = self.events.clone();
                 tokio::spawn(async move {
                     match load_schema(&pool).await {
                         Ok(tables) => {
                             send(&events, Event::Connected { conn });
-                            send(&events, Event::Schema { conn, result: Ok(tables) });
+                            send(
+                                &events,
+                                Event::Schema {
+                                    conn,
+                                    result: Ok(tables),
+                                },
+                            );
                         }
                         Err(e) => send(&events, Event::ConnectFailed { conn, error: e }),
                     }
@@ -169,12 +175,20 @@ impl Engine {
             }
             Command::Disconnect { conn } => {
                 if let Some(pool) = self.pools.remove(&conn) {
-                    close_all(pool.take_all());
-                    send(&self.events, Event::PoolStats { conn, stats: PoolStats::default() });
+                    close_all(pool.take_all(), None);
+                    send(
+                        &self.events,
+                        Event::PoolStats {
+                            conn,
+                            stats: PoolStats::default(),
+                        },
+                    );
                 }
             }
             Command::RefreshSchema { conn } => {
-                let Some(pool) = self.pools.get(&conn).cloned() else { return };
+                let Some(pool) = self.pools.get(&conn).cloned() else {
+                    return;
+                };
                 let events = self.events.clone();
                 tokio::spawn(async move {
                     let result = load_schema(&pool).await;
@@ -182,9 +196,20 @@ impl Engine {
                     send_stats(&events, conn, &pool);
                 });
             }
-            Command::Execute { query, tab, conn, sql } => {
+            Command::Execute {
+                query,
+                tab,
+                conn,
+                sql,
+            } => {
                 let Some(pool) = self.pools.get(&conn).cloned() else {
-                    finish(&self.events, query, Duration::ZERO, Some("not connected".into()), false);
+                    finish(
+                        &self.events,
+                        query,
+                        Duration::ZERO,
+                        Some("not connected".into()),
+                        false,
+                    );
                     return;
                 };
                 let events = self.events.clone();
@@ -205,8 +230,7 @@ impl Engine {
                 if let Some(pool) = self.pools.get(&conn)
                     && let Some(lease) = pool.release_tab(tab)
                 {
-                    close_all(vec![lease]);
-                    send_stats(&self.events, conn, pool);
+                    close_all(vec![lease], Some((self.events.clone(), conn, pool.clone())));
                 }
             }
         }
@@ -214,11 +238,10 @@ impl Engine {
 
     fn reap_idle(&self) {
         for (conn, pool) in &self.pools {
-            let expired = pool.take_expired();
-            if !expired.is_empty() {
-                close_all(expired);
-                send_stats(&self.events, *conn, pool);
-            }
+            close_all(
+                pool.take_expired(),
+                Some((self.events.clone(), *conn, pool.clone())),
+            );
         }
     }
 }
@@ -236,7 +259,13 @@ async fn execute(
     let mut lease = match pool.acquire(Some(tab)).await {
         Ok(l) => l,
         Err(e) => {
-            finish(&events, query, started.elapsed(), Some(format!("{e:#}")), false);
+            finish(
+                &events,
+                query,
+                started.elapsed(),
+                Some(format!("{e:#}")),
+                false,
+            );
             return;
         }
     };
@@ -246,30 +275,53 @@ async fn execute(
         .unwrap()
         .insert(query, lease.session.cancel_handle());
 
-    let mut sink = |ev: ExecEvent| send(&events, Event::Query { query, event: QueryEvent::Exec(ev) });
+    let mut sink = |ev: ExecEvent| {
+        send(
+            &events,
+            Event::Query {
+                query,
+                event: QueryEvent::Exec(ev),
+            },
+        )
+    };
     let result = lease.session.execute(&sql, ROW_LIMIT, &mut sink).await;
 
     running.lock().unwrap().remove(&query);
     let in_tx = lease.session.in_transaction();
-    finish(&events, query, started.elapsed(), result.err().map(|e| format!("{e:#}")), in_tx);
+    finish(
+        &events,
+        query,
+        started.elapsed(),
+        result.err().map(|e| format!("{e:#}")),
+        in_tx,
+    );
     pool.release(Some(tab), lease);
     send_stats(&events, conn, &pool);
 }
 
 async fn load_schema(pool: &Pool) -> Result<Vec<TableInfo>, String> {
     let mut lease = pool.acquire(None).await.map_err(|e| format!("{e:#}"))?;
-    let result = lease.session.list_tables().await.map_err(|e| format!("{e:#}"));
+    let result = lease
+        .session
+        .list_tables()
+        .await
+        .map_err(|e| format!("{e:#}"));
     pool.release(None, lease);
     result
 }
 
-fn close_all(leases: Vec<Lease>) {
+/// Closes sessions in the background. With `report`, pool stats are sent once the
+/// sessions (and their pool slots) are gone.
+fn close_all(leases: Vec<Lease>, report: Option<(Events, ConnId, Arc<Pool>)>) {
     if leases.is_empty() {
         return;
     }
     tokio::spawn(async move {
         for lease in leases {
             lease.session.close().await;
+        }
+        if let Some((events, conn, pool)) = report {
+            send_stats(&events, conn, &pool);
         }
     });
 }
@@ -279,13 +331,23 @@ fn finish(events: &Events, query: QueryId, elapsed: Duration, error: Option<Stri
         events,
         Event::Query {
             query,
-            event: QueryEvent::Finished { elapsed, error, in_transaction: in_tx },
+            event: QueryEvent::Finished {
+                elapsed,
+                error,
+                in_transaction: in_tx,
+            },
         },
     );
 }
 
 fn send_stats(events: &Events, conn: ConnId, pool: &Pool) {
-    send(events, Event::PoolStats { conn, stats: pool.stats() });
+    send(
+        events,
+        Event::PoolStats {
+            conn,
+            stats: pool.stats(),
+        },
+    );
 }
 
 fn send(events: &Events, event: Event) {

@@ -43,7 +43,12 @@ impl Harness {
         let (engine, events) = rusdb_engine::start();
         let conn = ConnId(1);
         engine.send(Command::Connect { conn, driver, cfg });
-        let mut h = Self { engine, events, conn, next_query: 0 };
+        let mut h = Self {
+            engine,
+            events,
+            conn,
+            next_query: 0,
+        };
         loop {
             match h.next().await {
                 Event::Connected { .. } => break,
@@ -64,21 +69,37 @@ impl Harness {
     fn start(&mut self, tab: TabId, sql: &str) -> QueryId {
         self.next_query += 1;
         let query = QueryId(self.next_query);
-        self.engine.send(Command::Execute { query, tab, conn: self.conn, sql: sql.into() });
+        self.engine.send(Command::Execute {
+            query,
+            tab,
+            conn: self.conn,
+            sql: sql.into(),
+        });
         query
     }
 
     async fn wait(&mut self, query: QueryId) -> Outcome {
-        let mut out = Outcome { result: None, error: None, in_transaction: false, truncated: false };
+        let mut out = Outcome {
+            result: None,
+            error: None,
+            in_transaction: false,
+            truncated: false,
+        };
         loop {
             if let Event::Query { query: q, event } = self.next().await {
                 assert_eq!(q, query);
                 match event {
-                    QueryEvent::Exec(ExecEvent::ResultStart(cols)) => out.result = Some(ResultSet::new(cols)),
+                    QueryEvent::Exec(ExecEvent::ResultStart(cols)) => {
+                        out.result = Some(ResultSet::new(cols))
+                    }
                     QueryEvent::Exec(ExecEvent::Rows(b)) => out.result.as_mut().unwrap().append(b),
                     QueryEvent::Exec(ExecEvent::Truncated) => out.truncated = true,
                     QueryEvent::Exec(ExecEvent::StatementDone { .. }) => {}
-                    QueryEvent::Finished { error, in_transaction, .. } => {
+                    QueryEvent::Finished {
+                        error,
+                        in_transaction,
+                        ..
+                    } => {
                         out.error = error;
                         out.in_transaction = in_transaction;
                         return out;
@@ -96,7 +117,9 @@ impl Harness {
     async fn stats(&mut self) -> rusdb_engine::PoolStats {
         // Stats are sent after every release; drain until the latest one.
         let mut last = None;
-        while let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(200), self.events.recv()).await {
+        while let Ok(Ok(ev)) =
+            tokio::time::timeout(Duration::from_millis(200), self.events.recv()).await
+        {
             if let Event::PoolStats { stats, .. } = ev {
                 last = Some(stats);
             }
@@ -111,7 +134,12 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
     let tab_b = TabId(2);
 
     // Basic select with NULL, unicode and multiple result sets (last one wins in UI).
-    let out = h.run(tab_a, "SELECT 1 AS a, NULL AS b, 'héllo' AS c; SELECT 2 AS x").await;
+    let out = h
+        .run(
+            tab_a,
+            "SELECT 1 AS a, NULL AS b, 'héllo' AS c; SELECT 2 AS x",
+        )
+        .await;
     assert_eq!(out.error, None);
     let rs = out.result.unwrap();
     assert_eq!(rs.columns()[0].name, "x");
@@ -119,7 +147,10 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
 
     let out = h.run(tab_a, "SELECT 1 AS a, NULL AS b, 'héllo' AS c").await;
     let rs = out.result.unwrap();
-    assert_eq!((rs.cell(0, 0), rs.cell(0, 1), rs.cell(0, 2)), (Some("1"), None, Some("héllo")));
+    assert_eq!(
+        (rs.cell(0, 0), rs.cell(0, 1), rs.cell(0, 2)),
+        (Some("1"), None, Some("héllo"))
+    );
 
     // Errors are reported, the session stays usable.
     let out = h.run(tab_a, "SELECT * FROM does_not_exist_xyz").await;
@@ -139,12 +170,24 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
     assert!(!out.in_transaction, "COMMIT should unpin");
     assert_eq!(h.stats().await.pinned, 0);
 
+    // Closing a tab with an open transaction closes its pinned session.
+    h.run(tab_a, "BEGIN").await;
+    h.engine.send(Command::ReleaseTab {
+        tab: tab_a,
+        conn: h.conn,
+    });
+    let s = h.stats().await;
+    assert_eq!((s.open, s.pinned), (1, 0));
+
     // Cancel a long-running statement.
     let q = h.start(tab_a, sleep_sql);
     tokio::time::sleep(Duration::from_millis(500)).await;
     h.engine.send(Command::Cancel { query: q });
     let out = h.wait(q).await;
-    assert!(out.error.is_some(), "cancelled query should report an error");
+    assert!(
+        out.error.is_some(),
+        "cancelled query should report an error"
+    );
     assert_eq!(h.run(tab_a, "SELECT 1").await.error, None);
 }
 
@@ -157,7 +200,9 @@ async fn postgres() {
     common_checks(DriverKind::Postgres, cfg.clone(), "SELECT pg_sleep(30)").await;
 
     let mut h = Harness::connect(DriverKind::Postgres, cfg).await;
-    let out = h.run(TabId(1), "SELECT g FROM generate_series(1, 25000) g").await;
+    let out = h
+        .run(TabId(1), "SELECT g FROM generate_series(1, 25000) g")
+        .await;
     assert!(out.truncated);
     assert_eq!(out.result.unwrap().row_count(), rusdb_engine::ROW_LIMIT);
 
@@ -177,7 +222,10 @@ async fn mysql() {
 
     let mut h = Harness::connect(DriverKind::Mysql, cfg).await;
     let out = h
-        .run(TabId(1), "CREATE TEMPORARY TABLE t (id int); INSERT INTO t VALUES (1),(2); SELECT * FROM t")
+        .run(
+            TabId(1),
+            "CREATE TEMPORARY TABLE t (id int); INSERT INTO t VALUES (1),(2); SELECT * FROM t",
+        )
         .await;
     assert_eq!(out.error, None);
     assert_eq!(out.result.unwrap().row_count(), 2);

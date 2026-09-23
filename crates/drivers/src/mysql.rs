@@ -66,7 +66,9 @@ struct MysqlSession {
 
 impl MysqlSession {
     fn conn(&mut self) -> Result<&mut Conn> {
-        self.conn.as_mut().ok_or_else(|| anyhow!("connection closed"))
+        self.conn
+            .as_mut()
+            .ok_or_else(|| anyhow!("connection closed"))
     }
 }
 
@@ -80,7 +82,10 @@ impl Session for MysqlSession {
             .conn
             .as_ref()
             .and_then(|c| c.last_ok_packet())
-            .map(|ok| ok.status_flags().contains(StatusFlags::SERVER_STATUS_IN_TRANS))
+            .map(|ok| {
+                ok.status_flags()
+                    .contains(StatusFlags::SERVER_STATUS_IN_TRANS)
+            })
             .unwrap_or(self.in_transaction);
         result
     }

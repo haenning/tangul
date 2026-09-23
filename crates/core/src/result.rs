@@ -93,7 +93,11 @@ impl ResultSet {
         if self.nulls[ix] {
             return None;
         }
-        let start = if ix == 0 { 0 } else { self.ends[ix - 1] as usize };
+        let start = if ix == 0 {
+            0
+        } else {
+            self.ends[ix - 1] as usize
+        };
         Some(&self.text[start..self.ends[ix] as usize])
     }
 }
