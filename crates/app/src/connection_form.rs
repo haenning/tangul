@@ -1,4 +1,4 @@
-//! Form for creating/editing a connection profile. Rendered inside a dialog.
+//! Form for creating/editing a database and its users. Rendered inside a dialog.
 
 use gpui_kit::component::{
     ActiveTheme as _, Sizable as _,
@@ -7,13 +7,43 @@ use gpui_kit::component::{
     input::{Input, InputState},
     v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_core::{DriverKind, Profile, TlsMode};
+use rusdb_core::{Database, DbUser, DriverKind, TlsMode};
 
-use crate::store::new_profile_id;
+use crate::store::new_id;
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum FormMode {
+    /// Connection settings plus a first user.
+    NewDatabase,
+    /// Connection settings only; the users are kept.
+    EditDatabase,
+    /// User and password for an existing database.
+    User,
+}
+
+impl FormMode {
+    fn has_db_fields(self) -> bool {
+        self != FormMode::User
+    }
+
+    fn has_user_fields(self) -> bool {
+        self != FormMode::EditDatabase
+    }
+}
+
+pub struct FormOutput {
+    pub database: Database,
+    /// The user to add or update, with a new password (`None` keeps the stored one).
+    pub user: Option<(DbUser, Option<String>)>,
+}
 
 pub struct ConnectionForm {
-    profile_id: Option<String>,
+    mode: FormMode,
+    /// The database being edited or extended; `None` for [`FormMode::NewDatabase`].
+    base: Option<Database>,
+    user_id: Option<String>,
     driver: DriverKind,
     tls: TlsMode,
     name: Entity<InputState>,
@@ -26,10 +56,16 @@ pub struct ConnectionForm {
 }
 
 impl ConnectionForm {
-    /// `profile` = None creates a new profile. The password field stays empty when
-    /// editing; empty means "keep the stored password".
-    pub fn new(profile: Option<&Profile>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let driver = profile.map_or(DriverKind::Postgres, |p| p.driver);
+    /// `user` is the user to edit in [`FormMode::User`] (`None` adds one). The password
+    /// field stays empty when editing; empty means "keep the stored password".
+    pub fn new(
+        mode: FormMode,
+        db: Option<&Database>,
+        user: Option<&DbUser>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let driver = db.map_or(DriverKind::Postgres, |p| p.driver);
         let input = |value: String,
                      placeholder: &'static str,
                      window: &mut Window,
@@ -41,31 +77,31 @@ impl ConnectionForm {
             })
         };
         Self {
-            profile_id: profile.map(|p| p.id.clone()),
+            mode,
+            base: db.cloned(),
+            user_id: user.map(|u| u.id.clone()),
             driver,
-            tls: profile.map_or(TlsMode::Prefer, |p| p.tls),
+            tls: db.map_or(TlsMode::Prefer, |p| p.tls),
             name: input(
-                profile.map(|p| p.name.clone()).unwrap_or_default(),
+                db.map(|p| p.name.clone()).unwrap_or_default(),
                 "optional",
                 window,
                 cx,
             ),
             host: input(
-                profile.map_or("localhost".into(), |p| p.host.clone()),
+                db.map_or("localhost".into(), |p| p.host.clone()),
                 "localhost",
                 window,
                 cx,
             ),
             port: input(
-                profile
-                    .map_or(driver.default_port(), |p| p.port)
-                    .to_string(),
+                db.map_or(driver.default_port(), |p| p.port).to_string(),
                 "port",
                 window,
                 cx,
             ),
             user: input(
-                profile.map(|p| p.user.clone()).unwrap_or_default(),
+                user.map(|u| u.user.clone()).unwrap_or_default(),
                 "user",
                 window,
                 cx,
@@ -73,14 +109,14 @@ impl ConnectionForm {
             password: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
-                    .placeholder(if profile.is_some() {
+                    .placeholder(if user.is_some() {
                         "unchanged"
                     } else {
                         "password"
                     })
             }),
             database: input(
-                profile.map(|p| p.database.clone()).unwrap_or_default(),
+                db.map(|p| p.database.clone()).unwrap_or_default(),
                 "optional",
                 window,
                 cx,
@@ -102,16 +138,17 @@ impl ConnectionForm {
     }
 
     /// Validates the form. On error the message is shown inline and `None` returned.
-    pub fn submit(&mut self, cx: &mut Context<Self>) -> Option<(Profile, Option<String>)> {
+    pub fn submit(&mut self, cx: &mut Context<Self>) -> Option<FormOutput> {
         let value = |s: &Entity<InputState>| s.read(cx).value().trim().to_string();
         let host = value(&self.host);
         let user = value(&self.user);
         let port = value(&self.port).parse::<u16>();
-        let error = if host.is_empty() {
+        let (db_fields, user_fields) = (self.mode.has_db_fields(), self.mode.has_user_fields());
+        let error = if db_fields && host.is_empty() {
             Some("Host is required")
-        } else if user.is_empty() {
+        } else if user_fields && user.is_empty() {
             Some("User is required")
-        } else if port.is_err() {
+        } else if db_fields && port.is_err() {
             Some("Port must be a number")
         } else {
             None
@@ -121,18 +158,28 @@ impl ConnectionForm {
             cx.notify();
             return None;
         }
-        let password = self.password.read(cx).value().to_string();
-        let profile = Profile {
-            id: self.profile_id.clone().unwrap_or_else(new_profile_id),
-            name: value(&self.name),
-            driver: self.driver,
-            host,
-            port: port.unwrap_or_default(),
-            user,
-            database: value(&self.database),
-            tls: self.tls,
+        let database = match (&self.base, db_fields) {
+            (Some(base), false) => base.clone(),
+            (base, _) => Database {
+                id: base.as_ref().map_or_else(new_id, |b| b.id.clone()),
+                name: value(&self.name),
+                driver: self.driver,
+                host,
+                port: port.unwrap_or_default(),
+                database: value(&self.database),
+                tls: self.tls,
+                users: base.as_ref().map(|b| b.users.clone()).unwrap_or_default(),
+            },
         };
-        Some((profile, (!password.is_empty()).then_some(password)))
+        let password = self.password.read(cx).value().to_string();
+        let user = user_fields.then(|| {
+            let id = self.user_id.clone().unwrap_or_else(new_id);
+            (
+                DbUser { id, user },
+                (!password.is_empty()).then_some(password),
+            )
+        });
+        Some(FormOutput { database, user })
     }
 }
 
@@ -168,7 +215,7 @@ impl Render for ConnectionForm {
                 }))
             };
 
-        v_flex()
+        let db_fields = v_flex()
             .gap_3()
             .child(
                 h_flex()
@@ -183,12 +230,6 @@ impl Render for ConnectionForm {
                     .child(field("Host", Input::new(&self.host)).flex_1())
                     .child(field("Port", Input::new(&self.port)).w(px(90.))),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(field("User", Input::new(&self.user)).flex_1())
-                    .child(field("Password", Input::new(&self.password).mask_toggle()).flex_1()),
-            )
             .child(field("Database", Input::new(&self.database)))
             .child(
                 h_flex()
@@ -198,8 +239,17 @@ impl Render for ConnectionForm {
                     .child(tls_button(TlsMode::Disable, "off", self.tls, cx))
                     .child(tls_button(TlsMode::Prefer, "prefer", self.tls, cx))
                     .child(tls_button(TlsMode::Require, "require", self.tls, cx)),
-            )
-            // TODO(ssh): SSH tunnel section (host, user, password | key | agent).
+            );
+        // TODO(ssh): SSH tunnel section (host, user, password | key | agent).
+        let user_fields = h_flex()
+            .gap_2()
+            .child(field("User", Input::new(&self.user)).flex_1())
+            .child(field("Password", Input::new(&self.password).mask_toggle()).flex_1());
+
+        v_flex()
+            .gap_3()
+            .when(self.mode.has_db_fields(), |this| this.child(db_fields))
+            .when(self.mode.has_user_fields(), |this| this.child(user_fields))
             .children(
                 self.error
                     .clone()

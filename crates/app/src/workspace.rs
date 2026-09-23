@@ -1,4 +1,5 @@
-//! Root view: sidebar (connections + schema), query tabs, status bar.
+//! Root view: title bar (database + user switchers, like Zed's project/branch),
+//! schema sidebar of the active connection, query tabs, status bar.
 //! Routes engine events to the tab that started the query.
 
 use std::collections::{HashMap, HashSet};
@@ -7,24 +8,35 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable as _, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
+    spinner::Spinner,
     tab::{Tab, TabBar},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_core::{ConnId, DriverKind, Profile, QueryId, TabId, TableInfo, TableKind};
+use rusdb_core::{ConnId, Database, DbUser, DriverKind, QueryId, TabId, TableInfo, TableKind};
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
 use crate::{
     CloseTab, NewTab,
-    connection_form::ConnectionForm,
+    assets::Lucide,
+    bookmark_form::BookmarkForm,
+    connection_form::{ConnectionForm, FormMode, FormOutput},
     query_tab::{QueryTab, TabConn, TabEvent},
-    store::Store,
+    store::{Bookmark, Store},
 };
 
 const SIDEBAR_WIDTH: f32 = 260.;
 const ROW_HEIGHT: f32 = 26.;
+const BOOKMARK_ROW_HEIGHT: f32 = 40.;
+
+#[derive(Clone, Copy, PartialEq)]
+enum SidebarView {
+    Schema,
+    Bookmarks,
+}
 
 #[derive(Clone, PartialEq)]
 enum ConnStatus {
@@ -40,19 +52,21 @@ struct ConnState {
     stats: PoolStats,
 }
 
-/// Flattened sidebar entry, so the tree renders through a virtualized list.
+/// Flattened sidebar entry of the active connection (schema → tables/views), so the
+/// tree renders through a virtualized list.
 #[derive(Clone)]
 enum SidebarRow {
-    Profile {
-        profile_ix: usize,
-    },
     Schema {
-        profile_ix: usize,
         schema: SharedString,
         expanded: bool,
     },
+    Group {
+        schema: SharedString,
+        kind: TableKind,
+        count: usize,
+        expanded: bool,
+    },
     Table {
-        profile_ix: usize,
         table: TableInfo,
     },
 }
@@ -60,12 +74,17 @@ enum SidebarRow {
 pub struct Workspace {
     engine: EngineHandle,
     store: Store,
-    /// Connection state by profile id.
+    /// Connection state by user id.
     conns: HashMap<String, ConnState>,
-    conn_profiles: HashMap<ConnId, String>,
-    expanded_profiles: HashSet<String>,
+    conn_users: HashMap<ConnId, String>,
+    /// Selected database and user; the sidebar shows this connection.
+    active_db: Option<String>,
+    active_user: Option<String>,
+    /// (user id, schema)
     expanded_schemas: HashSet<(String, SharedString)>,
-    active_profile: Option<String>,
+    /// (user id, schema, kind). Groups start expanded.
+    collapsed_groups: HashSet<(String, SharedString, TableKind)>,
+    sidebar_view: SidebarView,
     tabs: Vec<Entity<QueryTab>>,
     active_tab: usize,
     queries: HashMap<QueryId, WeakEntity<QueryTab>>,
@@ -106,10 +125,12 @@ impl Workspace {
             engine,
             store: Store::load(),
             conns: HashMap::new(),
-            conn_profiles: HashMap::new(),
-            expanded_profiles: HashSet::new(),
+            conn_users: HashMap::new(),
+            active_db: None,
+            active_user: None,
             expanded_schemas: HashSet::new(),
-            active_profile: None,
+            collapsed_groups: HashSet::new(),
+            sidebar_view: SidebarView::Schema,
             tabs: Vec::new(),
             active_tab: 0,
             queries: HashMap::new(),
@@ -119,7 +140,10 @@ impl Workspace {
             _subscriptions: Vec::new(),
             _pump: pump,
         };
-        this.active_profile = this.store.profiles.first().map(|p| p.id.clone());
+        if let Some(db) = this.store.databases.first() {
+            this.active_db = Some(db.id.clone());
+            this.active_user = db.users.first().map(|u| u.id.clone());
+        }
         this.add_tab("", window, cx);
         this
     }
@@ -129,18 +153,29 @@ impl Workspace {
         self.next_id
     }
 
-    fn profile(&self, id: &str) -> Option<&Profile> {
-        self.store.profiles.iter().find(|p| p.id == id)
+    fn active_database(&self) -> Option<&Database> {
+        self.store.database(self.active_db.as_deref()?)
     }
 
-    /// The tab connection for a profile, if it is connected (or connecting).
-    fn tab_conn(&self, profile_id: &str) -> Option<TabConn> {
-        let profile = self.profile(profile_id)?;
-        let state = self.conns.get(profile_id)?;
+    fn active_conn(&self) -> Option<&ConnState> {
+        self.conns.get(self.active_user.as_deref()?)
+    }
+
+    fn find_user(&self, user_id: &str) -> Option<(&Database, &DbUser)> {
+        self.store
+            .databases
+            .iter()
+            .find_map(|db| Some((db, db.user(user_id)?)))
+    }
+
+    /// The tab connection for a user, if it is connected (or connecting).
+    fn tab_conn(&self, user_id: &str) -> Option<TabConn> {
+        let (db, user) = self.find_user(user_id)?;
+        let state = self.conns.get(user_id)?;
         Some(TabConn {
             id: state.id,
-            name: display_name(profile).into(),
-            driver: profile.driver,
+            name: format!("{}@{}", user.user, db.display_name()).into(),
+            driver: db.driver,
         })
     }
 
@@ -153,10 +188,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Entity<QueryTab> {
         let id = TabId(self.next_id());
-        let conn = self
-            .active_profile
-            .as_deref()
-            .and_then(|p| self.tab_conn(p));
+        let conn = self.active_user.as_deref().and_then(|p| self.tab_conn(p));
         let engine = self.engine.clone();
         let tab = cx.new(|cx| QueryTab::new(id, conn, sql, engine, window, cx));
         self._subscriptions
@@ -201,10 +233,14 @@ impl Workspace {
         &mut self,
         tab: &Entity<QueryTab>,
         event: &TabEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
+            TabEvent::Bookmark(sql) => {
+                let existing = tab.read(cx).bookmark_id.clone();
+                self.open_bookmark_dialog(existing, sql.clone(), Some(tab.clone()), window, cx);
+            }
             TabEvent::Run(sql) => {
                 let Some(conn) = tab.read(cx).conn.clone() else {
                     return;
@@ -222,19 +258,123 @@ impl Workspace {
         }
     }
 
-    // ---- connections -----------------------------------------------------------
+    // ---- bookmarks -------------------------------------------------------------
 
-    fn connect(&mut self, profile_id: &str, cx: &mut Context<Self>) {
-        let Some(profile) = self.profile(profile_id).cloned() else {
+    /// Asks for a name and saves `sql` as a bookmark (updating `existing` if set).
+    /// `tab` gets linked to the bookmark, so saving again from it updates it.
+    fn open_bookmark_dialog(
+        &mut self,
+        existing: Option<String>,
+        sql: String,
+        tab: Option<Entity<QueryTab>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = existing.and_then(|id| self.store.bookmark(&id)).cloned();
+        let title = if existing.is_some() {
+            "Update bookmark"
+        } else {
+            "Bookmark query"
+        };
+        let db_id = self.active_db.clone();
+        let form = cx.new(|cx| BookmarkForm::new(existing.as_ref(), sql, db_id, window, cx));
+        let workspace = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let save = {
+                let (form, workspace, tab) = (form.clone(), workspace.clone(), tab.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let Some(bookmark) = form.update(cx, |f, cx| f.submit(cx)) else {
+                        return;
+                    };
+                    if let Some(tab) = &tab {
+                        tab.update(cx, |t, cx| {
+                            t.bookmark_id = Some(bookmark.id.clone());
+                            t.title = bookmark.name.clone().into();
+                            cx.notify();
+                        });
+                    }
+                    let _ = workspace.update(cx, |ws, cx| ws.save_bookmark(bookmark, window, cx));
+                    window.close_dialog(cx);
+                }
+            };
+            dialog.title(title).w(px(460.)).child(form.clone()).footer(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel")
+                            .label("Cancel")
+                            .ghost()
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(Button::new("save").label("Save").primary().on_click(save)),
+            )
+        });
+    }
+
+    fn save_bookmark(&mut self, bookmark: Bookmark, window: &mut Window, cx: &mut Context<Self>) {
+        let title: SharedString = bookmark.name.clone().into();
+        for tab in &self.tabs {
+            if tab.read(cx).bookmark_id.as_deref() == Some(bookmark.id.as_str()) {
+                tab.update(cx, |t, _| t.title = title.clone());
+            }
+        }
+        if let Err(e) = self.store.upsert_bookmark(bookmark) {
+            window.push_notification(
+                Notification::error(format!("Could not save bookmark: {e:#}")),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    fn delete_bookmark(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = self.store.delete_bookmark(id) {
+            window.push_notification(
+                Notification::error(format!("Could not delete bookmark: {e:#}")),
+                cx,
+            );
+        }
+        for tab in &self.tabs {
+            if tab.read(cx).bookmark_id.as_deref() == Some(id) {
+                tab.update(cx, |t, _| t.bookmark_id = None);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Opens a bookmark in a new tab, optionally running it right away.
+    fn open_bookmark(&mut self, id: &str, run: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bookmark) = self.store.bookmark(id).cloned() else {
             return;
         };
-        let id = match self.conns.get(profile_id) {
+        let tab = self.add_tab(&bookmark.sql, window, cx);
+        tab.update(cx, |t, cx| {
+            t.title = bookmark.name.clone().into();
+            t.bookmark_id = Some(bookmark.id.clone());
+            if run && t.conn.is_some() {
+                cx.emit(TabEvent::Run(bookmark.sql.clone()));
+            }
+        });
+    }
+
+    // ---- connections -----------------------------------------------------------
+
+    fn connect(&mut self, user_id: &str, cx: &mut Context<Self>) {
+        let Some((db, user)) = self
+            .find_user(user_id)
+            .map(|(db, user)| (db.clone(), user.clone()))
+        else {
+            return;
+        };
+        let id = match self.conns.get(user_id) {
             Some(state) => state.id,
             None => ConnId(self.next_id()),
         };
-        let password = self.store.password(profile_id);
+        let password = self.store.password(user_id);
         self.conns.insert(
-            profile_id.to_string(),
+            user_id.to_string(),
             ConnState {
                 id,
                 status: ConnStatus::Connecting,
@@ -242,35 +382,67 @@ impl Workspace {
                 stats: PoolStats::default(),
             },
         );
-        self.conn_profiles.insert(id, profile_id.to_string());
+        self.conn_users.insert(id, user_id.to_string());
         self.engine.send(Command::Connect {
             conn: id,
-            driver: profile.driver,
-            cfg: rusdb_core::ConnectConfig::from_profile(&profile, password),
+            driver: db.driver,
+            cfg: rusdb_core::ConnectConfig::new(&db, &user, password),
         });
         cx.notify();
     }
 
-    /// Sidebar click on a profile: make it active, connect if needed, and use it for
-    /// the current tab.
-    fn select_profile(&mut self, profile_id: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Makes a user the active connection (connecting if needed) and uses it for the
+    /// current tab.
+    fn select_user(
+        &mut self,
+        db_id: String,
+        user_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let needs_connect = !matches!(
-            self.conns.get(&profile_id).map(|c| &c.status),
+            self.conns.get(&user_id).map(|c| &c.status),
             Some(ConnStatus::Connected | ConnStatus::Connecting)
         );
         if needs_connect {
-            self.connect(&profile_id, cx);
+            self.connect(&user_id, cx);
         }
-        if !self.expanded_profiles.insert(profile_id.clone()) && !needs_connect {
-            self.expanded_profiles.remove(&profile_id);
-        }
-        self.active_profile = Some(profile_id.clone());
-        self.assign_active_tab(&profile_id, window, cx);
+        self.active_db = Some(db_id);
+        self.active_user = Some(user_id.clone());
+        self.assign_active_tab(&user_id, window, cx);
         cx.notify();
     }
 
-    fn assign_active_tab(&mut self, profile_id: &str, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(conn) = self.tab_conn(profile_id) else {
+    /// Switches to a database with a user that is already connected, else its first
+    /// user. A database without users asks for one.
+    fn select_database(&mut self, db_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(db) = self.store.database(&db_id) else {
+            return;
+        };
+        let user = db
+            .users
+            .iter()
+            .find(|u| {
+                matches!(
+                    self.conns.get(&u.id).map(|c| &c.status),
+                    Some(ConnStatus::Connected)
+                )
+            })
+            .or(db.users.first())
+            .map(|u| u.id.clone());
+        match user {
+            Some(user_id) => self.select_user(db_id, user_id, window, cx),
+            None => {
+                self.active_db = Some(db_id.clone());
+                self.active_user = None;
+                self.open_form(FormMode::User, Some(db_id), None, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn assign_active_tab(&mut self, user_id: &str, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(conn) = self.tab_conn(user_id) else {
             return;
         };
         if let Some(tab) = self.tabs.get(self.active_tab) {
@@ -281,18 +453,11 @@ impl Workspace {
         }
     }
 
-    fn open_table(
-        &mut self,
-        profile_ix: usize,
-        table: &TableInfo,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(profile) = self.store.profiles.get(profile_ix).cloned() else {
+    fn open_table(&mut self, table: &TableInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(driver) = self.active_database().map(|db| db.driver) else {
             return;
         };
-        self.active_profile = Some(profile.id.clone());
-        let q = |s: &str| match profile.driver {
+        let q = |s: &str| match driver {
             DriverKind::Postgres => format!("\"{}\"", s.replace('"', "\"\"")),
             DriverKind::Mysql => format!("`{}`", s.replace('`', "``")),
         };
@@ -308,77 +473,124 @@ impl Workspace {
         });
     }
 
-    fn open_connection_dialog(
+    /// Opens the database/user dialog. `db_id` is the database to edit or add a user
+    /// to, `user_id` the user to edit.
+    fn open_form(
         &mut self,
-        profile_id: Option<String>,
+        mode: FormMode,
+        db_id: Option<String>,
+        user_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let profile = profile_id
+        let db = db_id
             .as_deref()
-            .and_then(|id| self.profile(id))
+            .and_then(|id| self.store.database(id))
             .cloned();
-        let form = cx.new(|cx| ConnectionForm::new(profile.as_ref(), window, cx));
-        let workspace = cx.entity().downgrade();
-        let title = if profile.is_some() {
-            "Edit connection"
-        } else {
-            "New connection"
+        let user = db
+            .as_ref()
+            .zip(user_id.as_deref())
+            .and_then(|(db, id)| db.user(id))
+            .cloned();
+        let title: SharedString = match (mode, &db, &user) {
+            (FormMode::NewDatabase, ..) => "New database".into(),
+            (FormMode::EditDatabase, ..) => "Edit database".into(),
+            (FormMode::User, Some(db), Some(_)) => {
+                format!("Edit user · {}", db.display_name()).into()
+            }
+            (FormMode::User, Some(db), None) => format!("Add user · {}", db.display_name()).into(),
+            (FormMode::User, None, _) => return,
         };
+        let save_label = if mode == FormMode::EditDatabase {
+            "Save"
+        } else {
+            "Save & connect"
+        };
+        let form = cx.new(|cx| ConnectionForm::new(mode, db.as_ref(), user.as_ref(), window, cx));
+        let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let save = {
                 let form = form.clone();
                 let workspace = workspace.clone();
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let Some((profile, password)) = form.update(cx, |f, cx| f.submit(cx)) else {
+                    let Some(output) = form.update(cx, |f, cx| f.submit(cx)) else {
                         return;
                     };
-                    let _ = workspace
-                        .update(cx, |ws, cx| ws.save_profile(profile, password, window, cx));
+                    let _ = workspace.update(cx, |ws, cx| ws.save_form(output, window, cx));
                     window.close_dialog(cx);
                 }
             };
-            dialog.title(title).w(px(460.)).child(form.clone()).footer(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        Button::new("cancel")
-                            .label("Cancel")
-                            .ghost()
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        Button::new("save")
-                            .label("Save & connect")
-                            .primary()
-                            .on_click(save),
-                    ),
-            )
+            dialog
+                .title(title.clone())
+                .w(px(460.))
+                .child(form.clone())
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("save")
+                                .label(save_label)
+                                .primary()
+                                .on_click(save),
+                        ),
+                )
         });
     }
 
-    fn save_profile(
-        &mut self,
-        profile: Profile,
-        password: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let id = profile.id.clone();
-        if let Err(e) = self.store.upsert(profile, password) {
+    fn save_form(&mut self, output: FormOutput, window: &mut Window, cx: &mut Context<Self>) {
+        let FormOutput { database, user } = output;
+        let db_id = database.id.clone();
+        let target_changed = self.store.database(&db_id).is_some_and(|old| {
+            (old.driver, &old.host, old.port, &old.database, old.tls)
+                != (
+                    database.driver,
+                    &database.host,
+                    database.port,
+                    &database.database,
+                    database.tls,
+                )
+        });
+        let mut result = self.store.upsert_database(database);
+        let user_id = user.map(|(user, password)| {
+            let id = user.id.clone();
+            result = std::mem::replace(&mut result, Ok(()))
+                .and_then(|_| self.store.upsert_user(&db_id, user, password));
+            id
+        });
+        if let Err(e) = result {
             window.push_notification(
-                Notification::error(format!("Could not save profile: {e:#}")),
+                Notification::error(format!("Could not save connection: {e:#}")),
                 cx,
             );
         }
-        // (Re)connect with the new settings. The ConnId is kept, so tabs using this
-        // profile keep working; the engine replaces the old pool.
-        self.connect(&id, cx);
-        self.expanded_profiles.insert(id.clone());
-        self.active_profile = Some(id.clone());
-        self.assign_active_tab(&id, window, cx);
+        // Reconnect with the new settings. ConnIds are kept, so tabs using them keep
+        // working; the engine replaces the old pool.
+        if target_changed {
+            let open: Vec<String> = self
+                .store
+                .database(&db_id)
+                .into_iter()
+                .flat_map(|db| &db.users)
+                .filter(|u| self.conns.contains_key(&u.id))
+                .map(|u| u.id.clone())
+                .collect();
+            for id in open {
+                self.connect(&id, cx);
+            }
+        }
+        if let Some(user_id) = user_id {
+            self.connect(&user_id, cx);
+            self.select_user(db_id, user_id, window, cx);
+        }
+        cx.notify();
     }
 
     fn on_engine_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
@@ -397,8 +609,8 @@ impl Workspace {
                     state.status = ConnStatus::Connected;
                 }
                 // Tabs without a connection pick up the newly connected one.
-                if let Some(profile_id) = self.conn_profiles.get(&conn).cloned()
-                    && let Some(tc) = self.tab_conn(&profile_id)
+                if let Some(user_id) = self.conn_users.get(&conn).cloned()
+                    && let Some(tc) = self.tab_conn(&user_id)
                 {
                     for tab in &self.tabs {
                         if tab.read(cx).conn.is_none() {
@@ -431,42 +643,55 @@ impl Workspace {
     }
 
     fn conn_state_mut(&mut self, conn: ConnId) -> Option<&mut ConnState> {
-        let profile_id = self.conn_profiles.get(&conn)?;
-        self.conns.get_mut(profile_id).filter(|s| s.id == conn)
+        let user_id = self.conn_users.get(&conn)?;
+        self.conns.get_mut(user_id).filter(|s| s.id == conn)
     }
 
     // ---- rendering ---------------------------------------------------------------
 
     fn build_sidebar_rows(&self) -> Vec<SidebarRow> {
+        let Some((user_id, state)) = self
+            .active_user
+            .as_ref()
+            .and_then(|id| Some((id, self.conns.get(id)?)))
+        else {
+            return Vec::new();
+        };
         let mut rows = Vec::new();
-        for (profile_ix, profile) in self.store.profiles.iter().enumerate() {
-            rows.push(SidebarRow::Profile { profile_ix });
-            if !self.expanded_profiles.contains(&profile.id) {
+        // Drivers return tables ordered by schema, then name.
+        for tables in state.tables.chunk_by(|a, b| a.schema == b.schema) {
+            let schema: SharedString = tables[0].schema.clone().into();
+            let expanded = self
+                .expanded_schemas
+                .contains(&(user_id.clone(), schema.clone()));
+            rows.push(SidebarRow::Schema {
+                schema: schema.clone(),
+                expanded,
+            });
+            if !expanded {
                 continue;
             }
-            let Some(state) = self.conns.get(&profile.id) else {
-                continue;
-            };
-            let mut current_schema: Option<&str> = None;
-            let mut expanded = false;
-            for table in &state.tables {
-                if current_schema != Some(table.schema.as_str()) {
-                    current_schema = Some(&table.schema);
-                    let schema: SharedString = table.schema.clone().into();
-                    expanded = self
-                        .expanded_schemas
-                        .contains(&(profile.id.clone(), schema.clone()));
-                    rows.push(SidebarRow::Schema {
-                        profile_ix,
-                        schema,
-                        expanded,
-                    });
+            for kind in [TableKind::Table, TableKind::View] {
+                let items: Vec<&TableInfo> = tables.iter().filter(|t| t.kind == kind).collect();
+                if items.is_empty() {
+                    continue;
                 }
+                let expanded =
+                    !self
+                        .collapsed_groups
+                        .contains(&(user_id.clone(), schema.clone(), kind));
+                rows.push(SidebarRow::Group {
+                    schema: schema.clone(),
+                    kind,
+                    count: items.len(),
+                    expanded,
+                });
                 if expanded {
-                    rows.push(SidebarRow::Table {
-                        profile_ix,
-                        table: table.clone(),
-                    });
+                    rows.extend(
+                        items
+                            .into_iter()
+                            .map(|t| SidebarRow::Table { table: t.clone() }),
+                    );
                 }
             }
         }
@@ -475,6 +700,8 @@ impl Workspace {
 
     fn render_sidebar_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
+        let user_id = self.active_user.clone().unwrap_or_default();
+        let driver = self.active_database().map(|db| db.driver);
         let row = h_flex()
             .id(("sidebar-row", ix))
             .w_full()
@@ -488,76 +715,16 @@ impl Workspace {
             .cursor_pointer();
 
         match self.sidebar_rows[ix].clone() {
-            SidebarRow::Profile { profile_ix } => {
-                let profile = &self.store.profiles[profile_ix];
-                let state = self.conns.get(&profile.id);
-                let dot = match state.map(|s| &s.status) {
-                    Some(ConnStatus::Connected) => theme.success,
-                    Some(ConnStatus::Connecting) => theme.warning,
-                    Some(ConnStatus::Failed(_)) => theme.danger,
-                    None => theme.muted_foreground.opacity(0.4),
+            SidebarRow::Schema { schema, expanded } => {
+                // A MySQL "schema" is a database.
+                let icon: Icon = match (driver, expanded) {
+                    (Some(DriverKind::Mysql), _) => Icon::new(Lucide::Database),
+                    (_, true) => Icon::new(IconName::FolderOpen),
+                    (_, false) => Icon::new(IconName::FolderClosed),
                 };
-                let active = self.active_profile.as_deref() == Some(profile.id.as_str());
-                let expanded = self.expanded_profiles.contains(&profile.id);
-                let id = profile.id.clone();
-                let edit_id = profile.id.clone();
-                let connected = matches!(state.map(|s| &s.status), Some(ConnStatus::Connected));
-                let conn_id = state.map(|s| s.id);
-                row.when(active, |r| r.bg(theme.sidebar_accent))
-                    .child(chevron(expanded))
-                    .child(div().size_2().flex_shrink_0().rounded_full().bg(dot))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(display_name(profile)),
-                    )
-                    .when_some(conn_id.filter(|_| connected), |r, conn| {
-                        r.child(
-                            Button::new(("refresh", ix))
-                                .icon(IconName::RotateCw)
-                                .ghost()
-                                .xsmall()
-                                .tooltip("Refresh schema")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.engine.send(Command::RefreshSchema { conn });
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new(("edit", ix))
-                            .icon(IconName::Settings)
-                            .ghost()
-                            .xsmall()
-                            .tooltip("Edit connection")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.open_connection_dialog(Some(edit_id.clone()), window, cx)
-                            })),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_profile(id.clone(), window, cx)
-                    }))
-                    .into_any_element()
-            }
-            SidebarRow::Schema {
-                profile_ix,
-                schema,
-                expanded,
-            } => {
-                let key = (self.store.profiles[profile_ix].id.clone(), schema.clone());
-                row.pl_5()
-                    .child(chevron(expanded))
-                    .child(
-                        Icon::new(if expanded {
-                            IconName::FolderOpen
-                        } else {
-                            IconName::FolderClosed
-                        })
-                        .xsmall(),
-                    )
+                let key = (user_id, schema.clone());
+                row.child(chevron(expanded))
+                    .child(icon.xsmall().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(schema))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.expanded_schemas.remove(&key) {
@@ -567,27 +734,136 @@ impl Workspace {
                     }))
                     .into_any_element()
             }
-            SidebarRow::Table { profile_ix, table } => {
+            SidebarRow::Group {
+                schema,
+                kind,
+                count,
+                expanded,
+            } => {
+                let label = match kind {
+                    TableKind::Table => "Tables",
+                    TableKind::View => "Views",
+                };
+                let key = (user_id, schema, kind);
+                row.pl_5()
+                    .child(chevron(expanded))
+                    .child(div().min_w_0().truncate().child(label))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(count.to_string()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed_groups.remove(&key) {
+                            this.collapsed_groups.insert(key.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
+            SidebarRow::Table { table } => {
                 let icon = match table.kind {
-                    TableKind::Table => IconName::File,
-                    TableKind::View => IconName::Eye,
+                    TableKind::Table => Icon::new(Lucide::Table),
+                    TableKind::View => Icon::new(IconName::Eye),
                 };
                 let name = table.name.clone();
                 row.pl(px(52.))
-                    .child(Icon::new(icon).xsmall().text_color(theme.muted_foreground))
+                    .child(icon.xsmall().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(name))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_table(profile_ix, &table, window, cx)
-                    }))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.open_table(&table, window, cx)),
+                    )
                     .into_any_element()
             }
         }
     }
 
-    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sidebar_rows = self.build_sidebar_rows();
+    /// Placeholder for the sidebar when there is nothing to list yet.
+    fn render_sidebar_empty(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme();
-        let count = self.sidebar_rows.len();
+        let message = |text: SharedString| {
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let body = v_flex().px_3().py_2().gap_2().items_start();
+        let Some(db) = self.active_database() else {
+            return Some(
+                body.child(message("No databases yet.".into()))
+                    .child(
+                        Button::new("empty-add-db")
+                            .label("Add database")
+                            .icon(IconName::Plus)
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_form(FormMode::NewDatabase, None, None, window, cx)
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        };
+        let db_id = db.id.clone();
+        let Some(user_id) = self.active_user.clone() else {
+            return Some(
+                body.child(message("No user for this database.".into()))
+                    .child(
+                        Button::new("empty-add-user")
+                            .label("Add user")
+                            .icon(IconName::Plus)
+                            .small()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_form(
+                                    FormMode::User,
+                                    Some(db_id.clone()),
+                                    None,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        };
+        let connect = |label: &'static str| {
+            Button::new("empty-connect")
+                .label(label)
+                .small()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.connect(&user_id, cx);
+                    this.assign_active_tab(&user_id, window, cx);
+                }))
+        };
+        match self.active_conn().map(|c| (&c.status, c.tables.is_empty())) {
+            None => Some(
+                body.child(message("Not connected.".into()))
+                    .child(connect("Connect"))
+                    .into_any_element(),
+            ),
+            Some((ConnStatus::Connecting, _)) => {
+                Some(body.child(message("Connecting…".into())).into_any_element())
+            }
+            Some((ConnStatus::Failed(e), _)) => Some(
+                body.child(div().text_sm().text_color(theme.danger).child(e.clone()))
+                    .child(connect("Retry"))
+                    .into_any_element(),
+            ),
+            Some((ConnStatus::Connected, true)) => Some(
+                body.child(message("No tables or views.".into()))
+                    .into_any_element(),
+            ),
+            Some((ConnStatus::Connected, false)) => None,
+        }
+    }
+
+    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = self.sidebar_view;
+        let body = match view {
+            SidebarView::Schema => self.render_schema_panel(cx).into_any_element(),
+            SidebarView::Bookmarks => self.render_bookmarks_panel(cx).into_any_element(),
+        };
+        let theme = cx.theme();
         v_flex()
             .w(px(SIDEBAR_WIDTH))
             .h_full()
@@ -596,6 +872,45 @@ impl Workspace {
             .border_r_1()
             .border_color(theme.sidebar_border)
             .child(
+                TabBar::new("sidebar-tabs")
+                    .underline()
+                    .small()
+                    .px_2()
+                    .child(Tab::new().label("Schema"))
+                    .child(Tab::new().label("Bookmarks"))
+                    .selected_index(match view {
+                        SidebarView::Schema => 0,
+                        SidebarView::Bookmarks => 1,
+                    })
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        this.sidebar_view = if *ix == 0 {
+                            SidebarView::Schema
+                        } else {
+                            SidebarView::Bookmarks
+                        };
+                        cx.notify();
+                    })),
+            )
+            .child(body)
+    }
+
+    fn render_schema_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sidebar_rows = self.build_sidebar_rows();
+        let empty = self.render_sidebar_empty(cx);
+        let theme = cx.theme();
+        let count = self.sidebar_rows.len();
+        let heading = match self.active_database().map(|db| db.driver) {
+            Some(DriverKind::Mysql) => "DATABASES",
+            _ => "SCHEMAS",
+        };
+        let refresh = self
+            .active_conn()
+            .filter(|c| c.status == ConnStatus::Connected)
+            .map(|c| c.id);
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(
                 h_flex()
                     .h_9()
                     .px_3()
@@ -603,26 +918,21 @@ impl Workspace {
                     .justify_between()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("CONNECTIONS")
-                    .child(
-                        Button::new("add-connection")
-                            .icon(IconName::Plus)
-                            .ghost()
-                            .xsmall()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_connection_dialog(None, window, cx)
-                            })),
-                    ),
+                    .child(heading)
+                    .when_some(refresh, |this, conn| {
+                        this.child(
+                            Button::new("refresh-schema")
+                                .icon(IconName::RotateCw)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Refresh")
+                                .on_click(cx.listener(move |this, _, _, _| {
+                                    this.engine.send(Command::RefreshSchema { conn });
+                                })),
+                        )
+                    }),
             )
-            .when(count == 0, |this| {
-                this.child(
-                    div()
-                        .px_3()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No connections yet. Click + to add one."),
-                )
-            })
+            .children(empty)
             .child(
                 uniform_list(
                     "sidebar",
@@ -636,6 +946,239 @@ impl Workspace {
                 .px_1()
                 .flex_1(),
             )
+    }
+
+    fn render_bookmarks_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let bookmarks: Vec<Bookmark> = self
+            .store
+            .bookmarks_for(self.active_db.as_deref())
+            .into_iter()
+            .cloned()
+            .collect();
+        let count = bookmarks.len();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .h_9()
+                    .px_3()
+                    .items_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("BOOKMARKS"),
+            )
+            .when(count == 0, |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("No bookmarks yet. Press ⌘D in a query tab to save one."),
+                )
+            })
+            .child(
+                uniform_list(
+                    "bookmarks",
+                    count,
+                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                        range
+                            .map(|ix| this.render_bookmark_row(ix, &bookmarks[ix], cx))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .px_1()
+                .flex_1(),
+            )
+    }
+
+    fn render_bookmark_row(
+        &self,
+        ix: usize,
+        bookmark: &Bookmark,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let preview: String = bookmark
+            .sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let global = bookmark.database_id.is_none();
+        let (open_id, run_id, edit_id, delete_id) = (
+            bookmark.id.clone(),
+            bookmark.id.clone(),
+            bookmark.id.clone(),
+            bookmark.id.clone(),
+        );
+        let edit_sql = bookmark.sql.clone();
+        let group: SharedString = format!("bookmark-{ix}").into();
+        let actions = h_flex()
+            .gap_0p5()
+            .invisible()
+            .group_hover(group.clone(), |s| s.visible())
+            .child(
+                Button::new(("bookmark-run", ix))
+                    .icon(IconName::Play)
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Open and run")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_bookmark(&run_id, true, window, cx)
+                    })),
+            )
+            .child(
+                Button::new(("bookmark-edit", ix))
+                    .icon(Icon::new(Lucide::Pencil))
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Rename")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_bookmark_dialog(
+                            Some(edit_id.clone()),
+                            edit_sql.clone(),
+                            None,
+                            window,
+                            cx,
+                        )
+                    })),
+            )
+            .child(
+                Button::new(("bookmark-delete", ix))
+                    .icon(IconName::Delete)
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Delete")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.delete_bookmark(&delete_id, window, cx)
+                    })),
+            );
+        h_flex()
+            .id(("bookmark-row", ix))
+            .group(group)
+            .w_full()
+            .h(px(BOOKMARK_ROW_HEIGHT))
+            .px_2()
+            .gap_1p5()
+            .items_center()
+            .rounded(theme.radius)
+            .hover(|s| s.bg(theme.sidebar_accent))
+            .cursor_pointer()
+            .child(
+                Icon::new(Lucide::Bookmark)
+                    .xsmall()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .text_sm()
+                            .child(div().min_w_0().truncate().child(bookmark.name.clone()))
+                            .when(global, |this| {
+                                this.child(
+                                    Icon::new(IconName::Globe)
+                                        .xsmall()
+                                        .text_color(theme.muted_foreground),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.muted_foreground)
+                            .child(preview),
+                    ),
+            )
+            .child(actions)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_bookmark(&open_id, false, window, cx)
+            }))
+            .into_any_element()
+    }
+
+    /// Zed-style title bar content: database switcher, then user switcher.
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let weak = cx.entity().downgrade();
+        let db = self.active_database();
+        let active_db = self.active_db.clone();
+        let active_user = self.active_user.clone();
+
+        let databases: Vec<(String, String)> = self
+            .store
+            .databases
+            .iter()
+            .map(|d| (d.id.clone(), d.display_name()))
+            .collect();
+        let db_menu = {
+            let weak = weak.clone();
+            let active_db = active_db.clone();
+            Button::new("db-switcher")
+                .label(db.map_or("No database".into(), |d| d.display_name()))
+                .ghost()
+                .small()
+                .dropdown_menu(move |menu, _, _| {
+                    database_menu(menu, &databases, active_db.as_deref(), &weak)
+                })
+        };
+
+        let user_menu = db.map(|db| {
+            let users: Vec<(String, String)> = db
+                .users
+                .iter()
+                .map(|u| (u.id.clone(), u.user.clone()))
+                .collect();
+            let label = active_user
+                .as_deref()
+                .and_then(|id| db.user(id))
+                .map_or("No user".into(), |u| u.user.clone());
+            let db_id = db.id.clone();
+            let active_user = active_user.clone();
+            let weak = weak.clone();
+            Button::new("user-switcher")
+                .label(label)
+                .icon(IconName::User)
+                .ghost()
+                .small()
+                .text_color(theme.muted_foreground)
+                .dropdown_menu(move |menu, _, _| {
+                    user_menu(menu, &db_id, &users, active_user.as_deref(), &weak)
+                })
+        });
+
+        let dot = self.active_conn().map(|c| match c.status {
+            ConnStatus::Connected => theme.success,
+            ConnStatus::Connecting => theme.warning,
+            ConnStatus::Failed(_) => theme.danger,
+        });
+
+        h_flex()
+            .gap_1()
+            .items_center()
+            .child(db_menu)
+            .when_some(user_menu, |this, user_menu| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground.opacity(0.6))
+                        .child("/"),
+                )
+                .child(user_menu)
+            })
+            .when_some(dot, |this, dot| {
+                this.child(div().size_1p5().flex_shrink_0().rounded_full().bg(dot))
+            })
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -681,10 +1224,10 @@ impl Workspace {
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let text: SharedString = self
-            .active_profile
+            .active_user
             .as_ref()
-            .and_then(|id| Some((self.profile(id)?, self.conns.get(id)?)))
-            .map(|(profile, state)| {
+            .and_then(|id| Some((self.tab_conn(id)?, self.conns.get(id)?)))
+            .map(|(conn, state)| {
                 let s = state.stats;
                 let status = match &state.status {
                     ConnStatus::Connecting => "connecting…".to_string(),
@@ -694,19 +1237,31 @@ impl Workspace {
                         s.open, s.max, s.idle, s.pinned
                     ),
                 };
-                format!("{} — {status}", display_name(profile)).into()
+                format!("{} — {status}", conn.name).into()
             })
             .unwrap_or_else(|| "Not connected".into());
+        // Timing and row count of the active tab, right-aligned.
+        let (query_text, running) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| {
+                let t = tab.read(cx);
+                (t.status_text(cx), t.is_running())
+            })
+            .unwrap_or_default();
         h_flex()
             .h_6()
             .px_3()
+            .gap_2()
             .items_center()
             .border_t_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child(text)
+            .child(div().flex_1().min_w_0().truncate().child(text))
+            .when(running, |this| this.child(Spinner::new().xsmall()))
+            .child(query_text)
     }
 }
 
@@ -721,7 +1276,7 @@ impl Render for Workspace {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(TitleBar::new().child(div().text_sm().child("rusdb")))
+            .child(TitleBar::new().child(self.render_title_bar(cx)))
             .child(
                 h_flex()
                     .flex_1()
@@ -751,14 +1306,103 @@ fn chevron(expanded: bool) -> impl IntoElement {
     .xsmall()
 }
 
-fn display_name(p: &Profile) -> String {
-    if !p.name.is_empty() {
-        return p.name.clone();
+fn database_menu(
+    mut menu: PopupMenu,
+    databases: &[(String, String)],
+    active: Option<&str>,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    if !databases.is_empty() {
+        menu = menu.label("Databases");
     }
-    let db = if p.database.is_empty() {
-        String::new()
-    } else {
-        format!("/{}", p.database)
-    };
-    format!("{}@{}{}", p.user, p.host, db)
+    for (id, name) in databases {
+        let (ws, id) = (workspace.clone(), id.clone());
+        menu = menu.item(
+            PopupMenuItem::new(name.clone())
+                .checked(active == Some(id.as_str()))
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.select_database(id.clone(), window, cx));
+                }),
+        );
+    }
+    if !databases.is_empty() {
+        menu = menu.separator();
+    }
+    if let Some(id) = active {
+        let (ws, id) = (workspace.clone(), id.to_string());
+        menu = menu.item(
+            PopupMenuItem::new("Edit database…")
+                .icon(IconName::Settings)
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.open_form(FormMode::EditDatabase, Some(id.clone()), None, window, cx)
+                    });
+                }),
+        );
+    }
+    let ws = workspace.clone();
+    menu.item(
+        PopupMenuItem::new("Add database…")
+            .icon(IconName::Plus)
+            .on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| {
+                    ws.open_form(FormMode::NewDatabase, None, None, window, cx)
+                });
+            }),
+    )
+}
+
+fn user_menu(
+    mut menu: PopupMenu,
+    db_id: &str,
+    users: &[(String, String)],
+    active: Option<&str>,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    if !users.is_empty() {
+        menu = menu.label("Users");
+    }
+    for (id, name) in users {
+        let (ws, db_id, id) = (workspace.clone(), db_id.to_string(), id.clone());
+        menu = menu.item(
+            PopupMenuItem::new(name.clone())
+                .checked(active == Some(id.as_str()))
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.select_user(db_id.clone(), id.clone(), window, cx)
+                    });
+                }),
+        );
+    }
+    if !users.is_empty() {
+        menu = menu.separator();
+    }
+    if let Some(id) = active {
+        let (ws, db_id, id) = (workspace.clone(), db_id.to_string(), id.to_string());
+        menu = menu.item(
+            PopupMenuItem::new("Edit user…")
+                .icon(IconName::Settings)
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.open_form(
+                            FormMode::User,
+                            Some(db_id.clone()),
+                            Some(id.clone()),
+                            window,
+                            cx,
+                        )
+                    });
+                }),
+        );
+    }
+    let (ws, db_id) = (workspace.clone(), db_id.to_string());
+    menu.item(
+        PopupMenuItem::new("Add user…")
+            .icon(IconName::Plus)
+            .on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| {
+                    ws.open_form(FormMode::User, Some(db_id.clone()), None, window, cx)
+                });
+            }),
+    )
 }

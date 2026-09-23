@@ -1,3 +1,5 @@
+mod assets;
+mod bookmark_form;
 mod connection_form;
 mod query_tab;
 mod results;
@@ -7,14 +9,14 @@ mod workspace;
 use gpui_kit::component::{Root, Theme, ThemeMode, TitleBar};
 use gpui_kit::*;
 
-actions!(rusdb, [RunQuery, NewTab, CloseTab, Quit]);
+actions!(rusdb, [RunQuery, BookmarkQuery, NewTab, CloseTab, Quit]);
 
 fn main() {
     // The engine owns its own tokio runtime thread; the UI only exchanges messages.
     let (engine, events) = rusdb_engine::start();
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             Theme::change(ThemeMode::Dark, None, cx);
@@ -23,6 +25,7 @@ fn main() {
                 // Must win over the editor's own `secondary-enter` (newline), hence the
                 // same depth ("Input") and registration after gpui_kit::init.
                 KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
+                KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
                 KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
                 KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
                 KeyBinding::new("secondary-q", Quit, None),

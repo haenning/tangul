@@ -60,7 +60,7 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 - Profiles: TOML in `~/Library/Application Support/rusdb/profiles.toml`.
 - Passwords: macOS Keychain (`keyring`, service `rusdb`). On Linux (dev only) an
   in-memory mock store is used → passwords are not persisted there.
-- "User management" = multiple profiles per server (different users). No role/grant UI.
+- "User management" = multiple users per saved database, switched from the title bar. No role/grant UI.
 
 ### D7 — UI: GPUI + gpui-component, kept deliberately plain
 - Editor: gpui-component code editor (tree-sitter SQL highlighting, line numbers).

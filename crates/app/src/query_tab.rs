@@ -3,11 +3,10 @@
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Editor, EditorState},
-    spinner::Spinner,
     table::{DataTable, TableState},
     v_flex,
 };
@@ -16,7 +15,7 @@ use gpui_kit::*;
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
 use rusdb_engine::{Command, EngineHandle, ExecEvent, QueryEvent};
 
-use crate::{RunQuery, results::ResultsDelegate};
+use crate::{BookmarkQuery, RunQuery, assets::Lucide, results::ResultsDelegate};
 
 /// Connection a tab runs against.
 #[derive(Clone)]
@@ -29,6 +28,8 @@ pub struct TabConn {
 pub enum TabEvent {
     /// The user wants to run this SQL; the workspace assigns a QueryId.
     Run(String),
+    /// The user wants to save the editor's SQL as a bookmark.
+    Bookmark(String),
 }
 
 enum Status {
@@ -45,6 +46,8 @@ pub struct QueryTab {
     pub id: TabId,
     pub title: SharedString,
     pub conn: Option<TabConn>,
+    /// Bookmark this tab was opened from or saved as; bookmarking again updates it.
+    pub bookmark_id: Option<String>,
     engine: EngineHandle,
     editor: Entity<EditorState>,
     table: Entity<TableState<ResultsDelegate>>,
@@ -84,6 +87,7 @@ impl QueryTab {
             id,
             title: format!("Query {}", id.0).into(),
             conn,
+            bookmark_id: None,
             engine,
             editor,
             table,
@@ -141,6 +145,13 @@ impl QueryTab {
             return;
         }
         cx.emit(TabEvent::Run(sql.to_string()));
+    }
+
+    fn bookmark(&mut self, _: &BookmarkQuery, _: &mut Window, cx: &mut Context<Self>) {
+        let sql = self.editor.read(cx).value().to_string();
+        if !sql.trim().is_empty() {
+            cx.emit(TabEvent::Bookmark(sql));
+        }
     }
 
     /// Called by the workspace once the query was sent to the engine.
@@ -224,7 +235,7 @@ impl QueryTab {
         };
         let conn_label: SharedString = match &self.conn {
             Some(c) => format!("{} · {}", c.name, c.driver.label()).into(),
-            None => "No connection — pick one in the sidebar".into(),
+            None => "No connection — pick one in the title bar".into(),
         };
 
         h_flex()
@@ -252,6 +263,24 @@ impl QueryTab {
                         .child("in transaction"),
                 )
             })
+            .child(div().flex_1())
+            .child(
+                Button::new("bookmark")
+                    .icon(Icon::new(Lucide::Bookmark))
+                    .label(if self.bookmark_id.is_some() {
+                        "Update bookmark"
+                    } else {
+                        "Bookmark"
+                    })
+                    .ghost()
+                    .small()
+                    .tooltip("Save query as bookmark (⌘D)")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.bookmark(&BookmarkQuery, window, cx)
+                        }),
+                    ),
+            )
     }
 
     fn render_results(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -290,10 +319,10 @@ impl QueryTab {
         }
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    /// Timing and row count of the last run, shown in the workspace status bar.
+    pub fn status_text(&self, cx: &App) -> SharedString {
         let rows = self.table.read(cx).delegate().result.row_count();
-        let text: SharedString = match &self.status {
+        match &self.status {
             Status::Idle => "".into(),
             Status::Running => format!("Running… {rows} rows").into(),
             Status::Done {
@@ -312,20 +341,7 @@ impl QueryTab {
                 }
                 s.into()
             }
-        };
-        h_flex()
-            .h_7()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_t_1()
-            .border_color(theme.border)
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .when(self.running.is_some(), |this| {
-                this.child(Spinner::new().xsmall())
-            })
-            .child(text)
+        }
     }
 }
 
@@ -334,6 +350,7 @@ impl Render for QueryTab {
         v_flex()
             .size_full()
             .on_action(cx.listener(Self::run))
+            .on_action(cx.listener(Self::bookmark))
             .child(self.render_toolbar(cx))
             .child(
                 div()
@@ -348,8 +365,7 @@ impl Render for QueryTab {
                     .min_h_0()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().min_h_0().child(self.render_results(cx)))
-                    .child(self.render_footer(cx)),
+                    .child(div().flex_1().min_h_0().child(self.render_results(cx))),
             )
     }
 }
