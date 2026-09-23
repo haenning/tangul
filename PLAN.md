@@ -35,7 +35,7 @@ SSH tunnels and a schema sidebar without rewrites later.
   every exotic type (PostGIS, enums, arrays, JSON) renders on day one. Typed/binary
   decoding (for sorting, editing, export) is a later, additive step.
 
-### D3 — Connection efficiency vs. session semantics (needs your decision)
+### D3 — Connection efficiency vs. session semantics (decided)
 "Waste no connections" conflicts with SQL session state: `BEGIN`, `SET search_path`,
 temp tables, `SET @var` only work if consecutive statements hit the **same** connection.
 
@@ -46,7 +46,10 @@ Recommendation:
   and **returned after the statement** → idle tabs cost 0 connections.
 - **Tab gets pinned** to its connection when a transaction is open
   (PG: `ReadyForQuery` txn status / detect `BEGIN`; MySQL: `SERVER_STATUS_IN_TRANS` flag)
-  or when the user toggles "sticky session" on the tab.
+  or when the user reserves it for the tab.
+- **Out of scope for MVP:** a "reserve connection for this tab" button. The lease code gets a
+  `// TODO(reserve-connection): tab-level button to pin a connection permanently` marker at
+  the point where pinning is decided, so the button only needs to set a flag later.
 - Idle pool connections closed after ~60s; nothing opened until first use.
 - Consequence: `SET search_path` in a non-sticky tab may not persist → solved by
   a per-tab "default schema/database" that is applied on lease (cheap, one round-trip, only
@@ -147,18 +150,33 @@ M0–M5 is the critical path. M6–M8 are independent and can be done in any ord
 
 ---
 
-## 5. Critical points / open questions
+## 5. Resolved
 
-1. **"Different user management"** is ambiguous: (a) multiple credential sets (profiles) for
-   the same server — covered by profiles; or (b) a UI to manage DB roles/grants — not in this
-   plan. Please clarify.
-2. **D3 session semantics** – confirm the "lease per statement, pin on transaction/sticky"
-   model. The alternative (one dedicated connection per tab) is simpler and has no surprises,
-   but costs one connection per open tab.
-3. **egui SQL editor is the weakest part.** `TextEdit` has no multi-cursor, limited
-   undo, and syntax highlighting (syntect) gets slow on very large buffers. Fine for MVP;
-   a custom editor widget is a real project later.
-4. **Not native look.** egui renders its own widgets; it won't feel like AppKit (menus,
-   text input/IME, accessibility are weaker). Acceptable trade-off for speed, but know it.
-5. **Text protocol limits:** no client-side typed sorting/editing yet; binary-typed values
-   (bytea/BLOB) show as hex/escaped text.
+- User management = **connection profiles** (multiple credential sets per server). No
+  role/grant management UI.
+- Session model = D3 as proposed; reserve button deferred (TODO marker).
+- Look & feel: Zed-like clean UI, native AppKit look is **not** a goal.
+
+## 6. Open: UI framework (SQL editor quality)
+
+egui's `TextEdit` is the weak spot: no multi-cursor, basic undo, syntect highlighting slows
+on large buffers. Options:
+
+| Option | Editor | Result grid | Dock/tabs | Risk |
+|---|---|---|---|---|
+| **egui** (current plan) | `TextEdit` / `egui_code_editor` (same limits); real editor = custom widget (rope + tree-sitter), weeks of work | `egui_extras` virtualized table, very fast | `egui_dock` | Editor stays mediocre unless we build one |
+| **GPUI + gpui-component** (Zed's framework) | Built-in code editor, tree-sitter highlighting, LSP hooks, claims stable at 200K lines | Virtualized table (sorting, resizable/fixed columns, cell selection) | Dock with draggable tabs, splits, serializable | Younger ecosystem, API churn, thinner docs; multi-cursor not advertised → verify |
+| **iced** | `text_editor` widget + highlighter; no multi-cursor | No built-in table (community crates) | Pane grid, tabs DIY | More DIY than both above |
+| **Tauri + Svelte + CodeMirror 6** | Best editor by far (multi-cursor, autocomplete, huge ecosystem), your stack | Must be canvas/virtualized; results cross IPC (serialization cost) | Web libs | Not "native Rust UI"; webview memory/latency; hardest to hit "ultra performant" |
+
+**Recommendation: GPUI + gpui-component.** It is literally the Zed look you want, and it
+ships the three hard parts of this app (editor, virtualized table, dock) instead of us
+building them. Backend (D1–D6) is unchanged — only the `app` crate differs.
+
+Mitigation for its risk: a **1–2 day spike** before M0: window + dock with 2 tabs + editor
+with SQL highlighting + table with 1M rows. If it holds up → switch; if not → egui.
+
+## 7. Remaining limits
+
+- **Text protocol:** no client-side typed sorting/editing yet; binary values (bytea/BLOB)
+  show as hex/escaped text.
