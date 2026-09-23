@@ -1,0 +1,39 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching the version in Cargo.toml) to build a universal
+# macOS DMG and publish it as a GitHub release. See README → Releases.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  dmg:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Metal toolchain (GPUI compiles its shaders at build time)
+        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag matches Cargo.toml version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rusdb"))')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1
+          fi
+      - name: Build universal app + DMG
+        run: scripts/bundle-macos.sh --universal
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" target/bundle/rusdb-*-universal.dmg \
+            --title "rusdb $GITHUB_REF_NAME" --generate-notes

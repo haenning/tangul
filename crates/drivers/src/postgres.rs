@@ -4,7 +4,9 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::{TryStreamExt, pin_mut};
 use postgres_native_tls::MakeTlsConnector;
-use rusdb_core::{ColumnInfo, ConnectConfig, RowBatch, TableInfo, TableKind, TlsMode};
+use rusdb_core::{
+    ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
+};
 use tokio_postgres::{CancelToken, Client, SimpleQueryMessage, config::SslMode};
 
 use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, may_touch_transaction};
@@ -128,6 +130,80 @@ impl Session for PgSession {
                         Some("v") | Some("m") => TableKind::View,
                         _ => TableKind::Table,
                     },
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    async fn list_columns(&mut self) -> Result<Vec<ColumnMeta>> {
+        const SQL: &str = "SELECT n.nspname, c.relname, a.attname, \
+              format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, \
+              EXISTS (SELECT 1 FROM pg_index i \
+                      WHERE i.indrelid = c.oid AND i.indisprimary AND a.attnum = ANY(i.indkey)) \
+            FROM pg_attribute a \
+            JOIN pg_class c ON c.oid = a.attrelid \
+            JOIN pg_namespace n ON n.oid = c.relnamespace \
+            WHERE a.attnum > 0 AND NOT a.attisdropped \
+              AND c.relkind IN ('r','p','v','m','f') \
+              AND n.nspname NOT IN ('pg_catalog','information_schema') \
+              AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' \
+            ORDER BY 1, 2, a.attnum";
+        let msgs = self.client.simple_query(SQL).await.map_err(pg_error)?;
+        let text = |r: &tokio_postgres::SimpleQueryRow, i| r.get(i).unwrap_or_default().to_string();
+        Ok(msgs
+            .iter()
+            .filter_map(|m| match m {
+                SimpleQueryMessage::Row(r) => Some(ColumnMeta {
+                    schema: text(r, 0),
+                    table: text(r, 1),
+                    name: text(r, 2),
+                    data_type: text(r, 3),
+                    nullable: r.get(4) == Some("t"),
+                    primary_key: r.get(5) == Some("t"),
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    async fn list_foreign_keys(&mut self) -> Result<Vec<ForeignKey>> {
+        // Column lists are joined with the unit separator, which no sane name contains.
+        const SQL: &str = "SELECT con.conname, n.nspname, c.relname, rn.nspname, rc.relname, \
+              (SELECT string_agg(a.attname, chr(31) ORDER BY k.ord) \
+                 FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord) \
+                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum), \
+              (SELECT string_agg(a.attname, chr(31) ORDER BY k.ord) \
+                 FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord) \
+                 JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum) \
+            FROM pg_constraint con \
+            JOIN pg_class c ON c.oid = con.conrelid \
+            JOIN pg_namespace n ON n.oid = c.relnamespace \
+            JOIN pg_class rc ON rc.oid = con.confrelid \
+            JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
+            WHERE con.contype = 'f' \
+              AND n.nspname NOT IN ('pg_catalog','information_schema') \
+            ORDER BY 2, 3, 1";
+        let msgs = self.client.simple_query(SQL).await.map_err(pg_error)?;
+        let text = |r: &tokio_postgres::SimpleQueryRow, i| r.get(i).unwrap_or_default().to_string();
+        let list = |r: &tokio_postgres::SimpleQueryRow, i| {
+            r.get(i)
+                .unwrap_or_default()
+                .split('\u{1f}')
+                .map(String::from)
+                .collect()
+        };
+        Ok(msgs
+            .iter()
+            .filter_map(|m| match m {
+                SimpleQueryMessage::Row(r) => Some(ForeignKey {
+                    name: text(r, 0),
+                    schema: text(r, 1),
+                    table: text(r, 2),
+                    ref_schema: text(r, 3),
+                    ref_table: text(r, 4),
+                    columns: list(r, 5),
+                    ref_columns: list(r, 6),
                 }),
                 _ => None,
             })

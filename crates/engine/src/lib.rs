@@ -12,9 +12,10 @@ use std::{
 
 pub use pool::PoolStats;
 use pool::{Lease, Pool};
-use rusdb_core::{ConnId, ConnectConfig, DriverKind, QueryId, TabId, TableInfo};
+use rusdb_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, SshTarget, TabId};
 pub use rusdb_drivers::ExecEvent;
 use rusdb_drivers::{CancelHandle, driver_for};
+use rusdb_tunnel::{HostKeyError, Tunnel};
 use tokio::sync::mpsc;
 
 /// Max rows kept per result set. TODO(fetch-more): make configurable / page on demand.
@@ -26,11 +27,19 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum Command {
-    /// Opens the pool and verifies credentials by loading the schema.
+    /// Opens the pool and verifies credentials by loading the schema. With `ssh`,
+    /// sessions go through a tunnel and `cfg.host`/`port` are as the SSH server sees them.
     Connect {
         conn: ConnId,
         driver: DriverKind,
         cfg: ConnectConfig,
+        ssh: Option<SshTarget>,
+    },
+    /// The user confirmed an unknown SSH host key: add it to `~/.ssh/known_hosts`.
+    TrustHostKey {
+        host: String,
+        port: u16,
+        key: String,
     },
     Disconnect {
         conn: ConnId,
@@ -63,9 +72,18 @@ pub enum Event {
         conn: ConnId,
         error: String,
     },
+    /// The SSH server's key is not in known_hosts. Connecting stopped; after the user
+    /// confirms, send `TrustHostKey` and connect again.
+    HostKeyUnknown {
+        conn: ConnId,
+        host: String,
+        port: u16,
+        fingerprint: String,
+        key: String,
+    },
     Schema {
         conn: ConnId,
-        result: Result<Vec<TableInfo>, String>,
+        result: Result<SchemaInfo, String>,
     },
     Query {
         query: QueryId,
@@ -162,28 +180,63 @@ impl Engine {
 
     fn handle(&mut self, cmd: Command) {
         match cmd {
-            Command::Connect { conn, driver, cfg } => {
-                let pool = Arc::new(Pool::new(driver_for(driver), cfg, MAX_CONNECTIONS));
+            Command::Connect {
+                conn,
+                driver,
+                cfg,
+                ssh,
+            } => {
+                let tunnel = ssh.map(|ssh| Tunnel::new(ssh, cfg.host.clone(), cfg.port));
+                let pool = Arc::new(Pool::new(driver_for(driver), cfg, tunnel, MAX_CONNECTIONS));
                 if let Some(old) = self.pools.insert(conn, pool.clone()) {
                     close_all(old.take_all(), None);
                 }
                 let events = self.events.clone();
                 tokio::spawn(async move {
                     match load_schema(&pool).await {
-                        Ok(tables) => {
+                        Ok(schema) => {
                             send(&events, Event::Connected { conn });
                             send(
                                 &events,
                                 Event::Schema {
                                     conn,
-                                    result: Ok(tables),
+                                    result: Ok(schema),
                                 },
                             );
                         }
-                        Err(e) => send(&events, Event::ConnectFailed { conn, error: e }),
+                        Err(e) => match e.downcast_ref::<HostKeyError>() {
+                            Some(HostKeyError::Unknown {
+                                host,
+                                port,
+                                fingerprint,
+                                key,
+                            }) => send(
+                                &events,
+                                Event::HostKeyUnknown {
+                                    conn,
+                                    host: host.clone(),
+                                    port: *port,
+                                    fingerprint: fingerprint.clone(),
+                                    key: key.clone(),
+                                },
+                            ),
+                            _ => send(
+                                &events,
+                                Event::ConnectFailed {
+                                    conn,
+                                    error: format!("{e:#}"),
+                                },
+                            ),
+                        },
                     }
                     send_stats(&events, conn, &pool);
                 });
+            }
+            Command::TrustHostKey { host, port, key } => {
+                // A small file append; done inline so a following Connect sees it.
+                if let Err(e) = rusdb_tunnel::trust_host_key(&host, port, &key) {
+                    eprintln!("could not update known_hosts: {e:#}");
+                }
             }
             Command::Disconnect { conn } => {
                 if let Some(pool) = self.pools.remove(&conn) {
@@ -203,7 +256,7 @@ impl Engine {
                 };
                 let events = self.events.clone();
                 tokio::spawn(async move {
-                    let result = load_schema(&pool).await;
+                    let result = load_schema(&pool).await.map_err(|e| format!("{e:#}"));
                     send(&events, Event::Schema { conn, result });
                     send_stats(&events, conn, &pool);
                 });
@@ -325,13 +378,29 @@ async fn execute(
     send_stats(&events, conn, &pool);
 }
 
-async fn load_schema(pool: &Pool) -> Result<Vec<TableInfo>, String> {
-    let mut lease = pool.acquire(None).await.map_err(|e| format!("{e:#}"))?;
-    let result = lease
-        .session
-        .list_tables()
-        .await
-        .map_err(|e| format!("{e:#}"));
+/// Tables are required; columns and foreign keys are best effort (they only feed
+/// SQL assistance, and a restricted user may not be allowed to read them).
+async fn load_schema(pool: &Pool) -> anyhow::Result<SchemaInfo> {
+    let mut lease = pool.acquire(None).await?;
+    let session = &mut lease.session;
+    let result = match session.list_tables().await {
+        Ok(tables) => {
+            let columns = session.list_columns().await.unwrap_or_else(|e| {
+                eprintln!("could not load columns: {e:#}");
+                Vec::new()
+            });
+            let foreign_keys = session.list_foreign_keys().await.unwrap_or_else(|e| {
+                eprintln!("could not load foreign keys: {e:#}");
+                Vec::new()
+            });
+            Ok(SchemaInfo {
+                tables,
+                columns,
+                foreign_keys,
+            })
+        }
+        Err(e) => Err(e),
+    };
     pool.release(None, lease);
     result
 }

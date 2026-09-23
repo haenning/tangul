@@ -2,11 +2,12 @@
 
 PG_URL    ?= postgres:@127.0.0.1:55432/postgres
 MYSQL_URL ?= root:@127.0.0.1:53306/app
+SSH_URL   ?= rusdb:rusdb@127.0.0.1:52222
 DEV_CONFIG := target/dev-config
 
 .DEFAULT_GOAL := help
-.PHONY: help setup db-up db-down db-reset db-logs psql mysql run run-release run-dev \
-        test test-live fmt lint ci
+.PHONY: help setup tools db-up db-down db-reset db-logs psql mysql run run-release run-dev \
+        test test-live fmt lint ci app dmg install
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -20,7 +21,7 @@ setup: ## Check required tools
 		echo "  run: xcodebuild -downloadComponent MetalToolchain"; exit 1; fi
 	@rustup show active-toolchain >/dev/null && echo "ok"
 
-db-up: ## Start dev Postgres (:55432) and MySQL (:53306) with sample data
+db-up: ## Start dev Postgres (:55432), MySQL (:53306) and an SSH bastion (:52222)
 	docker compose up -d --wait
 
 db-down: ## Stop dev databases (data is kept)
@@ -54,13 +55,31 @@ test: ## Unit tests (no databases needed)
 	cargo test --workspace
 
 test-live: db-up ## Integration tests against the dev databases
-	RUSDB_TEST_PG=$(PG_URL) RUSDB_TEST_MYSQL=$(MYSQL_URL) cargo test -p rusdb-engine
+	RUSDB_TEST_PG=$(PG_URL) RUSDB_TEST_MYSQL=$(MYSQL_URL) RUSDB_TEST_SSH=$(SSH_URL) \
+		cargo test -p rusdb-engine
+
+app: ## Build target/bundle/rusdb.app and a DMG (UNIVERSAL=1 for Apple Silicon + Intel)
+	scripts/bundle-macos.sh $(if $(UNIVERSAL),--universal)
+
+dmg: app ## Same as app (the DMG is built alongside)
+
+install: app ## Build the app and copy it to /Applications
+	rm -rf /Applications/rusdb.app
+	cp -R target/bundle/rusdb.app /Applications/
+	@echo "installed /Applications/rusdb.app"
 
 fmt: ## Format code
 	cargo fmt --all
 
-lint: ## Format check + clippy (warnings are errors)
+tools: ## Install the lint tools (cargo-deny, cargo-machete)
+	cargo install --locked cargo-deny cargo-machete
+
+lint: ## Format check, clippy (warnings are errors), cargo-deny, unused deps
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
+	@command -v cargo-deny >/dev/null || { echo "missing cargo-deny: make tools"; exit 1; }
+	cargo deny check
+	@command -v cargo-machete >/dev/null || { echo "missing cargo-machete: make tools"; exit 1; }
+	cargo machete
 
 ci: lint test test-live ## Everything CI runs

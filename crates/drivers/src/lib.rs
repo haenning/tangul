@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use rusdb_core::{ColumnInfo, ConnectConfig, DriverKind, RowBatch, TableInfo};
+use rusdb_core::{
+    ColumnInfo, ColumnMeta, ConnectConfig, DriverKind, ForeignKey, RowBatch, TableInfo,
+};
 
 /// Rows are forwarded to the UI in chunks of this size.
 pub const BATCH_ROWS: usize = 1000;
@@ -50,6 +52,11 @@ pub trait Session: Send {
     fn cancel_handle(&self) -> Arc<dyn CancelHandle>;
 
     async fn list_tables(&mut self) -> Result<Vec<TableInfo>>;
+
+    /// Columns of all listed tables, ordered by schema, table, position.
+    async fn list_columns(&mut self) -> Result<Vec<ColumnMeta>>;
+
+    async fn list_foreign_keys(&mut self) -> Result<Vec<ForeignKey>>;
 
     /// False once the server connection is gone; broken sessions are not reused.
     fn is_alive(&self) -> bool;
