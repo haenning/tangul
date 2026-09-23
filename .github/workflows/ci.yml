@@ -1,9 +1,9 @@
 name: CI
 
+# Only pull requests into main; plain pushes to other branches don't run CI.
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
