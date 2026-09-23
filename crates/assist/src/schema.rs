@@ -134,6 +134,56 @@ impl SchemaIndex {
     }
 }
 
+/// Reserved words (Postgres and MySQL) beyond the clause keywords the analysis knows;
+/// a table or column with such a name must be quoted.
+const QUOTE_RESERVED: &[&str] = &[
+    "analyse",
+    "analyze",
+    "array",
+    "asymmetric",
+    "both",
+    "cast",
+    "check",
+    "collate",
+    "column",
+    "constraint",
+    "create",
+    "current_catalog",
+    "current_date",
+    "current_role",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "default",
+    "deferrable",
+    "do",
+    "false",
+    "foreign",
+    "grant",
+    "index",
+    "initially",
+    "key",
+    "keys",
+    "leading",
+    "localtime",
+    "localtimestamp",
+    "only",
+    "placing",
+    "primary",
+    "range",
+    "rank",
+    "references",
+    "row",
+    "rows",
+    "session_user",
+    "symmetric",
+    "trailing",
+    "true",
+    "unique",
+    "user",
+    "variadic",
+];
+
 /// Quotes an identifier if it would not survive unquoted (Postgres folds unquoted
 /// names to lowercase, so any uppercase letter needs quotes there).
 pub fn quote_ident(driver: DriverKind, ident: &str) -> String {
@@ -149,7 +199,8 @@ pub fn quote_ident(driver: DriverKind, ident: &str) -> String {
                     DriverKind::Mysql => c.is_ascii_alphabetic(),
                 }
         })
-        && !is_reserved(ident);
+        && !is_reserved(ident)
+        && !QUOTE_RESERVED.iter().any(|k| ident.eq_ignore_ascii_case(k));
     if plain {
         return ident.to_string();
     }
@@ -227,5 +278,11 @@ pub(crate) mod tests {
         assert_eq!(s.resolve(Some("public"), "orders"), None);
         assert_eq!(quote_ident(DriverKind::Mysql, "order"), "`order`");
         assert_eq!(quote_ident(DriverKind::Mysql, "Users"), "Users");
+        assert_eq!(quote_ident(DriverKind::Postgres, "user"), "\"user\"");
+        assert_eq!(quote_ident(DriverKind::Mysql, "key"), "`key`");
+        assert_eq!(
+            quote_ident(DriverKind::Postgres, "spatial_ref_sys"),
+            "spatial_ref_sys"
+        );
     }
 }
