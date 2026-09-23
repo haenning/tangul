@@ -17,6 +17,7 @@ use std::{
 use anyhow::Result;
 use rusdb_core::{ConnectConfig, TabId};
 use rusdb_drivers::{Driver, Session};
+use rusdb_tunnel::Tunnel;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -46,6 +47,8 @@ pub struct PoolStats {
 pub struct Pool {
     driver: Arc<dyn Driver>,
     cfg: ConnectConfig,
+    /// Sessions connect through this when set (`cfg` then targets the local end).
+    tunnel: Option<Tunnel>,
     max: usize,
     permits: Arc<Semaphore>,
     idle: Mutex<Vec<(Lease, Instant)>>,
@@ -53,10 +56,16 @@ pub struct Pool {
 }
 
 impl Pool {
-    pub fn new(driver: Arc<dyn Driver>, cfg: ConnectConfig, max: usize) -> Self {
+    pub fn new(
+        driver: Arc<dyn Driver>,
+        cfg: ConnectConfig,
+        tunnel: Option<Tunnel>,
+        max: usize,
+    ) -> Self {
         Self {
             driver,
             cfg,
+            tunnel,
             max,
             permits: Arc::new(Semaphore::new(max)),
             idle: Mutex::default(),
@@ -83,7 +92,17 @@ impl Pool {
                 None => break,
             }
         }
-        let session = self.driver.connect(&self.cfg).await?;
+        let session = match &self.tunnel {
+            Some(tunnel) => {
+                let cfg = ConnectConfig {
+                    host: "127.0.0.1".into(),
+                    port: tunnel.local_port().await?,
+                    ..self.cfg.clone()
+                };
+                self.driver.connect(&cfg).await?
+            }
+            None => self.driver.connect(&self.cfg).await?,
+        };
         Ok(Lease {
             session,
             _permit: permit,

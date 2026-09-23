@@ -41,7 +41,8 @@ pub struct NewHistory<'a> {
     pub entry: HistoryEntry,
 }
 
-const MIGRATIONS: &[&str] = &["CREATE TABLE bookmarks (
+const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE bookmarks (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         sql TEXT NOT NULL,
@@ -72,7 +73,12 @@ const MIGRATIONS: &[&str] = &["CREATE TABLE bookmarks (
     CREATE TABLE schema_cache (
         user_id TEXT PRIMARY KEY,
         payload TEXT NOT NULL
-    );"];
+    );",
+    "CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );",
+];
 
 pub struct Local {
     conn: Connection,
@@ -344,6 +350,30 @@ impl Local {
         usage
     }
 
+    // ---- settings ------------------------------------------------------------------
+
+    pub fn setting(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()?
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) {
+        let result = self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = ?2",
+            params![key, value],
+        );
+        if let Err(e) = result {
+            eprintln!("could not save setting {key}: {e}");
+        }
+    }
+
     // ---- schema cache --------------------------------------------------------------
 
     pub fn save_schema(&self, user_id: &str, schema: &SchemaInfo) -> Result<()> {
@@ -454,5 +484,9 @@ mod tests {
         let schema = SchemaInfo::default();
         l.save_schema("u", &schema).unwrap();
         assert_eq!(l.cached_schema("u"), Some(schema));
+        assert_eq!(l.setting("last_user"), None);
+        l.set_setting("last_user", "a");
+        l.set_setting("last_user", "b");
+        assert_eq!(l.setting("last_user").as_deref(), Some("b"));
     }
 }

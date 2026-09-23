@@ -27,3 +27,24 @@ tls = "disable"
 [[databases.users]]
 id = "dev-mysql"
 user = "root"
+
+# The dev Postgres again, reached through the SSH bastion from docker-compose
+# (ssh password: rusdb — enter it once via "Edit database…"; it goes to the Keychain).
+[[databases]]
+id = "dev-postgres-ssh"
+name = "dev postgres via ssh"
+driver = "postgres"
+host = "postgres"
+port = 5432
+database = "postgres"
+tls = "disable"
+
+[databases.ssh]
+host = "127.0.0.1"
+port = 52222
+user = "rusdb"
+auth = "password"
+
+[[databases.users]]
+id = "dev-postgres-ssh"
+user = "postgres"
