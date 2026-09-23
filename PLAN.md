@@ -46,10 +46,15 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 - `TODO(reserve-connection)`: a tab button to pin a connection permanently (out of scope).
 - The status bar shows `open/max · idle · in transaction` for the active profile.
 
-### D4 — SSH tunnel via `russh` (not implemented yet)
-- One SSH session per profile, each DB connection = one `direct-tcpip` channel; local
-  `127.0.0.1:0` listener, so drivers stay unchanged. Auth: password, key, ssh-agent.
-  Verify `known_hosts`, never auto-accept. Hooks: `TODO(ssh)` in profile/form.
+### D4 — SSH tunnel via `russh` (`crates/tunnel`)
+- One SSH session per database pool, each DB connection = one `direct-tcpip` channel; local
+  `127.0.0.1:0` listener, so drivers stay unchanged. Auth: ssh-agent, key file (optional
+  passphrase), password; secrets in the Keychain (`ssh:<database id>`).
+- Opened lazily by the pool; a dead session is re-opened on the next connection.
+- Host keys are checked against `~/.ssh/known_hosts`, never accepted silently: an unknown
+  key asks the user (fingerprint dialog, "Trust & connect" appends it); a changed key is
+  an error. `RUSDB_KNOWN_HOSTS` overrides the file (tests).
+- ring crypto backend (no aws-lc/cmake build dependency).
 
 ### D5 — Result storage
 - One `String` arena + `u32` end offsets + null flags per result (no allocation per cell).
@@ -99,6 +104,7 @@ crates/
   drivers/  # Driver/Session traits, postgres.rs, mysql.rs
   engine/   # tokio thread, Command/Event, pool (D3); live integration tests
   assist/   # SQL lexer, analysis, completion, usage ranking, suggestions — no UI/I/O
+  tunnel/   # SSH tunnels (russh): lazy session, local listener, known_hosts checks
   app/      # GPUI binary `rusdb`: workspace, query tab, results grid, forms, local.db
 ```
 
@@ -116,11 +122,10 @@ crates/
 | **M5** | **Query tab: editor, ⌘↵, streamed results, errors, cancel** | ✅ **first query** |
 | M6 | MySQL driver | ✅ |
 | M7 | Schema sidebar (schema → tables/views, click opens `SELECT * … LIMIT 100`) | ✅ basic (no columns yet) |
-| M8 | SSH tunnel | ⏳ next |
+| M8 | SSH tunnel; auto-connect to the last used connection at startup | ✅ |
 | M9 | Bookmarks, history, completion, learned suggestions (local.db) | ✅ |
 
 ### Next candidates
-1. SSH tunnel (M8).
 2. Resizable editor/results split; results per statement (currently last result set).
 3. Cell detail view + copy (cell / row / TSV).
 4. Columns/indexes in the sidebar (columns are loaded already, see D6b).

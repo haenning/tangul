@@ -6,7 +6,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context as _, Result};
-use rusdb_core::{Database, DbUser, DriverKind, TlsMode};
+use rusdb_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, SshTarget, TlsMode};
 use serde::{Deserialize, Serialize};
 
 const KEYCHAIN_SERVICE: &str = "rusdb";
@@ -61,6 +61,7 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
                 database: p.database,
                 tls: p.tls,
                 users: vec![user],
+                ssh: None,
             }),
         }
     }
@@ -148,10 +149,7 @@ impl Store {
             .find(|d| d.id == db_id)
             .context("unknown database")?;
         if let Some(pw) = password {
-            if let Err(e) = keychain(&user.id).and_then(|k| Ok(k.set_password(&pw)?)) {
-                eprintln!("keychain write failed: {e:#}");
-            }
-            self.passwords.insert(user.id.clone(), pw);
+            set_keychain(&mut self.passwords, &user.id, pw);
         }
         match db.users.iter_mut().find(|u| u.id == user.id) {
             Some(existing) => *existing = user,
@@ -165,18 +163,45 @@ impl Store {
         self.path.as_deref().and_then(|p| p.parent())
     }
 
-    pub fn password(&mut self, user_id: &str) -> Option<String> {
-        if let Some(pw) = self.passwords.get(user_id) {
+    /// Stores the SSH password or key passphrase of a database.
+    pub fn set_ssh_secret(&mut self, db_id: &str, secret: String) {
+        set_keychain(
+            &mut self.passwords,
+            &SshConfig::secret_account(db_id),
+            secret,
+        );
+    }
+
+    /// The tunnel settings of a database with its secret, if it uses SSH.
+    pub fn ssh_target(&mut self, db: &Database) -> Option<SshTarget> {
+        let config = db.ssh.clone()?;
+        let secret = match config.auth {
+            SshAuth::Agent => None,
+            SshAuth::Key | SshAuth::Password => self.password(&SshConfig::secret_account(&db.id)),
+        };
+        Some(SshTarget { config, secret })
+    }
+
+    /// A secret by Keychain account (user id, or [`SshConfig::secret_account`]).
+    pub fn password(&mut self, account: &str) -> Option<String> {
+        if let Some(pw) = self.passwords.get(account) {
             return Some(pw.clone());
         }
-        let pw = keychain(user_id).ok()?.get_password().ok()?;
-        self.passwords.insert(user_id.to_string(), pw.clone());
+        let pw = keychain(account).ok()?.get_password().ok()?;
+        self.passwords.insert(account.to_string(), pw.clone());
         Some(pw)
     }
 }
 
-fn keychain(user_id: &str) -> Result<keyring::Entry> {
-    Ok(keyring::Entry::new(KEYCHAIN_SERVICE, user_id)?)
+fn keychain(account: &str) -> Result<keyring::Entry> {
+    Ok(keyring::Entry::new(KEYCHAIN_SERVICE, account)?)
+}
+
+fn set_keychain(cache: &mut HashMap<String, String>, account: &str, secret: String) {
+    if let Err(e) = keychain(account).and_then(|k| Ok(k.set_password(&secret)?)) {
+        eprintln!("keychain write failed: {e:#}");
+    }
+    cache.insert(account.to_string(), secret);
 }
 
 /// Unique enough id for a new database or user without pulling in a uuid crate.

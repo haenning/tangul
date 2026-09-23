@@ -49,6 +49,8 @@ const BOOKMARK_ROW_HEIGHT: f32 = 40.;
 const HISTORY_LIMIT: usize = 300;
 /// Successful runs after which the toolbar suggests bookmarking a query.
 const BOOKMARK_HINT_RUNS: u32 = 3;
+/// local.db setting: the user id connected last, reopened at startup.
+const LAST_USER_SETTING: &str = "last_user";
 
 #[derive(Clone, Copy, PartialEq)]
 enum SidebarView {
@@ -206,9 +208,23 @@ impl Workspace {
             _subscriptions: vec![search_sub],
             _pump: pump,
         };
-        if let Some(db) = this.store.databases.first() {
-            this.active_db = Some(db.id.clone());
-            this.active_user = db.users.first().map(|u| u.id.clone());
+        // Reopen the connection used last (else the first one) right away.
+        let last = this.local.setting(LAST_USER_SETTING);
+        let start = last
+            .as_deref()
+            .and_then(|id| this.find_user(id))
+            .map(|(db, u)| (db.id.clone(), Some(u.id.clone())))
+            .or_else(|| {
+                let db = this.store.databases.first()?;
+                Some((db.id.clone(), db.users.first().map(|u| u.id.clone())))
+            });
+        if let Some((db_id, user_id)) = start {
+            this.active_db = Some(db_id);
+            if let Some(user_id) = user_id {
+                this.connect(&user_id, cx);
+                this.active_user = Some(user_id);
+            }
+            this.refresh_history(cx);
         }
         this.add_tab("", window, cx);
         this
@@ -597,6 +613,7 @@ impl Workspace {
             None => ConnId(self.next_id()),
         };
         let password = self.store.password(user_id);
+        let ssh = self.store.ssh_target(&db);
         // Show (and complete against) the cached schema until the server answers.
         let schema = match self.conns.get(user_id) {
             Some(state) => state.schema.clone(),
@@ -620,6 +637,7 @@ impl Workspace {
             conn: id,
             driver: db.driver,
             cfg: rusdb_core::ConnectConfig::new(&db, &user, password),
+            ssh,
         });
         cx.notify();
     }
@@ -642,6 +660,7 @@ impl Workspace {
         }
         self.active_db = Some(db_id);
         self.active_user = Some(user_id.clone());
+        self.local.set_setting(LAST_USER_SETTING, &user_id);
         self.assign_active_tab(&user_id, window, cx);
         self.refresh_history(cx);
         cx.notify();
@@ -780,19 +799,34 @@ impl Workspace {
     }
 
     fn save_form(&mut self, output: FormOutput, window: &mut Window, cx: &mut Context<Self>) {
-        let FormOutput { database, user } = output;
+        let FormOutput {
+            database,
+            user,
+            ssh_secret,
+        } = output;
         let db_id = database.id.clone();
-        let target_changed = self.store.database(&db_id).is_some_and(|old| {
-            (old.driver, &old.host, old.port, &old.database, old.tls)
-                != (
+        let target_changed = ssh_secret.is_some()
+            || self.store.database(&db_id).is_some_and(|old| {
+                (
+                    old.driver,
+                    &old.host,
+                    old.port,
+                    &old.database,
+                    old.tls,
+                    &old.ssh,
+                ) != (
                     database.driver,
                     &database.host,
                     database.port,
                     &database.database,
                     database.tls,
+                    &database.ssh,
                 )
-        });
+            });
         let mut result = self.store.upsert_database(database);
+        if let Some(secret) = ssh_secret {
+            self.store.set_ssh_secret(&db_id, secret);
+        }
         let user_id = user.map(|(user, password)| {
             let id = user.id.clone();
             result = std::mem::replace(&mut result, Ok(()))
@@ -860,6 +894,13 @@ impl Workspace {
                     }
                 }
             }
+            Event::HostKeyUnknown {
+                conn,
+                host,
+                port,
+                fingerprint,
+                key,
+            } => self.confirm_host_key(conn, host, port, fingerprint, key, window, cx),
             Event::ConnectFailed { conn, error } => {
                 if let Some(state) = self.conn_state_mut(conn) {
                     state.status = ConnStatus::Failed(error.clone().into());
@@ -888,6 +929,110 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// Unknown SSH host key: show its fingerprint and let the user decide. Trusting
+    /// adds it to `~/.ssh/known_hosts` and connects again.
+    #[allow(clippy::too_many_arguments)]
+    fn confirm_host_key(
+        &mut self,
+        conn: ConnId,
+        host: String,
+        port: u16,
+        fingerprint: String,
+        key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(user_id) = self.conn_users.get(&conn).cloned() else {
+            return;
+        };
+        let workspace = cx.entity().downgrade();
+        let target: SharedString = if port == 22 {
+            host.clone().into()
+        } else {
+            format!("{host}:{port}").into()
+        };
+        let fingerprint: SharedString = fingerprint.into();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let trust = {
+                let (workspace, user_id, host, key) = (
+                    workspace.clone(),
+                    user_id.clone(),
+                    host.clone(),
+                    key.clone(),
+                );
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = workspace.update(cx, |ws, cx| {
+                        ws.engine.send(Command::TrustHostKey {
+                            host: host.clone(),
+                            port,
+                            key: key.clone(),
+                        });
+                        ws.connect(&user_id, cx);
+                    });
+                    window.close_dialog(cx);
+                }
+            };
+            let cancel = {
+                let (workspace, user_id) = (workspace.clone(), user_id.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = workspace.update(cx, |ws, cx| {
+                        if let Some(state) = ws.conns.get_mut(&user_id) {
+                            state.status = ConnStatus::Failed("SSH host key not trusted".into());
+                        }
+                        cx.notify();
+                    });
+                    window.close_dialog(cx);
+                }
+            };
+            let theme = cx.theme();
+            dialog
+                .title("Unknown SSH host")
+                .w(px(480.))
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .text_sm()
+                        .child(format!(
+                            "The authenticity of {target} can't be established. \
+                             Compare the fingerprint with the one your server admin gave you."
+                        ))
+                        .child(
+                            div()
+                                .p_2()
+                                .rounded(theme.radius)
+                                .bg(theme.muted)
+                                .font_family(theme.mono_font_family.clone())
+                                .text_xs()
+                                .child(fingerprint.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("Trusting adds the key to ~/.ssh/known_hosts."),
+                        ),
+                )
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(cancel),
+                        )
+                        .child(
+                            Button::new("trust")
+                                .label("Trust & connect")
+                                .primary()
+                                .on_click(trust),
+                        ),
+                )
+        });
     }
 
     fn conn_state_mut(&mut self, conn: ConnId) -> Option<&mut ConnState> {

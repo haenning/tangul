@@ -3,13 +3,14 @@
 use gpui_kit::component::{
     ActiveTheme as _, Sizable as _,
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     h_flex,
     input::{Input, InputState},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_core::{Database, DbUser, DriverKind, TlsMode};
+use rusdb_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode};
 
 use crate::store::new_id;
 
@@ -37,6 +38,8 @@ pub struct FormOutput {
     pub database: Database,
     /// The user to add or update, with a new password (`None` keeps the stored one).
     pub user: Option<(DbUser, Option<String>)>,
+    /// New SSH password or key passphrase (`None` keeps the stored one).
+    pub ssh_secret: Option<String>,
 }
 
 pub struct ConnectionForm {
@@ -52,6 +55,13 @@ pub struct ConnectionForm {
     user: Entity<InputState>,
     password: Entity<InputState>,
     database: Entity<InputState>,
+    ssh: bool,
+    ssh_auth: SshAuth,
+    ssh_host: Entity<InputState>,
+    ssh_port: Entity<InputState>,
+    ssh_user: Entity<InputState>,
+    ssh_key_path: Entity<InputState>,
+    ssh_secret: Entity<InputState>,
     error: Option<SharedString>,
 }
 
@@ -66,6 +76,7 @@ impl ConnectionForm {
         cx: &mut Context<Self>,
     ) -> Self {
         let driver = db.map_or(DriverKind::Postgres, |p| p.driver);
+        let ssh = db.and_then(|d| d.ssh.as_ref());
         let input = |value: String,
                      placeholder: &'static str,
                      window: &mut Window,
@@ -121,6 +132,41 @@ impl ConnectionForm {
                 window,
                 cx,
             ),
+            ssh: ssh.is_some(),
+            ssh_auth: ssh.map(|s| s.auth).unwrap_or_default(),
+            ssh_host: input(
+                ssh.map(|s| s.host.clone()).unwrap_or_default(),
+                "bastion.example.com",
+                window,
+                cx,
+            ),
+            ssh_port: input(ssh.map_or(22, |s| s.port).to_string(), "22", window, cx),
+            ssh_user: input(
+                ssh.map_or_else(
+                    || std::env::var("USER").unwrap_or_default(),
+                    |s| s.user.clone(),
+                ),
+                "user",
+                window,
+                cx,
+            ),
+            ssh_key_path: input(
+                ssh.map(|s| s.key_path.clone())
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or_else(|| "~/.ssh/id_ed25519".into()),
+                "~/.ssh/id_ed25519",
+                window,
+                cx,
+            ),
+            ssh_secret: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder(if ssh.is_some() {
+                        "unchanged"
+                    } else {
+                        "optional"
+                    })
+            }),
             error: None,
         }
     }
@@ -144,12 +190,22 @@ impl ConnectionForm {
         let user = value(&self.user);
         let port = value(&self.port).parse::<u16>();
         let (db_fields, user_fields) = (self.mode.has_db_fields(), self.mode.has_user_fields());
+        let ssh = db_fields && self.ssh;
+        let ssh_port = value(&self.ssh_port).parse::<u16>();
         let error = if db_fields && host.is_empty() {
             Some("Host is required")
         } else if user_fields && user.is_empty() {
             Some("User is required")
         } else if db_fields && port.is_err() {
             Some("Port must be a number")
+        } else if ssh && value(&self.ssh_host).is_empty() {
+            Some("SSH host is required")
+        } else if ssh && value(&self.ssh_user).is_empty() {
+            Some("SSH user is required")
+        } else if ssh && ssh_port.is_err() {
+            Some("SSH port must be a number")
+        } else if ssh && self.ssh_auth == SshAuth::Key && value(&self.ssh_key_path).is_empty() {
+            Some("SSH key file is required")
         } else {
             None
         };
@@ -169,8 +225,21 @@ impl ConnectionForm {
                 database: value(&self.database),
                 tls: self.tls,
                 users: base.as_ref().map(|b| b.users.clone()).unwrap_or_default(),
+                ssh: ssh.then(|| SshConfig {
+                    host: value(&self.ssh_host),
+                    port: ssh_port.clone().unwrap_or(22),
+                    user: value(&self.ssh_user),
+                    auth: self.ssh_auth,
+                    key_path: match self.ssh_auth {
+                        SshAuth::Key => value(&self.ssh_key_path),
+                        _ => String::new(),
+                    },
+                }),
             },
         };
+        let secret = self.ssh_secret.read(cx).value().to_string();
+        let ssh_secret =
+            (ssh && self.ssh_auth != SshAuth::Agent && !secret.is_empty()).then_some(secret);
         let password = self.password.read(cx).value().to_string();
         let user = user_fields.then(|| {
             let id = self.user_id.clone().unwrap_or_else(new_id);
@@ -179,7 +248,11 @@ impl ConnectionForm {
                 (!password.is_empty()).then_some(password),
             )
         });
-        Some(FormOutput { database, user })
+        Some(FormOutput {
+            database,
+            user,
+            ssh_secret,
+        })
     }
 }
 
@@ -240,7 +313,70 @@ impl Render for ConnectionForm {
                     .child(tls_button(TlsMode::Prefer, "prefer", self.tls, cx))
                     .child(tls_button(TlsMode::Require, "require", self.tls, cx)),
             );
-        // TODO(ssh): SSH tunnel section (host, user, password | key | agent).
+        let auth_button = |auth: SshAuth, label: &'static str, cx: &mut Context<Self>| {
+            let b = Button::new(label).label(label).xsmall();
+            let b = if auth == self.ssh_auth {
+                b.primary()
+            } else {
+                b.ghost()
+            };
+            b.on_click(cx.listener(move |this, _, _, cx| {
+                this.ssh_auth = auth;
+                cx.notify();
+            }))
+        };
+        let ssh_fields = v_flex()
+            .gap_3()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Host and port above are as seen from the SSH server."),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(field("SSH host", Input::new(&self.ssh_host)).flex_1())
+                    .child(field("Port", Input::new(&self.ssh_port)).w(px(90.))),
+            )
+            .child(field("SSH user", Input::new(&self.ssh_user)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_xs().child("Auth"))
+                    .child(auth_button(SshAuth::Agent, "ssh-agent", cx))
+                    .child(auth_button(SshAuth::Key, "key file", cx))
+                    .child(auth_button(SshAuth::Password, "password", cx)),
+            )
+            .when(self.ssh_auth == SshAuth::Key, |this| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .child(field("Key file", Input::new(&self.ssh_key_path)).flex_1())
+                        .child(
+                            field("Passphrase", Input::new(&self.ssh_secret).mask_toggle())
+                                .w(px(150.)),
+                        ),
+                )
+            })
+            .when(self.ssh_auth == SshAuth::Password, |this| {
+                this.child(field(
+                    "SSH password",
+                    Input::new(&self.ssh_secret).mask_toggle(),
+                ))
+            });
+        let db_fields = db_fields
+            .child(
+                Checkbox::new("use-ssh")
+                    .label("Connect through an SSH tunnel")
+                    .checked(self.ssh)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.ssh = *checked;
+                        cx.notify();
+                    })),
+            )
+            .when(self.ssh, |this| this.child(ssh_fields));
         let user_fields = h_flex()
             .gap_2()
             .child(field("User", Input::new(&self.user)).flex_1())
