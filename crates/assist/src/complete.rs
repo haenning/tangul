@@ -1,5 +1,6 @@
-//! Editor completion: figures out what the cursor position expects (a table, a
-//! column, a join, a keyword) and ranks candidates by match quality and usage.
+//! Editor completion: asks the grammar what the cursor position expects (a table, an
+//! operand, an operator or clause keyword, …) and ranks the fitting candidates by
+//! match quality and usage.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -7,6 +8,7 @@ use std::ops::Range;
 use rusdb_core::{ForeignKey, TableKind};
 
 use crate::analyze::{TableRef, analyze, significant, statements};
+use crate::grammar::{self, Clause, Expect, State};
 use crate::lexer::{Token, TokenKind, tokenize, unquote};
 use crate::schema::SchemaIndex;
 use crate::usage::{Usage, UsageKind, column_key, parse_join_key, table_key};
@@ -14,6 +16,7 @@ use crate::usage::{Usage, UsageKind, column_key, parse_join_key, table_key};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuggestionKind {
     Keyword,
+    Function,
     Table,
     View,
     Column,
@@ -38,82 +41,13 @@ pub struct Completion {
 
 const MAX_ITEMS: usize = 80;
 
-const STATEMENT_KEYWORDS: &[&str] = &[
-    "SELECT",
-    "INSERT INTO",
-    "UPDATE",
-    "DELETE FROM",
-    "WITH",
-    "EXPLAIN",
-    "BEGIN",
-    "COMMIT",
-    "ROLLBACK",
-    "CREATE TABLE",
-    "ALTER TABLE",
-    "DROP TABLE",
-];
-
-const CLAUSE_KEYWORDS: &[&str] = &[
-    "WHERE",
-    "JOIN",
-    "LEFT JOIN",
-    "INNER JOIN",
-    "ON",
-    "AND",
-    "OR",
-    "GROUP BY",
-    "ORDER BY",
-    "HAVING",
-    "LIMIT",
-    "OFFSET",
-    "AS",
-    "ASC",
-    "DESC",
-    "UNION",
-    "RETURNING",
-    "SET",
-    "VALUES",
-    "IS NULL",
-    "IS NOT NULL",
-    "IN",
-    "LIKE",
-    "BETWEEN",
-    "DISTINCT",
-    "FROM",
-    "COUNT(*)",
-];
-
-/// Words after which a column (expression) follows.
-const COLUMN_WORDS: &[&str] = &[
-    "select",
-    "where",
-    "and",
-    "or",
-    "on",
-    "by",
-    "set",
-    "having",
-    "when",
-    "then",
-    "else",
-    "case",
-    "distinct",
-    "not",
-    "returning",
-    "like",
-    "ilike",
-    "between",
-    "in",
-];
-
-#[derive(Debug, PartialEq)]
-enum Context {
-    Statement,
-    Keyword,
-    Table { schema: Option<String> },
-    Join,
-    JoinCondition { joined: usize },
-    Column { qualifier: Option<usize> },
+/// Where the cursor is, beyond what the grammar state says.
+enum Target {
+    /// Columns of a table in scope (`alias.|`).
+    ColumnsOf(usize),
+    /// Tables of a schema (`schema.|`).
+    TablesIn(String),
+    State(State),
     Nothing,
 }
 
@@ -164,36 +98,57 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
         .map(|t| schema.resolve(t.schema.as_deref(), &t.name))
         .collect();
 
-    let ctx = context(stmt, &before, &scope, &resolved, schema);
+    let target = target(stmt, &before, &scope, schema);
     let cx = Ctx {
         schema,
         usage,
         prefix: &prefix,
         scope: &scope,
         resolved: &resolved,
+        lower_keywords: lower_keywords(stmt, &tokens, &prefix),
     };
-    let mut items = match ctx {
-        Context::Nothing => Vec::new(),
-        Context::Statement => cx.keywords(STATEMENT_KEYWORDS),
-        Context::Keyword => cx.keywords(CLAUSE_KEYWORDS),
-        Context::Table { schema: in_schema } => cx.tables(in_schema.as_deref()),
-        Context::Join => {
-            let mut items = cx.joins(None);
-            items.extend(cx.tables(None));
-            items
-        }
-        Context::JoinCondition { joined } => {
-            let mut items = cx.joins(Some(joined));
-            items.extend(cx.columns(None));
-            items
-        }
-        Context::Column { qualifier } => {
-            let mut items = cx.columns(qualifier);
-            if qualifier.is_none() && !prefix.is_empty() {
-                items.extend(cx.keywords(CLAUSE_KEYWORDS));
+    let d = schema.driver();
+    let mut items = match target {
+        Target::Nothing => Vec::new(),
+        Target::ColumnsOf(i) => cx.columns(Some(i)),
+        Target::TablesIn(s) => cx.tables(Some(&s)),
+        Target::State(st) => match st.expect {
+            Expect::Statement => cx.keywords(grammar::statement_keywords(d)),
+            Expect::Words(words) => cx.keywords(words),
+            Expect::Name => Vec::new(),
+            Expect::Table if st.clause == Clause::Join => {
+                let mut items = cx.joins(None);
+                items.extend(cx.tables(None));
+                items
             }
-            items
-        }
+            Expect::Table => cx.tables(None),
+            // Right after a table the next word is often an alias: only offer
+            // keywords once two letters make the intent clear.
+            Expect::AfterTable { alias: false } if prefix.chars().count() < 2 => Vec::new(),
+            Expect::AfterTable { alias } => {
+                cx.keywords(&grammar::after_table_keywords(d, st.clause, alias))
+            }
+            Expect::AfterOperand { star } => {
+                cx.keywords(&grammar::after_operand_keywords(d, st.clause, star))
+            }
+            Expect::Operand { first } => {
+                let mut items = Vec::new();
+                // Right after `JOIN t ON`: the join conditions first.
+                if st.clause == Clause::On
+                    && before.last().is_some_and(|t| t.is_word(stmt, "on"))
+                    && let Some(j) = scope.iter().rposition(|t| t.end <= replace_start)
+                    && resolved[j].is_some()
+                {
+                    items.extend(cx.joins(Some(j)));
+                }
+                if grammar::operand_takes_columns(st.clause) {
+                    items.extend(cx.columns(None));
+                    items.extend(cx.functions(grammar::functions(d)));
+                }
+                items.extend(cx.keywords(grammar::operand_keywords(st.clause, first)));
+                items
+            }
+        },
     };
     items.sort_by(|a, b| {
         b.score
@@ -210,107 +165,39 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
     }
 }
 
-fn context(
-    sql: &str,
-    before: &[Token],
-    scope: &[TableRef],
-    resolved: &[Option<usize>],
-    schema: &SchemaIndex,
-) -> Context {
-    let Some(prev) = before.last() else {
-        return Context::Statement;
-    };
+fn target(sql: &str, before: &[Token], scope: &[TableRef], schema: &SchemaIndex) -> Target {
     // `qualifier.` → columns of that table, or tables of that schema.
-    if prev.is_punct(sql, '.') {
+    if before.last().is_some_and(|t| t.is_punct(sql, '.')) {
         let Some(q) = before
             .len()
             .checked_sub(2)
             .map(|i| before[i])
             .filter(|t| t.is_ident())
         else {
-            return Context::Nothing;
+            return Target::Nothing;
         };
         let q = unquote(q.text(sql));
         if let Some(i) = scope.iter().position(|t| t.answers_to(&q)) {
-            return Context::Column { qualifier: Some(i) };
+            return Target::ColumnsOf(i);
         }
         if schema.has_schema(&q) {
-            return Context::Table { schema: Some(q) };
+            return Target::TablesIn(q);
         }
-        return Context::Nothing;
+        return Target::Nothing;
     }
-    let word = |t: &Token, w: &str| t.is_word(sql, w);
-    if ["from", "update", "into", "table"]
-        .iter()
-        .any(|w| word(prev, w))
-    {
-        return Context::Table { schema: None };
-    }
-    if word(prev, "join") {
-        return Context::Join;
-    }
-    if word(prev, "on") {
-        // The table joined right before this ON.
-        if let Some(i) = scope.iter().rposition(|t| t.end <= prev.start)
-            && resolved[i].is_some()
-        {
-            return Context::JoinCondition { joined: i };
-        }
-        return Context::Column { qualifier: None };
-    }
-    if prev.is_punct(sql, ',') {
-        return match clause(sql, before) {
-            Some("from") => Context::Table { schema: None },
-            _ => Context::Column { qualifier: None },
-        };
-    }
-    if prev.kind == TokenKind::Word && COLUMN_WORDS.iter().any(|w| word(prev, w)) {
-        return Context::Column { qualifier: None };
-    }
-    if prev.kind == TokenKind::Punct && "=<>!(+-*/%|".contains(&sql[prev.start..prev.end]) {
-        return Context::Column { qualifier: None };
-    }
-    if prev.is_ident()
-        || prev.is_punct(sql, ')')
-        || prev.is_punct(sql, '*')
-        || prev.kind != TokenKind::Punct
-    {
-        return Context::Keyword;
-    }
-    Context::Nothing
+    Target::State(grammar::state_at(sql, before))
 }
 
-/// The last clause keyword at the current parenthesis depth.
-fn clause<'a>(sql: &'a str, before: &[Token]) -> Option<&'a str> {
-    let mut depth = 0;
-    for t in before.iter().rev() {
-        if t.is_punct(sql, ')') {
-            depth += 1;
-        } else if t.is_punct(sql, '(') {
-            if depth == 0 {
-                return None;
-            }
-            depth -= 1;
-        } else if depth == 0 && t.kind == TokenKind::Word {
-            for kw in [
-                "select",
-                "from",
-                "join",
-                "where",
-                "by",
-                "set",
-                "having",
-                "values",
-                "returning",
-                "on",
-            ] {
-                if t.is_word(sql, kw) {
-                    return Some(if kw == "join" { "from" } else { kw });
-                }
-            }
-        }
+/// Keywords follow the user's casing: the typed prefix, else the statement's first
+/// keyword; uppercase by default.
+fn lower_keywords(sql: &str, tokens: &[Token], prefix: &str) -> bool {
+    if prefix.chars().any(char::is_alphabetic) {
+        return !prefix.chars().any(char::is_uppercase);
     }
-    None
+    tokens
+        .iter()
+        .find(|t| t.kind == TokenKind::Word)
+        .is_some_and(|t| !t.text(sql).chars().any(char::is_uppercase))
 }
 
 struct Ctx<'a> {
@@ -319,6 +206,7 @@ struct Ctx<'a> {
     prefix: &'a str,
     scope: &'a [TableRef],
     resolved: &'a [Option<usize>],
+    lower_keywords: bool,
 }
 
 /// How well `candidate` matches what was typed; `None` hides it.
@@ -345,12 +233,13 @@ fn usage_boost(score: f64) -> f64 {
 }
 
 impl Ctx<'_> {
+    /// `list` is in order of relevance; that order survives ranking.
     fn keywords(&self, list: &[&str]) -> Vec<Suggestion> {
-        let lower = !self.prefix.is_empty() && self.prefix.chars().all(|c| !c.is_uppercase());
         list.iter()
-            .filter_map(|kw| {
+            .enumerate()
+            .filter_map(|(i, kw)| {
                 let score = match_score(kw, self.prefix)?;
-                let insert = if lower {
+                let insert = if self.lower_keywords {
                     kw.to_lowercase()
                 } else {
                     kw.to_string()
@@ -360,8 +249,34 @@ impl Ctx<'_> {
                     insert,
                     kind: SuggestionKind::Keyword,
                     detail: "keyword".into(),
-                    // Keywords rank below schema objects.
-                    score: score - 0.5,
+                    // Below schema objects when mixed with them.
+                    score: score - 0.5 - i as f64 * 0.01,
+                })
+            })
+            .collect()
+    }
+
+    /// Functions, inserted with the opening parenthesis.
+    fn functions(&self, list: &[&str]) -> Vec<Suggestion> {
+        list.iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                // Only once typing started: they would drown the columns otherwise.
+                if self.prefix.is_empty() {
+                    return None;
+                }
+                let score = match_score(f, self.prefix)?;
+                let name = if self.lower_keywords {
+                    f.to_string()
+                } else {
+                    f.to_uppercase()
+                };
+                Some(Suggestion {
+                    label: format!("{name}()"),
+                    insert: format!("{name}("),
+                    kind: SuggestionKind::Function,
+                    detail: "function".into(),
+                    score: score - 0.3 - i as f64 * 0.001,
                 })
             })
             .collect()
@@ -708,7 +623,66 @@ mod tests {
     #[test]
     fn keywords_and_nothing_in_strings() {
         assert!(labels("sel|").contains(&"select".to_string()));
-        assert!(labels("select * from app.users |").contains(&"WHERE".to_string()));
+        // Right after a table: likely an alias, so keywords only from two letters on.
+        assert!(labels("select * from app.users w|").is_empty());
+        assert_eq!(labels("select * from app.users wh|"), ["where"]);
+        assert_eq!(labels("SELECT * FROM app.users WH|"), ["WHERE"]);
         assert!(labels("select 'fr|om'").is_empty());
+    }
+
+    #[test]
+    fn after_star_only_from() {
+        assert_eq!(labels("select * f|"), ["from"]);
+        assert_eq!(labels("select u.* f|"), ["from"]);
+    }
+
+    #[test]
+    fn operators_only_after_an_operand() {
+        // `where l` starts an operand: columns/functions, never `LIKE`.
+        let l = labels("select * from app.users where l|");
+        assert!(!l.iter().any(|s| s.contains("like")), "{l:?}");
+        assert!(l.contains(&"lower()".to_string()));
+        // After a column: operators and continuations.
+        assert_eq!(labels("select * from app.users where email l|")[0], "like");
+        assert_eq!(
+            labels("select * from app.users where email = 'x' a|")[0],
+            "and"
+        );
+        assert!(labels("select * from app.users order by id d|").contains(&"desc".to_string()));
+        assert_eq!(
+            labels("select * from app.users where name is n|"),
+            ["null", "not null"]
+        );
+        assert_eq!(labels("select * from app.users group |"), ["by"]);
+    }
+
+    #[test]
+    fn dialects() {
+        let words = |driver, sql: &str| -> Vec<String> {
+            let offset = sql.find('|').unwrap();
+            let sql = sql.replace('|', "");
+            let s = crate::schema::tests::sample_for(driver);
+            complete(&sql, offset, &s, &Usage::new(0))
+                .items
+                .into_iter()
+                .map(|i| i.label)
+                .collect()
+        };
+        let sql = "select * from app.users where email |";
+        let pg = words(rusdb_core::DriverKind::Postgres, &sql.replace('|', "i|"));
+        let my = words(rusdb_core::DriverKind::Mysql, &sql.replace('|', "i|"));
+        assert!(pg.contains(&"ilike".to_string()) && !my.contains(&"ilike".to_string()));
+        let my = words(rusdb_core::DriverKind::Mysql, &sql.replace('|', "r|"));
+        assert_eq!(my, ["regexp"]);
+        let pg = words(
+            rusdb_core::DriverKind::Postgres,
+            "insert into app.users values (1) r|",
+        );
+        assert_eq!(pg, ["returning"]);
+        let my = words(
+            rusdb_core::DriverKind::Mysql,
+            "insert into app.users values (1) o|",
+        );
+        assert_eq!(my, ["on duplicate key update"]);
     }
 }

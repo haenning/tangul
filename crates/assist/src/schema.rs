@@ -167,6 +167,10 @@ pub(crate) mod tests {
     /// `app.users(id pk, email, name)`, `app.orders(id pk, user_id → users.id, total)`,
     /// `public.Logs(id)`.
     pub fn sample() -> SchemaIndex {
+        sample_for(DriverKind::Postgres)
+    }
+
+    pub fn sample_for(driver: DriverKind) -> SchemaIndex {
         let table = |schema: &str, name: &str| TableInfo {
             schema: schema.into(),
             name: name.into(),
@@ -205,7 +209,7 @@ pub(crate) mod tests {
                 ref_columns: vec!["id".into()],
             }],
         };
-        SchemaIndex::new(info, DriverKind::Postgres, Some("public".into()))
+        SchemaIndex::new(info, driver, Some("public".into()))
     }
 
     #[test]

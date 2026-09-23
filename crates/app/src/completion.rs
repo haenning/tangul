@@ -84,6 +84,7 @@ impl CompletionProvider for SqlCompletion {
                     label: s.label,
                     kind: Some(match s.kind {
                         SuggestionKind::Keyword => CompletionItemKind::KEYWORD,
+                        SuggestionKind::Function => CompletionItemKind::FUNCTION,
                         SuggestionKind::Table => CompletionItemKind::CLASS,
                         SuggestionKind::View => CompletionItemKind::INTERFACE,
                         SuggestionKind::Column => CompletionItemKind::FIELD,
