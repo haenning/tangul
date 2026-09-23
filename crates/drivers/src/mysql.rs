@@ -1,0 +1,205 @@
+use std::sync::Arc;
+
+use anyhow::{Result, anyhow};
+use async_trait::async_trait;
+use mysql_async::{
+    Conn, Opts, OptsBuilder, Row, SslOpts, Value, consts::StatusFlags, prelude::Queryable,
+};
+use rusdb_core::{ColumnInfo, ConnectConfig, RowBatch, TableInfo, TableKind, TlsMode};
+
+use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink};
+
+pub struct MysqlDriver;
+
+fn opts(cfg: &ConnectConfig, tls: bool) -> Opts {
+    let mut b = OptsBuilder::default()
+        .ip_or_hostname(cfg.host.clone())
+        .tcp_port(cfg.port)
+        .user(Some(cfg.user.clone()))
+        .pass(cfg.password.clone())
+        .prefer_socket(false);
+    if !cfg.database.is_empty() {
+        b = b.db_name(Some(cfg.database.clone()));
+    }
+    if tls {
+        // Encrypt without verification, same semantics as the Postgres driver.
+        // TODO(tls): add verified modes.
+        b = b.ssl_opts(
+            SslOpts::default()
+                .with_danger_accept_invalid_certs(true)
+                .with_danger_skip_domain_validation(true),
+        );
+    }
+    b.into()
+}
+
+#[async_trait]
+impl Driver for MysqlDriver {
+    async fn connect(&self, cfg: &ConnectConfig) -> Result<Box<dyn Session>> {
+        let conn = match cfg.tls {
+            TlsMode::Disable => Conn::new(opts(cfg, false)).await?,
+            TlsMode::Require => Conn::new(opts(cfg, true)).await?,
+            // mysql_async has no native "prefer": try TLS first, fall back to plain.
+            TlsMode::Prefer => match Conn::new(opts(cfg, true)).await {
+                Ok(c) => c,
+                Err(_) => Conn::new(opts(cfg, false)).await?,
+            },
+        };
+        let cancel = Arc::new(MysqlCancel {
+            opts: conn.opts().clone(),
+            conn_id: conn.id(),
+        });
+        Ok(Box::new(MysqlSession {
+            conn: Some(conn),
+            cancel,
+            in_transaction: false,
+        }))
+    }
+}
+
+struct MysqlSession {
+    // Option so `close` can move the connection out for a clean disconnect.
+    conn: Option<Conn>,
+    cancel: Arc<MysqlCancel>,
+    in_transaction: bool,
+}
+
+impl MysqlSession {
+    fn conn(&mut self) -> Result<&mut Conn> {
+        self.conn.as_mut().ok_or_else(|| anyhow!("connection closed"))
+    }
+}
+
+#[async_trait]
+impl Session for MysqlSession {
+    async fn execute(&mut self, sql: &str, row_limit: usize, sink: Sink<'_>) -> Result<()> {
+        let conn = self.conn()?;
+        let result = run_text(conn, sql, row_limit, sink).await;
+        // The server reports the transaction state in every OK packet.
+        self.in_transaction = self
+            .conn
+            .as_ref()
+            .and_then(|c| c.last_ok_packet())
+            .map(|ok| ok.status_flags().contains(StatusFlags::SERVER_STATUS_IN_TRANS))
+            .unwrap_or(self.in_transaction);
+        result
+    }
+
+    fn in_transaction(&self) -> bool {
+        self.in_transaction
+    }
+
+    fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
+        self.cancel.clone()
+    }
+
+    async fn list_tables(&mut self) -> Result<Vec<TableInfo>> {
+        const SQL: &str = "SELECT table_schema, table_name, table_type \
+            FROM information_schema.tables \
+            WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys') \
+            ORDER BY 1, 2";
+        let rows: Vec<(String, String, String)> = self.conn()?.query(SQL).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(schema, name, kind)| TableInfo {
+                schema,
+                name,
+                kind: if kind.contains("VIEW") {
+                    TableKind::View
+                } else {
+                    TableKind::Table
+                },
+            })
+            .collect())
+    }
+
+    fn is_alive(&self) -> bool {
+        self.conn.as_ref().is_some_and(|c| !c.is_disconnected())
+    }
+
+    async fn close(mut self: Box<Self>) {
+        if let Some(conn) = self.conn.take() {
+            let _ = conn.disconnect().await;
+        }
+    }
+}
+
+async fn run_text(conn: &mut Conn, sql: &str, row_limit: usize, sink: Sink<'_>) -> Result<()> {
+    let mut result = conn.query_iter(sql).await?;
+    loop {
+        let columns = result.columns().unwrap_or_else(|| Arc::from([]));
+        if columns.is_empty() {
+            // OK packet only (INSERT/UPDATE/DDL ...).
+            sink(ExecEvent::StatementDone {
+                rows: result.affected_rows(),
+            });
+            // Advances to the next result set, if any.
+            result.next().await?;
+        } else {
+            sink(ExecEvent::ResultStart(
+                columns
+                    .iter()
+                    .map(|c| ColumnInfo {
+                        name: c.name_str().into_owned(),
+                    })
+                    .collect(),
+            ));
+            let mut batch = RowBatch::default();
+            let mut rows = 0usize;
+            let mut truncated = false;
+            // `next` returns None at the end of this set and moves to the next one.
+            while let Some(row) = result.next().await? {
+                rows += 1;
+                if rows > row_limit {
+                    // TODO(fetch-more): stop reading instead of discarding.
+                    if !truncated {
+                        truncated = true;
+                        sink(ExecEvent::Truncated);
+                    }
+                    continue;
+                }
+                push_row(&mut batch, &row, columns.len());
+                if batch.rows() >= BATCH_ROWS {
+                    sink(ExecEvent::Rows(std::mem::take(&mut batch)));
+                }
+            }
+            if !batch.is_empty() {
+                sink(ExecEvent::Rows(batch));
+            }
+            sink(ExecEvent::StatementDone { rows: rows as u64 });
+        }
+        if result.is_empty() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn push_row(batch: &mut RowBatch, row: &Row, cols: usize) {
+    for i in 0..cols {
+        match row.as_ref(i) {
+            None | Some(Value::NULL) => batch.push_cell(None),
+            Some(Value::Bytes(b)) => batch.push_cell(Some(&String::from_utf8_lossy(b))),
+            // Text protocol only yields bytes; other variants are formatted defensively.
+            Some(v) => batch.push_cell(Some(&v.as_sql(true))),
+        }
+    }
+    batch.finish_row();
+}
+
+struct MysqlCancel {
+    opts: Opts,
+    conn_id: u32,
+}
+
+#[async_trait]
+impl CancelHandle for MysqlCancel {
+    /// MySQL has no out-of-band cancel: open a short-lived second connection.
+    async fn cancel(&self) -> Result<()> {
+        let mut conn = Conn::new(self.opts.clone()).await?;
+        conn.query_drop(format!("KILL QUERY {}", self.conn_id))
+            .await?;
+        conn.disconnect().await?;
+        Ok(())
+    }
+}

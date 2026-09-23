@@ -1,0 +1,15 @@
+[package]
+name = "rusdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dirs = "7.0.0"
+gpui-kit = { version = "=0.6.6", features = ["tree-sitter-sql"] }
+keyring = "4.2.0"
+rusdb-core = { version = "0.1.0", path = "../core" }
+rusdb-engine = { version = "0.1.0", path = "../engine" }
+serde = { workspace = true, features = ["derive"] }
+toml = "1.1.6"
