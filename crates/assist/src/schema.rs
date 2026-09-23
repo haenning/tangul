@@ -180,7 +180,11 @@ pub(crate) mod tests {
             schema: schema.into(),
             table: table.into(),
             name: name.into(),
-            data_type: if pk { "integer".into() } else { "text".into() },
+            data_type: if pk || name.ends_with("_id") {
+                "integer".into()
+            } else {
+                "text".into()
+            },
             nullable: !pk,
             primary_key: pk,
         };
