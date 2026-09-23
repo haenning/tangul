@@ -24,7 +24,7 @@ use gpui_kit::*;
 use rusdb_assist::{
     lexer::fingerprint,
     related::related_links,
-    schema::SchemaIndex,
+    schema::{SchemaIndex, quote_ident},
     suggest::{QuerySuggestion, one_line, suggest_for_table},
     usage::{Usage, learn},
 };
@@ -46,6 +46,10 @@ use crate::{
 
 const SIDEBAR_WIDTH: f32 = 260.;
 const ROW_HEIGHT: f32 = 26.;
+/// Sidebar tree geometry: left padding, indent per level, icon width.
+const TREE_PAD: f32 = 10.;
+const TREE_INDENT: f32 = 18.;
+const TREE_ICON: f32 = 14.;
 const BOOKMARK_ROW_HEIGHT: f32 = 40.;
 const HISTORY_LIMIT: usize = 300;
 /// Successful runs after which the toolbar suggests bookmarking a query.
@@ -725,18 +729,28 @@ impl Workspace {
         }
     }
 
-    /// `schema.table`, both quoted, for the active connection's dialect.
+    /// `schema.table`, quoted only where needed.
     fn qualified_name(&self, table: &TableInfo) -> Option<String> {
         let driver = self.active_database()?.driver;
-        let q = |s: &str| match driver {
-            DriverKind::Postgres => format!("\"{}\"", s.replace('"', "\"\"")),
-            DriverKind::Mysql => format!("`{}`", s.replace('`', "``")),
-        };
-        Some(format!("{}.{}", q(&table.schema), q(&table.name)))
+        Some(format!(
+            "{}.{}",
+            quote_ident(driver, &table.schema),
+            quote_ident(driver, &table.name)
+        ))
+    }
+
+    /// The table's name for generated SQL: without the default schema (`public`, or
+    /// the MySQL connection's database) and quoted only where needed.
+    fn sql_name(&self, table: &TableInfo) -> Option<String> {
+        let schema = &self.active_conn()?.schema;
+        match schema.resolve(Some(&table.schema), &table.name) {
+            Some(ix) => Some(schema.sql_name(ix)),
+            None => self.qualified_name(table),
+        }
     }
 
     fn open_table(&mut self, table: &TableInfo, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.qualified_name(table) else {
+        let Some(name) = self.sql_name(table) else {
             return;
         };
         self.run_in_new_tab(
@@ -748,7 +762,7 @@ impl Workspace {
     }
 
     fn count_table(&mut self, table: &TableInfo, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.qualified_name(table) else {
+        let Some(name) = self.sql_name(table) else {
             return;
         };
         self.run_in_new_tab(
@@ -1143,29 +1157,50 @@ impl Workspace {
         let theme = cx.theme();
         let user_id = self.active_user.clone().unwrap_or_default();
         let driver = self.active_database().map(|db| db.driver);
-        let row = h_flex()
-            .id(("sidebar-row", ix))
-            .w_full()
-            .h(px(ROW_HEIGHT))
-            .px_2()
-            .gap_1p5()
-            .items_center()
-            .text_sm()
-            .rounded(theme.radius)
-            .hover(|s| s.bg(theme.sidebar_accent))
-            .cursor_pointer();
+        // Zed-style tree: indentation plus one thin guide line per ancestor level,
+        // expansion shown by the folder icon instead of chevrons.
+        let guide = theme.sidebar_border;
+        let row = |depth: usize| {
+            h_flex()
+                .id(("sidebar-row", ix))
+                .relative()
+                .w_full()
+                .h(px(ROW_HEIGHT))
+                .pl(px(TREE_PAD + depth as f32 * TREE_INDENT))
+                .pr_2()
+                .gap_1p5()
+                .items_center()
+                .text_sm()
+                .hover(|s| s.bg(theme.sidebar_accent))
+                .cursor_pointer()
+                .children((0..depth).map(|level| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(TREE_PAD + level as f32 * TREE_INDENT + TREE_ICON / 2.))
+                        .w(px(1.))
+                        .bg(guide)
+                }))
+        };
+        let folder = |expanded: bool| {
+            Icon::new(if expanded {
+                IconName::FolderOpen
+            } else {
+                IconName::FolderClosed
+            })
+        };
 
         match self.sidebar_rows[ix].clone() {
             SidebarRow::Schema { schema, expanded } => {
                 // A MySQL "schema" is a database.
-                let icon: Icon = match (driver, expanded) {
-                    (Some(DriverKind::Mysql), _) => Icon::new(Lucide::Database),
-                    (_, true) => Icon::new(IconName::FolderOpen),
-                    (_, false) => Icon::new(IconName::FolderClosed),
+                let icon: Icon = match driver {
+                    Some(DriverKind::Mysql) => Icon::new(Lucide::Database),
+                    _ => folder(expanded),
                 };
                 let key = (user_id, schema.clone());
-                row.child(chevron(expanded))
-                    .child(icon.xsmall().text_color(theme.muted_foreground))
+                row(0)
+                    .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(schema))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.expanded_schemas.remove(&key) {
@@ -1186,8 +1221,8 @@ impl Workspace {
                     TableKind::View => "Views",
                 };
                 let key = (user_id, schema, kind);
-                row.pl_5()
-                    .child(chevron(expanded))
+                row(1)
+                    .child(folder(expanded).small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(label))
                     .child(
                         div()
@@ -1224,9 +1259,9 @@ impl Workspace {
                         let list = ws.read(cx).table_suggestions(&menu_table);
                         suggestions_menu(menu, &menu_table.name, list, &weak)
                     });
-                row.pl(px(52.))
+                row(2)
                     .group(group.clone())
-                    .child(icon.xsmall().text_color(theme.muted_foreground))
+                    .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().flex_1().min_w_0().truncate().child(name))
                     .child(
                         div()
@@ -1347,13 +1382,11 @@ impl Workspace {
             .border_r_1()
             .border_color(theme.sidebar_border)
             .child(
+                // Same tab style as the query tabs, split evenly like Zed's panels.
                 TabBar::new("sidebar-tabs")
-                    .underline()
-                    .small()
-                    .px_2()
-                    .child(Tab::new().label("Schema"))
-                    .child(Tab::new().label("Bookmarks"))
-                    .child(Tab::new().label("History"))
+                    .child(Tab::new().label("Schema").flex_1().justify_center())
+                    .child(Tab::new().label("Bookmarks").flex_1().justify_center())
+                    .child(Tab::new().label("History").flex_1().justify_center())
                     .selected_index(
                         SidebarView::ALL
                             .iter()
@@ -1881,15 +1914,6 @@ impl Render for Workspace {
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }
-}
-
-fn chevron(expanded: bool) -> impl IntoElement {
-    Icon::new(if expanded {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronRight
-    })
-    .xsmall()
 }
 
 fn database_menu(
