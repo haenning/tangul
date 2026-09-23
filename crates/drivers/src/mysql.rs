@@ -184,12 +184,26 @@ fn push_row(batch: &mut RowBatch, row: &Row, cols: usize) {
     for i in 0..cols {
         match row.as_ref(i) {
             None | Some(Value::NULL) => batch.push_cell(None),
-            Some(Value::Bytes(b)) => batch.push_cell(Some(&String::from_utf8_lossy(b))),
+            Some(Value::Bytes(b)) => match std::str::from_utf8(b) {
+                Ok(text) => batch.push_cell(Some(text)),
+                // Binary data (BLOB, BINARY, ...) is shown as hex, like Postgres bytea.
+                Err(_) => batch.push_cell(Some(&hex(b))),
+            },
             // Text protocol only yields bytes; other variants are formatted defensively.
             Some(v) => batch.push_cell(Some(&v.as_sql(true))),
         }
     }
     batch.finish_row();
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("0x");
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 struct MysqlCancel {

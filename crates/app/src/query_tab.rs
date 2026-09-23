@@ -37,6 +37,7 @@ enum Status {
     Done {
         elapsed: Duration,
         error: Option<SharedString>,
+        cancelled: bool,
     },
 }
 
@@ -187,12 +188,14 @@ impl QueryTab {
                 elapsed,
                 error,
                 in_transaction,
+                cancelled,
             } => {
                 self.running = None;
                 self.in_transaction = in_transaction;
                 self.status = Status::Done {
                     elapsed,
                     error: error.map(Into::into),
+                    cancelled,
                 };
             }
         }
@@ -293,11 +296,16 @@ impl QueryTab {
         let text: SharedString = match &self.status {
             Status::Idle => "".into(),
             Status::Running => format!("Running… {rows} rows").into(),
-            Status::Done { elapsed, .. } => {
+            Status::Done {
+                elapsed, cancelled, ..
+            } => {
                 let mut s = format!("{} ms", elapsed.as_millis());
                 if self.has_result_set {
                     let noun = if rows == 1 { "row" } else { "rows" };
                     s = format!("{rows} {noun} · {s}");
+                }
+                if *cancelled {
+                    s.push_str(" · cancelled");
                 }
                 if self.truncated {
                     s.push_str(&format!(" · limited to {} rows", rusdb_engine::ROW_LIMIT));

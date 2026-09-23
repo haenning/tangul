@@ -1,0 +1,66 @@
+# Developer shortcuts. `make` lists the targets.
+
+PG_URL    ?= postgres:@127.0.0.1:55432/postgres
+MYSQL_URL ?= root:@127.0.0.1:53306/app
+DEV_CONFIG := target/dev-config
+
+.DEFAULT_GOAL := help
+.PHONY: help setup db-up db-down db-reset db-logs psql mysql run run-release run-dev \
+        test test-live fmt lint ci
+
+help: ## List targets
+	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+
+setup: ## Check required tools
+	@command -v rustup >/dev/null || { echo "missing: rustup (https://rustup.rs)"; exit 1; }
+	@command -v docker >/dev/null || { echo "missing: docker (needed for dev databases)"; exit 1; }
+	@if [ "$$(uname)" = "Darwin" ] && ! xcrun -f metal >/dev/null 2>&1; then \
+		echo "missing: Metal toolchain (GPUI compiles its shaders with it)"; \
+		echo "  run: xcodebuild -downloadComponent MetalToolchain"; exit 1; fi
+	@rustup show active-toolchain >/dev/null && echo "ok"
+
+db-up: ## Start dev Postgres (:55432) and MySQL (:53306) with sample data
+	docker compose up -d --wait
+
+db-down: ## Stop dev databases (data is kept)
+	docker compose down
+
+db-reset: ## Drop dev databases and re-seed from dev/seed/
+	docker compose down -v
+	docker compose up -d --wait
+
+db-logs: ## Follow dev database logs
+	docker compose logs -f
+
+psql: ## Shell into dev Postgres
+	docker compose exec postgres psql -U postgres
+
+mysql: ## Shell into dev MySQL
+	docker compose exec mysql mysql -uroot --default-character-set=utf8mb4 app
+
+run: ## Run the app (debug) with your normal profiles
+	cargo run
+
+run-release: ## Run the app (release) with your normal profiles
+	cargo run --release
+
+run-dev: db-up ## Start dev databases and run the app with dev profiles only
+	@mkdir -p $(DEV_CONFIG)
+	@[ -f $(DEV_CONFIG)/profiles.toml ] || cp dev/profiles.toml $(DEV_CONFIG)/profiles.toml
+	RUSDB_CONFIG_DIR=$(DEV_CONFIG) cargo run
+
+test: ## Unit tests (no databases needed)
+	cargo test --workspace
+
+test-live: db-up ## Integration tests against the dev databases
+	RUSDB_TEST_PG=$(PG_URL) RUSDB_TEST_MYSQL=$(MYSQL_URL) cargo test -p rusdb-engine
+
+fmt: ## Format code
+	cargo fmt --all
+
+lint: ## Format check + clippy (warnings are errors)
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets -- -D warnings
+
+ci: lint test test-live ## Everything CI runs

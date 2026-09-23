@@ -1,0 +1,23 @@
+# Profiles for the docker-compose dev databases. `make run-dev` copies this file to
+# target/dev-config/ (once) and points the app there, so your real profiles are untouched.
+# No passwords: the dev databases use passwordless auth.
+
+[[profiles]]
+id = "dev-postgres"
+name = "dev postgres (docker)"
+driver = "postgres"
+host = "127.0.0.1"
+port = 55432
+user = "postgres"
+database = "postgres"
+tls = "disable"
+
+[[profiles]]
+id = "dev-mysql"
+name = "dev mysql (docker)"
+driver = "mysql"
+host = "127.0.0.1"
+port = 53306
+user = "root"
+database = "app"
+tls = "disable"

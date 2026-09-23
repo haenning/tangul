@@ -1,5 +1,6 @@
 //! Connection profiles as TOML in the config dir
-//! (`~/Library/Application Support/rusdb/profiles.toml` on macOS).
+//! (`~/Library/Application Support/rusdb/profiles.toml` on macOS, overridable with
+//! `RUSDB_CONFIG_DIR`, used by `make run-dev`).
 //! Passwords go to the Keychain, never into the file.
 
 use std::{collections::HashMap, path::PathBuf};
@@ -26,7 +27,10 @@ pub struct Store {
 
 impl Store {
     pub fn load() -> Self {
-        let path = dirs::config_dir().map(|d| d.join("rusdb").join("profiles.toml"));
+        let dir = std::env::var_os("RUSDB_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| dirs::config_dir().map(|d| d.join("rusdb")));
+        let path = dir.map(|d| d.join("profiles.toml"));
         let profiles = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())

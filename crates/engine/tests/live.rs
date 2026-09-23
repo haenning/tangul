@@ -1,7 +1,7 @@
 //! Integration tests against real servers. Skipped unless the env vars are set, e.g.:
-//!   RUSDB_TEST_PG=postgres:postgres@127.0.0.1:5432/postgres
-//!   RUSDB_TEST_MYSQL=rusdb:rusdb@127.0.0.1:3306/app
-//! (`docker compose up -d` provides both, see docker-compose.yml.)
+//!   RUSDB_TEST_PG=postgres:@127.0.0.1:55432/postgres
+//!   RUSDB_TEST_MYSQL=root:@127.0.0.1:53306/app
+//! (`make test-live` starts the databases from docker-compose.yml and sets both.)
 
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ fn config(var: &str) -> Option<ConnectConfig> {
         host: host.into(),
         port: port.parse().ok()?,
         user: user.into(),
-        password: Some(password.into()),
+        password: (!password.is_empty()).then(|| password.into()),
         database: database.into(),
         tls: TlsMode::Prefer,
     })
@@ -36,6 +36,7 @@ struct Outcome {
     error: Option<String>,
     in_transaction: bool,
     truncated: bool,
+    cancelled: bool,
 }
 
 impl Harness {
@@ -84,6 +85,7 @@ impl Harness {
             error: None,
             in_transaction: false,
             truncated: false,
+            cancelled: false,
         };
         loop {
             if let Event::Query { query: q, event } = self.next().await {
@@ -98,10 +100,12 @@ impl Harness {
                     QueryEvent::Finished {
                         error,
                         in_transaction,
+                        cancelled,
                         ..
                     } => {
                         out.error = error;
                         out.in_transaction = in_transaction;
+                        out.cancelled = cancelled;
                         return out;
                     }
                 }
@@ -183,10 +187,12 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
     let q = h.start(tab_a, sleep_sql);
     tokio::time::sleep(Duration::from_millis(500)).await;
     h.engine.send(Command::Cancel { query: q });
+    let started = std::time::Instant::now();
     let out = h.wait(q).await;
+    assert!(out.cancelled, "cancel should be reported");
     assert!(
-        out.error.is_some(),
-        "cancelled query should report an error"
+        started.elapsed() < Duration::from_secs(10),
+        "cancelled query should stop early"
     );
     assert_eq!(h.run(tab_a, "SELECT 1").await.error, None);
 }
@@ -229,4 +235,8 @@ async fn mysql() {
         .await;
     assert_eq!(out.error, None);
     assert_eq!(out.result.unwrap().row_count(), 2);
+
+    // Binary data is shown as hex instead of broken UTF-8.
+    let out = h.run(TabId(1), "SELECT UNHEX('DEADBEEF') AS b").await;
+    assert_eq!(out.result.unwrap().cell(0, 0), Some("0xdeadbeef"));
 }

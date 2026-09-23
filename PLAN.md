@@ -68,9 +68,15 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
   not yet verified on a Mac. ⌘↵ runs the selection or the whole buffer.
 - Simple own layout (sidebar | tab bar + tab content | status bar), stock components and
   the default dark theme. No custom styling system.
-- Pinned versions (`gpui-kit = "=0.6.6"`, toolchain 1.98) — GPUI API churn is the main
-  risk, upgrades are deliberate.
-- Zed's own editor is GPL-3.0: don't copy code from it into this Apache-2.0 project.
+- Pinned versions (`gpui-kit = "=0.6.6"`, Rust 1.98.1 = Zed's toolchain) — GPUI API
+  churn is the main risk, upgrades are deliberate.
+
+### D8 — Open source, Apache-2.0
+- Not a product. License Apache-2.0 (same as GPUI and gpui-component). No dependency
+  forces a license: all are permissive; the only copyleft ones are MPL-2.0 (file-level,
+  fine to use).
+- Zed's own editor/app crates are GPL-3.0: don't copy code from them.
+- Distribution: Homebrew (tap building from source) first; signing/notarization later.
 
 ---
 
@@ -106,13 +112,16 @@ crates/
 3. Cell detail view + copy (cell / row / TSV).
 4. Columns/indexes in the sidebar (lazy per table).
 5. Fetch more rows via server-side cursors instead of discarding beyond the limit.
-6. `.app` bundle (`cargo-bundle`), signing/notarization.
+6. Homebrew tap; `.app` bundle (`cargo-bundle`); signing/notarization much later.
 
 ---
 
 ## 4. Dev workflow
 
-- `docker compose up -d` → Postgres 16 + MySQL 8.4 for local testing.
-- `cargo test -p rusdb-engine` with `RUSDB_TEST_PG` / `RUSDB_TEST_MYSQL` set runs the live
-  tests (queries, NULLs, errors, pinning, release, cancel, row limit) against real servers.
+- `make run-dev`: dev Postgres (:55432) + MySQL (:53306) via docker compose with sample
+  data (`dev/seed/`), app started with separate passwordless dev profiles.
+- `make test-live`: engine integration tests (queries, NULLs, errors, pinning, release,
+  cancel, row limit, binary data) against the dev databases.
+- CI: Linux job = fmt, clippy, tests incl. live DB tests (service containers);
+  macOS job = clippy for the whole workspace + app build.
 - Deps are optimized in dev builds (`[profile.dev.package."*"] opt-level = 2`).

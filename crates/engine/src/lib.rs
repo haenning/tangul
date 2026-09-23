@@ -83,6 +83,9 @@ pub enum QueryEvent {
         error: Option<String>,
         /// The tab's session stays pinned while this is true.
         in_transaction: bool,
+        /// The user cancelled the query. Not every cancel produces an error (MySQL's
+        /// `SLEEP()` just returns 1), so this is reported separately.
+        cancelled: bool,
     },
 }
 
@@ -120,10 +123,17 @@ pub fn start() -> (EngineHandle, async_channel::Receiver<Event>) {
 
 type Events = async_channel::Sender<Event>;
 
+struct RunningQuery {
+    cancel: Arc<dyn CancelHandle>,
+    cancel_requested: bool,
+}
+
+type Running = Arc<Mutex<HashMap<QueryId, RunningQuery>>>;
+
 struct Engine {
     events: Events,
     pools: HashMap<ConnId, Arc<Pool>>,
-    running: Arc<Mutex<HashMap<QueryId, Arc<dyn CancelHandle>>>>,
+    running: Running,
 }
 
 impl Engine {
@@ -209,6 +219,7 @@ impl Engine {
                         Duration::ZERO,
                         Some("not connected".into()),
                         false,
+                        false,
                     );
                     return;
                 };
@@ -217,7 +228,11 @@ impl Engine {
                 tokio::spawn(execute(pool, events, running, query, tab, conn, sql));
             }
             Command::Cancel { query } => {
-                let handle = self.running.lock().unwrap().get(&query).cloned();
+                // A query still waiting for a free connection can't be cancelled yet.
+                let handle = self.running.lock().unwrap().get_mut(&query).map(|r| {
+                    r.cancel_requested = true;
+                    r.cancel.clone()
+                });
                 if let Some(handle) = handle {
                     tokio::spawn(async move {
                         if let Err(e) = handle.cancel().await {
@@ -249,7 +264,7 @@ impl Engine {
 async fn execute(
     pool: Arc<Pool>,
     events: Events,
-    running: Arc<Mutex<HashMap<QueryId, Arc<dyn CancelHandle>>>>,
+    running: Running,
     query: QueryId,
     tab: TabId,
     conn: ConnId,
@@ -265,15 +280,19 @@ async fn execute(
                 started.elapsed(),
                 Some(format!("{e:#}")),
                 false,
+                false,
             );
             return;
         }
     };
     send_stats(&events, conn, &pool);
-    running
-        .lock()
-        .unwrap()
-        .insert(query, lease.session.cancel_handle());
+    running.lock().unwrap().insert(
+        query,
+        RunningQuery {
+            cancel: lease.session.cancel_handle(),
+            cancel_requested: false,
+        },
+    );
 
     let mut sink = |ev: ExecEvent| {
         send(
@@ -286,7 +305,11 @@ async fn execute(
     };
     let result = lease.session.execute(&sql, ROW_LIMIT, &mut sink).await;
 
-    running.lock().unwrap().remove(&query);
+    let cancelled = running
+        .lock()
+        .unwrap()
+        .remove(&query)
+        .is_some_and(|r| r.cancel_requested);
     let in_tx = lease.session.in_transaction();
     finish(
         &events,
@@ -294,6 +317,7 @@ async fn execute(
         started.elapsed(),
         result.err().map(|e| format!("{e:#}")),
         in_tx,
+        cancelled,
     );
     pool.release(Some(tab), lease);
     send_stats(&events, conn, &pool);
@@ -326,7 +350,14 @@ fn close_all(leases: Vec<Lease>, report: Option<(Events, ConnId, Arc<Pool>)>) {
     });
 }
 
-fn finish(events: &Events, query: QueryId, elapsed: Duration, error: Option<String>, in_tx: bool) {
+fn finish(
+    events: &Events,
+    query: QueryId,
+    elapsed: Duration,
+    error: Option<String>,
+    in_transaction: bool,
+    cancelled: bool,
+) {
     send(
         events,
         Event::Query {
@@ -334,7 +365,8 @@ fn finish(events: &Events, query: QueryId, elapsed: Duration, error: Option<Stri
             event: QueryEvent::Finished {
                 elapsed,
                 error,
-                in_transaction: in_tx,
+                in_transaction,
+                cancelled,
             },
         },
     );

@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Backend crates + live tests against real Postgres and MySQL (service containers only
+  # exist on Linux runners). The GPUI app is built on macOS below.
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-retries 30
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: app
+        ports: ["53306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval 2s --health-retries 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy -p rusdb-core -p rusdb-drivers -p rusdb-engine --all-targets -- -D warnings
+      - name: Tests (incl. live DB tests)
+        env:
+          RUSDB_TEST_PG: postgres:@127.0.0.1:55432/postgres
+          RUSDB_TEST_MYSQL: root:@127.0.0.1:53306/app
+        run: cargo test -p rusdb-core -p rusdb-drivers -p rusdb-engine
+
+  app:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Metal toolchain (GPUI compiles its shaders at build time)
+        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build -p rusdb
+      - name: Unit tests
+        run: cargo test -p rusdb-core -p rusdb-drivers
