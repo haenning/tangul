@@ -28,9 +28,10 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
+    edit::row_edit,
     guard,
     lexer::fingerprint,
-    related::related_links,
+    related::{rank_links, related_links},
     schema::{SchemaIndex, quote_ident},
     suggest::{QuerySuggestion, one_line, suggest_for_table},
     usage::{Usage, learn},
@@ -438,6 +439,16 @@ impl Workspace {
                     if let Some(conn) = conn {
                         t.set_conn(conn, cx);
                         cx.emit(TabEvent::Run(sql.clone()));
+                    }
+                });
+            }
+            TabEvent::OpenSql { title, sql } => {
+                let conn = tab.read(cx).conn.clone();
+                let new = self.add_tab(sql, window, cx);
+                new.update(cx, |t, cx| {
+                    t.title = title.clone().into();
+                    if let Some(conn) = conn {
+                        t.set_conn(conn, cx);
                     }
                 });
             }
@@ -883,20 +894,31 @@ impl Workspace {
             eprintln!("could not record history: {e:#}");
         }
         if succeeded {
-            // Offer related rows (foreign keys) in the result's context menu.
-            if let (Some(tab), Some(state)) = (&tab, self.conns.get(&run.user_id)) {
-                let columns = tab.read(cx).result_columns(cx);
-                let links = related_links(&run.sql, &columns, &state.schema);
-                tab.update(cx, |t, cx| t.set_related(links, cx));
-            }
             if let Some(state) = self.conns.get(&run.user_id) {
                 let learned = learn(&run.sql, &state.schema);
                 let now = now_ms() / 1000;
                 if let Err(e) = self.local.record_usage(&db_id, &learned, now) {
                     eprintln!("could not record usage: {e:#}");
                 }
-                self.usage
-                    .insert(db_id.clone(), Arc::new(self.local.usage(&db_id, now)));
+                let usage = Arc::new(self.local.usage(&db_id, now));
+                self.usage.insert(db_id.clone(), usage.clone());
+                // Related rows (foreign keys, most used first) and UPDATE / DELETE
+                // statements in the result's context menu.
+                if let Some(tab) = &tab {
+                    let columns = tab.read(cx).result_columns(cx);
+                    let mut links = related_links(&run.sql, &columns, &state.schema);
+                    if links.len() > 1 {
+                        let bookmarked: Vec<_> = self
+                            .local
+                            .bookmarks_for(Some(&db_id))
+                            .iter()
+                            .flat_map(|b| learn(&b.sql, &state.schema))
+                            .collect();
+                        rank_links(&mut links, &usage, &bookmarked);
+                    }
+                    let edit = row_edit(&run.sql, &columns, &state.schema);
+                    tab.update(cx, |t, cx| t.set_row_actions(links, edit, cx));
+                }
                 self.sync_assist_for_db(&db_id);
             }
             let runs = self.local.runs(&db_id, &fp);

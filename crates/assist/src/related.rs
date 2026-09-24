@@ -6,9 +6,14 @@ use rusdb_core::DriverKind;
 
 use crate::analyze::{analyze, statements};
 use crate::schema::SchemaIndex;
+use crate::usage::{Usage, UsageKind, join_key, table_key};
 
 /// Most rows turned into one filter; more would make an unwieldy query.
 const MAX_KEYS: usize = 1000;
+/// Having joined over a link's key says more than having queried its target table.
+const JOIN_WEIGHT: f64 = 3.0;
+/// A bookmark counts like this many recent runs.
+const BOOKMARK_WEIGHT: f64 = 5.0;
 
 /// A table reachable from the result's table through a foreign key.
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +30,10 @@ pub struct RelatedLink {
     source_cols: Vec<usize>,
     numeric: Vec<bool>,
     driver: DriverKind,
+    /// Usage key of the target table.
+    target_key: String,
+    /// Usage key per key column pair (a join over the link).
+    join_keys: Vec<String>,
 }
 
 impl RelatedLink {
@@ -87,19 +96,7 @@ impl RelatedLink {
 /// The foreign-key links of a result, if it comes from exactly one known table and
 /// contains the key columns. `columns` are the result's column names.
 pub fn related_links(sql: &str, columns: &[String], schema: &SchemaIndex) -> Vec<RelatedLink> {
-    // The grid shows the last statement's result.
-    let Some(stmt) = statements(sql)
-        .into_iter()
-        .map(|(s, e)| &sql[s..e])
-        .rfind(|s| !s.trim().is_empty())
-    else {
-        return Vec::new();
-    };
-    let refs = analyze(stmt).tables;
-    let [table_ref] = &refs[..] else {
-        return Vec::new();
-    };
-    let Some(ix) = schema.resolve(table_ref.schema.as_deref(), &table_ref.name) else {
+    let Some(ix) = result_table(sql, schema) else {
         return Vec::new();
     };
     let result_col = |name: &str| columns.iter().position(|c| c.eq_ignore_ascii_case(name));
@@ -111,6 +108,7 @@ pub fn related_links(sql: &str, columns: &[String], schema: &SchemaIndex) -> Vec
             .is_some_and(|c| numeric_type(&c.data_type))
     };
     let driver = schema.driver();
+    let own_table = schema.table(ix);
 
     let mut links = Vec::new();
     for fk in schema.foreign_keys() {
@@ -136,7 +134,18 @@ pub fn related_links(sql: &str, columns: &[String], schema: &SchemaIndex) -> Vec
             else {
                 continue;
             };
-            let name = schema.table(target).name.clone();
+            let target_table = schema.table(target);
+            let name = target_table.name.clone();
+            let join_keys = own
+                .iter()
+                .zip(theirs.iter())
+                .map(|(o, t)| {
+                    join_key(
+                        (&own_table.schema, &own_table.name, o),
+                        (&target_table.schema, &target_table.name, t),
+                    )
+                })
+                .collect();
             let arrow = if incoming { "=" } else { "→" };
             let link = RelatedLink {
                 title: format!("{name} ({} {arrow} {})", theirs.join(", "), own.join(", ")),
@@ -147,6 +156,8 @@ pub fn related_links(sql: &str, columns: &[String], schema: &SchemaIndex) -> Vec
                 source_cols,
                 numeric: own.iter().map(|c| is_numeric(c)).collect(),
                 driver,
+                target_key: table_key(&target_table.schema, &target_table.name),
+                join_keys,
             };
             if !links.contains(&link) {
                 links.push(link);
@@ -158,7 +169,40 @@ pub fn related_links(sql: &str, columns: &[String], schema: &SchemaIndex) -> Vec
     links
 }
 
-fn numeric_type(data_type: &str) -> bool {
+/// Sorts links by how much the user works with them: joins over the link's key and
+/// queries of its target table, from the history (`usage`) and from bookmarks
+/// (`bookmarked`: what [`crate::usage::learn`] finds in each bookmark's SQL).
+/// Ties keep the given order.
+pub fn rank_links(links: &mut [RelatedLink], usage: &Usage, bookmarked: &[(UsageKind, String)]) {
+    let score = |kind: UsageKind, key: &str| {
+        let marks = bookmarked
+            .iter()
+            .filter(|(k, s)| *k == kind && s == key)
+            .count();
+        usage.score(kind, key) + BOOKMARK_WEIGHT * marks as f64
+    };
+    let rank = |l: &RelatedLink| {
+        let joins: f64 = l.join_keys.iter().map(|k| score(UsageKind::Join, k)).sum();
+        JOIN_WEIGHT * joins + score(UsageKind::Table, &l.target_key)
+    };
+    links.sort_by(|a, b| rank(b).total_cmp(&rank(a)));
+}
+
+/// The table a result comes from, if the script's last statement (the one the grid
+/// shows) reads exactly one known table.
+pub(crate) fn result_table(sql: &str, schema: &SchemaIndex) -> Option<usize> {
+    let stmt = statements(sql)
+        .into_iter()
+        .map(|(s, e)| &sql[s..e])
+        .rfind(|s| !s.trim().is_empty())?;
+    let refs = analyze(stmt).tables;
+    let [table_ref] = &refs[..] else {
+        return None;
+    };
+    schema.resolve(table_ref.schema.as_deref(), &table_ref.name)
+}
+
+pub(crate) fn numeric_type(data_type: &str) -> bool {
     let t = data_type.to_ascii_lowercase();
     [
         "int",
@@ -181,7 +225,7 @@ fn numeric_type(data_type: &str) -> bool {
 
 /// A SQL literal for a text-protocol value: numbers as they are (for numeric
 /// columns), everything else as a quoted string.
-fn literal(value: &str, numeric: bool, driver: DriverKind) -> String {
+pub(crate) fn literal(value: &str, numeric: bool, driver: DriverKind) -> String {
     let plain_number = !value.is_empty()
         && value
             .chars()
@@ -266,6 +310,69 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    #[test]
+    fn ranks_by_joins_tables_and_bookmarks() {
+        use rusdb_core::{ColumnMeta, ForeignKey, SchemaInfo, TableInfo, TableKind};
+        let table = |name: &str| TableInfo {
+            schema: "public".into(),
+            name: name.into(),
+            kind: TableKind::Table,
+        };
+        let col = |table: &str, name: &str| ColumnMeta {
+            schema: "public".into(),
+            table: table.into(),
+            name: name.into(),
+            data_type: "integer".into(),
+            nullable: false,
+            primary_key: name == "id",
+        };
+        let fk = |table: &str| ForeignKey {
+            name: format!("{table}_fk"),
+            schema: "public".into(),
+            table: table.into(),
+            columns: vec!["user_id".into()],
+            ref_schema: "public".into(),
+            ref_table: "users".into(),
+            ref_columns: vec!["id".into()],
+        };
+        let names = ["users", "logins", "orders", "tickets"];
+        let s = SchemaIndex::new(
+            SchemaInfo {
+                tables: names.iter().map(|n| table(n)).collect(),
+                columns: std::iter::once(col("users", "id"))
+                    .chain(
+                        names[1..]
+                            .iter()
+                            .flat_map(|t| [col(t, "id"), col(t, "user_id")]),
+                    )
+                    .collect(),
+                foreign_keys: names[1..].iter().map(|t| fk(t)).collect(),
+            },
+            DriverKind::Postgres,
+            Some("public".into()),
+        );
+        let mut links = related_links("select * from users", &cols(&["id"]), &s);
+        let order =
+            |links: &[RelatedLink]| links.iter().map(|l| l.table.clone()).collect::<Vec<_>>();
+        assert_eq!(order(&links), ["logins", "orders", "tickets"]);
+
+        let mut usage = Usage::new(0);
+        // Queried tickets twice, joined orders once: the join weighs more.
+        usage.record(UsageKind::Table, table_key("public", "tickets"));
+        usage.record(UsageKind::Table, table_key("public", "tickets"));
+        usage.record(
+            UsageKind::Join,
+            join_key(("public", "users", "id"), ("public", "orders", "user_id")),
+        );
+        rank_links(&mut links, &usage, &[]);
+        assert_eq!(order(&links), ["orders", "tickets", "logins"]);
+
+        // A bookmark on logins outweighs both.
+        let bookmarked = crate::usage::learn("select * from logins where user_id = 1", &s);
+        rank_links(&mut links, &usage, &bookmarked);
+        assert_eq!(order(&links), ["logins", "orders", "tickets"]);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::analyze::statements;
 use rusdb_assist::lexer::tokenize;
-use rusdb_assist::related::RelatedLink;
+use rusdb_assist::{edit::RowEdit, related::RelatedLink};
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
 use rusdb_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
 
@@ -42,6 +42,7 @@ pub struct TabConn {
     pub driver: DriverKind,
 }
 
+#[derive(Clone)]
 pub enum TabEvent {
     /// The user wants to run this SQL; the workspace assigns a QueryId.
     Run(String),
@@ -56,6 +57,9 @@ pub enum TabEvent {
     /// Open (and run) a query for rows related to the selected ones, on this tab's
     /// connection.
     OpenRelated { title: String, sql: String },
+    /// Open SQL for the selected rows in a new tab on this tab's connection, without
+    /// running it (UPDATE / DELETE statements).
+    OpenSql { title: String, sql: String },
 }
 
 enum Status {
@@ -216,10 +220,19 @@ impl QueryTab {
         self.table.read(cx).delegate().column_names()
     }
 
-    /// Foreign-key links offered in the result rows' context menu.
-    pub fn set_related(&mut self, links: Vec<RelatedLink>, cx: &mut Context<Self>) {
-        self.table
-            .update(cx, |t, _| t.delegate_mut().related = links);
+    /// What the result rows' context menu offers besides copying: foreign-key links
+    /// (most used first) and UPDATE / DELETE statements.
+    pub fn set_row_actions(
+        &mut self,
+        links: Vec<RelatedLink>,
+        edit: Option<RowEdit>,
+        cx: &mut Context<Self>,
+    ) {
+        self.table.update(cx, |t, _| {
+            let d = t.delegate_mut();
+            d.related = links;
+            d.edit = edit;
+        });
     }
 
     /// Rows returned by the last result set, or affected by the last statement.
