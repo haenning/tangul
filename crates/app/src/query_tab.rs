@@ -8,6 +8,7 @@ use gpui_kit::component::input::RopeExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
+    chart::{BarChart, LineChart},
     h_flex,
     input::{CompletionProvider, Editor, EditorState, InputEvent},
     resizable::{ResizableState, resizable_panel, v_resizable},
@@ -17,6 +18,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::analyze::statements;
+use rusdb_assist::chart::{ChartData, ChartKind, chart_data};
 use rusdb_assist::lexer::tokenize;
 use rusdb_assist::related::RelatedLink;
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
@@ -103,7 +105,14 @@ pub struct QueryTab {
     has_result_set: bool,
     truncated: bool,
     last_rows: Option<u64>,
+    /// The last result as a chart, or why it cannot be one.
+    chart: Result<Rc<ChartData>, SharedString>,
+    /// Show the chart instead of the grid when there is one; kept across runs.
+    show_chart: bool,
 }
+
+/// Why there is no chart before a result is complete.
+const NO_RESULT: &str = "Run a query that returns rows to chart them";
 
 impl EventEmitter<TabEvent> for QueryTab {}
 
@@ -160,6 +169,8 @@ impl QueryTab {
             has_result_set: false,
             truncated: false,
             last_rows: None,
+            chart: Err(NO_RESULT.into()),
+            show_chart: false,
         }
     }
 
@@ -303,6 +314,7 @@ impl QueryTab {
         self.has_result_set = false;
         self.truncated = false;
         self.last_rows = None;
+        self.chart = Err(NO_RESULT.into());
         self.table.update(cx, |t, cx| {
             t.delegate_mut().clear();
             t.refresh(cx);
@@ -349,6 +361,11 @@ impl QueryTab {
                 }
                 self.running = None;
                 self.in_transaction = in_transaction;
+                if error.is_none() && self.has_result_set {
+                    let sql = self.run_origin.as_ref().map_or("", |(_, sql)| sql.as_str());
+                    let result = &self.table.read(cx).delegate().result;
+                    self.chart = chart_data(sql, result).map(Rc::new).map_err(Into::into);
+                }
                 self.status = Status::Done {
                     elapsed,
                     error: error.map(Into::into),
@@ -545,6 +562,84 @@ impl QueryTab {
             })
     }
 
+    /// Chart button state for the status bar: `Ok(suggested)` if the result can be
+    /// charted (suggested for grouped queries), otherwise why not.
+    pub fn chart_state(&self) -> Result<bool, SharedString> {
+        self.chart.as_ref().map(|c| c.grouped).map_err(Clone::clone)
+    }
+
+    pub fn chart_shown(&self) -> bool {
+        self.show_chart && self.chart.is_ok()
+    }
+
+    pub fn toggle_chart(&mut self, cx: &mut Context<Self>) {
+        self.show_chart = !self.chart_shown();
+        cx.notify();
+    }
+
+    /// One chart per value column, stacked, sharing the x labels of column 0.
+    fn render_chart(&self, data: &ChartData, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let colors = [theme.chart_1, theme.chart_2, theme.chart_3, theme.chart_4];
+        // Leave room between x labels: about a dozen per chart.
+        let tick_margin = (data.x.len() / 12).max(1);
+        v_flex()
+            .size_full()
+            .p_3()
+            .gap_3()
+            .when(data.unsorted, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "{} is not in ascending order; add ORDER BY to plot it over time",
+                            data.x_name
+                        )),
+                )
+            })
+            .children(data.series.iter().enumerate().map(|(i, series)| {
+                // NULL values are left out, not drawn as 0.
+                let points: Vec<(SharedString, f64)> = data
+                    .x
+                    .iter()
+                    .zip(&series.values)
+                    .filter_map(|(x, v)| Some((SharedString::from(x.clone()), (*v)?)))
+                    .collect();
+                let color = colors[i % colors.len()];
+                let chart = match data.kind {
+                    ChartKind::Bar => BarChart::new(points)
+                        .id(("chart", i))
+                        .name(series.name.clone())
+                        .band(|p: &(SharedString, f64)| p.0.clone())
+                        .value(|p: &(SharedString, f64)| p.1)
+                        .fill(move |_, _, _, _| color)
+                        .tick_margin(tick_margin)
+                        .into_any_element(),
+                    ChartKind::Line => LineChart::new(points)
+                        .id(("chart", i))
+                        .name(series.name.clone())
+                        .x(|p: &(SharedString, f64)| p.0.clone())
+                        .y(|p: &(SharedString, f64)| p.1)
+                        .stroke(color)
+                        .tick_margin(tick_margin)
+                        .into_any_element(),
+                };
+                v_flex()
+                    .flex_1()
+                    .min_h(px(80.))
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(series.name.clone()),
+                    )
+                    .child(div().flex_1().min_h_0().child(chart))
+            }))
+            .into_any_element()
+    }
+
     fn render_results(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         match &self.status {
@@ -574,6 +669,10 @@ impl QueryTab {
                 .text_color(theme.muted_foreground)
                 .child("Run a query to see results")
                 .into_any_element(),
+            Status::Done { .. } if self.chart_shown() => match &self.chart {
+                Ok(data) => self.render_chart(data, cx),
+                Err(_) => unreachable!("chart_shown checks it"),
+            },
             _ => DataTable::new(&self.table)
                 .stripe(true)
                 .xsmall()

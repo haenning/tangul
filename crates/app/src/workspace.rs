@@ -2283,14 +2283,40 @@ impl Workspace {
     /// tools; the active query's timing on the right.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (query_text, running) = self
+        let (query_text, running, chart) = self
             .tabs
             .get(self.active_tab)
             .map(|tab| {
                 let t = tab.read(cx);
-                (t.status_text(cx), t.is_running())
+                let chart = (t.chart_state(), t.chart_shown());
+                (
+                    t.status_text(cx),
+                    t.is_running(),
+                    Some((tab.clone(), chart)),
+                )
             })
             .unwrap_or_default();
+        // Toggles the active tab's result between grid and chart. Suggested (not
+        // ghost) for grouped queries; disabled, with the reason, when not chartable.
+        let chart_button = chart.map(|(tab, (state, shown))| {
+            let button = Button::new("chart")
+                .icon(Icon::new(Lucide::ChartColumn))
+                .xsmall()
+                .selected(shown);
+            let button = match &state {
+                Ok(true) if !shown => button.outline(),
+                _ => button.ghost(),
+            };
+            let (enabled, tooltip): (bool, SharedString) = match state {
+                Ok(_) if shown => (true, "Show the table".into()),
+                Ok(_) => (true, "Show as chart".into()),
+                Err(reason) => (false, reason),
+            };
+            button
+                .disabled(!enabled)
+                .tooltip(tooltip)
+                .on_click(move |_, _, cx| tab.update(cx, |t, cx| t.toggle_chart(cx)))
+        });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
         let panels = [
             SidebarView::Schema,
@@ -2341,7 +2367,9 @@ impl Workspace {
             ))
             .child(div().flex_1())
             .when(running, |this| this.child(Spinner::new().xsmall()))
-            .child(div().pr_2().child(query_text))
+            .child(div().pr_1().child(query_text))
+            .children(chart_button)
+            .child(div().w_1())
     }
 
     /// Bottom-bar panel button: shows that panel, or hides the sidebar if it is the

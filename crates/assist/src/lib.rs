@@ -2,6 +2,7 @@
 //! completion, usage-based ranking and query suggestions.
 
 pub mod analyze;
+pub mod chart;
 pub mod complete;
 pub mod grammar;
 pub mod guard;
