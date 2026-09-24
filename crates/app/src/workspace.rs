@@ -48,7 +48,7 @@ use crate::{
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
     connection_form::{ConnectionForm, FormMode, FormOutput},
-    local::{Bookmark, HistoryEntry, Local, NewHistory},
+    local::{Bookmark, HistoryEntry, Local, NewHistory, bare_sql},
     palette::{self, PaletteAction, PaletteKind},
     query_tab::{QueryTab, TabConn, TabEvent},
     settings,
@@ -476,6 +476,22 @@ impl Workspace {
         };
         let query = QueryId(self.next_id());
         let user_id = self.conn_users.get(&conn.id).cloned().unwrap_or_default();
+        // Running a bookmarked query: the tab shows the bookmark's name, and its
+        // bookmark button edits that bookmark. Only when the whole editor ran, since
+        // the button saves the whole editor.
+        let whole_editor = bare_sql(&tab.read(cx).sql(cx)) == bare_sql(sql);
+        let bookmark = self
+            .find_user(&user_id)
+            .filter(|_| whole_editor)
+            .and_then(|(db, _)| self.local.bookmark_for_sql(&db.id, sql));
+        if let Some(bookmark) = bookmark
+            && tab.read(cx).bookmark_id.as_deref() != Some(bookmark.id.as_str())
+        {
+            tab.update(cx, |t, _| {
+                t.title = bookmark.name.into();
+                t.bookmark_id = Some(bookmark.id);
+            });
+        }
         self.queries.insert(
             query,
             RunningQuery {

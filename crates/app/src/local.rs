@@ -201,6 +201,21 @@ impl Local {
         Ok(())
     }
 
+    /// The bookmark shown for the database whose SQL is `sql`, ignoring surrounding
+    /// whitespace and trailing semicolons. Values count (unlike the fingerprint): a
+    /// query for another id is not that bookmark. The database's own bookmarks win
+    /// over global ones.
+    pub fn bookmark_for_sql(&self, db_id: &str, sql: &str) -> Option<Bookmark> {
+        let wanted = bare_sql(sql);
+        let mut matches: Vec<Bookmark> = self
+            .bookmarks_for(Some(db_id))
+            .into_iter()
+            .filter(|b| bare_sql(&b.sql) == wanted)
+            .collect();
+        matches.sort_by_key(|b| b.database_id.is_none());
+        matches.into_iter().next()
+    }
+
     /// Whether a query with this fingerprint is bookmarked for the database.
     pub fn is_bookmarked(&self, db_id: &str, fingerprint: &str) -> bool {
         self.conn
@@ -399,6 +414,12 @@ impl Local {
     }
 }
 
+/// `sql` without surrounding whitespace and trailing semicolons.
+pub fn bare_sql(sql: &str) -> &str {
+    sql.trim()
+        .trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +466,36 @@ mod tests {
         ));
         l.delete_bookmark("2").unwrap();
         assert!(l.bookmark("2").is_none());
+    }
+
+    #[test]
+    fn finds_bookmark_by_sql() {
+        let l = Local::in_memory();
+        let b = |id: &str, sql: &str, db: Option<&str>| Bookmark {
+            id: id.into(),
+            name: format!("b{id}"),
+            sql: sql.into(),
+            database_id: db.map(Into::into),
+        };
+        l.upsert_bookmark(&b("1", "select * from t where id = 1;", None))
+            .unwrap();
+        l.upsert_bookmark(&b("2", "select * from t where id = 1", Some("pg")))
+            .unwrap();
+        l.upsert_bookmark(&b("3", "select 2", Some("mysql")))
+            .unwrap();
+        let found = |db: &str, sql: &str| l.bookmark_for_sql(db, sql).map(|b| b.id);
+        // Trailing semicolons and whitespace don't matter; the own one wins.
+        assert_eq!(
+            found("pg", "  select * from t where id = 1 ;\n"),
+            Some("2".into())
+        );
+        assert_eq!(
+            found("other", "select * from t where id = 1"),
+            Some("1".into())
+        );
+        // Other values or another database's bookmark: no match.
+        assert_eq!(found("pg", "select * from t where id = 2"), None);
+        assert_eq!(found("pg", "select 2"), None);
     }
 
     #[test]
