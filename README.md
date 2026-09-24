@@ -54,7 +54,7 @@ to passwords saved by an earlier build ("Always Allow").
   or to open related rows via foreign keys.
 - The bottom bar switches the sidebar between Schema, Bookmarks and History (click the
   active one, or `⌘B`, to hide it). Hover the status dot next to the user in the title
-  bar for connection, SSH, pool and schema details.
+  bar for the connection status, pool usage and schema counts.
 - `⌘↵` runs the selection or the whole editor, `⌘D` bookmarks the query, `⌘T` new tab,
   `⌘W` close tab, `⌘B` toggle sidebar.
 
@@ -80,7 +80,8 @@ The dev databases use non-default ports bound to localhost, so they don't clash 
 local Postgres/MySQL.
 
 Branches: work happens on `dev`; every push to `dev` opens (or updates) a pull request
-into `main` (`.github/workflows/dev-pr.yml`). CI (`.github/workflows/ci.yml`: lint,
+into `main` (`.github/workflows/dev-pr.yml`, using a personal access token from the
+repository secret `DEV_PR_TOKEN`). CI (`.github/workflows/ci.yml`: lint,
 backend with live database tests on Linux, app build on macOS) is paused during heavy
 development and only runs when started by hand (Actions → CI → Run workflow).
 

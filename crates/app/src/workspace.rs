@@ -32,8 +32,7 @@ use rusdb_assist::{
     usage::{Usage, learn},
 };
 use rusdb_core::{
-    ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, SshAuth, TabId, TableInfo,
-    TableKind, TlsMode,
+    ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo, TableKind,
 };
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
@@ -1967,12 +1966,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Details for the status dot's hover card, grouped by topic.
+    /// The status dot's hover card: live state only (status, pool, what the schema
+    /// holds); connection settings are in the database dialog.
     fn connection_details(&self) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
-        let (Some(user_id), Some(state)) = (self.active_user.as_deref(), self.active_conn()) else {
-            return Vec::new();
-        };
-        let Some((db, user)) = self.find_user(user_id) else {
+        let Some(state) = self.active_conn() else {
             return Vec::new();
         };
         let mut sections = Vec::new();
@@ -1982,36 +1979,6 @@ impl Workspace {
             ConnStatus::Failed(e) => format!("Failed: {e}"),
         };
         sections.push(("Status", vec![("State", status)]));
-        let tls = match db.tls {
-            TlsMode::Disable => "off",
-            TlsMode::Prefer => "prefer",
-            TlsMode::Require => "require",
-        };
-        let mut conn = vec![
-            ("Database", db.display_name()),
-            ("Driver", db.driver.label().to_string()),
-            ("Host", format!("{}:{}", db.host, db.port)),
-        ];
-        if !db.database.is_empty() {
-            conn.push(("Schema", db.database.clone()));
-        }
-        conn.push(("User", user.user.clone()));
-        conn.push(("TLS", tls.to_string()));
-        sections.push(("Connection", conn));
-        if let Some(ssh) = &db.ssh {
-            let auth = match ssh.auth {
-                SshAuth::Agent => "ssh-agent",
-                SshAuth::Key => "key file",
-                SshAuth::Password => "password",
-            };
-            sections.push((
-                "SSH tunnel",
-                vec![
-                    ("Via", format!("{}@{}:{}", ssh.user, ssh.host, ssh.port)),
-                    ("Auth", auth.to_string()),
-                ],
-            ));
-        }
         let s = state.stats;
         sections.push((
             "Pool",

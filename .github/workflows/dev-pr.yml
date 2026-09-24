@@ -1,15 +1,14 @@
 name: PR dev → main
 
 # Every push to dev makes sure a pull request from dev into main is open.
-# Needs "Allow GitHub Actions to create and approve pull requests"
-# (Settings → Actions → General → Workflow permissions).
+# Uses a personal access token from the repository secret DEV_PR_TOKEN
+# (fine-grained, this repo only: Pull requests read/write, Contents read-only).
 on:
   push:
     branches: [dev]
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   open-pr:
@@ -17,9 +16,12 @@ jobs:
     steps:
       - name: Open PR if dev is ahead of main and none is open
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.DEV_PR_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Repository secret DEV_PR_TOKEN is not set (see workflow header)"; exit 1
+          fi
           ahead=$(gh api "repos/$REPO/compare/main...dev" --jq .ahead_by)
           if [ "$ahead" = "0" ]; then
             echo "dev has nothing that main doesn't"; exit 0
