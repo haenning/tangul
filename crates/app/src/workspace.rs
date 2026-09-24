@@ -28,6 +28,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
+    guard,
     lexer::fingerprint,
     related::related_links,
     schema::{SchemaIndex, quote_ident},
@@ -94,6 +95,18 @@ impl SidebarView {
 }
 
 /// A query sent to the engine, kept until it finishes to record it in history.
+/// Why a statement is held back before it runs.
+enum RunGuard {
+    /// Read-only mode: nothing changes until the user allows writes.
+    ReadOnly {
+        user: String,
+        /// (keyword, statement on one line)
+        statements: Vec<(String, String)>,
+    },
+    /// `UPDATE` / `DELETE` without `WHERE`.
+    Unfiltered { statements: Vec<(String, String)> },
+}
+
 struct RunningQuery {
     tab: WeakEntity<QueryTab>,
     sql: String,
@@ -436,26 +449,209 @@ impl Workspace {
                 let Some(conn) = tab.read(cx).conn.clone() else {
                     return;
                 };
-                let query = QueryId(self.next_id());
-                let user_id = self.conn_users.get(&conn.id).cloned().unwrap_or_default();
-                self.queries.insert(
-                    query,
-                    RunningQuery {
-                        tab: tab.downgrade(),
-                        sql: sql.clone(),
-                        user_id,
-                        started_at: now_ms(),
-                    },
-                );
-                self.engine.send(Command::Execute {
-                    query,
-                    tab: tab.read(cx).id,
-                    conn: conn.id,
-                    sql: sql.clone(),
-                });
-                tab.update(cx, |t, cx| t.started(query, sql, cx));
+                match self.run_guard(conn.id, sql, cx) {
+                    None => self.execute(tab, sql, cx),
+                    Some(guard) => self.hold_back(tab.clone(), sql.clone(), guard, window, cx),
+                }
             }
         }
+    }
+
+    /// Sends `sql` to the engine on the tab's connection.
+    fn execute(&mut self, tab: &Entity<QueryTab>, sql: &str, cx: &mut Context<Self>) {
+        let Some(conn) = tab.read(cx).conn.clone() else {
+            return;
+        };
+        let query = QueryId(self.next_id());
+        let user_id = self.conn_users.get(&conn.id).cloned().unwrap_or_default();
+        self.queries.insert(
+            query,
+            RunningQuery {
+                tab: tab.downgrade(),
+                sql: sql.to_string(),
+                user_id,
+                started_at: now_ms(),
+            },
+        );
+        // The server refuses writes, too, so read-only mode can't be sidestepped.
+        let read_only = self
+            .conn_user_name(conn.id)
+            .is_some_and(|user| settings::current(cx).is_read_only(&user));
+        self.engine.send(Command::Execute {
+            query,
+            tab: tab.read(cx).id,
+            conn: conn.id,
+            sql: sql.to_string(),
+            read_only,
+        });
+        tab.update(cx, |t, cx| t.started(query, sql, cx));
+    }
+
+    // ---- safety ------------------------------------------------------------------
+
+    /// The database user name of a connection.
+    fn conn_user_name(&self, conn: ConnId) -> Option<String> {
+        let user_id = self.conn_users.get(&conn)?;
+        Some(self.find_user(user_id)?.1.user.clone())
+    }
+
+    /// Whether the active user is in read-only mode.
+    fn active_user_read_only(&self, cx: &App) -> Option<bool> {
+        let user = &self.find_user(self.active_user.as_deref()?)?.1.user;
+        Some(settings::current(cx).is_read_only(user))
+    }
+
+    /// Flips read-only mode for the active user (kept in `settings.json`).
+    fn toggle_read_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(user) = self
+            .active_user
+            .as_deref()
+            .and_then(|id| self.find_user(id))
+            .map(|(_, u)| u.user.clone())
+        else {
+            return;
+        };
+        let on = !settings::current(cx).is_read_only(&user);
+        if let Err(e) = settings::set_read_only(&user, on, cx) {
+            window.push_notification(
+                Notification::error(format!("Could not change read-only mode: {e}")),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Why `sql` shouldn't run on `conn` right away: it changes data in read-only mode
+    /// (which takes precedence), or it is an `UPDATE` / `DELETE` without a `WHERE`.
+    fn run_guard(&self, conn: ConnId, sql: &str, cx: &App) -> Option<RunGuard> {
+        let settings = settings::current(cx);
+        let user = self
+            .conn_user_name(conn)
+            .filter(|user| settings.is_read_only(user));
+        let checks = guard::check(sql);
+        let described = |keep: &dyn Fn(&guard::Check) -> bool| -> Vec<(String, String)> {
+            checks
+                .iter()
+                .filter(|c| keep(c))
+                .map(|c| (c.keyword.clone(), one_line(&c.statement, 160)))
+                .collect()
+        };
+        if let Some(user) = user {
+            let statements = described(&|c| c.writes);
+            if !statements.is_empty() {
+                return Some(RunGuard::ReadOnly { user, statements });
+            }
+        }
+        if settings.safety.confirm_unfiltered_writes {
+            let statements = described(&|c| c.unfiltered);
+            if !statements.is_empty() {
+                return Some(RunGuard::Unfiltered { statements });
+            }
+        }
+        None
+    }
+
+    /// Explains why `sql` did not run. The red button lifts the guard: "Allow writes"
+    /// turns read-only mode off (the statement is not run; run it again), "Allow …"
+    /// for an unfiltered statement runs it once.
+    fn hold_back(
+        &mut self,
+        tab: Entity<QueryTab>,
+        sql: String,
+        guard: RunGuard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = cx.entity().downgrade();
+        let (title, intro, statements, allow) = match &guard {
+            RunGuard::ReadOnly { user, statements } => (
+                "Read-only mode",
+                format!(
+                    "Read-only mode is on for {user}. Nothing was run; these statements change data:"
+                ),
+                statements.clone(),
+                "Allow writes".to_string(),
+            ),
+            RunGuard::Unfiltered { statements } => {
+                let has = |keyword: &str| statements.iter().any(|(k, _)| k == keyword);
+                let allow = match (has("DELETE"), has("UPDATE")) {
+                    (true, false) => "Allow deletes",
+                    (false, true) => "Allow updates",
+                    _ => "Allow updates and deletes",
+                };
+                (
+                    "No WHERE clause",
+                    "These statements have no WHERE and affect every row:".to_string(),
+                    statements.clone(),
+                    allow.to_string(),
+                )
+            }
+        };
+        let read_only_user = match &guard {
+            RunGuard::ReadOnly { user, .. } => Some(user.clone()),
+            RunGuard::Unfiltered { .. } => None,
+        };
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let theme = cx.theme();
+            let body = v_flex()
+                .gap_2()
+                .child(div().text_sm().child(intro.clone()))
+                .children(statements.iter().map(|(_, statement)| {
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded(theme.radius)
+                        .bg(theme.muted)
+                        .font_family(theme.mono_font_family.clone())
+                        .text_sm()
+                        .child(statement.clone())
+                }));
+            let allow_click = {
+                let (workspace, tab, sql) = (workspace.clone(), tab.clone(), sql.clone());
+                let read_only_user = read_only_user.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    window.close_dialog(cx);
+                    match &read_only_user {
+                        // Lifts read-only mode; running the statement is a second, deliberate step.
+                        Some(user) => match settings::set_read_only(user, false, cx) {
+                            Ok(()) => window.push_notification(
+                                Notification::info(format!(
+                                    "Read-only mode is off for {user}. Run the statement again."
+                                )),
+                                cx,
+                            ),
+                            Err(e) => window.push_notification(
+                                Notification::error(format!(
+                                    "Could not change read-only mode: {e}"
+                                )),
+                                cx,
+                            ),
+                        },
+                        None => {
+                            let _ = workspace.update(cx, |ws, cx| ws.execute(&tab, &sql, cx));
+                        }
+                    }
+                }
+            };
+            dialog.title(title).w(px(520.)).child(body).footer(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel-run")
+                            .label("Cancel")
+                            .ghost()
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("allow-run")
+                            .label(allow.clone())
+                            .danger()
+                            .on_click(allow_click),
+                    ),
+            )
+        });
     }
 
     // ---- bookmarks -------------------------------------------------------------
@@ -1928,6 +2124,7 @@ impl Workspace {
                 })
         });
 
+        let read_only = self.active_user_read_only(cx);
         let dot = self.active_conn().map(|c| match c.status {
             ConnStatus::Connected => theme.success,
             ConnStatus::Connecting => theme.warning,
@@ -1946,6 +2143,34 @@ impl Workspace {
                         .child("/"),
                 )
                 .child(user_menu)
+            })
+            .when_some(read_only, |this, on| {
+                let color = if on {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                };
+                this.child(
+                    Button::new("read-only")
+                        .icon(
+                            Icon::new(if on {
+                                Lucide::PencilOff
+                            } else {
+                                Lucide::Pencil
+                            })
+                            .text_color(color),
+                        )
+                        .ghost()
+                        .xsmall()
+                        .tooltip(if on {
+                            "Read-only mode is on: writes ask first. Click to turn off"
+                        } else {
+                            "Read-only mode is off. Click to turn on"
+                        })
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_read_only(window, cx)),
+                        ),
+                )
             })
             .when_some(dot, |this, dot| {
                 let weak = cx.entity().downgrade();

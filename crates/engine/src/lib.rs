@@ -52,6 +52,8 @@ pub enum Command {
         tab: TabId,
         conn: ConnId,
         sql: String,
+        /// The server refuses writes for this statement (read-only mode).
+        read_only: bool,
     },
     Cancel {
         query: QueryId,
@@ -290,6 +292,7 @@ impl Engine {
                 tab,
                 conn,
                 sql,
+                read_only,
             } => {
                 let Some(pool) = self.pools.get(&conn).cloned() else {
                     finish(
@@ -304,7 +307,14 @@ impl Engine {
                 };
                 let events = self.events.clone();
                 let running = self.running.clone();
-                tokio::spawn(execute(pool, events, running, query, tab, conn, sql));
+                let job = Job {
+                    query,
+                    tab,
+                    conn,
+                    sql,
+                    read_only,
+                };
+                tokio::spawn(execute(pool, events, running, job));
             }
             Command::Validate {
                 request,
@@ -355,15 +365,23 @@ impl Engine {
     }
 }
 
-async fn execute(
-    pool: Arc<Pool>,
-    events: Events,
-    running: Running,
+/// A statement to run on a tab's session.
+struct Job {
     query: QueryId,
     tab: TabId,
     conn: ConnId,
     sql: String,
-) {
+    read_only: bool,
+}
+
+async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
+    let Job {
+        query,
+        tab,
+        conn,
+        sql,
+        read_only,
+    } = job;
     let started = Instant::now();
     let mut lease = match pool.acquire(Some(tab)).await {
         Ok(l) => l,
@@ -379,6 +397,20 @@ async fn execute(
             return;
         }
     };
+    if let Err(e) = sync_read_only(&mut lease, read_only).await {
+        let in_tx = lease.session.in_transaction();
+        finish(
+            &events,
+            query,
+            started.elapsed(),
+            Some(describe(&e)),
+            in_tx,
+            false,
+        );
+        pool.release(Some(tab), lease);
+        send_stats(&events, conn, &pool);
+        return;
+    }
     send_stats(&events, conn, &pool);
     running.lock().unwrap().insert(
         query,
@@ -415,6 +447,27 @@ async fn execute(
     );
     pool.release(Some(tab), lease);
     send_stats(&events, conn, &pool);
+}
+
+/// Makes the server side match `want` before a statement runs. In read-only mode it is
+/// applied before every statement, since a script could have switched it off; that
+/// costs one round trip. An open transaction can't be changed, so read-only mode
+/// refuses to run inside one that may write.
+async fn sync_read_only(lease: &mut Lease, want: bool) -> anyhow::Result<()> {
+    if lease.session.in_transaction() {
+        if want && !lease.read_only {
+            anyhow::bail!(
+                "Read-only mode is on, but this tab has an open transaction that can write. \
+                 Commit or roll it back first."
+            );
+        }
+        return Ok(());
+    }
+    if want || lease.read_only {
+        lease.session.set_read_only(want).await?;
+        lease.read_only = want;
+    }
+    Ok(())
 }
 
 /// Longest wait for a spare session; validation is skipped when all are busy.

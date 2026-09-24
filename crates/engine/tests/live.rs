@@ -85,8 +85,23 @@ impl Harness {
             tab,
             conn: self.conn,
             sql: sql.into(),
+            read_only: false,
         });
         query
+    }
+
+    /// Runs `sql` with the server refusing writes.
+    async fn run_read_only(&mut self, tab: TabId, sql: &str) -> Outcome {
+        self.next_query += 1;
+        let query = QueryId(self.next_query);
+        self.engine.send(Command::Execute {
+            query,
+            tab,
+            conn: self.conn,
+            sql: sql.into(),
+            read_only: true,
+        });
+        self.wait(query).await
     }
 
     async fn wait(&mut self, query: QueryId) -> Outcome {
@@ -298,6 +313,62 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
     assert_eq!(h.run(tab, drop).await.error, None);
 }
 
+/// Read-only mode is enforced by the server: writes fail, reads work, and a script
+/// that switches the session back to read-write does not get around it.
+async fn read_only_checks(h: &mut Harness, switch_to_read_write: &str) {
+    let tab = TabId(9);
+    h.run(tab, "DROP TABLE IF EXISTS rusdb_ro_test").await;
+    assert_eq!(
+        h.run(tab, "CREATE TABLE rusdb_ro_test (id INT)")
+            .await
+            .error,
+        None
+    );
+    assert_eq!(
+        h.run(tab, "INSERT INTO rusdb_ro_test VALUES (1)")
+            .await
+            .error,
+        None
+    );
+
+    let out = h.run_read_only(tab, "SELECT * FROM rusdb_ro_test").await;
+    assert_eq!(out.error, None);
+    assert_eq!(out.result.unwrap().row_count(), 1);
+    for write in [
+        "INSERT INTO rusdb_ro_test VALUES (2)",
+        "UPDATE rusdb_ro_test SET id = 5",
+        "DELETE FROM rusdb_ro_test",
+        "DROP TABLE rusdb_ro_test",
+    ] {
+        let out = h.run_read_only(tab, write).await;
+        assert!(out.error.is_some(), "{write} must fail in read-only mode");
+    }
+    // Switching the session to read-write doesn't stick: the next statement is
+    // read-only again.
+    h.run_read_only(tab, switch_to_read_write).await;
+    let out = h
+        .run_read_only(tab, "INSERT INTO rusdb_ro_test VALUES (3)")
+        .await;
+    assert!(out.error.is_some(), "read-only mode must be re-applied");
+
+    // Nothing changed, and turning read-only off allows writes again.
+    let out = h.run(tab, "SELECT * FROM rusdb_ro_test").await;
+    assert_eq!(out.result.unwrap().row_count(), 1);
+    assert_eq!(
+        h.run(tab, "INSERT INTO rusdb_ro_test VALUES (4)")
+            .await
+            .error,
+        None
+    );
+
+    // An open transaction that can write can't be made read-only.
+    h.run(tab, "BEGIN").await;
+    let out = h.run_read_only(tab, "SELECT 1").await;
+    assert!(out.error.is_some_and(|e| e.contains("Read-only")));
+    h.run(tab, "ROLLBACK").await;
+    h.run(tab, "DROP TABLE rusdb_ro_test").await;
+}
+
 #[tokio::test]
 async fn postgres() {
     let Some(cfg) = config("RUSDB_TEST_PG") else {
@@ -318,6 +389,12 @@ async fn postgres() {
     h.run(TabId(1), "BEGIN").await;
     assert!(h.run(TabId(1), "SELECT 1/0").await.in_transaction);
     assert!(!h.run(TabId(1), "ROLLBACK").await.in_transaction);
+
+    read_only_checks(
+        &mut h,
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -342,6 +419,8 @@ async fn mysql() {
     // Binary data is shown as hex instead of broken UTF-8.
     let out = h.run(TabId(1), "SELECT UNHEX('DEADBEEF') AS b").await;
     assert_eq!(out.result.unwrap().cell(0, 0), Some("0xdeadbeef"));
+
+    read_only_checks(&mut h, "SET SESSION TRANSACTION READ WRITE").await;
 }
 
 /// Through the SSH bastion to Postgres: an unknown host key is reported (not
@@ -429,6 +508,7 @@ async fn ssh_tunnel() {
         tab: TabId(1),
         conn: ConnId(1),
         sql: "SELECT 42".into(),
+        read_only: false,
     });
     loop {
         if let Event::Query {

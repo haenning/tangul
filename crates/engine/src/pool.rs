@@ -25,6 +25,8 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// A session together with its slot in the pool. Dropping it frees the slot.
 pub struct Lease {
     pub session: Box<dyn Session>,
+    /// Whether the server was told to refuse writes on this session.
+    pub read_only: bool,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -105,6 +107,7 @@ impl Pool {
         };
         Ok(Lease {
             session,
+            read_only: false,
             _permit: permit,
         })
     }
