@@ -50,8 +50,9 @@ to passwords saved by an earlier build ("Always Allow").
 - The title bar switches database and user (like Zed's project and branch); the
   dropdowns also add and edit them. Passwords go to the macOS Keychain.
 - Databases can be reached through an SSH tunnel (ssh-agent, key file or password).
-- Click a table to query it; right-click for more. Right-click result rows to copy them
-  or to open related rows via foreign keys.
+- Click a table to query it; right-click for more. Right-click result rows to copy them,
+  to open related rows via foreign keys (the three you use most, the rest under
+  **Show all**), or to get an UPDATE / DELETE statement for them in a new tab (not run).
 - The bottom bar switches the sidebar between Schema, Bookmarks and History (click the
   active one, or `⌘B`, to hide it). Hover the status dot next to the user in the title
   bar for the connection status, pool usage and schema counts.

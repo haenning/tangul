@@ -35,6 +35,40 @@ SELECT (g % 100000) + 1,
        date '2024-01-01' + (g % 700)
 FROM generate_series(1, 300000) g;
 
+-- More tables referencing users, so its "Show related" menu has more than three
+-- entries (the rest go under "Show all").
+CREATE TABLE app.addresses (
+    id      serial PRIMARY KEY,
+    user_id int NOT NULL REFERENCES app.users (id),
+    city    text NOT NULL
+);
+INSERT INTO app.addresses (user_id, city)
+SELECT g, (ARRAY['Berlin', 'Hamburg', 'Munich'])[1 + g % 3] FROM generate_series(1, 1000) g;
+
+CREATE TABLE app.sessions (
+    id      bigserial PRIMARY KEY,
+    user_id int NOT NULL REFERENCES app.users (id),
+    started timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO app.sessions (user_id) SELECT (g % 1000) + 1 FROM generate_series(1, 5000) g;
+
+CREATE TABLE app.tickets (
+    id      serial PRIMARY KEY,
+    user_id int NOT NULL REFERENCES app.users (id),
+    subject text NOT NULL
+);
+INSERT INTO app.tickets (user_id, subject)
+SELECT (g % 500) + 1, 'Ticket ' || g FROM generate_series(1, 800) g;
+
+-- No primary key: UPDATE / DELETE from the grid match rows by all columns.
+CREATE TABLE app.audit_log (
+    user_id int REFERENCES app.users (id),
+    action  text NOT NULL,
+    at      timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO app.audit_log (user_id, action)
+SELECT (g % 100) + 1, (ARRAY['login', 'logout'])[1 + g % 2] FROM generate_series(1, 300) g;
+
 CREATE VIEW app.revenue_by_status AS
 SELECT status, count(*) AS orders, sum(total) AS revenue
 FROM app.orders

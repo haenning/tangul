@@ -3,7 +3,8 @@
 //!
 //! Row selection is kept here rather than in the table (which knows a single row):
 //! click selects, ⇧-click extends, ⌘-click toggles. The right-click menu copies the
-//! selection and follows foreign keys to related rows.
+//! selection, follows foreign keys to related rows and writes UPDATE / DELETE
+//! statements for the selected rows (opened in a new tab, not run).
 
 use std::collections::BTreeSet;
 
@@ -14,13 +15,16 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_assist::related::RelatedLink;
+use rusdb_assist::{edit::RowEdit, related::RelatedLink};
 use rusdb_core::{ColumnInfo, ResultSet};
 
 use crate::query_tab::{QueryTab, TabEvent};
 
 /// Longer values are cut in the grid (full value view is a later feature).
 const MAX_CELL_CHARS: usize = 200;
+/// Related tables listed directly in the menu (the most used); the rest are under
+/// "Show all".
+const RELATED_SHOWN: usize = 3;
 
 #[derive(Default)]
 pub struct ResultsDelegate {
@@ -31,8 +35,11 @@ pub struct ResultsDelegate {
     anchor: Option<usize>,
     /// Column under the last right click, for "Copy cell".
     menu_col: Option<usize>,
-    /// Foreign-key links of the current result (see `rusdb_assist::related`).
+    /// Foreign-key links of the current result, most used first (see
+    /// `rusdb_assist::related`).
     pub related: Vec<RelatedLink>,
+    /// UPDATE / DELETE statements for the rows, if the result is from one table.
+    pub edit: Option<RowEdit>,
     /// The owning tab, which opens related queries.
     tab: Option<WeakEntity<QueryTab>>,
 }
@@ -60,6 +67,7 @@ impl ResultsDelegate {
         self.anchor = None;
         self.menu_col = None;
         self.related.clear();
+        self.edit = None;
     }
 
     pub fn clear(&mut self) {
@@ -99,6 +107,48 @@ impl ResultsDelegate {
         } else {
             vec![row]
         }
+    }
+
+    /// All values of the rows.
+    fn row_values(&self, rows: &[usize]) -> Vec<Vec<Option<&str>>> {
+        let cols = self.result.columns().len();
+        rows.iter()
+            .map(|&r| (0..cols).map(|c| self.result.cell(r, c)).collect())
+            .collect()
+    }
+
+    fn related_item(&self, link: &RelatedLink, rows: &[usize]) -> PopupMenuItem {
+        let values: Vec<Vec<Option<&str>>> = rows
+            .iter()
+            .map(|&r| {
+                link.source_cols()
+                    .iter()
+                    .map(|&c| self.result.cell(r, c))
+                    .collect()
+            })
+            .collect();
+        let arrow = if link.incoming { "←" } else { "→" };
+        self.open_item(
+            format!("{arrow} {}", link.title),
+            link.query(&values).map(|sql| TabEvent::OpenRelated {
+                title: link.table.clone(),
+                sql,
+            }),
+        )
+    }
+
+    /// A menu item that has the owning tab emit `event`; disabled without one.
+    fn open_item(&self, label: String, event: Option<TabEvent>) -> PopupMenuItem {
+        let tab = self.tab.clone();
+        PopupMenuItem::new(label)
+            .disabled(event.is_none())
+            .on_click(move |_, _, cx| {
+                let (Some(tab), Some(event)) = (tab.as_ref().and_then(|t| t.upgrade()), &event)
+                else {
+                    return;
+                };
+                tab.update(cx, |_, cx| cx.emit(event.clone()));
+            })
     }
 
     fn tsv(&self, rows: &[usize], headers: bool) -> String {
@@ -190,8 +240,8 @@ impl TableDelegate for ResultsDelegate {
         &mut self,
         row_ix: usize,
         mut menu: PopupMenu,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
         let rows = self.target_rows(row_ix);
         let n = rows.len();
@@ -217,42 +267,51 @@ impl TableDelegate for ResultsDelegate {
                 self.tsv(&rows, true),
             ));
 
+        if let Some(edit) = &self.edit {
+            let values = self.row_values(&rows);
+            let title = |verb: &str| format!("{verb} {}", edit.table);
+            menu = menu.separator();
+            if let Some(col) = self.menu_col.filter(|&c| edit.editable(c)) {
+                let name = &self.result.columns()[col].name;
+                let value = self.result.cell(row_ix, col);
+                menu = menu.item(
+                    self.open_item(
+                        format!("UPDATE {name} of {count}row{s}"),
+                        edit.update(col, value, &values)
+                            .map(|sql| TabEvent::OpenSql {
+                                title: title("update"),
+                                sql,
+                            }),
+                    ),
+                );
+            }
+            menu = menu.item(self.open_item(
+                format!("DELETE {count}row{s}"),
+                edit.delete(&values).map(|sql| TabEvent::OpenSql {
+                    title: title("delete"),
+                    sql,
+                }),
+            ));
+        }
+
         if !self.related.is_empty() {
             menu = menu.separator().label("Show related");
-            for link in &self.related {
-                let values: Vec<Vec<Option<&str>>> = rows
+            for link in self.related.iter().take(RELATED_SHOWN) {
+                menu = menu.item(self.related_item(link, &rows));
+            }
+            if self.related.len() > RELATED_SHOWN {
+                let items: Vec<PopupMenuItem> = self
+                    .related
                     .iter()
-                    .map(|&r| {
-                        link.source_cols()
-                            .iter()
-                            .map(|&c| self.result.cell(r, c))
-                            .collect()
-                    })
+                    .map(|link| self.related_item(link, &rows))
                     .collect();
-                let query = link.query(&values);
-                let (tab, title) = (self.tab.clone(), link.table.clone());
-                let label = if link.incoming {
-                    format!("← {}", link.title)
-                } else {
-                    format!("→ {}", link.title)
-                };
-                menu = menu.item(
-                    PopupMenuItem::new(label)
-                        .disabled(query.is_none())
-                        .on_click(move |_, _, cx| {
-                            let (Some(tab), Some(sql)) =
-                                (tab.as_ref().and_then(|t| t.upgrade()), &query)
-                            else {
-                                return;
-                            };
-                            tab.update(cx, |_, cx| {
-                                cx.emit(TabEvent::OpenRelated {
-                                    title: title.clone(),
-                                    sql: sql.clone(),
-                                })
-                            });
-                        }),
-                );
+                let all = PopupMenu::build(window, cx, move |menu, _, _| {
+                    items.into_iter().fold(menu, PopupMenu::item)
+                });
+                menu = menu.item(PopupMenuItem::submenu(
+                    format!("Show all ({})", self.related.len()),
+                    all,
+                ));
             }
         }
         menu
