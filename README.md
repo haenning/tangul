@@ -89,7 +89,8 @@ Linux builds (dev only) need `libxkbcommon-dev libxkbcommon-x11-dev`.
 ## Roadmap
 
 Planned work and ideas are GitHub issues labeled `roadmap`, tracked in the rusdb
-project (horizons: quick win, short term, northstar, backlog). Feature requests are
+project (horizons: quick win, short term, northstar, backlog); see
+[ROADMAP.md](ROADMAP.md) for the list and the project structure. Feature requests are
 welcome via the issue template. rusdb stays a focused viewer: no grid editing, table
 designers or schema migrations.
 
