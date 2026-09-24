@@ -277,34 +277,45 @@ impl TableDelegate for ResultsDelegate {
                     sql,
                 })
             };
-            // UPDATE submenu: the clicked cell (one value for all rows, or each row's
-            // own), or the whole row when only one is selected.
-            let mut updates = Vec::new();
-            if let Some(col) = self.menu_col.filter(|&c| edit.editable(c)) {
-                let name = &self.result.columns()[col].name;
+            // UPDATE submenu: the clicked cell under its column name (one value for all
+            // rows, or each row's own), and the whole row when only one is selected.
+            let mut cell_items = Vec::new();
+            let column = self.menu_col.filter(|&c| edit.editable(c)).map(|col| {
                 let value = self.result.cell(row_ix, col);
                 if n == 1 {
-                    updates.push(self.open_item(
-                        format!("Cell: {name}"),
-                        open(edit.update_cell(col, value, &values)),
-                    ));
+                    cell_items.push(
+                        self.open_item("Cell".into(), open(edit.update_cell(col, value, &values))),
+                    );
                 } else {
-                    updates.push(self.open_item(
-                        format!("Cell: {name}, one value for {n} rows"),
+                    cell_items.push(self.open_item(
+                        format!("One value for {n} rows"),
                         open(edit.update_cell(col, value, &values)),
                     ));
-                    updates.push(self.open_item(
-                        format!("Cells: {name}, each row's own value"),
+                    cell_items.push(self.open_item(
+                        "Each row's own value".into(),
                         open(edit.update_cells(col, &values)),
                     ));
                 }
-            }
-            if let [row] = &values[..] {
-                updates.push(self.open_item("Row".into(), open(edit.update_row(row))));
-            }
-            if !updates.is_empty() {
-                let submenu = PopupMenu::build(window, cx, move |menu, _, _| {
-                    updates.into_iter().fold(menu, PopupMenu::item)
+                self.result.columns()[col].name.clone()
+            });
+            let row_item = match &values[..] {
+                [row] => Some(self.open_item("Row".into(), open(edit.update_row(row)))),
+                _ => None,
+            };
+            if column.is_some() || row_item.is_some() {
+                let submenu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+                    if let Some(name) = column {
+                        menu = cell_items
+                            .into_iter()
+                            .fold(menu.label(name), PopupMenu::item);
+                    }
+                    if let Some(row) = row_item {
+                        if !menu.is_empty() {
+                            menu = menu.separator();
+                        }
+                        menu = menu.item(row);
+                    }
+                    menu
                 });
                 menu = menu.item(PopupMenuItem::submenu("UPDATE", submenu));
             }
