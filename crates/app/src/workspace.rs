@@ -7,12 +7,14 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Root, Sizable as _, TitleBar, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _,
+    TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
@@ -30,12 +32,13 @@ use rusdb_assist::{
     usage::{Usage, learn},
 };
 use rusdb_core::{
-    ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo, TableKind,
+    ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, SshAuth, TabId, TableInfo,
+    TableKind, TlsMode,
 };
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
 use crate::{
-    CloseTab, NewTab,
+    CloseTab, NewTab, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
@@ -66,11 +69,21 @@ enum SidebarView {
 }
 
 impl SidebarView {
-    const ALL: [SidebarView; 3] = [
-        SidebarView::Schema,
-        SidebarView::Bookmarks,
-        SidebarView::History,
-    ];
+    fn icon(self) -> Lucide {
+        match self {
+            SidebarView::Schema => Lucide::ListTree,
+            SidebarView::Bookmarks => Lucide::Bookmark,
+            SidebarView::History => Lucide::RotateCcwClock,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SidebarView::Schema => "Schema",
+            SidebarView::Bookmarks => "Bookmarks",
+            SidebarView::History => "History",
+        }
+    }
 }
 
 /// A query sent to the engine, kept until it finishes to record it in history.
@@ -143,6 +156,7 @@ pub struct Workspace {
     /// (user id, schema, kind). Groups start expanded.
     collapsed_groups: HashSet<(String, SharedString, TableKind)>,
     sidebar_view: SidebarView,
+    sidebar_open: bool,
     tabs: Vec<Entity<QueryTab>>,
     active_tab: usize,
     queries: HashMap<QueryId, RunningQuery>,
@@ -204,6 +218,7 @@ impl Workspace {
             expanded_schemas: HashSet::new(),
             collapsed_groups: HashSet::new(),
             sidebar_view: SidebarView::Schema,
+            sidebar_open: true,
             tabs: Vec::new(),
             active_tab: 0,
             queries: HashMap::new(),
@@ -1382,26 +1397,6 @@ impl Workspace {
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(theme.sidebar_border)
-            .child(
-                // Same tab style as the query tabs, split evenly like Zed's panels.
-                TabBar::new("sidebar-tabs")
-                    .child(Tab::new().label("Schema").flex_1().justify_center())
-                    .child(Tab::new().label("Bookmarks").flex_1().justify_center())
-                    .child(Tab::new().label("History").flex_1().justify_center())
-                    .selected_index(
-                        SidebarView::ALL
-                            .iter()
-                            .position(|v| *v == view)
-                            .unwrap_or(0),
-                    )
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.sidebar_view = SidebarView::ALL[*ix];
-                        if this.sidebar_view == SidebarView::History {
-                            this.refresh_history(cx);
-                        }
-                        cx.notify();
-                    })),
-            )
             .child(body)
     }
 
@@ -1796,7 +1791,28 @@ impl Workspace {
                 .child(user_menu)
             })
             .when_some(dot, |this, dot| {
-                this.child(div().size_1p5().flex_shrink_0().rounded_full().bg(dot))
+                let weak = cx.entity().downgrade();
+                this.child(
+                    HoverCard::new("connection-details")
+                        .anchor(Anchor::TopLeft)
+                        .open_delay(Duration::from_millis(150))
+                        .trigger(
+                            // A larger hit area than the dot itself.
+                            div()
+                                .size_4()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(div().size_1p5().rounded_full().bg(dot)),
+                        )
+                        .content(move |_, _, cx| {
+                            let sections = weak
+                                .upgrade()
+                                .map(|ws| ws.read(cx).connection_details())
+                                .unwrap_or_default();
+                            render_details(sections, cx)
+                        }),
+                )
             })
     }
 
@@ -1840,26 +1856,10 @@ impl Workspace {
             )
     }
 
+    /// Zed-style bottom bar: sidebar panels, then (planned) AI and schema-graph
+    /// tools; the active query's timing on the right.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let text: SharedString = self
-            .active_user
-            .as_ref()
-            .and_then(|id| Some((self.tab_conn(id)?, self.conns.get(id)?)))
-            .map(|(conn, state)| {
-                let s = state.stats;
-                let status = match &state.status {
-                    ConnStatus::Connecting => "connecting…".to_string(),
-                    ConnStatus::Failed(_) => "connection failed".to_string(),
-                    ConnStatus::Connected => format!(
-                        "{}/{} connections open · {} idle · {} in transaction",
-                        s.open, s.max, s.idle, s.pinned
-                    ),
-                };
-                format!("{} — {status}", conn.name).into()
-            })
-            .unwrap_or_else(|| "Not connected".into());
-        // Timing and row count of the active tab, right-aligned.
         let (query_text, running) = self
             .tabs
             .get(self.active_tab)
@@ -1868,20 +1868,178 @@ impl Workspace {
                 (t.status_text(cx), t.is_running())
             })
             .unwrap_or_default();
+        let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
+        let panels = [
+            SidebarView::Schema,
+            SidebarView::Bookmarks,
+            SidebarView::History,
+        ]
+        .map(|view| {
+            let active = self.sidebar_open && self.sidebar_view == view;
+            Button::new(("panel", view as usize))
+                .icon(Icon::new(view.icon()))
+                .ghost()
+                .xsmall()
+                .selected(active)
+                .tooltip(view.label())
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(view, cx)))
+        });
+        let planned = |id: &'static str, icon: Lucide, tooltip: &'static str| {
+            Button::new(id)
+                .icon(Icon::new(icon))
+                .ghost()
+                .xsmall()
+                .disabled(true)
+                .tooltip(tooltip)
+        };
         h_flex()
-            .h_6()
-            .px_3()
-            .gap_2()
+            .h_7()
+            .px_1()
+            .gap_0p5()
             .items_center()
             .border_t_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child(div().flex_1().min_w_0().truncate().child(text))
+            .children(panels)
+            .child(separator())
+            .child(planned("ai-agent", Lucide::Bot, "Agent via ACP — planned"))
+            .child(planned(
+                "ai-assist",
+                Lucide::Sparkles,
+                "AI query help — planned",
+            ))
+            .child(separator())
+            .child(planned(
+                "schema-graph",
+                Lucide::Network,
+                "Schema graph (tables and their relations) — planned",
+            ))
+            .child(div().flex_1())
             .when(running, |this| this.child(Spinner::new().xsmall()))
-            .child(query_text)
+            .child(div().pr_2().child(query_text))
     }
+
+    /// Bottom-bar panel button: shows that panel, or hides the sidebar if it is the
+    /// one already shown (like Zed's dock buttons).
+    fn toggle_panel(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+        if self.sidebar_open && self.sidebar_view == view {
+            self.sidebar_open = false;
+        } else {
+            self.sidebar_open = true;
+            self.sidebar_view = view;
+            if view == SidebarView::History {
+                self.refresh_history(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
+        cx.notify();
+    }
+
+    /// Details for the status dot's hover card, grouped by topic.
+    fn connection_details(&self) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
+        let (Some(user_id), Some(state)) = (self.active_user.as_deref(), self.active_conn()) else {
+            return Vec::new();
+        };
+        let Some((db, user)) = self.find_user(user_id) else {
+            return Vec::new();
+        };
+        let mut sections = Vec::new();
+        let status = match &state.status {
+            ConnStatus::Connected => "Connected".to_string(),
+            ConnStatus::Connecting => "Connecting…".to_string(),
+            ConnStatus::Failed(e) => format!("Failed: {e}"),
+        };
+        sections.push(("Status", vec![("State", status)]));
+        let tls = match db.tls {
+            TlsMode::Disable => "off",
+            TlsMode::Prefer => "prefer",
+            TlsMode::Require => "require",
+        };
+        let mut conn = vec![
+            ("Database", db.display_name()),
+            ("Driver", db.driver.label().to_string()),
+            ("Host", format!("{}:{}", db.host, db.port)),
+        ];
+        if !db.database.is_empty() {
+            conn.push(("Schema", db.database.clone()));
+        }
+        conn.push(("User", user.user.clone()));
+        conn.push(("TLS", tls.to_string()));
+        sections.push(("Connection", conn));
+        if let Some(ssh) = &db.ssh {
+            let auth = match ssh.auth {
+                SshAuth::Agent => "ssh-agent",
+                SshAuth::Key => "key file",
+                SshAuth::Password => "password",
+            };
+            sections.push((
+                "SSH tunnel",
+                vec![
+                    ("Via", format!("{}@{}:{}", ssh.user, ssh.host, ssh.port)),
+                    ("Auth", auth.to_string()),
+                ],
+            ));
+        }
+        let s = state.stats;
+        sections.push((
+            "Pool",
+            vec![
+                ("Open", format!("{} of {}", s.open, s.max)),
+                ("Idle", s.idle.to_string()),
+                ("In transaction", s.pinned.to_string()),
+            ],
+        ));
+        let tables = state.schema.tables();
+        let views = tables.iter().filter(|t| t.kind == TableKind::View).count();
+        sections.push((
+            "Schema",
+            vec![
+                ("Tables", (tables.len() - views).to_string()),
+                ("Views", views.to_string()),
+                (
+                    "Foreign keys",
+                    state.schema.foreign_keys().len().to_string(),
+                ),
+            ],
+        ));
+        sections
+    }
+}
+
+fn render_details(sections: Vec<(&'static str, Vec<(&'static str, String)>)>, cx: &App) -> Div {
+    let theme = cx.theme();
+    v_flex()
+        .w(px(300.))
+        .gap_3()
+        .text_xs()
+        .children(sections.into_iter().map(|(title, rows)| {
+            v_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(title.to_uppercase()),
+                )
+                .children(rows.into_iter().map(|(label, value)| {
+                    h_flex()
+                        .gap_2()
+                        .items_start()
+                        .child(
+                            div()
+                                .w(px(96.))
+                                .flex_shrink_0()
+                                .text_color(theme.muted_foreground)
+                                .child(label),
+                        )
+                        .child(div().flex_1().min_w_0().child(value))
+                }))
+        }))
 }
 
 impl Drop for Workspace {
@@ -1901,6 +2059,7 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
+            .on_action(cx.listener(Self::toggle_sidebar))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1909,7 +2068,9 @@ impl Render for Workspace {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar(cx))
+                    .when(self.sidebar_open, |this| {
+                        this.child(self.render_sidebar(cx))
+                    })
                     .child(
                         v_flex()
                             .flex_1()

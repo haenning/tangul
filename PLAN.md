@@ -76,7 +76,11 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
   (count decayed by age) and per-table query suggestions.
 - Completion: tables after FROM/JOIN, columns in scope (by alias), FK- and history-based
   join conditions, keywords; ranked by match quality + usage.
-- AI assistance later, via ACP (Agent Client Protocol) — not planned for now.
+- AI assistance later, via ACP (Agent Client Protocol); placeholder buttons in the
+  bottom bar.
+- Schema graph (planned, placeholder in the bottom bar): an Obsidian-style graph of
+  tables and their foreign keys from `SchemaInfo`, with the same structure exported in a
+  compact form for AI agents to build queries from.
 
 ### D7 — UI: GPUI + gpui-component, kept deliberately plain
 - Editor: gpui-component code editor (tree-sitter SQL highlighting, line numbers).
