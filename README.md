@@ -1,111 +1,110 @@
 # rusdb
 
-Fast, minimal database viewer for macOS. Rust + GPUI (Zed's UI framework).
-PostgreSQL and MySQL. Design and decisions: [PLAN.md](PLAN.md).
+**A light, fast window into your data.** A native macOS viewer for PostgreSQL and MySQL,
+for anyone who wants to look at their data, understand it and dig into it. It isn't a
+tool for administering a database.
 
 ![rusdb](docs/screenshot.png)
 
-## Quick start
+rusdb starts instantly, stays out of your way and keeps your connections safe. It is
+written in Rust on [GPUI](https://www.gpui.rs), the UI framework behind the
+[Zed](https://zed.dev) editor, and is heavily inspired by Zed: the plain, dense look,
+the title bar that switches database and user the way Zed switches project and branch,
+the dock-style sidebar, the command palette, and the idea that a tool should feel
+immediate.
 
-```sh
-make setup     # checks rustup, docker and (macOS) the Metal toolchain
-make run-dev   # starts dev Postgres + MySQL with sample data and opens the app
-```
+**[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)**
 
-`make run-dev` uses its own profile file (`target/dev-config/`) with two ready-made,
-passwordless connections to the dev databases, so your real profiles stay untouched.
-Use `make run` / `make run-release` for normal use.
+## A viewer, on purpose
 
-Requirements:
-- rustup (Rust 1.98.1 is installed automatically from `rust-toolchain.toml`, same as Zed).
-- Docker (only for the dev databases).
-- macOS: Xcode's Metal toolchain, which GPUI uses to compile shaders. Newer Xcode versions
-  don't ship it by default: `xcodebuild -downloadComponent MetalToolchain`.
+rusdb shows you what is in your database. It does not design it.
 
-## Install
+- **No table designers, no `CREATE TABLE` dialogs, no schema editing.** Your schema
+  belongs to your migration tool ([golang-migrate](https://github.com/golang-migrate/migrate),
+  Flyway, Alembic, …) and to version control, not to a GUI.
+- **No editing cells in the grid.** Changing data stays explicit SQL that you read before
+  it runs.
 
-**From a release** (any of your Macs): download `rusdb-<version>-universal.dmg` from the
-[GitHub releases](https://github.com/haenning/rusdb/releases), open it and drag rusdb
-onto Applications. The app is only ad-hoc signed (no Apple Developer ID), so macOS blocks
-the first start of a downloaded copy. Once: right-click rusdb in Applications → **Open** →
-**Open**, or run `xattr -dr com.apple.quarantine /Applications/rusdb.app`.
+These won't be added later. Leaving them out is what keeps rusdb small, fast and safe
+to point at production.
 
-**From source:** `make install` builds the app and copies it to `/Applications`.
-`make dmg` only builds `target/bundle/rusdb.app` and the DMG (`UNIVERSAL=1` for Apple
-Silicon + Intel). The icon is `packaging/macos/icon.png` (1024×1024).
+## See your data
 
-Profiles, passwords and `local.db` live in `~/Library/Application Support/rusdb` and the
-Keychain, per Mac. The first start of a newly built app asks once for Keychain access
-to passwords saved by an earlier build ("Always Allow").
+- **A fast result grid.** Only the visible cells are drawn, so large results scroll
+  smoothly. NULL looks different from an empty string, and long values are cut in the
+  grid instead of blowing up the layout.
+- **Follow your foreign keys.** Right-click rows to open the rows they reference, or the
+  rows that reference them. The three relations you use most come first; the rest are
+  under *Show all*.
+- **Charts from a query.** A grouped query becomes a chart in two clicks: lines, areas,
+  stacked areas, bars side by side or stacked bars, for all columns or a single one,
+  with a hover tooltip for exact values. Charts are a view of the result and are never
+  stored.
+- **Copy what you see.** Select rows (⇧-click, ⌘-click) and copy cells, rows or rows
+  with headers; the format pastes cleanly into spreadsheets.
+- **Schema at a glance.** Browse tables and views in the sidebar, click one to query it,
+  and get query suggestions for it based on what you ran before.
 
-## Releases
+## Ask better questions
 
-1. Bump `version` in the workspace `Cargo.toml`, commit, merge.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-3. The Release workflow builds the universal DMG and publishes it as a GitHub release
-   with generated notes. The tag has to match the `Cargo.toml` version.
+- **An editor that knows your schema.** Completion for tables, columns in scope and join
+  conditions (from foreign keys and from joins you wrote before), ranked by what you
+  actually use.
+- **Errors before you run.** While you type, the server checks your statements without
+  running them and underlines the exact spot it complains about.
+- **History and bookmarks.** Every run is kept locally and searchable. Queries you
+  repeat get a hint to bookmark them, and a bookmarked query shows its name when it
+  runs.
+- **Command palette** (⌘⇧P) for bookmarks, history and settings.
 
-## Using it
+## Safe by default
 
-- The title bar switches database and user (like Zed's project and branch); the
-  dropdowns also add and edit them. Passwords go to the macOS Keychain.
-- Databases can be reached through an SSH tunnel (ssh-agent, key file or password).
-- Click a table to query it; right-click for more. Right-click result rows to copy them,
-  to open related rows via foreign keys (the three you use most, the rest under
-  **Show all**), or to get an UPDATE / DELETE statement for them in a new tab (not run).
-  UPDATE has a submenu: the clicked cell or the whole row (one row selected), or with
-  several rows the cell with one value for all of them or each row's own value.
-- The chart button next to the row count turns blue when the result can be charted and
-  opens a menu: the table; all value columns in one chart (lines, areas, stacked
-  areas, bars side by side, stacked bars); or a single column (line, area, bars;
-  pick the column in the submenu). The first column is the x axis, every further column must
-  be numeric (at most 5; bars up to 50 rows, lines and areas up to 1000). Grouped
-  queries get the button outlined; otherwise its tooltip says why a result can't be
-  charted.
-- The bottom bar switches the sidebar between Schema, Bookmarks and History (click the
-  active one, or `⌘B`, to hide it). Hover the status dot next to the user in the title
-  bar for the connection status, pool usage and schema counts.
-- `⌘↵` runs the selection or the whole editor, `⌘D` bookmarks the query, `⌘T` new tab,
-  `⌘W` close tab, `⌘B` toggle sidebar, `⌘,` settings.
-- Settings (`⌘,` or "Open settings" in the command palette) open `settings.json` in a
-  tab of its own: just the editor, `⌘S` saves and the changes apply right away.
+- **Read-only mode per user.** Mark a login as read-only and the server session itself
+  refuses writes, so a stray `UPDATE` can't get through even if the app's own checks
+  miss it.
+- **A second look before damage.** In read-only mode, statements that change data or
+  schema stop and ask first. An `UPDATE` or `DELETE` without a `WHERE` asks too (on by
+  default, in the settings).
+- **Nothing runs behind your back.** UPDATE and DELETE statements generated from
+  selected rows open in a new tab, keyed by primary key, and wait for you to run them.
+  Without a primary key the statement says so in a comment at the top.
+- **Secrets stay in the Keychain.** Database passwords and SSH secrets go to the macOS
+  Keychain, never into a config file.
+- **SSH tunnels with verified host keys.** Connect through ssh-agent, a key file or a
+  password. Unknown host keys show their fingerprint and ask; a changed key is refused.
+- **TLS** for connections that need it (`prefer` / `require`). Certificate verification
+  is on the roadmap.
+- **Local and private.** No account and no telemetry. Profiles, history and bookmarks
+  stay on your Mac. rusdb only talks to your databases.
 
-## Development
+## Light and fast
 
-Run `make` to list all targets. The common ones:
+- **The UI never waits on the network.** Queries run on their own thread; the window
+  keeps responding while a slow query streams in, and you can cancel it.
+- **Gentle on your servers.** Connections open on first use, a tab only holds one while
+  a statement runs, and idle connections close after a minute. One user with one tab
+  uses exactly one server connection. An open transaction keeps its connection for that
+  tab until you commit or roll back, and the tab shows it.
+- **Sensible limits.** Results stream in batches and stop at 10,000 rows, so an
+  accidental `SELECT *` on a huge table doesn't swamp your Mac.
 
-| Target | What it does |
+## Keyboard
+
+| | |
 |---|---|
-| `make db-up` / `db-down` / `db-reset` | Dev Postgres on `127.0.0.1:55432`, MySQL on `127.0.0.1:53306` (seed: `dev/seed/`) |
-| `make psql` / `make mysql` | Shell into a dev database |
-| `make test` | Unit tests |
-| `make test-live` | Integration tests against the dev databases |
-| `make lint` | rustfmt check, clippy (warnings as errors), cargo-deny, cargo-machete |
-| `make tools` | Installs cargo-deny and cargo-machete |
-| `make install` / `make dmg` | Build the macOS app (and DMG), see Install |
-| `make ci` | Everything CI runs |
+| `⌘↵` | Run the selection, or the whole editor |
+| `⌘T` / `⌘W` | New tab / close tab |
+| `⌘D` | Bookmark the query |
+| `⌘B` | Show or hide the sidebar |
+| `⌘⇧P` | Command palette |
+| `⌘,` | Settings (`settings.json` in a tab, `⌘S` saves) |
 
-Lint rules shared by all crates are in `[workspace.lints]` (root `Cargo.toml`);
-dependency policy (advisories, licenses, sources) is in `deny.toml`.
+## Status
 
-The dev databases use non-default ports bound to localhost, so they don't clash with a
-local Postgres/MySQL.
-
-Branches: work happens on `dev`; every push to `dev` opens (or updates) a pull request
-into `main` (`.github/workflows/dev-pr.yml`, using a personal access token from the
-repository secret `DEV_PR_TOKEN`). CI (`.github/workflows/ci.yml`: lint,
-backend with live database tests on Linux, app build on macOS) is paused during heavy
-development and only runs when started by hand (Actions → CI → Run workflow).
-
-Linux builds (dev only) need `libxkbcommon-dev libxkbcommon-x11-dev`.
-
-## Roadmap
-
-Planned work and ideas are GitHub issues labeled `roadmap`, tracked in the rusdb
-project (horizons: quick win, short term, northstar, backlog); see
-[ROADMAP.md](ROADMAP.md) for the list and the project structure. Feature requests are
-welcome via the issue template. rusdb stays a focused viewer: no grid editing, table
-designers or schema migrations.
+rusdb is young and under active development. It runs on macOS (Apple Silicon and
+Intel) and supports PostgreSQL and MySQL. Plans and ideas are in the
+[roadmap](ROADMAP.md); requests are welcome as
+[issues](https://github.com/haenning/rusdb/issues).
 
 ## License
 
