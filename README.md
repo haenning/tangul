@@ -52,10 +52,11 @@ to passwords saved by an earlier build ("Always Allow").
 - Databases can be reached through an SSH tunnel (ssh-agent, key file or password).
 - Click a table to query it; right-click for more. Right-click result rows to copy them
   or to open related rows via foreign keys.
-- The chart button next to the row count shows a result as charts: the first column is the
-  x axis (dates give a line, anything else bars), every further column must be
-  numeric and gets its own chart (at most 4, 50 bars or 1000 points). Grouped
-  queries highlight the button; otherwise its tooltip says why a result can't be
+- The chart button next to the row count turns blue when the result can be charted and
+  opens a menu: table, lines, areas, stacked areas, bars side by side or stacked bars,
+  all series in one chart. The first column is the x axis, every further column must
+  be numeric (at most 5; bars up to 50 rows, lines and areas up to 1000). Grouped
+  queries get the button outlined; otherwise its tooltip says why a result can't be
   charted.
 - The bottom bar switches the sidebar between Schema, Bookmarks and History (click the
   active one, or `⌘B`, to hide it). Hover the status dot next to the user in the title

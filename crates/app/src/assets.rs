@@ -13,7 +13,10 @@ gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
         Bookmark,
+        ChartArea,
         ChartColumn,
+        ChartColumnStacked,
+        ChartLine,
         Database,
         Lightbulb,
         ListTree,

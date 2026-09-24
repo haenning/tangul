@@ -8,7 +8,6 @@ use gpui_kit::component::input::RopeExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    chart::{BarChart, LineChart},
     h_flex,
     input::{CompletionProvider, Editor, EditorState, InputEvent},
     resizable::{ResizableState, resizable_panel, v_resizable},
@@ -18,7 +17,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::analyze::statements;
-use rusdb_assist::chart::{ChartData, ChartKind, chart_data};
+use rusdb_assist::chart::{ChartData, ChartStyle, chart_data};
 use rusdb_assist::lexer::tokenize;
 use rusdb_assist::related::RelatedLink;
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
@@ -34,7 +33,9 @@ const EDITOR_HEIGHT: f32 = 240.;
 /// Dragging the editor below this height hides it completely.
 const EDITOR_SNAP_HIDE: f32 = 60.;
 
-use crate::{BookmarkQuery, RunQuery, assets::Lucide, results::ResultsDelegate};
+use crate::{
+    BookmarkQuery, RunQuery, assets::Lucide, chart::ResultChart, results::ResultsDelegate,
+};
 
 /// Connection a tab runs against.
 #[derive(Clone)]
@@ -107,8 +108,9 @@ pub struct QueryTab {
     last_rows: Option<u64>,
     /// The last result as a chart, or why it cannot be one.
     chart: Result<Rc<ChartData>, SharedString>,
-    /// Show the chart instead of the grid when there is one; kept across runs.
-    show_chart: bool,
+    /// The chart style picked in the status bar, shown instead of the grid when the
+    /// result can be charted; `None` shows the grid. Kept across runs.
+    chart_style: Option<ChartStyle>,
 }
 
 /// Why there is no chart before a result is complete.
@@ -170,7 +172,7 @@ impl QueryTab {
             truncated: false,
             last_rows: None,
             chart: Err(NO_RESULT.into()),
-            show_chart: false,
+            chart_style: None,
         }
     }
 
@@ -562,81 +564,68 @@ impl QueryTab {
             })
     }
 
-    /// Chart button state for the status bar: `Ok(suggested)` if the result can be
-    /// charted (suggested for grouped queries), otherwise why not.
-    pub fn chart_state(&self) -> Result<bool, SharedString> {
-        self.chart.as_ref().map(|c| c.grouped).map_err(Clone::clone)
+    /// Chart menu state for the status bar: the styles this result allows and
+    /// whether a chart is suggested (grouped query), or why it can't be charted.
+    pub fn chart_options(&self) -> Result<(Vec<ChartStyle>, bool), SharedString> {
+        self.chart
+            .as_ref()
+            .map(|c| (c.styles(), c.grouped))
+            .map_err(Clone::clone)
     }
 
-    pub fn chart_shown(&self) -> bool {
-        self.show_chart && self.chart.is_ok()
+    /// The style the result is shown in, if it is shown as a chart.
+    pub fn chart_shown(&self) -> Option<ChartStyle> {
+        let data = self.chart.as_ref().ok()?;
+        self.chart_style.map(|s| data.style_or_default(Some(s)))
     }
 
-    pub fn toggle_chart(&mut self, cx: &mut Context<Self>) {
-        self.show_chart = !self.chart_shown();
+    /// Shows the result as a chart in `style`, or as the grid (`None`).
+    pub fn set_chart_style(&mut self, style: Option<ChartStyle>, cx: &mut Context<Self>) {
+        self.chart_style = style;
         cx.notify();
     }
 
-    /// One chart per value column, stacked, sharing the x labels of column 0.
-    fn render_chart(&self, data: &ChartData, cx: &App) -> AnyElement {
+    /// All series in one chart, with a legend when there are several.
+    fn render_chart(&self, data: &Rc<ChartData>, style: ChartStyle, cx: &App) -> AnyElement {
         let theme = cx.theme();
-        let colors = [theme.chart_1, theme.chart_2, theme.chart_3, theme.chart_4];
-        // Leave room between x labels: about a dozen per chart.
-        let tick_margin = (data.x.len() / 12).max(1);
+        let colors = vec![
+            theme.chart_1,
+            theme.chart_2,
+            theme.chart_3,
+            theme.chart_4,
+            theme.chart_5,
+        ];
+        let legend = (data.series.len() > 1).then(|| {
+            h_flex()
+                .gap_3()
+                .flex_wrap()
+                .children(data.series.iter().enumerate().map(|(i, s)| {
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(div().size_2().rounded_sm().bg(colors[i % colors.len()]))
+                        .child(s.name.clone())
+                }))
+        });
         v_flex()
             .size_full()
             .p_3()
-            .gap_3()
-            .when(data.unsorted, |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "{} is not in ascending order; add ORDER BY to plot it over time",
-                            data.x_name
-                        )),
-                )
+            .gap_2()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .children(legend)
+            .when(data.unsorted && !style.is_bars(), |this| {
+                this.child(format!(
+                    "{} is not in ascending order; add ORDER BY to plot it over time",
+                    data.x_name
+                ))
             })
-            .children(data.series.iter().enumerate().map(|(i, series)| {
-                // NULL values are left out, not drawn as 0.
-                let points: Vec<(SharedString, f64)> = data
-                    .x
-                    .iter()
-                    .zip(&series.values)
-                    .filter_map(|(x, v)| Some((SharedString::from(x.clone()), (*v)?)))
-                    .collect();
-                let color = colors[i % colors.len()];
-                let chart = match data.kind {
-                    ChartKind::Bar => BarChart::new(points)
-                        .id(("chart", i))
-                        .name(series.name.clone())
-                        .band(|p: &(SharedString, f64)| p.0.clone())
-                        .value(|p: &(SharedString, f64)| p.1)
-                        .fill(move |_, _, _, _| color)
-                        .tick_margin(tick_margin)
-                        .into_any_element(),
-                    ChartKind::Line => LineChart::new(points)
-                        .id(("chart", i))
-                        .name(series.name.clone())
-                        .x(|p: &(SharedString, f64)| p.0.clone())
-                        .y(|p: &(SharedString, f64)| p.1)
-                        .stroke(color)
-                        .tick_margin(tick_margin)
-                        .into_any_element(),
-                };
-                v_flex()
-                    .flex_1()
-                    .min_h(px(80.))
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(series.name.clone()),
-                    )
-                    .child(div().flex_1().min_h_0().child(chart))
-            }))
+            .child(div().flex_1().min_h_0().child(ResultChart::new(
+                "result-chart",
+                data.clone(),
+                style,
+                colors,
+            )))
             .into_any_element()
     }
 
@@ -669,10 +658,11 @@ impl QueryTab {
                 .text_color(theme.muted_foreground)
                 .child("Run a query to see results")
                 .into_any_element(),
-            Status::Done { .. } if self.chart_shown() => match &self.chart {
-                Ok(data) => self.render_chart(data, cx),
-                Err(_) => unreachable!("chart_shown checks it"),
-            },
+            Status::Done { .. }
+                if let (Some(style), Ok(data)) = (self.chart_shown(), &self.chart) =>
+            {
+                self.render_chart(data, style, cx)
+            }
             _ => DataTable::new(&self.table)
                 .stripe(true)
                 .xsmall()

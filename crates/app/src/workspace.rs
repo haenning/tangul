@@ -28,6 +28,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
+    chart::ChartStyle,
     guard,
     lexer::fingerprint,
     related::related_links,
@@ -2288,7 +2289,7 @@ impl Workspace {
             .get(self.active_tab)
             .map(|tab| {
                 let t = tab.read(cx);
-                let chart = (t.chart_state(), t.chart_shown());
+                let chart = (t.chart_options(), t.chart_shown());
                 (
                     t.status_text(cx),
                     t.is_running(),
@@ -2296,26 +2297,8 @@ impl Workspace {
                 )
             })
             .unwrap_or_default();
-        // Toggles the active tab's result between grid and chart. Suggested (not
-        // ghost) for grouped queries; disabled, with the reason, when not chartable.
-        let chart_button = chart.map(|(tab, (state, shown))| {
-            let button = Button::new("chart")
-                .icon(Icon::new(Lucide::ChartColumn))
-                .xsmall()
-                .selected(shown);
-            let button = match &state {
-                Ok(true) if !shown => button.outline(),
-                _ => button.ghost(),
-            };
-            let (enabled, tooltip): (bool, SharedString) = match state {
-                Ok(_) if shown => (true, "Show the table".into()),
-                Ok(_) => (true, "Show as chart".into()),
-                Err(reason) => (false, reason),
-            };
-            button
-                .disabled(!enabled)
-                .tooltip(tooltip)
-                .on_click(move |_, _, cx| tab.update(cx, |t, cx| t.toggle_chart(cx)))
+        let chart_button = chart.map(|(tab, (options, shown))| {
+            chart_button(tab, options, shown, theme.chart_1, theme.muted_foreground)
         });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
         let panels = [
@@ -2713,4 +2696,64 @@ fn table_menu(
         .separator()
         .item(copy("Copy name", table.name.clone()))
         .item(copy("Copy qualified name", name))
+}
+
+/// Status-bar button of the active tab's result: tinted when the result can be
+/// charted, with a menu of the table and the chart styles that fit; the chosen
+/// style's name next to the icon. Disabled, with the reason, otherwise.
+fn chart_button(
+    tab: Entity<QueryTab>,
+    options: Result<(Vec<ChartStyle>, bool), SharedString>,
+    shown: Option<ChartStyle>,
+    available: Hsla,
+    muted: Hsla,
+) -> AnyElement {
+    let (styles, suggested) = match options {
+        Ok(options) => options,
+        Err(reason) => {
+            return Button::new("chart")
+                .icon(Icon::new(Lucide::ChartColumn).text_color(muted))
+                .ghost()
+                .xsmall()
+                .disabled(true)
+                .tooltip(reason)
+                .into_any_element();
+        }
+    };
+    let button = Button::new("chart")
+        .icon(Icon::new(style_icon(shown)).text_color(available))
+        .xsmall()
+        .selected(shown.is_some())
+        .when_some(shown, |b, style| b.label(style.label()));
+    let button = if suggested && shown.is_none() {
+        button.outline().tooltip("Show as chart (grouped query)")
+    } else {
+        button.ghost().tooltip("Show as chart")
+    };
+    button
+        .dropdown_menu(move |mut menu, _, _| {
+            let item = |label: &'static str, style: Option<ChartStyle>| {
+                let tab = tab.clone();
+                PopupMenuItem::new(label)
+                    .icon(Icon::new(style_icon(style)))
+                    .checked(shown == style)
+                    .on_click(move |_, _, cx| tab.update(cx, |t, cx| t.set_chart_style(style, cx)))
+            };
+            menu = menu.item(item("Table", None)).separator();
+            for &style in &styles {
+                menu = menu.item(item(style.label(), Some(style)));
+            }
+            menu
+        })
+        .into_any_element()
+}
+
+fn style_icon(style: Option<ChartStyle>) -> Lucide {
+    match style {
+        None => Lucide::Table,
+        Some(ChartStyle::Line) => Lucide::ChartLine,
+        Some(ChartStyle::Area | ChartStyle::StackedArea) => Lucide::ChartArea,
+        Some(ChartStyle::Bars) => Lucide::ChartColumn,
+        Some(ChartStyle::StackedBars) => Lucide::ChartColumnStacked,
+    }
 }
