@@ -388,6 +388,74 @@ impl Workspace {
     }
 
     fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix).cloned() else {
+            return;
+        };
+        if tab.read(cx).has_unsaved_changes(cx) {
+            self.ask_to_save(tab, window, cx);
+            return;
+        }
+        self.remove_tab(ix, window, cx);
+    }
+
+    /// Closing a file tab with unsaved changes: save, discard or keep the tab.
+    fn ask_to_save(&mut self, tab: Entity<QueryTab>, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = cx.entity().downgrade();
+        let name = tab.read(cx).title.clone();
+        let id = tab.read(cx).id;
+        // Closes the tab (if it is still there) once the dialog is answered.
+        let close = move |save: bool| {
+            let (workspace, tab) = (workspace.clone(), tab.clone());
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                window.close_dialog(cx);
+                if save && !tab.update(cx, |t, cx| t.save_file(window, cx)) {
+                    return;
+                }
+                let _ = workspace.update(cx, |ws, cx| {
+                    if let Some(ix) = ws.tab_index(id, cx) {
+                        ws.remove_tab(ix, window, cx);
+                    }
+                });
+            }
+        };
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(format!("Save changes to {name}?"))
+                .w(px(420.))
+                .child(
+                    div()
+                        .text_sm()
+                        .child("Your changes are lost if you don't save them."),
+                )
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel-close")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("discard-close")
+                                .label("Don't save")
+                                .danger()
+                                .on_click(close(false)),
+                        )
+                        .child(
+                            Button::new("save-close")
+                                .label("Save")
+                                .primary()
+                                .on_click(close(true)),
+                        ),
+                )
+        });
+    }
+
+    /// Closes a tab without asking.
+    fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.tabs.len() {
             return;
         }

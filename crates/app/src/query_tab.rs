@@ -247,20 +247,26 @@ impl QueryTab {
     /// Writes a file tab's text. Settings that don't parse are saved anyway (it is
     /// the user's file) but not applied; the tab says why.
     fn save(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_file(window, cx);
+    }
+
+    /// Writes a file tab's text; `false` (with a notification) if that failed.
+    pub fn save_file(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let text = self.editor.read(cx).value().to_string();
         let Some(file) = &mut self.file else {
-            return;
+            return false;
         };
         if let Err(e) = std::fs::write(&file.path, &text) {
             window.push_notification(
                 Notification::error(format!("Could not save {}: {e}", file.path.display())),
                 cx,
             );
-            return;
+            return false;
         }
         file.problem = crate::settings::problem(&text).map(Into::into);
         file.saved = text;
         cx.notify();
+        true
     }
 
     fn editor_hidden(&self, cx: &App) -> bool {
