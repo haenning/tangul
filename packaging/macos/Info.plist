@@ -12,6 +12,9 @@
     <string>io.github.haenning.rusdb</string>
     <key>CFBundleIconFile</key>
     <string>rusdb</string>
+    <!-- Icon Composer icon (Assets.car, macOS 26+); CFBundleIconFile is the fallback. -->
+    <key>CFBundleIconName</key>
+    <string>rusdb</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
