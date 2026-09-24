@@ -38,13 +38,26 @@ impl ChartStyle {
         ChartStyle::StackedBars,
     ];
 
+    /// Styles for a single value column.
+    pub const SINGLE: [ChartStyle; 3] = [ChartStyle::Line, ChartStyle::Area, ChartStyle::Bars];
+
+    /// Name for all value columns in one chart.
     pub fn label(self) -> &'static str {
         match self {
             ChartStyle::Line => "Lines",
             ChartStyle::Area => "Areas",
             ChartStyle::StackedArea => "Stacked areas",
-            ChartStyle::Bars => "Bars",
+            ChartStyle::Bars => "Bars side by side",
             ChartStyle::StackedBars => "Stacked bars",
+        }
+    }
+
+    /// Name for a single value column.
+    pub fn single_label(self) -> &'static str {
+        match self {
+            ChartStyle::Line => "Line",
+            ChartStyle::Area | ChartStyle::StackedArea => "Area",
+            ChartStyle::Bars | ChartStyle::StackedBars => "Bars",
         }
     }
 
@@ -55,6 +68,14 @@ impl ChartStyle {
     pub fn is_stacked(self) -> bool {
         matches!(self, ChartStyle::StackedArea | ChartStyle::StackedBars)
     }
+}
+
+/// What a chart shows: all value columns in one style, or a single one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChartView {
+    pub style: ChartStyle,
+    /// Index into [`ChartData::series`]; `None` shows all of them.
+    pub series: Option<usize>,
 }
 
 /// One value column.
@@ -145,30 +166,71 @@ pub fn chart_data(sql: &str, result: &ResultSet) -> Result<ChartData, String> {
 }
 
 impl ChartData {
-    /// The styles that fit: bars only for up to [`MAX_BARS`] rows, stacked styles
-    /// only for more than one series (with one they equal the plain ones).
-    pub fn styles(&self) -> Vec<ChartStyle> {
-        ChartStyle::ALL
-            .into_iter()
+    /// Styles for all value columns in one chart; none with a single column (that
+    /// is [`Self::single_styles`]).
+    pub fn multi_styles(&self) -> Vec<ChartStyle> {
+        if self.series.len() < 2 {
+            return Vec::new();
+        }
+        self.fitting(&ChartStyle::ALL)
+    }
+
+    /// Styles for one value column.
+    pub fn single_styles(&self) -> Vec<ChartStyle> {
+        self.fitting(&ChartStyle::SINGLE)
+    }
+
+    /// Bars only for up to [`MAX_BARS`] rows.
+    fn fitting(&self, styles: &[ChartStyle]) -> Vec<ChartStyle> {
+        styles
+            .iter()
+            .copied()
             .filter(|s| !s.is_bars() || self.x.len() <= MAX_BARS)
-            .filter(|s| !s.is_stacked() || self.series.len() > 1)
             .collect()
     }
 
-    /// Lines over time, bars for categories.
-    pub fn default_style(&self) -> ChartStyle {
-        if self.dates {
-            ChartStyle::Line
-        } else {
-            ChartStyle::Bars
+    pub fn fits(&self, view: ChartView) -> bool {
+        match view.series {
+            None => self.multi_styles().contains(&view.style),
+            Some(i) => i < self.series.len() && self.single_styles().contains(&view.style),
         }
     }
 
-    /// `style` if it fits, otherwise the default.
-    pub fn style_or_default(&self, style: Option<ChartStyle>) -> ChartStyle {
-        style
-            .filter(|s| self.styles().contains(s))
-            .unwrap_or_else(|| self.default_style())
+    /// Lines over time, bars for categories; all columns when there are several.
+    pub fn default_view(&self) -> ChartView {
+        let style = if self.dates {
+            ChartStyle::Line
+        } else {
+            ChartStyle::Bars
+        };
+        let series = (self.series.len() < 2).then_some(0);
+        ChartView { style, series }
+    }
+
+    /// `view` if it fits this result, otherwise the default.
+    pub fn view_or_default(&self, view: Option<ChartView>) -> ChartView {
+        view.filter(|&v| self.fits(v))
+            .unwrap_or_else(|| self.default_view())
+    }
+
+    /// Name of a view for the status bar: `Stacked bars`, or `Line · revenue`.
+    pub fn view_label(&self, view: ChartView) -> String {
+        match view.series.and_then(|i| self.series.get(i)) {
+            None => view.style.label().to_string(),
+            Some(_) if self.series.len() < 2 => view.style.single_label().to_string(),
+            Some(s) => format!("{} · {}", view.style.single_label(), s.name),
+        }
+    }
+
+    /// The chart data a view draws.
+    pub fn for_view(&self, view: ChartView) -> ChartData {
+        match view.series {
+            Some(i) if self.series.len() > 1 => ChartData {
+                series: self.series.get(i).into_iter().cloned().collect(),
+                ..self.clone()
+            },
+            _ => self.clone(),
+        }
     }
 
     /// Per series and row the `(from, to)` of its stacked segment. Positive values
@@ -333,8 +395,25 @@ mod tests {
         )
         .unwrap();
         assert!(!c.dates);
-        assert_eq!(c.default_style(), ChartStyle::Bars);
-        assert_eq!(c.styles(), ChartStyle::ALL);
+        let all = ChartView {
+            style: ChartStyle::Bars,
+            series: None,
+        };
+        assert_eq!(c.default_view(), all);
+        assert_eq!(c.multi_styles(), ChartStyle::ALL);
+        assert_eq!(c.view_label(all), "Bars side by side");
+        let revenue = ChartView {
+            style: ChartStyle::Line,
+            series: Some(1),
+        };
+        assert!(c.fits(revenue));
+        assert_eq!(c.view_label(revenue), "Line · revenue");
+        assert_eq!(c.for_view(revenue).series[0].name, "revenue");
+        // Stacking is for all columns only.
+        assert!(!c.fits(ChartView {
+            style: ChartStyle::StackedBars,
+            series: Some(0)
+        }));
         assert!(c.grouped && !c.unsorted);
         assert_eq!(c.x, ["paid", "NULL"]);
         assert_eq!(c.series[1].name, "revenue");
@@ -352,16 +431,22 @@ mod tests {
         );
         let c = chart_data("select * from app.revenue_by_day", &r).unwrap();
         assert!(c.dates);
-        assert_eq!(c.default_style(), ChartStyle::Line);
-        // One series: stacking would look the same as the plain styles.
+        // One value column: only the single-column styles.
+        assert!(c.multi_styles().is_empty());
+        assert_eq!(c.single_styles(), ChartStyle::SINGLE);
+        let line = ChartView {
+            style: ChartStyle::Line,
+            series: Some(0),
+        };
+        assert_eq!(c.default_view(), line);
         assert_eq!(
-            c.styles(),
-            [ChartStyle::Line, ChartStyle::Area, ChartStyle::Bars]
+            c.view_or_default(Some(ChartView {
+                style: ChartStyle::StackedBars,
+                series: None
+            })),
+            line
         );
-        assert_eq!(
-            c.style_or_default(Some(ChartStyle::StackedBars)),
-            ChartStyle::Line
-        );
+        assert_eq!(c.view_label(line), "Line");
         assert!(!c.grouped && c.unsorted);
         // Numbers in column 0 are labels.
         let r = result(

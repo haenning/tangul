@@ -17,7 +17,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::analyze::statements;
-use rusdb_assist::chart::{ChartData, ChartStyle, chart_data};
+use rusdb_assist::chart::{ChartData, ChartView, chart_data};
 use rusdb_assist::lexer::tokenize;
 use rusdb_assist::related::RelatedLink;
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
@@ -108,9 +108,9 @@ pub struct QueryTab {
     last_rows: Option<u64>,
     /// The last result as a chart, or why it cannot be one.
     chart: Result<Rc<ChartData>, SharedString>,
-    /// The chart style picked in the status bar, shown instead of the grid when the
-    /// result can be charted; `None` shows the grid. Kept across runs.
-    chart_style: Option<ChartStyle>,
+    /// The chart picked in the status bar, shown instead of the grid when the result
+    /// can be charted; `None` shows the grid. Kept across runs.
+    chart_view: Option<ChartView>,
 }
 
 /// Why there is no chart before a result is complete.
@@ -172,7 +172,7 @@ impl QueryTab {
             truncated: false,
             last_rows: None,
             chart: Err(NO_RESULT.into()),
-            chart_style: None,
+            chart_view: None,
         }
     }
 
@@ -564,37 +564,41 @@ impl QueryTab {
             })
     }
 
-    /// Chart menu state for the status bar: the styles this result allows and
-    /// whether a chart is suggested (grouped query), or why it can't be charted.
-    pub fn chart_options(&self) -> Result<(Vec<ChartStyle>, bool), SharedString> {
-        self.chart
-            .as_ref()
-            .map(|c| (c.styles(), c.grouped))
-            .map_err(Clone::clone)
+    /// The last result as chart data (for the status-bar menu), or why it can't be
+    /// charted.
+    pub fn chart(&self) -> Result<Rc<ChartData>, SharedString> {
+        self.chart.clone()
     }
 
-    /// The style the result is shown in, if it is shown as a chart.
-    pub fn chart_shown(&self) -> Option<ChartStyle> {
+    /// What the result is shown as, if it is shown as a chart.
+    pub fn chart_shown(&self) -> Option<ChartView> {
         let data = self.chart.as_ref().ok()?;
-        self.chart_style.map(|s| data.style_or_default(Some(s)))
+        self.chart_view.map(|v| data.view_or_default(Some(v)))
     }
 
-    /// Shows the result as a chart in `style`, or as the grid (`None`).
-    pub fn set_chart_style(&mut self, style: Option<ChartStyle>, cx: &mut Context<Self>) {
-        self.chart_style = style;
+    /// Shows the result as `view`, or as the grid (`None`).
+    pub fn set_chart_view(&mut self, view: Option<ChartView>, cx: &mut Context<Self>) {
+        self.chart_view = view;
         cx.notify();
     }
 
     /// All series in one chart, with a legend when there are several.
-    fn render_chart(&self, data: &Rc<ChartData>, style: ChartStyle, cx: &App) -> AnyElement {
+    fn render_chart(&self, data: &ChartData, view: ChartView, cx: &App) -> AnyElement {
         let theme = cx.theme();
-        let colors = vec![
+        let mut colors = vec![
             theme.chart_1,
             theme.chart_2,
             theme.chart_3,
             theme.chart_4,
             theme.chart_5,
         ];
+        // A single column keeps the color it has among all of them.
+        if let Some(i) = view.series {
+            let n = colors.len();
+            colors.rotate_left(i % n);
+        }
+        let style = view.style;
+        let data = Rc::new(data.for_view(view));
         let legend = (data.series.len() > 1).then(|| {
             h_flex()
                 .gap_3()
@@ -622,7 +626,7 @@ impl QueryTab {
             })
             .child(div().flex_1().min_h_0().child(ResultChart::new(
                 "result-chart",
-                data.clone(),
+                data,
                 style,
                 colors,
             )))
@@ -659,9 +663,9 @@ impl QueryTab {
                 .child("Run a query to see results")
                 .into_any_element(),
             Status::Done { .. }
-                if let (Some(style), Ok(data)) = (self.chart_shown(), &self.chart) =>
+                if let (Some(view), Ok(data)) = (self.chart_shown(), &self.chart) =>
             {
-                self.render_chart(data, style, cx)
+                self.render_chart(data, view, cx)
             }
             _ => DataTable::new(&self.table)
                 .stripe(true)

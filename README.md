@@ -53,8 +53,9 @@ to passwords saved by an earlier build ("Always Allow").
 - Click a table to query it; right-click for more. Right-click result rows to copy them
   or to open related rows via foreign keys.
 - The chart button next to the row count turns blue when the result can be charted and
-  opens a menu: table, lines, areas, stacked areas, bars side by side or stacked bars,
-  all series in one chart. The first column is the x axis, every further column must
+  opens a menu: the table; all value columns in one chart (lines, areas, stacked
+  areas, bars side by side, stacked bars); or a single column (line, area, bars;
+  pick the column in the submenu). The first column is the x axis, every further column must
   be numeric (at most 5; bars up to 50 rows, lines and areas up to 1000). Grouped
   queries get the button outlined; otherwise its tooltip says why a result can't be
   charted.
