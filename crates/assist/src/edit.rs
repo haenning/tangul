@@ -113,33 +113,92 @@ impl RowEdit {
         self.warning.is_none()
     }
 
-    /// `UPDATE … SET col = <value> WHERE <rows>`, with `value` (the clicked cell's)
-    /// as the starting point. `rows` hold all result columns.
-    pub fn update(
+    /// `UPDATE … SET col = <value> WHERE <rows>`: one value for the column of all
+    /// rows, starting from `value` (the clicked cell's). `rows` hold all result
+    /// columns.
+    pub fn update_cell(
         &self,
         col: usize,
         value: Option<&str>,
         rows: &[Vec<Option<&str>>],
     ) -> Option<String> {
         let column = self.columns.get(col)?.as_ref()?;
-        let value = match value {
-            Some(v) => literal(v, column.numeric, self.driver),
-            None => "NULL".into(),
-        };
         Some(format!(
-            "{}UPDATE {}\nSET {} = {value}\nWHERE {};",
-            self.warning.as_deref().unwrap_or_default(),
+            "{}UPDATE {}\nSET {} = {}\nWHERE {};",
+            self.warning(),
             self.table_sql,
             column.sql,
+            self.value(column, value),
             self.filter(rows)?
         ))
+    }
+
+    /// One `UPDATE` per row, each setting the column to that row's own value (rows
+    /// with the same key once).
+    pub fn update_cells(&self, col: usize, rows: &[Vec<Option<&str>>]) -> Option<String> {
+        let column = self.columns.get(col)?.as_ref()?;
+        let mut statements: Vec<String> = Vec::new();
+        for row in rows {
+            let stmt = format!(
+                "UPDATE {} SET {} = {} WHERE {};",
+                self.table_sql,
+                column.sql,
+                self.value(column, row.get(col).copied().flatten()),
+                self.filter(std::slice::from_ref(row))?
+            );
+            if !statements.contains(&stmt) {
+                statements.push(stmt);
+            }
+        }
+        (!statements.is_empty()).then(|| format!("{}{}", self.warning(), statements.join("\n")))
+    }
+
+    /// `UPDATE … SET` every table column of the row (except the key it is matched
+    /// by) to its current value.
+    pub fn update_row(&self, row: &[Option<&str>]) -> Option<String> {
+        let by_key = self.by_primary_key();
+        let sets: Vec<String> = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !(by_key && self.key.contains(i)))
+            .filter_map(|(i, c)| {
+                let c = c.as_ref()?;
+                Some(format!(
+                    "{} = {}",
+                    c.sql,
+                    self.value(c, row.get(i).copied().flatten())
+                ))
+            })
+            .collect();
+        if sets.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}UPDATE {}\nSET {}\nWHERE {};",
+            self.warning(),
+            self.table_sql,
+            sets.join(",\n    "),
+            self.filter(&[row.to_vec()])?
+        ))
+    }
+
+    fn warning(&self) -> &str {
+        self.warning.as_deref().unwrap_or_default()
+    }
+
+    fn value(&self, column: &EditColumn, value: Option<&str>) -> String {
+        match value {
+            Some(v) => literal(v, column.numeric, self.driver),
+            None => "NULL".into(),
+        }
     }
 
     /// `DELETE FROM … WHERE <rows>`. `rows` hold all result columns.
     pub fn delete(&self, rows: &[Vec<Option<&str>>]) -> Option<String> {
         Some(format!(
             "{}DELETE FROM {}\nWHERE {};",
-            self.warning.as_deref().unwrap_or_default(),
+            self.warning(),
             self.table_sql,
             self.filter(rows)?
         ))
@@ -229,11 +288,11 @@ mod tests {
             vec![Some("7"), Some("o'k@x"), None],
         ];
         assert_eq!(
-            e.update(1, Some("o'k@x"), &rows[..1]).unwrap(),
+            e.update_cell(1, Some("o'k@x"), &rows[..1]).unwrap(),
             "UPDATE app.users\nSET email = 'o''k@x'\nWHERE id = 7;"
         );
         assert_eq!(
-            e.update(1, None, &rows).unwrap(),
+            e.update_cell(1, None, &rows).unwrap(),
             "UPDATE app.users\nSET email = NULL\nWHERE id IN (7, 8);"
         );
         assert_eq!(
@@ -241,6 +300,16 @@ mod tests {
             "DELETE FROM app.users\nWHERE id IN (7, 8);"
         );
         assert_eq!(e.delete(&[]), None);
+        assert_eq!(
+            e.update_cells(1, &rows).unwrap(),
+            "UPDATE app.users SET email = 'o''k@x' WHERE id = 7;\n\
+             UPDATE app.users SET email = NULL WHERE id = 8;"
+        );
+        // The key is what matches the row, not something to set.
+        assert_eq!(
+            e.update_row(&rows[0]).unwrap(),
+            "UPDATE app.users\nSET email = 'o''k@x',\n    name = NULL\nWHERE id = 7;"
+        );
     }
 
     #[test]

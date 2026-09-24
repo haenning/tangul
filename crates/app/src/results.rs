@@ -271,19 +271,42 @@ impl TableDelegate for ResultsDelegate {
             let values = self.row_values(&rows);
             let title = |verb: &str| format!("{verb} {}", edit.table);
             menu = menu.separator();
+            let open = |sql: Option<String>| {
+                sql.map(|sql| TabEvent::OpenSql {
+                    title: title("update"),
+                    sql,
+                })
+            };
+            // UPDATE submenu: the clicked cell (one value for all rows, or each row's
+            // own), or the whole row when only one is selected.
+            let mut updates = Vec::new();
             if let Some(col) = self.menu_col.filter(|&c| edit.editable(c)) {
                 let name = &self.result.columns()[col].name;
                 let value = self.result.cell(row_ix, col);
-                menu = menu.item(
-                    self.open_item(
-                        format!("UPDATE {name} of {count}row{s}"),
-                        edit.update(col, value, &values)
-                            .map(|sql| TabEvent::OpenSql {
-                                title: title("update"),
-                                sql,
-                            }),
-                    ),
-                );
+                if n == 1 {
+                    updates.push(self.open_item(
+                        format!("Cell: {name}"),
+                        open(edit.update_cell(col, value, &values)),
+                    ));
+                } else {
+                    updates.push(self.open_item(
+                        format!("Cell: {name}, one value for {n} rows"),
+                        open(edit.update_cell(col, value, &values)),
+                    ));
+                    updates.push(self.open_item(
+                        format!("Cells: {name}, each row's own value"),
+                        open(edit.update_cells(col, &values)),
+                    ));
+                }
+            }
+            if let [row] = &values[..] {
+                updates.push(self.open_item("Row".into(), open(edit.update_row(row))));
+            }
+            if !updates.is_empty() {
+                let submenu = PopupMenu::build(window, cx, move |menu, _, _| {
+                    updates.into_iter().fold(menu, PopupMenu::item)
+                });
+                menu = menu.item(PopupMenuItem::submenu("UPDATE", submenu));
             }
             menu = menu.item(self.open_item(
                 format!("DELETE {count}row{s}"),
