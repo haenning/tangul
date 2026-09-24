@@ -111,6 +111,17 @@ impl Session for PgSession {
         self.in_transaction
     }
 
+    async fn set_read_only(&mut self, on: bool) -> Result<()> {
+        let mode = if on { "READ ONLY" } else { "READ WRITE" };
+        self.client
+            .simple_query(&format!(
+                "SET SESSION CHARACTERISTICS AS TRANSACTION {mode}"
+            ))
+            .await
+            .map_err(pg_error)?;
+        Ok(())
+    }
+
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
         self.cancel.clone()
     }

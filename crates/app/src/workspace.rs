@@ -9,15 +9,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui_kit::MouseButton;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _,
     TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
+    command::{Command as PaletteList, CommandGroup, CommandItem, CommandState},
     h_flex,
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
+    resizable::{ResizableState, h_resizable, resizable_panel},
     spinner::Spinner,
     tab::{Tab, TabBar},
     v_flex,
@@ -25,6 +28,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
+    guard,
     lexer::fingerprint,
     related::related_links,
     schema::{SchemaIndex, quote_ident},
@@ -37,17 +41,21 @@ use rusdb_core::{
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
 use crate::{
-    CloseTab, NewTab, ToggleSidebar,
+    CloseTab, NewTab, OpenPalette, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
     connection_form::{ConnectionForm, FormMode, FormOutput},
     local::{Bookmark, HistoryEntry, Local, NewHistory},
+    palette::{self, PaletteAction, PaletteKind},
     query_tab::{QueryTab, TabConn, TabEvent},
+    settings,
     store::Store,
 };
 
 const SIDEBAR_WIDTH: f32 = 260.;
+const SIDEBAR_MIN_WIDTH: f32 = 180.;
+const SIDEBAR_MAX_WIDTH: f32 = 600.;
 const ROW_HEIGHT: f32 = 26.;
 /// Sidebar tree geometry: left padding, indent per level, icon width.
 const TREE_PAD: f32 = 10.;
@@ -59,6 +67,7 @@ const HISTORY_LIMIT: usize = 300;
 const BOOKMARK_HINT_RUNS: u32 = 3;
 /// local.db setting: the user id connected last, reopened at startup.
 const LAST_USER_SETTING: &str = "last_user";
+const SIDEBAR_WIDTH_SETTING: &str = "sidebar_width";
 
 #[derive(Clone, Copy, PartialEq)]
 enum SidebarView {
@@ -86,6 +95,18 @@ impl SidebarView {
 }
 
 /// A query sent to the engine, kept until it finishes to record it in history.
+/// Why a statement is held back before it runs.
+enum RunGuard {
+    /// Read-only mode: nothing changes until the user allows writes.
+    ReadOnly {
+        user: String,
+        /// (keyword, statement on one line)
+        statements: Vec<(String, String)>,
+    },
+    /// `UPDATE` / `DELETE` without `WHERE`.
+    Unfiltered { statements: Vec<(String, String)> },
+}
+
 struct RunningQuery {
     tab: WeakEntity<QueryTab>,
     sql: String,
@@ -156,8 +177,13 @@ pub struct Workspace {
     collapsed_groups: HashSet<(String, SharedString, TableKind)>,
     sidebar_view: SidebarView,
     sidebar_open: bool,
+    /// Sidebar/content split; the sidebar is the first panel.
+    layout: Entity<ResizableState>,
+    sidebar_width: f32,
     tabs: Vec<Entity<QueryTab>>,
     active_tab: usize,
+    /// Tab a middle-button press started on; it closes if released on the same tab.
+    middle_press: Option<TabId>,
     queries: HashMap<QueryId, RunningQuery>,
     /// Pending editor checks: request → (tab, edit generation).
     validations: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
@@ -204,6 +230,11 @@ impl Workspace {
                 }
             },
         );
+        let sidebar_width = local
+            .setting(SIDEBAR_WIDTH_SETTING)
+            .and_then(|w| w.parse::<f32>().ok())
+            .unwrap_or(SIDEBAR_WIDTH)
+            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         let mut this = Self {
             engine,
             store,
@@ -220,8 +251,11 @@ impl Workspace {
             collapsed_groups: HashSet::new(),
             sidebar_view: SidebarView::Schema,
             sidebar_open: true,
+            layout: cx.new(|_| ResizableState::default()),
+            sidebar_width,
             tabs: Vec::new(),
             active_tab: 0,
+            middle_press: None,
             queries: HashMap::new(),
             validations: HashMap::new(),
             sidebar_rows: Vec::new(),
@@ -339,6 +373,38 @@ impl Workspace {
         cx.notify();
     }
 
+    fn tab_index(&self, id: TabId, cx: &App) -> Option<usize> {
+        self.tabs.iter().position(|t| t.read(cx).id == id)
+    }
+
+    fn close_tab_by_id(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tab_index(id, cx) {
+            self.close_tab(ix, window, cx);
+        }
+    }
+
+    fn toggle_tab_pin(&mut self, id: TabId, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tab_index(id, cx) {
+            self.tabs[ix].update(cx, |t, _| t.toggle_pin());
+            cx.notify();
+        }
+    }
+
+    /// Removes the tab's bookmark, or asks for a name and bookmarks its query.
+    fn toggle_tab_bookmark(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tab_index(id, cx).map(|ix| self.tabs[ix].clone()) else {
+            return;
+        };
+        if let Some(bookmark) = tab.read(cx).bookmark_id.clone() {
+            self.delete_bookmark(&bookmark, window, cx);
+        } else {
+            let sql = tab.read(cx).sql(cx);
+            if !sql.trim().is_empty() {
+                self.open_bookmark_dialog(None, sql, Some(tab), window, cx);
+            }
+        }
+    }
+
     fn on_tab_event(
         &mut self,
         tab: &Entity<QueryTab>,
@@ -383,26 +449,209 @@ impl Workspace {
                 let Some(conn) = tab.read(cx).conn.clone() else {
                     return;
                 };
-                let query = QueryId(self.next_id());
-                let user_id = self.conn_users.get(&conn.id).cloned().unwrap_or_default();
-                self.queries.insert(
-                    query,
-                    RunningQuery {
-                        tab: tab.downgrade(),
-                        sql: sql.clone(),
-                        user_id,
-                        started_at: now_ms(),
-                    },
-                );
-                self.engine.send(Command::Execute {
-                    query,
-                    tab: tab.read(cx).id,
-                    conn: conn.id,
-                    sql: sql.clone(),
-                });
-                tab.update(cx, |t, cx| t.started(query, sql, cx));
+                match self.run_guard(conn.id, sql, cx) {
+                    None => self.execute(tab, sql, cx),
+                    Some(guard) => self.hold_back(tab.clone(), sql.clone(), guard, window, cx),
+                }
             }
         }
+    }
+
+    /// Sends `sql` to the engine on the tab's connection.
+    fn execute(&mut self, tab: &Entity<QueryTab>, sql: &str, cx: &mut Context<Self>) {
+        let Some(conn) = tab.read(cx).conn.clone() else {
+            return;
+        };
+        let query = QueryId(self.next_id());
+        let user_id = self.conn_users.get(&conn.id).cloned().unwrap_or_default();
+        self.queries.insert(
+            query,
+            RunningQuery {
+                tab: tab.downgrade(),
+                sql: sql.to_string(),
+                user_id,
+                started_at: now_ms(),
+            },
+        );
+        // The server refuses writes, too, so read-only mode can't be sidestepped.
+        let read_only = self
+            .conn_user_name(conn.id)
+            .is_some_and(|user| settings::current(cx).is_read_only(&user));
+        self.engine.send(Command::Execute {
+            query,
+            tab: tab.read(cx).id,
+            conn: conn.id,
+            sql: sql.to_string(),
+            read_only,
+        });
+        tab.update(cx, |t, cx| t.started(query, sql, cx));
+    }
+
+    // ---- safety ------------------------------------------------------------------
+
+    /// The database user name of a connection.
+    fn conn_user_name(&self, conn: ConnId) -> Option<String> {
+        let user_id = self.conn_users.get(&conn)?;
+        Some(self.find_user(user_id)?.1.user.clone())
+    }
+
+    /// Whether the active user is in read-only mode.
+    fn active_user_read_only(&self, cx: &App) -> Option<bool> {
+        let user = &self.find_user(self.active_user.as_deref()?)?.1.user;
+        Some(settings::current(cx).is_read_only(user))
+    }
+
+    /// Flips read-only mode for the active user (kept in `settings.json`).
+    fn toggle_read_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(user) = self
+            .active_user
+            .as_deref()
+            .and_then(|id| self.find_user(id))
+            .map(|(_, u)| u.user.clone())
+        else {
+            return;
+        };
+        let on = !settings::current(cx).is_read_only(&user);
+        if let Err(e) = settings::set_read_only(&user, on, cx) {
+            window.push_notification(
+                Notification::error(format!("Could not change read-only mode: {e}")),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Why `sql` shouldn't run on `conn` right away: it changes data in read-only mode
+    /// (which takes precedence), or it is an `UPDATE` / `DELETE` without a `WHERE`.
+    fn run_guard(&self, conn: ConnId, sql: &str, cx: &App) -> Option<RunGuard> {
+        let settings = settings::current(cx);
+        let user = self
+            .conn_user_name(conn)
+            .filter(|user| settings.is_read_only(user));
+        let checks = guard::check(sql);
+        let described = |keep: &dyn Fn(&guard::Check) -> bool| -> Vec<(String, String)> {
+            checks
+                .iter()
+                .filter(|c| keep(c))
+                .map(|c| (c.keyword.clone(), one_line(&c.statement, 160)))
+                .collect()
+        };
+        if let Some(user) = user {
+            let statements = described(&|c| c.writes);
+            if !statements.is_empty() {
+                return Some(RunGuard::ReadOnly { user, statements });
+            }
+        }
+        if settings.safety.confirm_unfiltered_writes {
+            let statements = described(&|c| c.unfiltered);
+            if !statements.is_empty() {
+                return Some(RunGuard::Unfiltered { statements });
+            }
+        }
+        None
+    }
+
+    /// Explains why `sql` did not run. The red button lifts the guard: "Allow writes"
+    /// turns read-only mode off (the statement is not run; run it again), "Allow …"
+    /// for an unfiltered statement runs it once.
+    fn hold_back(
+        &mut self,
+        tab: Entity<QueryTab>,
+        sql: String,
+        guard: RunGuard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = cx.entity().downgrade();
+        let (title, intro, statements, allow) = match &guard {
+            RunGuard::ReadOnly { user, statements } => (
+                "Read-only mode",
+                format!(
+                    "Read-only mode is on for {user}. Nothing was run; these statements change data:"
+                ),
+                statements.clone(),
+                "Allow writes".to_string(),
+            ),
+            RunGuard::Unfiltered { statements } => {
+                let has = |keyword: &str| statements.iter().any(|(k, _)| k == keyword);
+                let allow = match (has("DELETE"), has("UPDATE")) {
+                    (true, false) => "Allow deletes",
+                    (false, true) => "Allow updates",
+                    _ => "Allow updates and deletes",
+                };
+                (
+                    "No WHERE clause",
+                    "These statements have no WHERE and affect every row:".to_string(),
+                    statements.clone(),
+                    allow.to_string(),
+                )
+            }
+        };
+        let read_only_user = match &guard {
+            RunGuard::ReadOnly { user, .. } => Some(user.clone()),
+            RunGuard::Unfiltered { .. } => None,
+        };
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let theme = cx.theme();
+            let body = v_flex()
+                .gap_2()
+                .child(div().text_sm().child(intro.clone()))
+                .children(statements.iter().map(|(_, statement)| {
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded(theme.radius)
+                        .bg(theme.muted)
+                        .font_family(theme.mono_font_family.clone())
+                        .text_sm()
+                        .child(statement.clone())
+                }));
+            let allow_click = {
+                let (workspace, tab, sql) = (workspace.clone(), tab.clone(), sql.clone());
+                let read_only_user = read_only_user.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    window.close_dialog(cx);
+                    match &read_only_user {
+                        // Lifts read-only mode; running the statement is a second, deliberate step.
+                        Some(user) => match settings::set_read_only(user, false, cx) {
+                            Ok(()) => window.push_notification(
+                                Notification::info(format!(
+                                    "Read-only mode is off for {user}. Run the statement again."
+                                )),
+                                cx,
+                            ),
+                            Err(e) => window.push_notification(
+                                Notification::error(format!(
+                                    "Could not change read-only mode: {e}"
+                                )),
+                                cx,
+                            ),
+                        },
+                        None => {
+                            let _ = workspace.update(cx, |ws, cx| ws.execute(&tab, &sql, cx));
+                        }
+                    }
+                }
+            };
+            dialog.title(title).w(px(520.)).child(body).footer(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel-run")
+                            .label("Cancel")
+                            .ghost()
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("allow-run")
+                            .label(allow.clone())
+                            .danger()
+                            .on_click(allow_click),
+                    ),
+            )
+        });
     }
 
     // ---- bookmarks -------------------------------------------------------------
@@ -511,6 +760,81 @@ impl Workspace {
     fn open_sql(&mut self, title: &str, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
         let tab = self.add_tab(sql, window, cx);
         tab.update(cx, |t, _| t.title = title.to_string().into());
+    }
+
+    // ---- command palette -------------------------------------------------------
+
+    fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        let db = self.active_db.clone();
+        let bookmarks = self.local.bookmarks_for(db.as_deref());
+        let history = match &db {
+            Some(db) => self.local.history(db, "", HISTORY_LIMIT),
+            None => Vec::new(),
+        };
+        let groups = palette::groups(&bookmarks, &history);
+        let list = cx.new(|cx| CommandState::new(window, cx));
+        let workspace = cx.entity().downgrade();
+        window.open_dialog(cx, {
+            let list = list.clone();
+            move |dialog, _, _| {
+                let mut command = PaletteList::new(&list)
+                    .placeholder("Search commands, bookmarks and history")
+                    .bordered(false);
+                for group in &groups {
+                    let icon = || match group.kind {
+                        PaletteKind::Command => Icon::new(IconName::Settings),
+                        PaletteKind::Bookmark => Icon::new(Lucide::Bookmark),
+                        PaletteKind::History => Icon::new(Lucide::RotateCcwClock),
+                    };
+                    command = command.group(CommandGroup::new().label(group.label).items(
+                        group.items.iter().map(|item| {
+                            CommandItem::new()
+                                .label(item.label.clone())
+                                .keywords([item.search.clone()])
+                                .icon(icon())
+                        }),
+                    ));
+                }
+                // Groups and items keep their positions while the list is filtered.
+                let actions: Vec<Vec<PaletteAction>> = groups
+                    .iter()
+                    .map(|g| g.items.iter().map(|i| i.action.clone()).collect())
+                    .collect();
+                let workspace = workspace.clone();
+                dialog
+                    .w(px(560.))
+                    .close_button(false)
+                    .child(command.on_confirm(move |path, window, cx| {
+                        let Some(action) = actions
+                            .get(path.section)
+                            .and_then(|items| items.get(path.row))
+                            .cloned()
+                        else {
+                            return;
+                        };
+                        window.close_dialog(cx);
+                        let _ = workspace.update(cx, |ws, cx| ws.run_palette(action, window, cx));
+                    }))
+            }
+        });
+        // The dialog is built on the next frame; focus the search field once it exists.
+        window.defer(cx, move |window, cx| {
+            list.update(cx, |list, cx| list.focus(window, cx))
+        });
+    }
+
+    fn run_palette(&mut self, action: PaletteAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            PaletteAction::Settings => match settings::ensure_file(cx) {
+                Some(path) => cx.open_with_system(&path),
+                None => window.push_notification(
+                    Notification::error("Could not create the settings file"),
+                    cx,
+                ),
+            },
+            PaletteAction::Bookmark(id) => self.open_bookmark(&id, false, window, cx),
+            PaletteAction::History(sql) => self.open_sql("History", &sql, window, cx),
+        }
     }
 
     // ---- history and learning ----------------------------------------------------
@@ -1407,6 +1731,12 @@ impl Workspace {
         }
     }
 
+    fn save_sidebar_width(&mut self, width: f32) {
+        self.sidebar_width = width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        self.local
+            .set_setting(SIDEBAR_WIDTH_SETTING, &self.sidebar_width.to_string());
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = self.sidebar_view;
         let body = match view {
@@ -1415,13 +1745,11 @@ impl Workspace {
             SidebarView::History => self.render_history_panel(cx).into_any_element(),
         };
         let theme = cx.theme();
+        // The divider next to it (the resize handle) draws the border.
         v_flex()
-            .w(px(SIDEBAR_WIDTH))
-            .h_full()
-            .flex_shrink_0()
+            .size_full()
+            .overflow_hidden()
             .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border)
             .child(body)
     }
 
@@ -1796,6 +2124,7 @@ impl Workspace {
                 })
         });
 
+        let read_only = self.active_user_read_only(cx);
         let dot = self.active_conn().map(|c| match c.status {
             ConnStatus::Connected => theme.success,
             ConnStatus::Connecting => theme.warning,
@@ -1814,6 +2143,34 @@ impl Workspace {
                         .child("/"),
                 )
                 .child(user_menu)
+            })
+            .when_some(read_only, |this, on| {
+                let color = if on {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                };
+                this.child(
+                    Button::new("read-only")
+                        .icon(
+                            Icon::new(if on {
+                                Lucide::PencilOff
+                            } else {
+                                Lucide::Pencil
+                            })
+                            .text_color(color),
+                        )
+                        .ghost()
+                        .xsmall()
+                        .tooltip(if on {
+                            "Read-only mode is on: writes ask first. Click to turn off"
+                        } else {
+                            "Read-only mode is off. Click to turn on"
+                        })
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_read_only(window, cx)),
+                        ),
+                )
             })
             .when_some(dot, |this, dot| {
                 let weak = cx.entity().downgrade();
@@ -1842,23 +2199,64 @@ impl Workspace {
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
         let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
-            let t = tab.read(cx);
-            let label: SharedString = if t.in_transaction() {
-                format!("{} •", t.title).into()
-            } else {
-                t.title.clone()
+            let (id, pinned, bookmarked, has_sql, title, in_transaction) = {
+                let t = tab.read(cx);
+                (
+                    t.id,
+                    t.pinned,
+                    t.bookmark_id.is_some(),
+                    !t.sql(cx).trim().is_empty(),
+                    t.title.clone(),
+                    t.in_transaction(),
+                )
             };
-            Tab::new().label(label).suffix(
-                Button::new(("close-tab", ix))
-                    .icon(IconName::Close)
-                    .ghost()
-                    .xsmall()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.close_tab(ix, window, cx)
-                    })),
-            )
+            let label: SharedString = if in_transaction {
+                format!("{title} •").into()
+            } else {
+                title
+            };
+            // The context menu can't wrap the `Tab` itself, so it sits on the content.
+            let content = h_flex()
+                .id(("tab-menu", id.0 as usize))
+                .gap_1()
+                .items_center()
+                .when(pinned, |this| this.child(Icon::new(Lucide::Pin).xsmall()))
+                .child(label.clone())
+                .context_menu({
+                    let weak = weak.clone();
+                    move |menu, _, _| tab_menu(menu, id, pinned, bookmarked, has_sql, &weak)
+                });
+            Tab::new()
+                .aria_label(label)
+                .child(content)
+                // Pinned tabs have no close button; the shortcut and menu still close them.
+                .when(!pinned, |this| {
+                    this.suffix(
+                        Button::new(("close-tab", ix))
+                            .icon(IconName::Close)
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(ix, window, cx)
+                            })),
+                    )
+                })
+                // Like browsers: closes when released on the tab it was pressed on.
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, _, _| this.middle_press = Some(id)),
+                )
+                .on_mouse_up(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
+                        if this.middle_press.take() == Some(id) && !pinned {
+                            this.close_tab_by_id(id, window, cx);
+                        }
+                    }),
+                )
         });
         TabBar::new("tabs")
             .children(tabs)
@@ -2053,26 +2451,43 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::open_palette))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(TitleBar::new().child(self.render_title_bar(cx)))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .when(self.sidebar_open, |this| {
-                        this.child(self.render_sidebar(cx))
-                    })
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(self.render_tabs(cx))
-                            .children(active.map(|tab| div().flex_1().min_h_0().child(tab))),
-                    ),
-            )
+            .child({
+                let content = v_flex()
+                    .size_full()
+                    .min_w_0()
+                    .child(self.render_tabs(cx))
+                    .children(active.map(|tab| div().flex_1().min_h_0().child(tab)));
+                let body = if self.sidebar_open {
+                    let this = cx.entity().downgrade();
+                    h_resizable("layout")
+                        .with_state(&self.layout)
+                        .on_resize(move |state, _, cx| {
+                            let width = state.read(cx).sizes().first().copied();
+                            let _ = this.update(cx, |ws, _| {
+                                if let Some(width) = width {
+                                    ws.save_sidebar_width(width.as_f32());
+                                }
+                            });
+                        })
+                        .child(
+                            resizable_panel()
+                                .size(px(self.sidebar_width))
+                                .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
+                                .flex_none()
+                                .child(self.render_sidebar(cx)),
+                        )
+                        .child(resizable_panel().child(content))
+                        .into_any_element()
+                } else {
+                    content.into_any_element()
+                };
+                div().flex_1().min_h_0().child(body)
+            })
             .child(self.render_status_bar(cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
@@ -2214,6 +2629,35 @@ fn ago(ms: i64) -> String {
 }
 
 /// Right-click menu of a table or view in the sidebar.
+fn tab_menu(
+    menu: PopupMenu,
+    tab: TabId,
+    pinned: bool,
+    bookmarked: bool,
+    has_sql: bool,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    let item = |label: &str, f: fn(&mut Workspace, TabId, &mut Window, &mut Context<Workspace>)| {
+        let ws = workspace.clone();
+        PopupMenuItem::new(label.to_string()).on_click(move |_, window, cx| {
+            let _ = ws.update(cx, |ws, cx| f(ws, tab, window, cx));
+        })
+    };
+    let menu = menu
+        .item(item("Close", Workspace::close_tab_by_id))
+        .item(item(
+            if pinned { "Unpin" } else { "Pin" },
+            |ws, tab, _, cx| ws.toggle_tab_pin(tab, cx),
+        ));
+    if bookmarked {
+        menu.item(item("Remove bookmark", Workspace::toggle_tab_bookmark))
+    } else if has_sql {
+        menu.item(item("Bookmark query…", Workspace::toggle_tab_bookmark))
+    } else {
+        menu
+    }
+}
+
 fn table_menu(
     menu: PopupMenu,
     table: &TableInfo,

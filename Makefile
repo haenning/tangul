@@ -6,7 +6,7 @@ SSH_URL   ?= rusdb:rusdb@127.0.0.1:52222
 DEV_CONFIG := target/dev-config
 
 .DEFAULT_GOAL := help
-.PHONY: help setup tools db-up db-down db-reset db-logs psql mysql run run-release run-dev \
+.PHONY: help setup tools docker-up db-up db-down db-reset db-logs psql mysql run run-release run-dev \
         test test-live fmt lint ci app dmg install
 
 help: ## List targets
@@ -21,7 +21,15 @@ setup: ## Check required tools
 		echo "  run: xcodebuild -downloadComponent MetalToolchain"; exit 1; fi
 	@rustup show active-toolchain >/dev/null && echo "ok"
 
-db-up: ## Start dev Postgres (:55432), MySQL (:53306) and an SSH bastion (:52222)
+docker-up: # Start Docker Desktop on macOS if the daemon isn't running (not listed in help)
+	@docker info >/dev/null 2>&1 || { \
+		if [ "$$(uname)" = "Darwin" ]; then \
+			echo "starting Docker Desktop..."; open -ga Docker; \
+			for i in $$(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 2; done; \
+			echo "Docker did not become ready in 2 minutes"; exit 1; \
+		else echo "docker daemon is not running"; exit 1; fi; }
+
+db-up: docker-up ## Start dev Postgres (:55432), MySQL (:53306) and an SSH bastion (:52222)
 	docker compose up -d --wait
 
 db-down: ## Stop dev databases (data is kept)
