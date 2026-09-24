@@ -45,6 +45,50 @@ FROM (
     FROM digits a, digits b, digits c, digits e, digits f
 ) t;
 
+-- More tables referencing users, so its "Show related" menu has more than three
+-- entries (the rest go under "Show all").
+CREATE TABLE addresses (
+    id      INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    city    VARCHAR(50) NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+INSERT INTO addresses (user_id, city)
+SELECT n + 1, ELT(1 + n % 3, 'Berlin', 'Hamburg', 'Munich')
+FROM (SELECT a.d + b.d * 10 + c.d * 100 AS n FROM digits a, digits b, digits c) t;
+
+CREATE TABLE sessions (
+    id      BIGINT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    started DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+INSERT INTO sessions (user_id)
+SELECT (n % 1000) + 1
+FROM (SELECT a.d + b.d * 10 + c.d * 100 + e.d * 1000 AS n
+      FROM digits a, digits b, digits c, digits e) t;
+
+CREATE TABLE tickets (
+    id      INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    subject VARCHAR(100) NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+INSERT INTO tickets (user_id, subject)
+SELECT (n % 500) + 1, CONCAT('Ticket ', n)
+FROM (SELECT a.d + b.d * 10 + c.d * 100 AS n FROM digits a, digits b, digits c) t;
+
+-- No primary key: UPDATE / DELETE from the grid match rows by all columns.
+CREATE TABLE audit_log (
+    user_id INT,
+    action  VARCHAR(20) NOT NULL,
+    at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+INSERT INTO audit_log (user_id, action)
+SELECT (n % 100) + 1, ELT(1 + n % 2, 'login', 'logout')
+FROM (SELECT a.d + b.d * 10 AS n FROM digits a, digits b) t;
+
 CREATE VIEW revenue_by_status AS
 SELECT status, COUNT(*) AS orders, SUM(total) AS revenue
 FROM orders

@@ -50,8 +50,9 @@ to passwords saved by an earlier build ("Always Allow").
 - The title bar switches database and user (like Zed's project and branch); the
   dropdowns also add and edit them. Passwords go to the macOS Keychain.
 - Databases can be reached through an SSH tunnel (ssh-agent, key file or password).
-- Click a table to query it; right-click for more. Right-click result rows to copy them
-  or to open related rows via foreign keys.
+- Click a table to query it; right-click for more. Right-click result rows to copy them,
+  to open related rows via foreign keys (the three you use most, the rest under
+  **Show all**), or to get an UPDATE / DELETE statement for them in a new tab (not run).
 - The chart button next to the row count turns blue when the result can be charted and
   opens a menu: the table; all value columns in one chart (lines, areas, stacked
   areas, bars side by side, stacked bars); or a single column (line, area, bars;
