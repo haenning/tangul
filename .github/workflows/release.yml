@@ -1,7 +1,7 @@
 name: Release
 
 # Push a tag like v0.2.0 (matching the version in Cargo.toml) to build a universal
-# macOS DMG and publish it as a GitHub release. See README → Releases.
+# macOS DMG and publish it as a GitHub release. See CONTRIBUTING.md → Releases.
 on:
   push:
     tags: ["v*"]

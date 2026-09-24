@@ -7,7 +7,7 @@
 # Uses only tools that ship with macOS (sips, iconutil, lipo, codesign, hdiutil), plus
 # Xcode 26's actool for the icon when available.
 # The app is ad-hoc signed: fine on your own Macs, but a downloaded copy has to be
-# opened once via right-click → Open (see README). Real signing + notarization needs
+# allowed once in System Settings → Privacy & Security (see INSTALL.md). Real signing + notarization needs
 # an Apple Developer ID.
 set -euo pipefail
 cd "$(dirname "$0")/.."
