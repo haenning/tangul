@@ -74,6 +74,11 @@ pub struct EditorSettings {
     pub font_family: Option<String>,
 }
 
+/// Why `text` can't be applied as settings, if it can't.
+pub fn problem(text: &str) -> Option<String> {
+    Settings::parse(text).err().map(|e| e.to_string())
+}
+
 impl Settings {
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
         // An empty file is as good as none.

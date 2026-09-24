@@ -1,5 +1,6 @@
 //! One query tab: SQL editor on top, results below.
 
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -7,9 +8,11 @@ use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::RopeExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{CompletionProvider, Editor, EditorState, InputEvent},
+    notification::Notification,
     resizable::{ResizableState, resizable_panel, v_resizable},
     table::{DataTable, TableState},
     v_flex,
@@ -34,7 +37,7 @@ const EDITOR_HEIGHT: f32 = 240.;
 const EDITOR_SNAP_HIDE: f32 = 60.;
 
 use crate::{
-    BookmarkQuery, RunQuery, assets::Lucide, chart::ResultChart, results::ResultsDelegate,
+    BookmarkQuery, RunQuery, SaveFile, assets::Lucide, chart::ResultChart, results::ResultsDelegate,
 };
 
 /// Connection a tab runs against.
@@ -117,10 +120,22 @@ pub struct QueryTab {
     chart_view: Option<ChartView>,
     /// Curved instead of straight lines; starts straight, which is exact.
     smooth_lines: bool,
+    /// Set for a file tab (no SQL, no results).
+    file: Option<FileTab>,
 }
 
 /// Why there is no chart before a result is complete.
 const NO_RESULT: &str = "Run a query that returns rows to chart them";
+
+/// A file edited in a tab instead of SQL (`settings.json`): only the editor, `⌘S`
+/// saves.
+struct FileTab {
+    path: PathBuf,
+    /// The text as last read or saved, to show unsaved changes.
+    saved: String,
+    /// Why the saved text isn't applied (invalid settings), if it isn't.
+    problem: Option<SharedString>,
+}
 
 impl EventEmitter<TabEvent> for QueryTab {}
 
@@ -180,7 +195,78 @@ impl QueryTab {
             chart: Err(NO_RESULT.into()),
             chart_view: None,
             smooth_lines: false,
+            file: None,
         }
+    }
+
+    /// A tab editing the JSON file at `path` (settings): no connection, no results.
+    pub fn new_file(
+        id: TabId,
+        path: PathBuf,
+        engine: EngineHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut this = Self::new(id, None, "", engine, window, cx);
+        this.editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language("json")
+                .line_number(true)
+                .default_value(text.clone())
+        });
+        this._editor_changes = cx.subscribe(&this.editor, |_, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        this.title = path
+            .file_name()
+            .map_or("settings.json".into(), |n| n.to_string_lossy().to_string())
+            .into();
+        this.file = Some(FileTab {
+            path,
+            saved: text,
+            problem: None,
+        });
+        this
+    }
+
+    /// The file this tab edits, if it is a file tab.
+    pub fn file_path(&self) -> Option<&Path> {
+        self.file.as_ref().map(|f| f.path.as_path())
+    }
+
+    /// A file tab with changes that aren't saved yet.
+    pub fn has_unsaved_changes(&self, cx: &App) -> bool {
+        self.file
+            .as_ref()
+            .is_some_and(|f| f.saved != self.editor.read(cx).value().as_ref())
+    }
+
+    /// Writes a file tab's text. Settings that don't parse are saved anyway (it is
+    /// the user's file) but not applied; the tab says why.
+    fn save(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_file(window, cx);
+    }
+
+    /// Writes a file tab's text; `false` (with a notification) if that failed.
+    pub fn save_file(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let text = self.editor.read(cx).value().to_string();
+        let Some(file) = &mut self.file else {
+            return false;
+        };
+        if let Err(e) = std::fs::write(&file.path, &text) {
+            window.push_notification(
+                Notification::error(format!("Could not save {}: {e}", file.path.display())),
+                cx,
+            );
+            return false;
+        }
+        file.problem = crate::settings::problem(&text).map(Into::into);
+        file.saved = text;
+        cx.notify();
+        true
     }
 
     fn editor_hidden(&self, cx: &App) -> bool {
@@ -270,6 +356,9 @@ impl QueryTab {
 
     /// Switching connection releases a pinned session (the engine rolls it back).
     pub fn set_conn(&mut self, conn: TabConn, cx: &mut Context<Self>) {
+        if self.file.is_some() {
+            return;
+        }
         // The same SQL can be valid on one connection and not on another.
         self.schedule_validation(cx);
         if let Some(old) = &self.conn
@@ -287,7 +376,7 @@ impl QueryTab {
     }
 
     fn run(&mut self, _: &RunQuery, _: &mut Window, cx: &mut Context<Self>) {
-        if self.running.is_some() {
+        if self.running.is_some() || self.file.is_some() {
             return;
         }
         // Run the selection if there is one, otherwise the whole buffer.
@@ -306,6 +395,9 @@ impl QueryTab {
     }
 
     fn bookmark(&mut self, _: &BookmarkQuery, _: &mut Window, cx: &mut Context<Self>) {
+        if self.file.is_some() {
+            return;
+        }
         let sql = self.sql(cx);
         if !sql.trim().is_empty() {
             cx.emit(TabEvent::Bookmark(sql));
@@ -749,8 +841,74 @@ impl QueryTab {
     }
 }
 
+impl QueryTab {
+    /// A file tab: path, save state and the editor over the whole tab.
+    fn render_file(&self, file: &FileTab, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let unsaved = self.has_unsaved_changes(cx);
+        let (status, color) = match (&file.problem, unsaved) {
+            (_, true) => ("Unsaved changes".into(), theme.muted_foreground),
+            (Some(problem), false) => (format!("Saved, not applied: {problem}"), theme.danger),
+            (None, false) => (
+                "Saved; changes apply right away".into(),
+                theme.muted_foreground,
+            ),
+        };
+        v_flex()
+            .size_full()
+            .on_action(cx.listener(Self::save))
+            .child(
+                h_flex()
+                    .h_9()
+                    .px_2()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(file.path.display().to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(color)
+                            .child(status),
+                    )
+                    .child(
+                        Button::new("save-file")
+                            .label("Save")
+                            .small()
+                            .when(unsaved, |b| b.primary())
+                            .when(!unsaved, |b| b.ghost())
+                            .tooltip("Save (⌘S)")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save(&SaveFile, window, cx)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .key_context("QueryEditor")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(Editor::new(&self.editor).h_full().bordered(false)),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for QueryTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(file) = &self.file {
+            return self.render_file(file, cx);
+        }
         let this = cx.entity().downgrade();
         v_flex()
             .size_full()
@@ -787,6 +945,7 @@ impl Render for QueryTab {
                         ),
                 ),
             )
+            .into_any_element()
     }
 }
 
