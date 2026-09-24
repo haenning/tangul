@@ -13,6 +13,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _,
     TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
+    command::{Command as PaletteList, CommandGroup, CommandItem, CommandState},
     h_flex,
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
@@ -37,13 +38,15 @@ use rusdb_core::{
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
 use crate::{
-    CloseTab, NewTab, ToggleSidebar,
+    CloseTab, NewTab, OpenPalette, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
     connection_form::{ConnectionForm, FormMode, FormOutput},
     local::{Bookmark, HistoryEntry, Local, NewHistory},
+    palette::{self, PaletteAction, PaletteKind},
     query_tab::{QueryTab, TabConn, TabEvent},
+    settings,
     store::Store,
 };
 
@@ -511,6 +514,81 @@ impl Workspace {
     fn open_sql(&mut self, title: &str, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
         let tab = self.add_tab(sql, window, cx);
         tab.update(cx, |t, _| t.title = title.to_string().into());
+    }
+
+    // ---- command palette -------------------------------------------------------
+
+    fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        let db = self.active_db.clone();
+        let bookmarks = self.local.bookmarks_for(db.as_deref());
+        let history = match &db {
+            Some(db) => self.local.history(db, "", HISTORY_LIMIT),
+            None => Vec::new(),
+        };
+        let groups = palette::groups(&bookmarks, &history);
+        let list = cx.new(|cx| CommandState::new(window, cx));
+        let workspace = cx.entity().downgrade();
+        window.open_dialog(cx, {
+            let list = list.clone();
+            move |dialog, _, _| {
+                let mut command = PaletteList::new(&list)
+                    .placeholder("Search commands, bookmarks and history")
+                    .bordered(false);
+                for group in &groups {
+                    let icon = || match group.kind {
+                        PaletteKind::Command => Icon::new(IconName::Settings),
+                        PaletteKind::Bookmark => Icon::new(Lucide::Bookmark),
+                        PaletteKind::History => Icon::new(Lucide::RotateCcwClock),
+                    };
+                    command = command.group(CommandGroup::new().label(group.label).items(
+                        group.items.iter().map(|item| {
+                            CommandItem::new()
+                                .label(item.label.clone())
+                                .keywords([item.search.clone()])
+                                .icon(icon())
+                        }),
+                    ));
+                }
+                // Groups and items keep their positions while the list is filtered.
+                let actions: Vec<Vec<PaletteAction>> = groups
+                    .iter()
+                    .map(|g| g.items.iter().map(|i| i.action.clone()).collect())
+                    .collect();
+                let workspace = workspace.clone();
+                dialog
+                    .w(px(560.))
+                    .close_button(false)
+                    .child(command.on_confirm(move |path, window, cx| {
+                        let Some(action) = actions
+                            .get(path.section)
+                            .and_then(|items| items.get(path.row))
+                            .cloned()
+                        else {
+                            return;
+                        };
+                        window.close_dialog(cx);
+                        let _ = workspace.update(cx, |ws, cx| ws.run_palette(action, window, cx));
+                    }))
+            }
+        });
+        // The dialog is built on the next frame; focus the search field once it exists.
+        window.defer(cx, move |window, cx| {
+            list.update(cx, |list, cx| list.focus(window, cx))
+        });
+    }
+
+    fn run_palette(&mut self, action: PaletteAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            PaletteAction::Settings => match settings::ensure_file(cx) {
+                Some(path) => cx.open_with_system(&path),
+                None => window.push_notification(
+                    Notification::error("Could not create the settings file"),
+                    cx,
+                ),
+            },
+            PaletteAction::Bookmark(id) => self.open_bookmark(&id, false, window, cx),
+            PaletteAction::History(sql) => self.open_sql("History", &sql, window, cx),
+        }
     }
 
     // ---- history and learning ----------------------------------------------------
@@ -2053,6 +2131,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::open_palette))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

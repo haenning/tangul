@@ -67,6 +67,13 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
     }
 }
 
+/// Where `profiles.toml` and `settings.json` live; `RUSDB_CONFIG_DIR` overrides it.
+pub fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("RUSDB_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|d| d.join("rusdb")))
+}
+
 pub struct Store {
     path: Option<PathBuf>,
     pub databases: Vec<Database>,
@@ -77,10 +84,7 @@ pub struct Store {
 
 impl Store {
     pub fn load() -> Self {
-        let dir = std::env::var_os("RUSDB_CONFIG_DIR")
-            .map(PathBuf::from)
-            .or_else(|| dirs::config_dir().map(|d| d.join("rusdb")));
-        let path = dir.map(|d| d.join("profiles.toml"));
+        let path = config_dir().map(|d| d.join("profiles.toml"));
         let file = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
