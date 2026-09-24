@@ -1,9 +1,11 @@
 name: CI
 
-# Only pull requests into main; plain pushes to other branches don't run CI.
+# Paused while the app is in heavy development: runs only when started by hand
+# (Actions → CI → Run workflow). To re-enable on PRs into main, add back:
+#   pull_request:
+#     branches: [main]
 on:
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read

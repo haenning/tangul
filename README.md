@@ -77,8 +77,12 @@ Lint rules shared by all crates are in `[workspace.lints]` (root `Cargo.toml`);
 dependency policy (advisories, licenses, sources) is in `deny.toml`.
 
 The dev databases use non-default ports bound to localhost, so they don't clash with a
-local Postgres/MySQL. CI (`.github/workflows/ci.yml`) runs the backend with live database
-tests on Linux and builds the app on macOS.
+local Postgres/MySQL.
+
+Branches: work happens on `dev`; every push to `dev` opens (or updates) a pull request
+into `main` (`.github/workflows/dev-pr.yml`). CI (`.github/workflows/ci.yml`: lint,
+backend with live database tests on Linux, app build on macOS) is paused during heavy
+development and only runs when started by hand (Actions → CI → Run workflow).
 
 Linux builds (dev only) need `libxkbcommon-dev libxkbcommon-x11-dev`.
 
