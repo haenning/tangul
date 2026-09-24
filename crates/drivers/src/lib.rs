@@ -127,6 +127,10 @@ pub trait Session: Send {
     /// The engine pins the session to its tab while this is true.
     fn in_transaction(&self) -> bool;
 
+    /// Makes the server refuse writes on this session (`READ ONLY` transactions), or
+    /// allow them again. Applies to transactions started afterwards.
+    async fn set_read_only(&mut self, on: bool) -> Result<()>;
+
     /// Handle that can cancel the running statement from another task.
     fn cancel_handle(&self) -> Arc<dyn CancelHandle>;
 

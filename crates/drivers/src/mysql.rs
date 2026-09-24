@@ -101,6 +101,14 @@ impl Session for MysqlSession {
         self.in_transaction
     }
 
+    async fn set_read_only(&mut self, on: bool) -> Result<()> {
+        let mode = if on { "READ ONLY" } else { "READ WRITE" };
+        self.conn()?
+            .query_drop(format!("SET SESSION TRANSACTION {mode}"))
+            .await?;
+        Ok(())
+    }
+
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
         self.cancel.clone()
     }

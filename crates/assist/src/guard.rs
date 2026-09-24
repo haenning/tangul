@@ -43,6 +43,8 @@ fn check_statement(sql: &str) -> Option<Check> {
     let mut top: Vec<(usize, String)> = Vec::new();
     let mut modifying_cte = None;
     let mut analyze = false;
+    let mut all: Vec<String> = Vec::new();
+    let mut mode_var = false;
     for (i, t) in tokens.iter().enumerate() {
         if t.is_punct(sql, '(') {
             depth += 1;
@@ -55,8 +57,13 @@ fn check_statement(sql: &str) -> Option<Check> {
             }
         } else if t.is_punct(sql, ')') {
             depth = depth.saturating_sub(1);
+        } else if t.kind == TokenKind::String {
+            // `set_config('default_transaction_read_only', 'off', false)`
+            mode_var |= names_read_only_variable(t.text(sql));
         } else if t.kind == TokenKind::Word {
             let word = t.text(sql).to_ascii_uppercase();
+            mode_var |= names_read_only_variable(&word);
+            all.push(word.clone());
             // Also inside the option list of `EXPLAIN (ANALYZE, …)`.
             analyze |= word == "ANALYZE" || word == "ANALYSE";
             if depth == 0 {
@@ -66,6 +73,21 @@ fn check_statement(sql: &str) -> Option<Check> {
     }
     let lead = top.first()?.1.as_str();
     let has = |word: &str| top.iter().any(|(_, w)| w == word);
+
+    // Statements that would switch the session out of read-only mode count as writes.
+    let read_write = all.windows(2).any(|w| w[0] == "READ" && w[1] == "WRITE");
+    let escapes = mode_var
+        || (matches!(lead, "SET" | "BEGIN" | "START") && read_write)
+        || lead == "DISCARD"
+        || (lead == "RESET" && has("ALL"));
+    if escapes {
+        return Some(Check {
+            statement: text_of(sql, &tokens),
+            keyword: lead.to_string(),
+            writes: true,
+            unfiltered: false,
+        });
+    }
 
     // The keyword that decides what the statement does.
     let main: &str = match lead {
@@ -102,6 +124,12 @@ fn check_statement(sql: &str) -> Option<Check> {
         writes,
         unfiltered,
     })
+}
+
+/// Names one of the session settings that make transactions read-only.
+fn names_read_only_variable(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("transaction_read_only") || text.contains("tx_read_only")
 }
 
 fn text_of(sql: &str, tokens: &[Token]) -> String {
@@ -191,6 +219,33 @@ mod tests {
             assert!(found.unfiltered, "{sql}");
             assert!(found.writes, "{sql}");
             assert_eq!(found.keyword, keyword, "{sql}");
+        }
+    }
+
+    #[test]
+    fn switching_off_read_only_counts_as_a_write() {
+        for sql in [
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+            "SET SESSION TRANSACTION READ WRITE",
+            "BEGIN READ WRITE",
+            "START TRANSACTION READ WRITE",
+            "SET default_transaction_read_only = off",
+            "SET SESSION transaction_read_only = 0",
+            "RESET default_transaction_read_only",
+            "RESET ALL",
+            "DISCARD ALL",
+            "SELECT set_config('default_transaction_read_only', 'off', false)",
+        ] {
+            let found = one(sql).unwrap_or_else(|| panic!("not found: {sql}"));
+            assert!(found.writes, "{sql}");
+        }
+        for sql in [
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+            "BEGIN READ ONLY",
+            "SET search_path = public",
+            "SELECT * FROM readers WHERE mode = 'write'",
+        ] {
+            assert_eq!(check(sql), vec![], "{sql}");
         }
     }
 
