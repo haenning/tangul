@@ -70,4 +70,8 @@ when started by hand (Actions → CI → Run workflow).
 3. The Release workflow builds the universal DMG and publishes it as a GitHub release
    with generated notes. The tag has to match the `Cargo.toml` version.
 
-The app icon is `packaging/macos/icon.png` (1024×1024).
+The app icon is `packaging/macos/rusdb.icon`, an Icon Composer document (open it with
+Icon Composer from Xcode 26). macOS draws the glass and the light/dark background itself.
+`scripts/bundle-macos.sh` compiles it with `actool`; without Xcode 26 it falls back to
+`packaging/macos/icon.png`. The bars' source SVGs are in `packaging/macos/icon-src/`,
+and `packaging/macos/rusdb-mono.icon` is a grey alternative.

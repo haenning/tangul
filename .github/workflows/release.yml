@@ -14,7 +14,9 @@ env:
 
 jobs:
   dmg:
-    runs-on: macos-15
+    # macOS 26 image: Xcode 26's actool compiles the Icon Composer icon (light/dark).
+    # bundle-macos.sh falls back to the PNG icon if it isn't available.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Metal toolchain (GPUI compiles its shaders at build time)
