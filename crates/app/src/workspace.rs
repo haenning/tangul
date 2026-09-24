@@ -22,6 +22,7 @@ use gpui_kit::component::{
     tab::{Tab, TabBar},
     v_flex,
 };
+use gpui_kit::MouseButton;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
@@ -1849,16 +1850,26 @@ impl Workspace {
             } else {
                 t.title.clone()
             };
-            Tab::new().label(label).suffix(
-                Button::new(("close-tab", ix))
-                    .icon(IconName::Close)
-                    .ghost()
-                    .xsmall()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.close_tab(ix, window, cx)
-                    })),
-            )
+            Tab::new()
+                .label(label)
+                .suffix(
+                    Button::new(("close-tab", ix))
+                        .icon(IconName::Close)
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(ix, window, cx)
+                        })),
+                )
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
+                        if !this.tabs.get(ix).map_or(false, |t| t.read(cx).pinned) {
+                            this.close_tab(ix, window, cx);
+                        }
+                    }),
+                )
         });
         TabBar::new("tabs")
             .children(tabs)

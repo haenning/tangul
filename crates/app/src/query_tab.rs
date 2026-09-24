@@ -71,6 +71,8 @@ pub struct QueryTab {
     pub bookmark_id: Option<String>,
     /// Times the last query was run successfully, when it is worth bookmarking.
     pub bookmark_hint: Option<u32>,
+    /// Tab is pinned and won't be closed with close-all or middle-click.
+    pub pinned: bool,
     engine: EngineHandle,
     editor: Entity<EditorState>,
     table: Entity<TableState<ResultsDelegate>>,
@@ -130,6 +132,7 @@ impl QueryTab {
             conn,
             bookmark_id: None,
             bookmark_hint: None,
+            pinned: false,
             pending_origin: None,
             run_origin: None,
             edit_generation: 0,
@@ -231,6 +234,10 @@ impl QueryTab {
         if !sql.trim().is_empty() {
             cx.emit(TabEvent::Bookmark(sql));
         }
+    }
+
+    pub fn toggle_pin(&mut self) {
+        self.pinned = !self.pinned;
     }
 
     /// Called by the workspace once the query was sent to the engine.
