@@ -43,7 +43,7 @@ use rusdb_core::{
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
 use crate::{
-    CloseTab, NewTab, OpenPalette, ToggleSidebar,
+    CloseTab, NewTab, OpenPalette, OpenSettings, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
@@ -344,6 +344,39 @@ impl Workspace {
         QueryTab::focus_editor(&tab, window, cx);
         cx.notify();
         tab
+    }
+
+    /// Edits `settings.json` in a tab (the one already open, if any).
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = settings::ensure_file(cx) else {
+            window.push_notification(
+                Notification::error("Could not create the settings file"),
+                cx,
+            );
+            return;
+        };
+        let open = self
+            .tabs
+            .iter()
+            .position(|t| t.read(cx).file_path() == Some(path.as_path()));
+        let tab = match open {
+            Some(ix) => {
+                self.active_tab = ix;
+                self.tabs[ix].clone()
+            }
+            None => {
+                let id = TabId(self.next_id());
+                let engine = self.engine.clone();
+                let tab = cx.new(|cx| QueryTab::new_file(id, path, engine, window, cx));
+                self._subscriptions
+                    .push(cx.subscribe_in(&tab, window, Self::on_tab_event));
+                self.tabs.push(tab.clone());
+                self.active_tab = self.tabs.len() - 1;
+                tab
+            }
+        };
+        QueryTab::focus_editor(&tab, window, cx);
+        cx.notify();
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -853,13 +886,7 @@ impl Workspace {
 
     fn run_palette(&mut self, action: PaletteAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            PaletteAction::Settings => match settings::ensure_file(cx) {
-                Some(path) => cx.open_with_system(&path),
-                None => window.push_notification(
-                    Notification::error("Could not create the settings file"),
-                    cx,
-                ),
-            },
+            PaletteAction::Settings => self.open_settings(window, cx),
             PaletteAction::Bookmark(id) => self.open_bookmark(&id, false, window, cx),
             PaletteAction::History(sql) => self.open_sql("History", &sql, window, cx),
         }
@@ -2246,12 +2273,14 @@ impl Workspace {
                     t.id,
                     t.pinned,
                     t.bookmark_id.is_some(),
-                    !t.sql(cx).trim().is_empty(),
+                    // A file tab (settings) holds no query to bookmark.
+                    t.file_path().is_none() && !t.sql(cx).trim().is_empty(),
                     t.title.clone(),
                     t.in_transaction(),
                 )
             };
-            let label: SharedString = if in_transaction {
+            let unsaved = tab.read(cx).has_unsaved_changes(cx);
+            let label: SharedString = if in_transaction || unsaved {
                 format!("{title} •").into()
             } else {
                 title
@@ -2331,7 +2360,8 @@ impl Workspace {
                 (
                     t.status_text(cx),
                     t.is_running(),
-                    Some((tab.clone(), chart)),
+                    // File tabs (settings) have no results to chart.
+                    t.file_path().is_none().then(|| (tab.clone(), chart)),
                 )
             })
             .unwrap_or_default();
@@ -2501,6 +2531,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

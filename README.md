@@ -66,7 +66,9 @@ to passwords saved by an earlier build ("Always Allow").
   active one, or `⌘B`, to hide it). Hover the status dot next to the user in the title
   bar for the connection status, pool usage and schema counts.
 - `⌘↵` runs the selection or the whole editor, `⌘D` bookmarks the query, `⌘T` new tab,
-  `⌘W` close tab, `⌘B` toggle sidebar.
+  `⌘W` close tab, `⌘B` toggle sidebar, `⌘,` settings.
+- Settings (`⌘,` or "Open settings" in the command palette) open `settings.json` in a
+  tab of its own: just the editor, `⌘S` saves and the changes apply right away.
 
 ## Development
 
