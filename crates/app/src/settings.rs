@@ -2,14 +2,17 @@
 //! reloaded while the app runs.
 //!
 //! ```json
-//! { "editor": { "font_size": 14, "font_family": "Menlo" } }
+//! {
+//!   "editor": { "font_size": 14, "font_family": "Menlo" },
+//!   "safety": { "read_only_users": ["reporting"], "confirm_unfiltered_writes": true }
+//! }
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use gpui_kit::component::Theme;
-use gpui_kit::{App, Pixels, SharedString, px};
+use gpui_kit::{App, Global, Pixels, SharedString, px};
 use serde::Deserialize;
 
 use crate::store::config_dir;
@@ -24,6 +27,42 @@ const FONT_SIZE_RANGE: (f32, f32) = (8., 32.);
 #[serde(default)]
 pub struct Settings {
     pub editor: EditorSettings,
+    pub safety: SafetySettings,
+}
+
+/// The settings in effect, as a global so any view can read them.
+struct Current(Settings);
+impl Global for Current {}
+
+/// The settings in effect.
+pub fn current(cx: &App) -> &Settings {
+    &cx.global::<Current>().0
+}
+
+/// Guardrails against running the wrong statement.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SafetySettings {
+    /// Database user names in read-only mode: statements that change data ask for
+    /// confirmation first. Matched against the user name of the connection.
+    pub read_only_users: Vec<String>,
+    /// Ask before running an `UPDATE` or `DELETE` without a `WHERE`.
+    pub confirm_unfiltered_writes: bool,
+}
+
+impl Default for SafetySettings {
+    fn default() -> Self {
+        Self {
+            read_only_users: Vec::new(),
+            confirm_unfiltered_writes: true,
+        }
+    }
+}
+
+impl Settings {
+    pub fn is_read_only(&self, user: &str) -> bool {
+        self.safety.read_only_users.iter().any(|u| u == user)
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
@@ -73,7 +112,11 @@ pub fn ensure_file(cx: &App) -> Option<PathBuf> {
             "editor": {
                 "font_size": theme.mono_font_size.as_f32(),
                 "font_family": theme.mono_font_family.to_string(),
-            }
+            },
+            "safety": {
+                "read_only_users": [],
+                "confirm_unfiltered_writes": true,
+            },
         });
         let write = || -> std::io::Result<()> {
             std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
@@ -87,6 +130,47 @@ pub fn ensure_file(cx: &App) -> Option<PathBuf> {
     Some(path)
 }
 
+/// Puts `user` in or takes it out of `safety.read_only_users` in the file, keeping
+/// everything else in it, and applies the change right away.
+pub fn set_read_only(user: &str, on: bool, cx: &mut App) -> Result<(), String> {
+    let path = ensure_file(cx).ok_or("could not create the settings file")?;
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let updated = with_read_only(&text, user, on)?;
+    std::fs::write(&path, updated).map_err(|e| e.to_string())?;
+    let settings = Settings::parse(&std::fs::read_to_string(&path).unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    cx.set_global(Current(settings));
+    cx.refresh_windows();
+    Ok(())
+}
+
+/// `text` (the settings file) with `user` added to or removed from the read-only list.
+fn with_read_only(text: &str, user: &str, on: bool) -> Result<String, String> {
+    let mut root: serde_json::Value = if text.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(text).map_err(|e| format!("settings.json is not valid JSON: {e}"))?
+    };
+    let root_object = root
+        .as_object_mut()
+        .ok_or("settings.json must contain a JSON object")?;
+    let safety = root_object
+        .entry("safety")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("\"safety\" in settings.json must be an object")?;
+    let users = safety
+        .entry("read_only_users")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or("\"safety.read_only_users\" in settings.json must be an array")?;
+    users.retain(|u| u.as_str() != Some(user));
+    if on {
+        users.push(user.into());
+    }
+    Ok(serde_json::to_string_pretty(&root).map_err(|e| e.to_string())? + "\n")
+}
+
 /// What the theme had before any setting was applied, so that removing a key
 /// brings the default back.
 struct ThemeDefaults {
@@ -95,6 +179,7 @@ struct ThemeDefaults {
 }
 
 fn apply(settings: &Settings, defaults: &ThemeDefaults, cx: &mut App) {
+    cx.set_global(Current(settings.clone()));
     let theme = Theme::global_mut(cx);
     theme.mono_font_size = settings.font_size().map_or(defaults.font_size, px);
     theme.mono_font_family = settings
@@ -105,6 +190,7 @@ fn apply(settings: &Settings, defaults: &ThemeDefaults, cx: &mut App) {
 
 /// Loads and applies the settings, then re-applies them whenever the file changes.
 pub fn init(cx: &mut App) {
+    cx.set_global(Current(Settings::default()));
     let defaults = {
         let theme = cx.global::<Theme>();
         ThemeDefaults {
@@ -178,6 +264,54 @@ mod tests {
     fn blank_family_is_unset() {
         let s = Settings::parse(r#"{"editor": {"font_family": "  "}}"#).unwrap();
         assert_eq!(s.font_family(), None);
+    }
+
+    #[test]
+    fn safety_defaults_and_read_only_users() {
+        let s = Settings::parse("{}").unwrap();
+        assert!(s.safety.confirm_unfiltered_writes);
+        assert!(!s.is_read_only("reporting"));
+        let s = Settings::parse(
+            r#"{"safety": {"read_only_users": ["reporting"], "confirm_unfiltered_writes": false}}"#,
+        )
+        .unwrap();
+        assert!(s.is_read_only("reporting"));
+        assert!(!s.is_read_only("admin"));
+        assert!(!s.safety.confirm_unfiltered_writes);
+        // Only the list given; the flag keeps its default.
+        let s = Settings::parse(r#"{"safety": {"read_only_users": ["a"]}}"#).unwrap();
+        assert!(s.safety.confirm_unfiltered_writes);
+    }
+
+    #[test]
+    fn toggling_read_only_keeps_the_rest_of_the_file() {
+        let text =
+            r#"{"editor": {"font_size": 15}, "safety": {"confirm_unfiltered_writes": false}}"#;
+        let on = with_read_only(text, "reporting", true).unwrap();
+        let s = Settings::parse(&on).unwrap();
+        assert!(s.is_read_only("reporting"));
+        assert_eq!(s.editor.font_size, Some(15.));
+        assert!(!s.safety.confirm_unfiltered_writes);
+        // Twice is still once.
+        let again = with_read_only(&on, "reporting", true).unwrap();
+        assert_eq!(
+            Settings::parse(&again)
+                .unwrap()
+                .safety
+                .read_only_users
+                .len(),
+            1
+        );
+        let off = with_read_only(&on, "reporting", false).unwrap();
+        assert!(!Settings::parse(&off).unwrap().is_read_only("reporting"));
+        // From nothing.
+        assert!(
+            Settings::parse(&with_read_only("", "u", true).unwrap())
+                .unwrap()
+                .is_read_only("u")
+        );
+        assert!(with_read_only("{broken", "u", true).is_err());
+        assert!(with_read_only("[]", "u", true).is_err());
     }
 
     #[test]
