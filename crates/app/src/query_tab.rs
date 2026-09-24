@@ -6,7 +6,7 @@ use std::time::Duration;
 use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::RopeExt as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{CompletionProvider, Editor, EditorState, InputEvent},
@@ -17,6 +17,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::analyze::statements;
+use rusdb_assist::chart::{ChartData, ChartView, chart_data};
 use rusdb_assist::lexer::tokenize;
 use rusdb_assist::{edit::RowEdit, related::RelatedLink};
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
@@ -32,7 +33,9 @@ const EDITOR_HEIGHT: f32 = 240.;
 /// Dragging the editor below this height hides it completely.
 const EDITOR_SNAP_HIDE: f32 = 60.;
 
-use crate::{BookmarkQuery, RunQuery, assets::Lucide, results::ResultsDelegate};
+use crate::{
+    BookmarkQuery, RunQuery, assets::Lucide, chart::ResultChart, results::ResultsDelegate,
+};
 
 /// Connection a tab runs against.
 #[derive(Clone)]
@@ -107,7 +110,17 @@ pub struct QueryTab {
     has_result_set: bool,
     truncated: bool,
     last_rows: Option<u64>,
+    /// The last result as a chart, or why it cannot be one.
+    chart: Result<Rc<ChartData>, SharedString>,
+    /// The chart picked in the status bar, shown instead of the grid when the result
+    /// can be charted; `None` shows the grid. Kept across runs.
+    chart_view: Option<ChartView>,
+    /// Curved instead of straight lines; starts straight, which is exact.
+    smooth_lines: bool,
 }
+
+/// Why there is no chart before a result is complete.
+const NO_RESULT: &str = "Run a query that returns rows to chart them";
 
 impl EventEmitter<TabEvent> for QueryTab {}
 
@@ -164,6 +177,9 @@ impl QueryTab {
             has_result_set: false,
             truncated: false,
             last_rows: None,
+            chart: Err(NO_RESULT.into()),
+            chart_view: None,
+            smooth_lines: false,
         }
     }
 
@@ -316,6 +332,7 @@ impl QueryTab {
         self.has_result_set = false;
         self.truncated = false;
         self.last_rows = None;
+        self.chart = Err(NO_RESULT.into());
         self.table.update(cx, |t, cx| {
             t.delegate_mut().clear();
             t.refresh(cx);
@@ -362,6 +379,11 @@ impl QueryTab {
                 }
                 self.running = None;
                 self.in_transaction = in_transaction;
+                if error.is_none() && self.has_result_set {
+                    let sql = self.run_origin.as_ref().map_or("", |(_, sql)| sql.as_str());
+                    let result = &self.table.read(cx).delegate().result;
+                    self.chart = chart_data(sql, result).map(Rc::new).map_err(Into::into);
+                }
                 self.status = Status::Done {
                     elapsed,
                     error: error.map(Into::into),
@@ -558,6 +580,108 @@ impl QueryTab {
             })
     }
 
+    /// The last result as chart data (for the status-bar menu), or why it can't be
+    /// charted.
+    pub fn chart(&self) -> Result<Rc<ChartData>, SharedString> {
+        self.chart.clone()
+    }
+
+    /// What the result is shown as, if it is shown as a chart.
+    pub fn chart_shown(&self) -> Option<ChartView> {
+        let data = self.chart.as_ref().ok()?;
+        self.chart_view.map(|v| data.view_or_default(Some(v)))
+    }
+
+    /// Shows the result as `view`, or as the grid (`None`).
+    pub fn set_chart_view(&mut self, view: Option<ChartView>, cx: &mut Context<Self>) {
+        self.chart_view = view;
+        cx.notify();
+    }
+
+    /// All series in one chart, with a legend when there are several.
+    fn render_chart(
+        &self,
+        data: &ChartData,
+        view: ChartView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let mut colors = vec![
+            theme.chart_1,
+            theme.chart_2,
+            theme.chart_3,
+            theme.chart_4,
+            theme.chart_5,
+        ];
+        // A single column keeps the color it has among all of them.
+        if let Some(i) = view.series {
+            let n = colors.len();
+            colors.rotate_left(i % n);
+        }
+        let style = view.style;
+        let data = Rc::new(data.for_view(view));
+        // Straight / smooth, for lines and areas only.
+        let curve_switch = (!style.is_bars()).then(|| {
+            let option = |id: &'static str, label: &'static str, smooth: bool| {
+                Button::new(id)
+                    .label(label)
+                    .xsmall()
+                    .ghost()
+                    .selected(self.smooth_lines == smooth)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.smooth_lines = smooth;
+                        cx.notify();
+                    }))
+            };
+            h_flex()
+                .gap_0p5()
+                .child(option("straight-lines", "Straight", false))
+                .child(option("smooth-lines", "Smooth", true))
+        });
+        let theme = cx.theme();
+        let legend = (data.series.len() > 1).then(|| {
+            h_flex()
+                .gap_3()
+                .flex_wrap()
+                .children(data.series.iter().enumerate().map(|(i, s)| {
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(div().size_2().rounded_sm().bg(colors[i % colors.len()]))
+                        .child(s.name.clone())
+                }))
+        });
+        v_flex()
+            .size_full()
+            .p_3()
+            .gap_2()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .when(curve_switch.is_some() || legend.is_some(), |this| {
+                this.child(
+                    h_flex()
+                        .gap_4()
+                        .items_center()
+                        .children(curve_switch)
+                        .children(legend),
+                )
+            })
+            .when(data.unsorted && !style.is_bars(), |this| {
+                this.child(format!(
+                    "{} is not in ascending order; add ORDER BY to plot it over time",
+                    data.x_name
+                ))
+            })
+            .child(div().flex_1().min_h_0().child(ResultChart::new(
+                "result-chart",
+                data,
+                style,
+                colors,
+                self.smooth_lines,
+            )))
+            .into_any_element()
+    }
+
     fn render_results(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         match &self.status {
@@ -587,6 +711,11 @@ impl QueryTab {
                 .text_color(theme.muted_foreground)
                 .child("Run a query to see results")
                 .into_any_element(),
+            Status::Done { .. }
+                if let (Some(view), Ok(data)) = (self.chart_shown(), &self.chart) =>
+            {
+                self.render_chart(data, view, cx)
+            }
             _ => DataTable::new(&self.table)
                 .stripe(true)
                 .xsmall()

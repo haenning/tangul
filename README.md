@@ -53,6 +53,13 @@ to passwords saved by an earlier build ("Always Allow").
 - Click a table to query it; right-click for more. Right-click result rows to copy them,
   to open related rows via foreign keys (the three you use most, the rest under
   **Show all**), or to get an UPDATE / DELETE statement for them in a new tab (not run).
+- The chart button next to the row count turns blue when the result can be charted and
+  opens a menu: the table; all value columns in one chart (lines, areas, stacked
+  areas, bars side by side, stacked bars); or a single column (line, area, bars;
+  pick the column in the submenu). The first column is the x axis, every further column must
+  be numeric (at most 5; bars up to 50 rows, lines and areas up to 1000). Grouped
+  queries get the button outlined; otherwise its tooltip says why a result can't be
+  charted.
 - The bottom bar switches the sidebar between Schema, Bookmarks and History (click the
   active one, or `⌘B`, to hide it). Hover the status dot next to the user in the title
   bar for the connection status, pool usage and schema counts.

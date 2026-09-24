@@ -1,5 +1,6 @@
 mod assets;
 mod bookmark_form;
+mod chart;
 mod completion;
 mod connection_form;
 mod local;

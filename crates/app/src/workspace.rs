@@ -28,6 +28,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
+    chart::{ChartData, ChartStyle, ChartView},
     edit::row_edit,
     guard,
     lexer::fingerprint,
@@ -2305,14 +2306,22 @@ impl Workspace {
     /// tools; the active query's timing on the right.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (query_text, running) = self
+        let (query_text, running, chart) = self
             .tabs
             .get(self.active_tab)
             .map(|tab| {
                 let t = tab.read(cx);
-                (t.status_text(cx), t.is_running())
+                let chart = (t.chart(), t.chart_shown());
+                (
+                    t.status_text(cx),
+                    t.is_running(),
+                    Some((tab.clone(), chart)),
+                )
             })
             .unwrap_or_default();
+        let chart_button = chart.map(|(tab, (data, shown))| {
+            chart_button(tab, data, shown, theme.chart_1, theme.muted_foreground)
+        });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
         let panels = [
             SidebarView::Schema,
@@ -2363,7 +2372,9 @@ impl Workspace {
             ))
             .child(div().flex_1())
             .when(running, |this| this.child(Spinner::new().xsmall()))
-            .child(div().pr_2().child(query_text))
+            .child(div().pr_1().child(query_text))
+            .children(chart_button)
+            .child(div().w_1())
     }
 
     /// Bottom-bar panel button: shows that panel, or hides the sidebar if it is the
@@ -2707,4 +2718,117 @@ fn table_menu(
         .separator()
         .item(copy("Copy name", table.name.clone()))
         .item(copy("Copy qualified name", name))
+}
+
+/// Status-bar button of the active tab's result: tinted when the result can be
+/// charted, with a menu of the table, charts of all value columns and charts of a
+/// single one; the chosen chart's name next to the icon. Disabled, with the reason,
+/// otherwise.
+fn chart_button(
+    tab: Entity<QueryTab>,
+    data: Result<Rc<ChartData>, SharedString>,
+    shown: Option<ChartView>,
+    available: Hsla,
+    muted: Hsla,
+) -> AnyElement {
+    let data = match data {
+        Ok(data) => data,
+        Err(reason) => {
+            return Button::new("chart")
+                .icon(Icon::new(Lucide::ChartColumn).text_color(muted))
+                .ghost()
+                .xsmall()
+                .disabled(true)
+                .tooltip(reason)
+                .into_any_element();
+        }
+    };
+    let button = Button::new("chart")
+        .icon(Icon::new(style_icon(shown.map(|v| v.style))).text_color(available))
+        .xsmall()
+        .selected(shown.is_some())
+        .when_some(shown, |b, view| b.label(data.view_label(view)));
+    let button = if data.grouped && shown.is_none() {
+        button.outline().tooltip("Show as chart (grouped query)")
+    } else {
+        button.ghost().tooltip("Show as chart")
+    };
+    button
+        .dropdown_menu(move |mut menu, window, cx| {
+            let item = |label: String, view: Option<ChartView>| {
+                let tab = tab.clone();
+                PopupMenuItem::new(label)
+                    .icon(Icon::new(style_icon(view.map(|v| v.style))))
+                    .checked(shown == view)
+                    .on_click(move |_, _, cx| tab.update(cx, |t, cx| t.set_chart_view(view, cx)))
+            };
+            menu = menu.item(item("Table".into(), None));
+            let multi = data.multi_styles();
+            if !multi.is_empty() {
+                menu = menu.separator().label("All columns");
+                for style in multi {
+                    let view = ChartView {
+                        style,
+                        series: None,
+                    };
+                    menu = menu.item(item(style.label().into(), Some(view)));
+                }
+            }
+            menu = menu.separator().label("Single column");
+            for style in data.single_styles() {
+                let label = style.single_label();
+                if data.series.len() < 2 {
+                    let view = ChartView {
+                        style,
+                        series: Some(0),
+                    };
+                    menu = menu.item(item(label.into(), Some(view)));
+                    continue;
+                }
+                // Several value columns: pick which one.
+                let columns: Vec<(String, ChartView)> = data
+                    .series
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let view = ChartView {
+                            style,
+                            series: Some(i),
+                        };
+                        (s.name.clone(), view)
+                    })
+                    .collect();
+                let tab = tab.clone();
+                menu = menu.submenu_with_icon(
+                    Some(Icon::new(style_icon(Some(style)))),
+                    label,
+                    window,
+                    cx,
+                    move |menu, _, _| {
+                        columns.iter().fold(menu, |menu, (name, view)| {
+                            let (tab, view) = (tab.clone(), *view);
+                            menu.item(
+                                PopupMenuItem::new(name.clone())
+                                    .checked(shown == Some(view))
+                                    .on_click(move |_, _, cx| {
+                                        tab.update(cx, |t, cx| t.set_chart_view(Some(view), cx))
+                                    }),
+                            )
+                        })
+                    },
+                );
+            }
+            menu
+        })
+        .into_any_element()
+}
+
+fn style_icon(style: Option<ChartStyle>) -> Lucide {
+    match style {
+        None => Lucide::Table,
+        Some(ChartStyle::Line) => Lucide::ChartLine,
+        Some(ChartStyle::Area | ChartStyle::StackedArea) => Lucide::ChartArea,
+        Some(ChartStyle::Bars) => Lucide::ChartColumn,
+        Some(ChartStyle::StackedBars) => Lucide::ChartColumnStacked,
+    }
 }
