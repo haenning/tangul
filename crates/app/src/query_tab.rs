@@ -10,6 +10,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{CompletionProvider, Editor, EditorState, InputEvent},
+    resizable::{ResizableState, resizable_panel, v_resizable},
     table::{DataTable, TableState},
     v_flex,
 };
@@ -26,6 +27,10 @@ const VALIDATE_AFTER: Duration = Duration::from_secs(1);
 /// Limits per check; larger scripts are only checked in part.
 const MAX_VALIDATE_STATEMENTS: usize = 50;
 const MAX_VALIDATE_BYTES: usize = 100_000;
+/// Editor height a new tab starts with.
+const EDITOR_HEIGHT: f32 = 240.;
+/// Dragging the editor below this height hides it completely.
+const EDITOR_SNAP_HIDE: f32 = 60.;
 
 use crate::{BookmarkQuery, RunQuery, assets::Lucide, results::ResultsDelegate};
 
@@ -69,6 +74,10 @@ pub struct QueryTab {
     pub conn: Option<TabConn>,
     /// Bookmark this tab was opened from or saved as; bookmarking again updates it.
     pub bookmark_id: Option<String>,
+    /// Editor/results split. The editor is the first panel; height 0 means hidden.
+    split: Entity<ResizableState>,
+    /// Editor height to come back to when it is shown again after being hidden.
+    editor_restore: Pixels,
     /// Times the last query was run successfully, when it is worth bookmarking.
     pub bookmark_hint: Option<u32>,
     engine: EngineHandle,
@@ -129,6 +138,8 @@ impl QueryTab {
             title: format!("Query {}", id.0).into(),
             conn,
             bookmark_id: None,
+            split: cx.new(|_| ResizableState::default()),
+            editor_restore: px(EDITOR_HEIGHT),
             bookmark_hint: None,
             pending_origin: None,
             run_origin: None,
@@ -146,6 +157,41 @@ impl QueryTab {
             truncated: false,
             last_rows: None,
         }
+    }
+
+    fn editor_hidden(&self, cx: &App) -> bool {
+        self.split
+            .read(cx)
+            .sizes()
+            .first()
+            .is_some_and(|height| *height < px(1.))
+    }
+
+    /// Hides the editor so only the toolbar and the results remain, or brings it back.
+    fn toggle_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let hidden = self.editor_hidden(cx);
+        let height = if hidden { self.editor_restore } else { px(0.) };
+        self.split
+            .update(cx, |split, cx| split.resize_panel(0, height, window, cx));
+        if hidden {
+            self.editor.update(cx, |e, cx| e.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// After a drag on the divider: remembers the editor height, or hides the
+    /// editor when it was dragged (almost) shut.
+    fn split_resized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(height) = self.split.read(cx).sizes().first().copied() else {
+            return;
+        };
+        if height >= px(EDITOR_SNAP_HIDE) {
+            self.editor_restore = height;
+        } else if height > px(0.) {
+            self.split
+                .update(cx, |split, cx| split.resize_panel(0, px(0.), window, cx));
+        }
+        cx.notify();
     }
 
     pub fn focus_editor(tab: &Entity<Self>, window: &mut Window, cx: &mut App) {
@@ -453,6 +499,19 @@ impl QueryTab {
             })
             .child(div().flex_1())
             .child({
+                let hidden = self.editor_hidden(cx);
+                Button::new("toggle-editor")
+                    .icon(if hidden {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronUp
+                    })
+                    .ghost()
+                    .small()
+                    .tooltip(if hidden { "Show editor" } else { "Hide editor" })
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_editor(window, cx)))
+            })
+            .child({
                 let hint = self.bookmark_hint.filter(|_| self.bookmark_id.is_none());
                 let button = Button::new("bookmark")
                     .icon(Icon::new(Lucide::Bookmark))
@@ -542,25 +601,41 @@ impl QueryTab {
 
 impl Render for QueryTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
         v_flex()
             .size_full()
             .on_action(cx.listener(Self::run))
             .on_action(cx.listener(Self::bookmark))
             .child(self.render_toolbar(cx))
             .child(
-                div()
-                    .key_context("QueryEditor")
-                    .h(relative(0.4))
-                    .min_h(px(80.))
-                    .child(Editor::new(&self.editor).h_full().bordered(false)),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(div().flex_1().min_h_0().child(self.render_results(cx))),
+                div().flex_1().min_h_0().child(
+                    v_resizable(("split", self.id.0 as usize))
+                        .with_state(&self.split)
+                        .on_resize(move |_, window, cx| {
+                            let _ = this.update(cx, |tab, cx| tab.split_resized(window, cx));
+                        })
+                        .child(
+                            resizable_panel()
+                                .size(px(EDITOR_HEIGHT))
+                                .size_range(px(0.)..Pixels::MAX)
+                                .flex_none()
+                                .child(
+                                    div()
+                                        .key_context("QueryEditor")
+                                        .size_full()
+                                        .overflow_hidden()
+                                        .child(Editor::new(&self.editor).h_full().bordered(false)),
+                                ),
+                        )
+                        .child(
+                            resizable_panel().child(
+                                div()
+                                    .size_full()
+                                    .overflow_hidden()
+                                    .child(self.render_results(cx)),
+                            ),
+                        ),
+                ),
             )
     }
 }

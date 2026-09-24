@@ -18,6 +18,7 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
+    resizable::{ResizableState, h_resizable, resizable_panel},
     spinner::Spinner,
     tab::{Tab, TabBar},
     v_flex,
@@ -48,6 +49,8 @@ use crate::{
 };
 
 const SIDEBAR_WIDTH: f32 = 260.;
+const SIDEBAR_MIN_WIDTH: f32 = 180.;
+const SIDEBAR_MAX_WIDTH: f32 = 600.;
 const ROW_HEIGHT: f32 = 26.;
 /// Sidebar tree geometry: left padding, indent per level, icon width.
 const TREE_PAD: f32 = 10.;
@@ -59,6 +62,7 @@ const HISTORY_LIMIT: usize = 300;
 const BOOKMARK_HINT_RUNS: u32 = 3;
 /// local.db setting: the user id connected last, reopened at startup.
 const LAST_USER_SETTING: &str = "last_user";
+const SIDEBAR_WIDTH_SETTING: &str = "sidebar_width";
 
 #[derive(Clone, Copy, PartialEq)]
 enum SidebarView {
@@ -156,6 +160,9 @@ pub struct Workspace {
     collapsed_groups: HashSet<(String, SharedString, TableKind)>,
     sidebar_view: SidebarView,
     sidebar_open: bool,
+    /// Sidebar/content split; the sidebar is the first panel.
+    layout: Entity<ResizableState>,
+    sidebar_width: f32,
     tabs: Vec<Entity<QueryTab>>,
     active_tab: usize,
     queries: HashMap<QueryId, RunningQuery>,
@@ -204,6 +211,11 @@ impl Workspace {
                 }
             },
         );
+        let sidebar_width = local
+            .setting(SIDEBAR_WIDTH_SETTING)
+            .and_then(|w| w.parse::<f32>().ok())
+            .unwrap_or(SIDEBAR_WIDTH)
+            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         let mut this = Self {
             engine,
             store,
@@ -220,6 +232,8 @@ impl Workspace {
             collapsed_groups: HashSet::new(),
             sidebar_view: SidebarView::Schema,
             sidebar_open: true,
+            layout: cx.new(|_| ResizableState::default()),
+            sidebar_width,
             tabs: Vec::new(),
             active_tab: 0,
             queries: HashMap::new(),
@@ -1407,6 +1421,12 @@ impl Workspace {
         }
     }
 
+    fn save_sidebar_width(&mut self, width: f32) {
+        self.sidebar_width = width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        self.local
+            .set_setting(SIDEBAR_WIDTH_SETTING, &self.sidebar_width.to_string());
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = self.sidebar_view;
         let body = match view {
@@ -1415,13 +1435,11 @@ impl Workspace {
             SidebarView::History => self.render_history_panel(cx).into_any_element(),
         };
         let theme = cx.theme();
+        // The divider next to it (the resize handle) draws the border.
         v_flex()
-            .w(px(SIDEBAR_WIDTH))
-            .h_full()
-            .flex_shrink_0()
+            .size_full()
+            .overflow_hidden()
             .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border)
             .child(body)
     }
 
@@ -2057,22 +2075,38 @@ impl Render for Workspace {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(TitleBar::new().child(self.render_title_bar(cx)))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .when(self.sidebar_open, |this| {
-                        this.child(self.render_sidebar(cx))
-                    })
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(self.render_tabs(cx))
-                            .children(active.map(|tab| div().flex_1().min_h_0().child(tab))),
-                    ),
-            )
+            .child({
+                let content = v_flex()
+                    .size_full()
+                    .min_w_0()
+                    .child(self.render_tabs(cx))
+                    .children(active.map(|tab| div().flex_1().min_h_0().child(tab)));
+                let body = if self.sidebar_open {
+                    let this = cx.entity().downgrade();
+                    h_resizable("layout")
+                        .with_state(&self.layout)
+                        .on_resize(move |state, _, cx| {
+                            let width = state.read(cx).sizes().first().copied();
+                            let _ = this.update(cx, |ws, _| {
+                                if let Some(width) = width {
+                                    ws.save_sidebar_width(width.as_f32());
+                                }
+                            });
+                        })
+                        .child(
+                            resizable_panel()
+                                .size(px(self.sidebar_width))
+                                .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
+                                .flex_none()
+                                .child(self.render_sidebar(cx)),
+                        )
+                        .child(resizable_panel().child(content))
+                        .into_any_element()
+                } else {
+                    content.into_any_element()
+                };
+                div().flex_1().min_h_0().child(body)
+            })
             .child(self.render_status_bar(cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
