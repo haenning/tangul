@@ -1,0 +1,35 @@
+name: PR dev → main
+
+# Every push to dev makes sure a pull request from dev into main is open.
+# Uses a personal access token from the repository secret DEV_PR_TOKEN
+# (fine-grained, this repo only: Pull requests read/write, Contents read-only).
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open PR if dev is ahead of main and none is open
+        env:
+          GH_TOKEN: ${{ secrets.DEV_PR_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Repository secret DEV_PR_TOKEN is not set (see workflow header)"; exit 1
+          fi
+          ahead=$(gh api "repos/$REPO/compare/main...dev" --jq .ahead_by)
+          if [ "$ahead" = "0" ]; then
+            echo "dev has nothing that main doesn't"; exit 0
+          fi
+          open=$(gh pr list -R "$REPO" --head dev --base main --state open --json number --jq length)
+          if [ "$open" != "0" ]; then
+            echo "PR dev → main already open"; exit 0
+          fi
+          gh pr create -R "$REPO" --head dev --base main \
+            --title "dev → main" \
+            --body "Opened automatically on push to \`dev\`. Contains everything on \`dev\` that is not in \`main\` yet; later pushes to \`dev\` update it."

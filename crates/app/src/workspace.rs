@@ -32,8 +32,7 @@ use rusdb_assist::{
     usage::{Usage, learn},
 };
 use rusdb_core::{
-    ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, SshAuth, TabId, TableInfo,
-    TableKind, TlsMode,
+    ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo, TableKind,
 };
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
@@ -160,6 +159,8 @@ pub struct Workspace {
     tabs: Vec<Entity<QueryTab>>,
     active_tab: usize,
     queries: HashMap<QueryId, RunningQuery>,
+    /// Pending editor checks: request → (tab, edit generation).
+    validations: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
     sidebar_rows: Vec<SidebarRow>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -222,6 +223,7 @@ impl Workspace {
             tabs: Vec::new(),
             active_tab: 0,
             queries: HashMap::new(),
+            validations: HashMap::new(),
             sidebar_rows: Vec::new(),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub],
@@ -345,6 +347,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            TabEvent::Validate {
+                generation,
+                statements,
+            } => {
+                let Some(conn) = tab.read(cx).conn.clone() else {
+                    return;
+                };
+                let request = self.next_id();
+                self.validations
+                    .insert(request, (tab.downgrade(), *generation));
+                self.engine.send(Command::Validate {
+                    request,
+                    conn: conn.id,
+                    statements: statements.clone(),
+                });
+            }
             TabEvent::OpenRelated { title, sql } => {
                 // Same connection as the tab the rows came from.
                 let conn = tab.read(cx).conn.clone();
@@ -382,7 +400,7 @@ impl Workspace {
                     conn: conn.id,
                     sql: sql.clone(),
                 });
-                tab.update(cx, |t, cx| t.started(query, cx));
+                tab.update(cx, |t, cx| t.started(query, sql, cx));
             }
         }
     }
@@ -1000,6 +1018,13 @@ impl Workspace {
                 }
                 Err(e) => window.push_notification(Notification::error(e), cx),
             },
+            Event::Validated { request, problems } => {
+                if let Some((tab, generation)) = self.validations.remove(&request)
+                    && let Some(tab) = tab.upgrade()
+                {
+                    tab.update(cx, |t, cx| t.apply_validation(generation, problems, cx));
+                }
+            }
             Event::PoolStats { conn, stats } => {
                 if let Some(state) = self.conn_state_mut(conn) {
                     state.stats = stats;
@@ -1941,12 +1966,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Details for the status dot's hover card, grouped by topic.
+    /// The status dot's hover card: live state only (status, pool, what the schema
+    /// holds); connection settings are in the database dialog.
     fn connection_details(&self) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
-        let (Some(user_id), Some(state)) = (self.active_user.as_deref(), self.active_conn()) else {
-            return Vec::new();
-        };
-        let Some((db, user)) = self.find_user(user_id) else {
+        let Some(state) = self.active_conn() else {
             return Vec::new();
         };
         let mut sections = Vec::new();
@@ -1956,36 +1979,6 @@ impl Workspace {
             ConnStatus::Failed(e) => format!("Failed: {e}"),
         };
         sections.push(("Status", vec![("State", status)]));
-        let tls = match db.tls {
-            TlsMode::Disable => "off",
-            TlsMode::Prefer => "prefer",
-            TlsMode::Require => "require",
-        };
-        let mut conn = vec![
-            ("Database", db.display_name()),
-            ("Driver", db.driver.label().to_string()),
-            ("Host", format!("{}:{}", db.host, db.port)),
-        ];
-        if !db.database.is_empty() {
-            conn.push(("Schema", db.database.clone()));
-        }
-        conn.push(("User", user.user.clone()));
-        conn.push(("TLS", tls.to_string()));
-        sections.push(("Connection", conn));
-        if let Some(ssh) = &db.ssh {
-            let auth = match ssh.auth {
-                SshAuth::Agent => "ssh-agent",
-                SshAuth::Key => "key file",
-                SshAuth::Password => "password",
-            };
-            sections.push((
-                "SSH tunnel",
-                vec![
-                    ("Via", format!("{}@{}:{}", ssh.user, ssh.host, ssh.port)),
-                    ("Auth", auth.to_string()),
-                ],
-            ));
-        }
         let s = state.stats;
         sections.push((
             "Pool",

@@ -1,0 +1,44 @@
+name: Feature request
+description: Suggest something for the roadmap
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        rusdb is a fast, focused database viewer: explore, query, understand.
+        Out of scope: editing data in the grid, table designers and schema migrations
+        (use a migration tool such as golang-migrate for those).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should rusdb do?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Editor
+        - Results
+        - Schema
+        - Graph
+        - AI
+        - Connections
+        - Observability
+        - Drivers
+        - Distribution
+        - Other
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and context
+      description: Workarounds, other tools that do this well, screenshots.
