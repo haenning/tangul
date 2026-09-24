@@ -21,6 +21,8 @@ const VALUE_GUTTER: f32 = 44.;
 const TOP_PAD: f32 = 8.;
 /// Space right of the last x position.
 const RIGHT_PAD: f32 = 8.;
+/// Smooth curves through the points (lines and area edges).
+const CURVE: StrokeStyle = StrokeStyle::Natural;
 /// Share of a row's width the bars of that row take.
 const BAR_GROUP: f32 = 0.7;
 
@@ -217,7 +219,7 @@ impl ResultChart {
                         .y1(|p: &(f32, f32)| Some(p.1))
                         .fill(tint(color, background, 0.45))
                         .stroke(color)
-                        .stroke_style(StrokeStyle::Linear)
+                        .stroke_style(CURVE)
                         .paint(bounds, window);
                 }
             }
@@ -236,20 +238,17 @@ impl ResultChart {
                             .y1(|p: &(f32, f32)| Some(p.1))
                             .fill(color.opacity(0.18))
                             .stroke(transparent_black())
-                            .stroke_style(StrokeStyle::Linear)
+                            .stroke_style(CURVE)
                             .paint(bounds, window);
                     }
-                    let mut line = Line::new()
+                    Line::new()
                         .data(points)
                         .x(|p: &(f32, f32)| Some(p.0))
                         .y(|p: &(f32, f32)| Some(p.1))
                         .stroke(color)
                         .stroke_width(2.)
-                        .stroke_style(StrokeStyle::Linear);
-                    if l.step >= 12. {
-                        line = line.dot().dot_size(5.).dot_fill_color(color);
-                    }
-                    line.paint(bounds, window);
+                        .stroke_style(CURVE)
+                        .paint(bounds, window);
                 }
             }
             ChartStyle::Bars | ChartStyle::StackedBars => {}
