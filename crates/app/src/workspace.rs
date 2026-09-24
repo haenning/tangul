@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui_kit::MouseButton;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _,
     TitleBar, WindowExt as _,
@@ -19,6 +20,7 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
+    resizable::{ResizableState, h_resizable, resizable_panel},
     spinner::Spinner,
     tab::{Tab, TabBar},
     v_flex,
@@ -52,6 +54,8 @@ use crate::{
 };
 
 const SIDEBAR_WIDTH: f32 = 260.;
+const SIDEBAR_MIN_WIDTH: f32 = 180.;
+const SIDEBAR_MAX_WIDTH: f32 = 600.;
 const ROW_HEIGHT: f32 = 26.;
 /// Sidebar tree geometry: left padding, indent per level, icon width.
 const TREE_PAD: f32 = 10.;
@@ -63,6 +67,7 @@ const HISTORY_LIMIT: usize = 300;
 const BOOKMARK_HINT_RUNS: u32 = 3;
 /// local.db setting: the user id connected last, reopened at startup.
 const LAST_USER_SETTING: &str = "last_user";
+const SIDEBAR_WIDTH_SETTING: &str = "sidebar_width";
 
 #[derive(Clone, Copy, PartialEq)]
 enum SidebarView {
@@ -172,8 +177,13 @@ pub struct Workspace {
     collapsed_groups: HashSet<(String, SharedString, TableKind)>,
     sidebar_view: SidebarView,
     sidebar_open: bool,
+    /// Sidebar/content split; the sidebar is the first panel.
+    layout: Entity<ResizableState>,
+    sidebar_width: f32,
     tabs: Vec<Entity<QueryTab>>,
     active_tab: usize,
+    /// Tab a middle-button press started on; it closes if released on the same tab.
+    middle_press: Option<TabId>,
     queries: HashMap<QueryId, RunningQuery>,
     /// Pending editor checks: request → (tab, edit generation).
     validations: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
@@ -220,6 +230,11 @@ impl Workspace {
                 }
             },
         );
+        let sidebar_width = local
+            .setting(SIDEBAR_WIDTH_SETTING)
+            .and_then(|w| w.parse::<f32>().ok())
+            .unwrap_or(SIDEBAR_WIDTH)
+            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         let mut this = Self {
             engine,
             store,
@@ -236,8 +251,11 @@ impl Workspace {
             collapsed_groups: HashSet::new(),
             sidebar_view: SidebarView::Schema,
             sidebar_open: true,
+            layout: cx.new(|_| ResizableState::default()),
+            sidebar_width,
             tabs: Vec::new(),
             active_tab: 0,
+            middle_press: None,
             queries: HashMap::new(),
             validations: HashMap::new(),
             sidebar_rows: Vec::new(),
@@ -353,6 +371,38 @@ impl Workspace {
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         }
         cx.notify();
+    }
+
+    fn tab_index(&self, id: TabId, cx: &App) -> Option<usize> {
+        self.tabs.iter().position(|t| t.read(cx).id == id)
+    }
+
+    fn close_tab_by_id(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tab_index(id, cx) {
+            self.close_tab(ix, window, cx);
+        }
+    }
+
+    fn toggle_tab_pin(&mut self, id: TabId, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tab_index(id, cx) {
+            self.tabs[ix].update(cx, |t, _| t.toggle_pin());
+            cx.notify();
+        }
+    }
+
+    /// Removes the tab's bookmark, or asks for a name and bookmarks its query.
+    fn toggle_tab_bookmark(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tab_index(id, cx).map(|ix| self.tabs[ix].clone()) else {
+            return;
+        };
+        if let Some(bookmark) = tab.read(cx).bookmark_id.clone() {
+            self.delete_bookmark(&bookmark, window, cx);
+        } else {
+            let sql = tab.read(cx).sql(cx);
+            if !sql.trim().is_empty() {
+                self.open_bookmark_dialog(None, sql, Some(tab), window, cx);
+            }
+        }
     }
 
     fn on_tab_event(
@@ -1681,6 +1731,12 @@ impl Workspace {
         }
     }
 
+    fn save_sidebar_width(&mut self, width: f32) {
+        self.sidebar_width = width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        self.local
+            .set_setting(SIDEBAR_WIDTH_SETTING, &self.sidebar_width.to_string());
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = self.sidebar_view;
         let body = match view {
@@ -1689,13 +1745,11 @@ impl Workspace {
             SidebarView::History => self.render_history_panel(cx).into_any_element(),
         };
         let theme = cx.theme();
+        // The divider next to it (the resize handle) draws the border.
         v_flex()
-            .w(px(SIDEBAR_WIDTH))
-            .h_full()
-            .flex_shrink_0()
+            .size_full()
+            .overflow_hidden()
             .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border)
             .child(body)
     }
 
@@ -2145,23 +2199,64 @@ impl Workspace {
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
         let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
-            let t = tab.read(cx);
-            let label: SharedString = if t.in_transaction() {
-                format!("{} •", t.title).into()
-            } else {
-                t.title.clone()
+            let (id, pinned, bookmarked, has_sql, title, in_transaction) = {
+                let t = tab.read(cx);
+                (
+                    t.id,
+                    t.pinned,
+                    t.bookmark_id.is_some(),
+                    !t.sql(cx).trim().is_empty(),
+                    t.title.clone(),
+                    t.in_transaction(),
+                )
             };
-            Tab::new().label(label).suffix(
-                Button::new(("close-tab", ix))
-                    .icon(IconName::Close)
-                    .ghost()
-                    .xsmall()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.close_tab(ix, window, cx)
-                    })),
-            )
+            let label: SharedString = if in_transaction {
+                format!("{title} •").into()
+            } else {
+                title
+            };
+            // The context menu can't wrap the `Tab` itself, so it sits on the content.
+            let content = h_flex()
+                .id(("tab-menu", id.0 as usize))
+                .gap_1()
+                .items_center()
+                .when(pinned, |this| this.child(Icon::new(Lucide::Pin).xsmall()))
+                .child(label.clone())
+                .context_menu({
+                    let weak = weak.clone();
+                    move |menu, _, _| tab_menu(menu, id, pinned, bookmarked, has_sql, &weak)
+                });
+            Tab::new()
+                .aria_label(label)
+                .child(content)
+                // Pinned tabs have no close button; the shortcut and menu still close them.
+                .when(!pinned, |this| {
+                    this.suffix(
+                        Button::new(("close-tab", ix))
+                            .icon(IconName::Close)
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(ix, window, cx)
+                            })),
+                    )
+                })
+                // Like browsers: closes when released on the tab it was pressed on.
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, _, _| this.middle_press = Some(id)),
+                )
+                .on_mouse_up(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
+                        if this.middle_press.take() == Some(id) && !pinned {
+                            this.close_tab_by_id(id, window, cx);
+                        }
+                    }),
+                )
         });
         TabBar::new("tabs")
             .children(tabs)
@@ -2361,22 +2456,38 @@ impl Render for Workspace {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(TitleBar::new().child(self.render_title_bar(cx)))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .when(self.sidebar_open, |this| {
-                        this.child(self.render_sidebar(cx))
-                    })
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(self.render_tabs(cx))
-                            .children(active.map(|tab| div().flex_1().min_h_0().child(tab))),
-                    ),
-            )
+            .child({
+                let content = v_flex()
+                    .size_full()
+                    .min_w_0()
+                    .child(self.render_tabs(cx))
+                    .children(active.map(|tab| div().flex_1().min_h_0().child(tab)));
+                let body = if self.sidebar_open {
+                    let this = cx.entity().downgrade();
+                    h_resizable("layout")
+                        .with_state(&self.layout)
+                        .on_resize(move |state, _, cx| {
+                            let width = state.read(cx).sizes().first().copied();
+                            let _ = this.update(cx, |ws, _| {
+                                if let Some(width) = width {
+                                    ws.save_sidebar_width(width.as_f32());
+                                }
+                            });
+                        })
+                        .child(
+                            resizable_panel()
+                                .size(px(self.sidebar_width))
+                                .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
+                                .flex_none()
+                                .child(self.render_sidebar(cx)),
+                        )
+                        .child(resizable_panel().child(content))
+                        .into_any_element()
+                } else {
+                    content.into_any_element()
+                };
+                div().flex_1().min_h_0().child(body)
+            })
             .child(self.render_status_bar(cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
@@ -2518,6 +2629,35 @@ fn ago(ms: i64) -> String {
 }
 
 /// Right-click menu of a table or view in the sidebar.
+fn tab_menu(
+    menu: PopupMenu,
+    tab: TabId,
+    pinned: bool,
+    bookmarked: bool,
+    has_sql: bool,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    let item = |label: &str, f: fn(&mut Workspace, TabId, &mut Window, &mut Context<Workspace>)| {
+        let ws = workspace.clone();
+        PopupMenuItem::new(label.to_string()).on_click(move |_, window, cx| {
+            let _ = ws.update(cx, |ws, cx| f(ws, tab, window, cx));
+        })
+    };
+    let menu = menu
+        .item(item("Close", Workspace::close_tab_by_id))
+        .item(item(
+            if pinned { "Unpin" } else { "Pin" },
+            |ws, tab, _, cx| ws.toggle_tab_pin(tab, cx),
+        ));
+    if bookmarked {
+        menu.item(item("Remove bookmark", Workspace::toggle_tab_bookmark))
+    } else if has_sql {
+        menu.item(item("Bookmark query…", Workspace::toggle_tab_bookmark))
+    } else {
+        menu
+    }
+}
+
 fn table_menu(
     menu: PopupMenu,
     table: &TableInfo,

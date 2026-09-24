@@ -18,6 +18,7 @@ gpui_kit::assets::icon_assets!(
         ListTree,
         Pencil,
         PencilOff,
+        Pin,
         RotateCcwClock,
         Sparkles,
         Table
