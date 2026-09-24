@@ -382,7 +382,7 @@ impl Workspace {
                     conn: conn.id,
                     sql: sql.clone(),
                 });
-                tab.update(cx, |t, cx| t.started(query, cx));
+                tab.update(cx, |t, cx| t.started(query, sql, cx));
             }
         }
     }

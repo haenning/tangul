@@ -9,7 +9,10 @@ use rusdb_core::{
 };
 use tokio_postgres::{CancelToken, Client, SimpleQueryMessage, config::SslMode};
 
-use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, may_touch_transaction};
+use crate::{
+    BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError, char_to_byte,
+    may_touch_transaction,
+};
 
 pub struct PgDriver;
 
@@ -220,7 +223,10 @@ impl Session for PgSession {
 }
 
 async fn run_simple(client: &Client, sql: &str, row_limit: usize, sink: Sink<'_>) -> Result<()> {
-    let stream = client.simple_query_raw(sql).await.map_err(pg_error)?;
+    let stream = client
+        .simple_query_raw(sql)
+        .await
+        .map_err(|e| pg_error_in(e, Some(sql)))?;
     pin_mut!(stream);
 
     let mut cols = 0usize;
@@ -228,7 +234,11 @@ async fn run_simple(client: &Client, sql: &str, row_limit: usize, sink: Sink<'_>
     let mut truncated = false;
     let mut batch = RowBatch::default();
 
-    while let Some(msg) = stream.try_next().await.map_err(pg_error)? {
+    while let Some(msg) = stream
+        .try_next()
+        .await
+        .map_err(|e| pg_error_in(e, Some(sql)))?
+    {
         match msg {
             SimpleQueryMessage::RowDescription(desc) => {
                 cols = desc.len();
@@ -274,6 +284,11 @@ async fn run_simple(client: &Client, sql: &str, row_limit: usize, sink: Sink<'_>
 
 /// Formats server errors like psql does (message, detail, hint, position).
 fn pg_error(e: tokio_postgres::Error) -> anyhow::Error {
+    pg_error_in(e, None)
+}
+
+/// With the executed SQL, the error carries its position as a [`SqlError`].
+fn pg_error_in(e: tokio_postgres::Error, sql: Option<&str>) -> anyhow::Error {
     let Some(db) = e.as_db_error() else {
         // Client-side errors keep the useful part in the source chain
         // (e.g. "invalid configuration: password missing").
@@ -292,10 +307,16 @@ fn pg_error(e: tokio_postgres::Error) -> anyhow::Error {
     if let Some(h) = db.hint() {
         msg.push_str(&format!("\nHINT: {h}"));
     }
-    if let Some(tokio_postgres::error::ErrorPosition::Original(p)) = db.position() {
-        msg.push_str(&format!("\nPOSITION: {p}"));
-    }
-    anyhow!(msg)
+    let position = match (db.position(), sql) {
+        (Some(tokio_postgres::error::ErrorPosition::Original(p)), Some(sql)) => {
+            char_to_byte(sql, *p as usize)
+        }
+        _ => None,
+    };
+    anyhow!(SqlError {
+        message: msg,
+        position,
+    })
 }
 
 struct PgCancel {

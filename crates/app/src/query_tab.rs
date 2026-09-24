@@ -3,6 +3,8 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
+use gpui_kit::component::input::RopeExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -13,6 +15,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rusdb_assist::lexer::tokenize;
 use rusdb_assist::related::RelatedLink;
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
 use rusdb_engine::{Command, EngineHandle, ExecEvent, QueryEvent};
@@ -60,6 +63,10 @@ pub struct QueryTab {
     table: Entity<TableState<ResultsDelegate>>,
     status: Status,
     running: Option<QueryId>,
+    /// Where the SQL of the next/current run starts in the editor (errors are
+    /// reported relative to the executed text), and that text.
+    pending_origin: Option<usize>,
+    run_origin: Option<(usize, String)>,
     /// Session pinned to this tab because a transaction is open.
     in_transaction: bool,
     has_result_set: bool,
@@ -99,6 +106,8 @@ impl QueryTab {
             conn,
             bookmark_id: None,
             bookmark_hint: None,
+            pending_origin: None,
+            run_origin: None,
             engine,
             editor,
             table,
@@ -175,14 +184,15 @@ impl QueryTab {
         // Run the selection if there is one, otherwise the whole buffer.
         let editor = self.editor.read(cx);
         let selected = editor.selected_value();
-        let sql = if selected.trim().is_empty() {
-            editor.value()
+        let (sql, origin) = if selected.trim().is_empty() {
+            (editor.value(), 0)
         } else {
-            selected
+            (selected, editor.selected_range().start)
         };
         if sql.trim().is_empty() {
             return;
         }
+        self.pending_origin = Some(origin);
         cx.emit(TabEvent::Run(sql.to_string()));
     }
 
@@ -194,7 +204,16 @@ impl QueryTab {
     }
 
     /// Called by the workspace once the query was sent to the engine.
-    pub fn started(&mut self, query: QueryId, cx: &mut Context<Self>) {
+    pub fn started(&mut self, query: QueryId, sql: &str, cx: &mut Context<Self>) {
+        // Locate the executed text in the editor, to put error markers in place.
+        let text = self.sql(cx);
+        let origin = self
+            .pending_origin
+            .take()
+            .filter(|&o| text.get(o..).is_some_and(|t| t.starts_with(sql)))
+            .or_else(|| text.find(sql));
+        self.run_origin = origin.map(|o| (o, sql.to_string()));
+        self.set_error_marker(None, cx);
         self.running = Some(query);
         self.status = Status::Running;
         self.has_result_set = false;
@@ -237,9 +256,13 @@ impl QueryTab {
             QueryEvent::Finished {
                 elapsed,
                 error,
+                error_position,
                 in_transaction,
                 cancelled,
             } => {
+                if let (Some(message), Some(position)) = (&error, error_position) {
+                    self.set_error_marker(Some((position, message.clone())), cx);
+                }
                 self.running = None;
                 self.in_transaction = in_transaction;
                 self.status = Status::Done {
@@ -250,6 +273,35 @@ impl QueryTab {
             }
         }
         cx.notify();
+    }
+
+    /// Underlines the token at `position` (byte offset in the executed SQL) with the
+    /// error as hover text; `None` clears. Editing clears it too (the editor resets
+    /// diagnostics on every change).
+    fn set_error_marker(&mut self, error: Option<(usize, String)>, cx: &mut Context<Self>) {
+        let marker = error.and_then(|(position, message)| {
+            let (origin, sql) = self.run_origin.as_ref()?;
+            let span = error_span(sql, position)?;
+            Some((origin + span.start..origin + span.end, message))
+        });
+        self.editor.update(cx, |editor, cx| {
+            let text = editor.text().clone();
+            let Some(diagnostics) = editor.diagnostics_mut() else {
+                return;
+            };
+            diagnostics.reset(&text);
+            if let Some((range, message)) = marker
+                && range.end <= text.len()
+            {
+                diagnostics.push(Diagnostic {
+                    range: text.offset_to_position(range.start)..text.offset_to_position(range.end),
+                    severity: DiagnosticSeverity::Error,
+                    message: message.into(),
+                    ..Default::default()
+                });
+            }
+            cx.notify();
+        });
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -419,5 +471,35 @@ impl Render for QueryTab {
 impl Focusable for QueryTab {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.editor.read(cx).focus_handle(cx)
+    }
+}
+
+/// The token an error position points at (or the last token if the error is at the
+/// end, e.g. an unfinished statement).
+fn error_span(sql: &str, position: usize) -> Option<std::ops::Range<usize>> {
+    let tokens: Vec<_> = tokenize(sql)
+        .into_iter()
+        .filter(|t| !t.is_trivia())
+        .collect();
+    tokens
+        .iter()
+        .find(|t| t.end > position)
+        .or(tokens.last())
+        .map(|t| t.start..t.end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_span;
+
+    #[test]
+    fn spans() {
+        let sql = "select * form users";
+        assert_eq!(error_span(sql, 9), Some(9..13));
+        // Position in whitespace: the next token.
+        assert_eq!(error_span(sql, 8), Some(9..13));
+        // At the end: the last token.
+        assert_eq!(error_span("select * from", 13), Some(9..13));
+        assert_eq!(error_span("", 0), None);
     }
 }

@@ -9,7 +9,7 @@ use rusdb_core::{
     ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
 };
 
-use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink};
+use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError, mysql_near};
 
 pub struct MysqlDriver;
 
@@ -78,7 +78,9 @@ impl MysqlSession {
 impl Session for MysqlSession {
     async fn execute(&mut self, sql: &str, row_limit: usize, sink: Sink<'_>) -> Result<()> {
         let conn = self.conn()?;
-        let result = run_text(conn, sql, row_limit, sink).await;
+        let result = run_text(conn, sql, row_limit, sink)
+            .await
+            .map_err(|e| with_position(e, sql));
         // The server reports the transaction state in every OK packet.
         self.in_transaction = self
             .conn
@@ -275,5 +277,18 @@ impl CancelHandle for MysqlCancel {
             .await?;
         conn.disconnect().await?;
         Ok(())
+    }
+}
+
+/// Server errors become a [`SqlError`] with the position MySQL describes as
+/// `near '…' at line N`.
+fn with_position(e: anyhow::Error, sql: &str) -> anyhow::Error {
+    match e.downcast_ref::<mysql_async::Error>() {
+        Some(mysql_async::Error::Server(server)) => {
+            let message = e.to_string();
+            let position = mysql_near(&server.message, sql);
+            anyhow::anyhow!(SqlError { message, position })
+        }
+        _ => e,
     }
 }

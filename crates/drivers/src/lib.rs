@@ -32,6 +32,59 @@ pub enum ExecEvent {
 
 pub type Sink<'a> = &'a mut (dyn FnMut(ExecEvent) + Send);
 
+/// An error the server reported for a statement, with where it happened (if known).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlError {
+    pub message: String,
+    /// Byte offset into the SQL passed to `Session::execute`.
+    pub position: Option<usize>,
+}
+
+impl std::fmt::Display for SqlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SqlError {}
+
+/// Byte offset of a 1-based character position (Postgres reports characters).
+pub(crate) fn char_to_byte(sql: &str, position: usize) -> Option<usize> {
+    let index = position.checked_sub(1)?;
+    sql.char_indices()
+        .nth(index)
+        .map(|(i, _)| i)
+        .or_else(|| (index == sql.chars().count()).then_some(sql.len()))
+}
+
+/// Locates MySQL's `… near '<rest of statement>' at line N` in `sql`. The quoted part
+/// is the (possibly cut) remainder of the statement from the error on; empty means
+/// the statement ended unexpectedly.
+pub(crate) fn mysql_near(message: &str, sql: &str) -> Option<usize> {
+    let start = message.find("near '")? + "near '".len();
+    let end = start + message[start..].rfind("' at line ")?;
+    let near = &message[start..end];
+    let line: usize = message[end + "' at line ".len()..]
+        .trim()
+        .trim_end_matches(|c: char| !c.is_ascii_digit())
+        .parse()
+        .ok()?;
+    if near.is_empty() {
+        return Some(sql.trim_end().trim_end_matches(';').trim_end().len());
+    }
+    // The server cuts long snippets; a short prefix is enough to find the spot.
+    let probe: String = near.chars().take(24).collect();
+    let line_start = sql
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1))
+        .map(str::len)
+        .sum::<usize>();
+    sql.get(line_start..)
+        .and_then(|rest| rest.find(&probe))
+        .map(|i| line_start + i)
+        .or_else(|| sql.find(&probe))
+}
+
 #[async_trait]
 pub trait Driver: Send + Sync {
     async fn connect(&self, cfg: &ConnectConfig) -> Result<Box<dyn Session>>;
@@ -95,7 +148,26 @@ pub(crate) fn may_touch_transaction(sql: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::may_touch_transaction;
+    use super::{char_to_byte, may_touch_transaction, mysql_near};
+
+    #[test]
+    fn error_positions() {
+        assert_eq!(char_to_byte("select föo", 8), Some(7));
+        // `ö` is two bytes: the final `o` (character 10) starts at byte 10.
+        assert_eq!(char_to_byte("select föo", 10), Some(10));
+        assert_eq!(char_to_byte("select föo", 11), Some(11));
+        assert_eq!(char_to_byte("abc", 4), Some(3));
+        assert_eq!(char_to_byte("abc", 0), None);
+
+        let msg = "ERROR 42000 (1064): You have an error in your SQL syntax; check the manual \
+                   that corresponds to your MySQL server version for the right syntax to use \
+                   near 'form users' at line 2";
+        let sql = "select 1;\nselect * form users";
+        assert_eq!(mysql_near(msg, sql), Some(sql.find("form").unwrap()));
+        let msg = "… to use near '' at line 1";
+        assert_eq!(mysql_near(msg, "select * from;"), Some(13));
+        assert_eq!(mysql_near("no position here", "x"), None);
+    }
 
     #[test]
     fn transaction_keywords() {

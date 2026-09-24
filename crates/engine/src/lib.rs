@@ -14,7 +14,7 @@ pub use pool::PoolStats;
 use pool::{Lease, Pool};
 use rusdb_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, SshTarget, TabId};
 pub use rusdb_drivers::ExecEvent;
-use rusdb_drivers::{CancelHandle, driver_for};
+use rusdb_drivers::{CancelHandle, SqlError, driver_for};
 use rusdb_tunnel::{HostKeyError, Tunnel};
 use tokio::sync::mpsc;
 
@@ -101,6 +101,8 @@ pub enum QueryEvent {
     Finished {
         elapsed: Duration,
         error: Option<String>,
+        /// Byte offset of the error in the executed SQL, when the server reported one.
+        error_position: Option<usize>,
         /// The tab's session stays pinned while this is true.
         in_transaction: bool,
         /// The user cancelled the query. Not every cancel produces an error (MySQL's
@@ -272,7 +274,7 @@ impl Engine {
                         &self.events,
                         query,
                         Duration::ZERO,
-                        Some("not connected".into()),
+                        Some(("not connected".into(), None)),
                         false,
                         false,
                     );
@@ -333,7 +335,7 @@ async fn execute(
                 &events,
                 query,
                 started.elapsed(),
-                Some(format!("{e:#}")),
+                Some(describe(&e)),
                 false,
                 false,
             );
@@ -370,7 +372,7 @@ async fn execute(
         &events,
         query,
         started.elapsed(),
-        result.err().map(|e| format!("{e:#}")),
+        result.err().map(|e| describe(&e)),
         in_tx,
         cancelled,
     );
@@ -423,11 +425,17 @@ fn close_all(leases: Vec<Lease>, report: Option<(Events, ConnId, Arc<Pool>)>) {
     });
 }
 
+/// Message and (for statement errors) position of an execution error.
+fn describe(e: &anyhow::Error) -> (String, Option<usize>) {
+    let position = e.downcast_ref::<SqlError>().and_then(|e| e.position);
+    (format!("{e:#}"), position)
+}
+
 fn finish(
     events: &Events,
     query: QueryId,
     elapsed: Duration,
-    error: Option<String>,
+    error: Option<(String, Option<usize>)>,
     in_transaction: bool,
     cancelled: bool,
 ) {
@@ -437,7 +445,8 @@ fn finish(
             query,
             event: QueryEvent::Finished {
                 elapsed,
-                error,
+                error_position: error.as_ref().and_then(|e| e.1),
+                error: error.map(|e| e.0),
                 in_transaction,
                 cancelled,
             },
