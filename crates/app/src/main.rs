@@ -1,5 +1,6 @@
 mod assets;
 mod bookmark_form;
+mod chart;
 mod completion;
 mod connection_form;
 mod local;
@@ -18,10 +19,12 @@ actions!(
     [
         RunQuery,
         BookmarkQuery,
+        SaveFile,
         NewTab,
         CloseTab,
         ToggleSidebar,
         OpenPalette,
+        OpenSettings,
         Quit
     ]
 );
@@ -51,10 +54,12 @@ fn main() {
             // same depth ("Input") and registration after gpui_kit::init.
             KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
             KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
+            KeyBinding::new("secondary-s", SaveFile, Some("QueryEditor > Input")),
             KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
             KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
             KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
             KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
+            KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
             KeyBinding::new("secondary-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());

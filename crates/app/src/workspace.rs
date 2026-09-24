@@ -28,9 +28,11 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
+    chart::{ChartData, ChartStyle, ChartView},
+    edit::row_edit,
     guard,
     lexer::fingerprint,
-    related::related_links,
+    related::{rank_links, related_links},
     schema::{SchemaIndex, quote_ident},
     suggest::{QuerySuggestion, one_line, suggest_for_table},
     usage::{Usage, learn},
@@ -41,12 +43,12 @@ use rusdb_core::{
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
 use crate::{
-    CloseTab, NewTab, OpenPalette, ToggleSidebar,
+    CloseTab, NewTab, OpenPalette, OpenSettings, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
     connection_form::{ConnectionForm, FormMode, FormOutput},
-    local::{Bookmark, HistoryEntry, Local, NewHistory},
+    local::{Bookmark, HistoryEntry, Local, NewHistory, bare_sql},
     palette::{self, PaletteAction, PaletteKind},
     query_tab::{QueryTab, TabConn, TabEvent},
     settings,
@@ -344,6 +346,39 @@ impl Workspace {
         tab
     }
 
+    /// Edits `settings.json` in a tab (the one already open, if any).
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = settings::ensure_file(cx) else {
+            window.push_notification(
+                Notification::error("Could not create the settings file"),
+                cx,
+            );
+            return;
+        };
+        let open = self
+            .tabs
+            .iter()
+            .position(|t| t.read(cx).file_path() == Some(path.as_path()));
+        let tab = match open {
+            Some(ix) => {
+                self.active_tab = ix;
+                self.tabs[ix].clone()
+            }
+            None => {
+                let id = TabId(self.next_id());
+                let engine = self.engine.clone();
+                let tab = cx.new(|cx| QueryTab::new_file(id, path, engine, window, cx));
+                self._subscriptions
+                    .push(cx.subscribe_in(&tab, window, Self::on_tab_event));
+                self.tabs.push(tab.clone());
+                self.active_tab = self.tabs.len() - 1;
+                tab
+            }
+        };
+        QueryTab::focus_editor(&tab, window, cx);
+        cx.notify();
+    }
+
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         self.add_tab("", window, cx);
     }
@@ -353,6 +388,74 @@ impl Workspace {
     }
 
     fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix).cloned() else {
+            return;
+        };
+        if tab.read(cx).has_unsaved_changes(cx) {
+            self.ask_to_save(tab, window, cx);
+            return;
+        }
+        self.remove_tab(ix, window, cx);
+    }
+
+    /// Closing a file tab with unsaved changes: save, discard or keep the tab.
+    fn ask_to_save(&mut self, tab: Entity<QueryTab>, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = cx.entity().downgrade();
+        let name = tab.read(cx).title.clone();
+        let id = tab.read(cx).id;
+        // Closes the tab (if it is still there) once the dialog is answered.
+        let close = move |save: bool| {
+            let (workspace, tab) = (workspace.clone(), tab.clone());
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                window.close_dialog(cx);
+                if save && !tab.update(cx, |t, cx| t.save_file(window, cx)) {
+                    return;
+                }
+                let _ = workspace.update(cx, |ws, cx| {
+                    if let Some(ix) = ws.tab_index(id, cx) {
+                        ws.remove_tab(ix, window, cx);
+                    }
+                });
+            }
+        };
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(format!("Save changes to {name}?"))
+                .w(px(420.))
+                .child(
+                    div()
+                        .text_sm()
+                        .child("Your changes are lost if you don't save them."),
+                )
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel-close")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("discard-close")
+                                .label("Don't save")
+                                .danger()
+                                .on_click(close(false)),
+                        )
+                        .child(
+                            Button::new("save-close")
+                                .label("Save")
+                                .primary()
+                                .on_click(close(true)),
+                        ),
+                )
+        });
+    }
+
+    /// Closes a tab without asking.
+    fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.tabs.len() {
             return;
         }
@@ -441,6 +544,16 @@ impl Workspace {
                     }
                 });
             }
+            TabEvent::OpenSql { title, sql } => {
+                let conn = tab.read(cx).conn.clone();
+                let new = self.add_tab(sql, window, cx);
+                new.update(cx, |t, cx| {
+                    t.title = title.clone().into();
+                    if let Some(conn) = conn {
+                        t.set_conn(conn, cx);
+                    }
+                });
+            }
             TabEvent::Bookmark(sql) => {
                 let existing = tab.read(cx).bookmark_id.clone();
                 self.open_bookmark_dialog(existing, sql.clone(), Some(tab.clone()), window, cx);
@@ -464,6 +577,22 @@ impl Workspace {
         };
         let query = QueryId(self.next_id());
         let user_id = self.conn_users.get(&conn.id).cloned().unwrap_or_default();
+        // Running a bookmarked query: the tab shows the bookmark's name, and its
+        // bookmark button edits that bookmark. Only when the whole editor ran, since
+        // the button saves the whole editor.
+        let whole_editor = bare_sql(&tab.read(cx).sql(cx)) == bare_sql(sql);
+        let bookmark = self
+            .find_user(&user_id)
+            .filter(|_| whole_editor)
+            .and_then(|(db, _)| self.local.bookmark_for_sql(&db.id, sql));
+        if let Some(bookmark) = bookmark
+            && tab.read(cx).bookmark_id.as_deref() != Some(bookmark.id.as_str())
+        {
+            tab.update(cx, |t, _| {
+                t.title = bookmark.name.into();
+                t.bookmark_id = Some(bookmark.id);
+            });
+        }
         self.queries.insert(
             query,
             RunningQuery {
@@ -825,13 +954,7 @@ impl Workspace {
 
     fn run_palette(&mut self, action: PaletteAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            PaletteAction::Settings => match settings::ensure_file(cx) {
-                Some(path) => cx.open_with_system(&path),
-                None => window.push_notification(
-                    Notification::error("Could not create the settings file"),
-                    cx,
-                ),
-            },
+            PaletteAction::Settings => self.open_settings(window, cx),
             PaletteAction::Bookmark(id) => self.open_bookmark(&id, false, window, cx),
             PaletteAction::History(sql) => self.open_sql("History", &sql, window, cx),
         }
@@ -883,20 +1006,31 @@ impl Workspace {
             eprintln!("could not record history: {e:#}");
         }
         if succeeded {
-            // Offer related rows (foreign keys) in the result's context menu.
-            if let (Some(tab), Some(state)) = (&tab, self.conns.get(&run.user_id)) {
-                let columns = tab.read(cx).result_columns(cx);
-                let links = related_links(&run.sql, &columns, &state.schema);
-                tab.update(cx, |t, cx| t.set_related(links, cx));
-            }
             if let Some(state) = self.conns.get(&run.user_id) {
                 let learned = learn(&run.sql, &state.schema);
                 let now = now_ms() / 1000;
                 if let Err(e) = self.local.record_usage(&db_id, &learned, now) {
                     eprintln!("could not record usage: {e:#}");
                 }
-                self.usage
-                    .insert(db_id.clone(), Arc::new(self.local.usage(&db_id, now)));
+                let usage = Arc::new(self.local.usage(&db_id, now));
+                self.usage.insert(db_id.clone(), usage.clone());
+                // Related rows (foreign keys, most used first) and UPDATE / DELETE
+                // statements in the result's context menu.
+                if let Some(tab) = &tab {
+                    let columns = tab.read(cx).result_columns(cx);
+                    let mut links = related_links(&run.sql, &columns, &state.schema);
+                    if links.len() > 1 {
+                        let bookmarked: Vec<_> = self
+                            .local
+                            .bookmarks_for(Some(&db_id))
+                            .iter()
+                            .flat_map(|b| learn(&b.sql, &state.schema))
+                            .collect();
+                        rank_links(&mut links, &usage, &bookmarked);
+                    }
+                    let edit = row_edit(&run.sql, &columns, &state.schema);
+                    tab.update(cx, |t, cx| t.set_row_actions(links, edit, cx));
+                }
                 self.sync_assist_for_db(&db_id);
             }
             let runs = self.local.runs(&db_id, &fp);
@@ -2207,12 +2341,14 @@ impl Workspace {
                     t.id,
                     t.pinned,
                     t.bookmark_id.is_some(),
-                    !t.sql(cx).trim().is_empty(),
+                    // A file tab (settings) holds no query to bookmark.
+                    t.file_path().is_none() && !t.sql(cx).trim().is_empty(),
                     t.title.clone(),
                     t.in_transaction(),
                 )
             };
-            let label: SharedString = if in_transaction {
+            let unsaved = tab.read(cx).has_unsaved_changes(cx);
+            let label: SharedString = if in_transaction || unsaved {
                 format!("{title} •").into()
             } else {
                 title
@@ -2283,14 +2419,23 @@ impl Workspace {
     /// tools; the active query's timing on the right.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (query_text, running) = self
+        let (query_text, running, chart) = self
             .tabs
             .get(self.active_tab)
             .map(|tab| {
                 let t = tab.read(cx);
-                (t.status_text(cx), t.is_running())
+                let chart = (t.chart(), t.chart_shown());
+                (
+                    t.status_text(cx),
+                    t.is_running(),
+                    // File tabs (settings) have no results to chart.
+                    t.file_path().is_none().then(|| (tab.clone(), chart)),
+                )
             })
             .unwrap_or_default();
+        let chart_button = chart.map(|(tab, (data, shown))| {
+            chart_button(tab, data, shown, theme.chart_1, theme.muted_foreground)
+        });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
         let panels = [
             SidebarView::Schema,
@@ -2341,7 +2486,9 @@ impl Workspace {
             ))
             .child(div().flex_1())
             .when(running, |this| this.child(Spinner::new().xsmall()))
-            .child(div().pr_2().child(query_text))
+            .child(div().pr_1().child(query_text))
+            .children(chart_button)
+            .child(div().w_1())
     }
 
     /// Bottom-bar panel button: shows that panel, or hides the sidebar if it is the
@@ -2452,6 +2599,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -2685,4 +2835,117 @@ fn table_menu(
         .separator()
         .item(copy("Copy name", table.name.clone()))
         .item(copy("Copy qualified name", name))
+}
+
+/// Status-bar button of the active tab's result: tinted when the result can be
+/// charted, with a menu of the table, charts of all value columns and charts of a
+/// single one; the chosen chart's name next to the icon. Disabled, with the reason,
+/// otherwise.
+fn chart_button(
+    tab: Entity<QueryTab>,
+    data: Result<Rc<ChartData>, SharedString>,
+    shown: Option<ChartView>,
+    available: Hsla,
+    muted: Hsla,
+) -> AnyElement {
+    let data = match data {
+        Ok(data) => data,
+        Err(reason) => {
+            return Button::new("chart")
+                .icon(Icon::new(Lucide::ChartColumn).text_color(muted))
+                .ghost()
+                .xsmall()
+                .disabled(true)
+                .tooltip(reason)
+                .into_any_element();
+        }
+    };
+    let button = Button::new("chart")
+        .icon(Icon::new(style_icon(shown.map(|v| v.style))).text_color(available))
+        .xsmall()
+        .selected(shown.is_some())
+        .when_some(shown, |b, view| b.label(data.view_label(view)));
+    let button = if data.grouped && shown.is_none() {
+        button.outline().tooltip("Show as chart (grouped query)")
+    } else {
+        button.ghost().tooltip("Show as chart")
+    };
+    button
+        .dropdown_menu(move |mut menu, window, cx| {
+            let item = |label: String, view: Option<ChartView>| {
+                let tab = tab.clone();
+                PopupMenuItem::new(label)
+                    .icon(Icon::new(style_icon(view.map(|v| v.style))))
+                    .checked(shown == view)
+                    .on_click(move |_, _, cx| tab.update(cx, |t, cx| t.set_chart_view(view, cx)))
+            };
+            menu = menu.item(item("Table".into(), None));
+            let multi = data.multi_styles();
+            if !multi.is_empty() {
+                menu = menu.separator().label("All columns");
+                for style in multi {
+                    let view = ChartView {
+                        style,
+                        series: None,
+                    };
+                    menu = menu.item(item(style.label().into(), Some(view)));
+                }
+            }
+            menu = menu.separator().label("Single column");
+            for style in data.single_styles() {
+                let label = style.single_label();
+                if data.series.len() < 2 {
+                    let view = ChartView {
+                        style,
+                        series: Some(0),
+                    };
+                    menu = menu.item(item(label.into(), Some(view)));
+                    continue;
+                }
+                // Several value columns: pick which one.
+                let columns: Vec<(String, ChartView)> = data
+                    .series
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let view = ChartView {
+                            style,
+                            series: Some(i),
+                        };
+                        (s.name.clone(), view)
+                    })
+                    .collect();
+                let tab = tab.clone();
+                menu = menu.submenu_with_icon(
+                    Some(Icon::new(style_icon(Some(style)))),
+                    label,
+                    window,
+                    cx,
+                    move |menu, _, _| {
+                        columns.iter().fold(menu, |menu, (name, view)| {
+                            let (tab, view) = (tab.clone(), *view);
+                            menu.item(
+                                PopupMenuItem::new(name.clone())
+                                    .checked(shown == Some(view))
+                                    .on_click(move |_, _, cx| {
+                                        tab.update(cx, |t, cx| t.set_chart_view(Some(view), cx))
+                                    }),
+                            )
+                        })
+                    },
+                );
+            }
+            menu
+        })
+        .into_any_element()
+}
+
+fn style_icon(style: Option<ChartStyle>) -> Lucide {
+    match style {
+        None => Lucide::Table,
+        Some(ChartStyle::Line) => Lucide::ChartLine,
+        Some(ChartStyle::Area | ChartStyle::StackedArea) => Lucide::ChartArea,
+        Some(ChartStyle::Bars) => Lucide::ChartColumn,
+        Some(ChartStyle::StackedBars) => Lucide::ChartColumnStacked,
+    }
 }

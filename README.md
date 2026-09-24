@@ -50,13 +50,25 @@ to passwords saved by an earlier build ("Always Allow").
 - The title bar switches database and user (like Zed's project and branch); the
   dropdowns also add and edit them. Passwords go to the macOS Keychain.
 - Databases can be reached through an SSH tunnel (ssh-agent, key file or password).
-- Click a table to query it; right-click for more. Right-click result rows to copy them
-  or to open related rows via foreign keys.
+- Click a table to query it; right-click for more. Right-click result rows to copy them,
+  to open related rows via foreign keys (the three you use most, the rest under
+  **Show all**), or to get an UPDATE / DELETE statement for them in a new tab (not run).
+  UPDATE has a submenu: the clicked cell or the whole row (one row selected), or with
+  several rows the cell with one value for all of them or each row's own value.
+- The chart button next to the row count turns blue when the result can be charted and
+  opens a menu: the table; all value columns in one chart (lines, areas, stacked
+  areas, bars side by side, stacked bars); or a single column (line, area, bars;
+  pick the column in the submenu). The first column is the x axis, every further column must
+  be numeric (at most 5; bars up to 50 rows, lines and areas up to 1000). Grouped
+  queries get the button outlined; otherwise its tooltip says why a result can't be
+  charted.
 - The bottom bar switches the sidebar between Schema, Bookmarks and History (click the
   active one, or `⌘B`, to hide it). Hover the status dot next to the user in the title
   bar for the connection status, pool usage and schema counts.
 - `⌘↵` runs the selection or the whole editor, `⌘D` bookmarks the query, `⌘T` new tab,
-  `⌘W` close tab, `⌘B` toggle sidebar.
+  `⌘W` close tab, `⌘B` toggle sidebar, `⌘,` settings.
+- Settings (`⌘,` or "Open settings" in the command palette) open `settings.json` in a
+  tab of its own: just the editor, `⌘S` saves and the changes apply right away.
 
 ## Development
 
