@@ -21,8 +21,6 @@ const VALUE_GUTTER: f32 = 44.;
 const TOP_PAD: f32 = 8.;
 /// Space right of the last x position.
 const RIGHT_PAD: f32 = 8.;
-/// Smooth curves through the points (lines and area edges).
-const CURVE: StrokeStyle = StrokeStyle::Natural;
 /// Share of a row's width the bars of that row take.
 const BAR_GROUP: f32 = 0.7;
 
@@ -33,6 +31,8 @@ pub struct ResultChart {
     style: ChartStyle,
     /// Per series.
     colors: Vec<Hsla>,
+    /// Curves instead of straight segments between points (lines and areas).
+    smooth: bool,
 }
 
 impl ResultChart {
@@ -41,12 +41,14 @@ impl ResultChart {
         data: Rc<ChartData>,
         style: ChartStyle,
         colors: Vec<Hsla>,
+        smooth: bool,
     ) -> Self {
         Self {
             id: id.into(),
             data,
             style,
             colors,
+            smooth,
         }
     }
 }
@@ -200,6 +202,12 @@ impl ResultChart {
 
     fn paint_lines(&self, l: &Layout, bounds: &Bounds<Pixels>, window: &mut Window, cx: &App) {
         let background = cx.theme().background;
+        // Straight segments are exact; curves can swing past the values between points.
+        let curve = if self.smooth {
+            StrokeStyle::Natural
+        } else {
+            StrokeStyle::Linear
+        };
         let rows = self.data.x.len();
         let zero = l.y(0.0);
         match self.style {
@@ -219,7 +227,7 @@ impl ResultChart {
                         .y1(|p: &(f32, f32)| Some(p.1))
                         .fill(tint(color, background, 0.45))
                         .stroke(color)
-                        .stroke_style(CURVE)
+                        .stroke_style(curve)
                         .paint(bounds, window);
                 }
             }
@@ -238,7 +246,7 @@ impl ResultChart {
                             .y1(|p: &(f32, f32)| Some(p.1))
                             .fill(color.opacity(0.18))
                             .stroke(transparent_black())
-                            .stroke_style(CURVE)
+                            .stroke_style(curve)
                             .paint(bounds, window);
                     }
                     Line::new()
@@ -247,7 +255,7 @@ impl ResultChart {
                         .y(|p: &(f32, f32)| Some(p.1))
                         .stroke(color)
                         .stroke_width(2.)
-                        .stroke_style(CURVE)
+                        .stroke_style(curve)
                         .paint(bounds, window);
                 }
             }

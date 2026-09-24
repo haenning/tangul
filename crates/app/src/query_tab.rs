@@ -6,7 +6,7 @@ use std::time::Duration;
 use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::RopeExt as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{CompletionProvider, Editor, EditorState, InputEvent},
@@ -111,6 +111,8 @@ pub struct QueryTab {
     /// The chart picked in the status bar, shown instead of the grid when the result
     /// can be charted; `None` shows the grid. Kept across runs.
     chart_view: Option<ChartView>,
+    /// Curved instead of straight lines; starts straight, which is exact.
+    smooth_lines: bool,
 }
 
 /// Why there is no chart before a result is complete.
@@ -173,6 +175,7 @@ impl QueryTab {
             last_rows: None,
             chart: Err(NO_RESULT.into()),
             chart_view: None,
+            smooth_lines: false,
         }
     }
 
@@ -583,7 +586,12 @@ impl QueryTab {
     }
 
     /// All series in one chart, with a legend when there are several.
-    fn render_chart(&self, data: &ChartData, view: ChartView, cx: &App) -> AnyElement {
+    fn render_chart(
+        &self,
+        data: &ChartData,
+        view: ChartView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let mut colors = vec![
             theme.chart_1,
@@ -599,6 +607,25 @@ impl QueryTab {
         }
         let style = view.style;
         let data = Rc::new(data.for_view(view));
+        // Straight / smooth, for lines and areas only.
+        let curve_switch = (!style.is_bars()).then(|| {
+            let option = |id: &'static str, label: &'static str, smooth: bool| {
+                Button::new(id)
+                    .label(label)
+                    .xsmall()
+                    .ghost()
+                    .selected(self.smooth_lines == smooth)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.smooth_lines = smooth;
+                        cx.notify();
+                    }))
+            };
+            h_flex()
+                .gap_0p5()
+                .child(option("straight-lines", "Straight", false))
+                .child(option("smooth-lines", "Smooth", true))
+        });
+        let theme = cx.theme();
         let legend = (data.series.len() > 1).then(|| {
             h_flex()
                 .gap_3()
@@ -617,7 +644,15 @@ impl QueryTab {
             .gap_2()
             .text_xs()
             .text_color(theme.muted_foreground)
-            .children(legend)
+            .when(curve_switch.is_some() || legend.is_some(), |this| {
+                this.child(
+                    h_flex()
+                        .gap_4()
+                        .items_center()
+                        .children(curve_switch)
+                        .children(legend),
+                )
+            })
             .when(data.unsorted && !style.is_bars(), |this| {
                 this.child(format!(
                     "{} is not in ascending order; add ORDER BY to plot it over time",
@@ -629,6 +664,7 @@ impl QueryTab {
                 data,
                 style,
                 colors,
+                self.smooth_lines,
             )))
             .into_any_element()
     }
