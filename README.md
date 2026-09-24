@@ -53,6 +53,8 @@ to passwords saved by an earlier build ("Always Allow").
 - Click a table to query it; right-click for more. Right-click result rows to copy them,
   to open related rows via foreign keys (the three you use most, the rest under
   **Show all**), or to get an UPDATE / DELETE statement for them in a new tab (not run).
+  UPDATE has a submenu: the clicked cell or the whole row (one row selected), or with
+  several rows the cell with one value for all of them or each row's own value.
 - The chart button next to the row count turns blue when the result can be charted and
   opens a menu: the table; all value columns in one chart (lines, areas, stacked
   areas, bars side by side, stacked bars); or a single column (line, area, bars;
