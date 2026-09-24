@@ -52,8 +52,11 @@ to passwords saved by an earlier build ("Always Allow").
 - Databases can be reached through an SSH tunnel (ssh-agent, key file or password).
 - Click a table to query it; right-click for more. Right-click result rows to copy them
   or to open related rows via foreign keys.
+- The bottom bar switches the sidebar between Schema, Bookmarks and History (click the
+  active one, or `⌘B`, to hide it). Hover the status dot next to the user in the title
+  bar for connection, SSH, pool and schema details.
 - `⌘↵` runs the selection or the whole editor, `⌘D` bookmarks the query, `⌘T` new tab,
-  `⌘W` close tab.
+  `⌘W` close tab, `⌘B` toggle sidebar.
 
 ## Development
 

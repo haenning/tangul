@@ -11,7 +11,17 @@ mod workspace;
 use gpui_kit::component::{Root, Theme, ThemeMode, TitleBar};
 use gpui_kit::*;
 
-actions!(rusdb, [RunQuery, BookmarkQuery, NewTab, CloseTab, Quit]);
+actions!(
+    rusdb,
+    [
+        RunQuery,
+        BookmarkQuery,
+        NewTab,
+        CloseTab,
+        ToggleSidebar,
+        Quit
+    ]
+);
 
 fn main() {
     // The engine owns its own tokio runtime thread; the UI only exchanges messages.
@@ -39,6 +49,7 @@ fn main() {
             KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
             KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
             KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
+            KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
             KeyBinding::new("secondary-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
