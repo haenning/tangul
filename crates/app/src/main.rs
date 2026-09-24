@@ -3,8 +3,10 @@ mod bookmark_form;
 mod completion;
 mod connection_form;
 mod local;
+mod palette;
 mod query_tab;
 mod results;
+mod settings;
 mod store;
 mod workspace;
 
@@ -19,6 +21,7 @@ actions!(
         NewTab,
         CloseTab,
         ToggleSidebar,
+        OpenPalette,
         Quit
     ]
 );
@@ -41,6 +44,7 @@ fn main() {
     app.run(move |cx| {
         init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+        settings::init(cx);
 
         cx.bind_keys([
             // Must win over the editor's own `secondary-enter` (newline), hence the
@@ -50,6 +54,7 @@ fn main() {
             KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
             KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
             KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
+            KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
             KeyBinding::new("secondary-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
