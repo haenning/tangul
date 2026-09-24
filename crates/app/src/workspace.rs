@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui_kit::MouseButton;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _,
     TitleBar, WindowExt as _,
@@ -22,7 +23,6 @@ use gpui_kit::component::{
     tab::{Tab, TabBar},
     v_flex,
 };
-use gpui_kit::MouseButton;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
@@ -159,6 +159,8 @@ pub struct Workspace {
     sidebar_open: bool,
     tabs: Vec<Entity<QueryTab>>,
     active_tab: usize,
+    /// Tab a middle-button press started on; it closes if released on the same tab.
+    middle_press: Option<TabId>,
     queries: HashMap<QueryId, RunningQuery>,
     /// Pending editor checks: request → (tab, edit generation).
     validations: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
@@ -223,6 +225,7 @@ impl Workspace {
             sidebar_open: true,
             tabs: Vec::new(),
             active_tab: 0,
+            middle_press: None,
             queries: HashMap::new(),
             validations: HashMap::new(),
             sidebar_rows: Vec::new(),
@@ -338,6 +341,38 @@ impl Workspace {
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         }
         cx.notify();
+    }
+
+    fn tab_index(&self, id: TabId, cx: &App) -> Option<usize> {
+        self.tabs.iter().position(|t| t.read(cx).id == id)
+    }
+
+    fn close_tab_by_id(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tab_index(id, cx) {
+            self.close_tab(ix, window, cx);
+        }
+    }
+
+    fn toggle_tab_pin(&mut self, id: TabId, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tab_index(id, cx) {
+            self.tabs[ix].update(cx, |t, _| t.toggle_pin());
+            cx.notify();
+        }
+    }
+
+    /// Removes the tab's bookmark, or asks for a name and bookmarks its query.
+    fn toggle_tab_bookmark(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tab_index(id, cx).map(|ix| self.tabs[ix].clone()) else {
+            return;
+        };
+        if let Some(bookmark) = tab.read(cx).bookmark_id.clone() {
+            self.delete_bookmark(&bookmark, window, cx);
+        } else {
+            let sql = tab.read(cx).sql(cx);
+            if !sql.trim().is_empty() {
+                self.open_bookmark_dialog(None, sql, Some(tab), window, cx);
+            }
+        }
     }
 
     fn on_tab_event(
@@ -1843,30 +1878,61 @@ impl Workspace {
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
         let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
-            let t = tab.read(cx);
-            let label: SharedString = if t.in_transaction() {
-                format!("{} •", t.title).into()
-            } else {
-                t.title.clone()
-            };
-            Tab::new()
-                .label(label)
-                .suffix(
-                    Button::new(("close-tab", ix))
-                        .icon(IconName::Close)
-                        .ghost()
-                        .xsmall()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_tab(ix, window, cx)
-                        })),
+            let (id, pinned, bookmarked, has_sql, title, in_transaction) = {
+                let t = tab.read(cx);
+                (
+                    t.id,
+                    t.pinned,
+                    t.bookmark_id.is_some(),
+                    !t.sql(cx).trim().is_empty(),
+                    t.title.clone(),
+                    t.in_transaction(),
                 )
+            };
+            let label: SharedString = if in_transaction {
+                format!("{title} •").into()
+            } else {
+                title
+            };
+            // The context menu can't wrap the `Tab` itself, so it sits on the content.
+            let content = h_flex()
+                .id(("tab-menu", id.0 as usize))
+                .gap_1()
+                .items_center()
+                .when(pinned, |this| this.child(Icon::new(Lucide::Pin).xsmall()))
+                .child(label.clone())
+                .context_menu({
+                    let weak = weak.clone();
+                    move |menu, _, _| tab_menu(menu, id, pinned, bookmarked, has_sql, &weak)
+                });
+            Tab::new()
+                .aria_label(label)
+                .child(content)
+                // Pinned tabs have no close button; the shortcut and menu still close them.
+                .when(!pinned, |this| {
+                    this.suffix(
+                        Button::new(("close-tab", ix))
+                            .icon(IconName::Close)
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(ix, window, cx)
+                            })),
+                    )
+                })
+                // Like browsers: closes when released on the tab it was pressed on.
                 .on_mouse_down(
                     MouseButton::Middle,
+                    cx.listener(move |this, _, _, _| this.middle_press = Some(id)),
+                )
+                .on_mouse_up(
+                    MouseButton::Middle,
                     cx.listener(move |this, _, window, cx| {
-                        if !this.tabs.get(ix).map_or(false, |t| t.read(cx).pinned) {
-                            this.close_tab(ix, window, cx);
+                        if this.middle_press.take() == Some(id) && !pinned {
+                            this.close_tab_by_id(id, window, cx);
                         }
                     }),
                 )
@@ -2225,6 +2291,35 @@ fn ago(ms: i64) -> String {
 }
 
 /// Right-click menu of a table or view in the sidebar.
+fn tab_menu(
+    menu: PopupMenu,
+    tab: TabId,
+    pinned: bool,
+    bookmarked: bool,
+    has_sql: bool,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    let item = |label: &str, f: fn(&mut Workspace, TabId, &mut Window, &mut Context<Workspace>)| {
+        let ws = workspace.clone();
+        PopupMenuItem::new(label.to_string()).on_click(move |_, window, cx| {
+            let _ = ws.update(cx, |ws, cx| f(ws, tab, window, cx));
+        })
+    };
+    let menu = menu
+        .item(item("Close", Workspace::close_tab_by_id))
+        .item(item(
+            if pinned { "Unpin" } else { "Pin" },
+            |ws, tab, _, cx| ws.toggle_tab_pin(tab, cx),
+        ));
+    if bookmarked {
+        menu.item(item("Remove bookmark", Workspace::toggle_tab_bookmark))
+    } else if has_sql {
+        menu.item(item("Bookmark query…", Workspace::toggle_tab_bookmark))
+    } else {
+        menu
+    }
+}
+
 fn table_menu(
     menu: PopupMenu,
     table: &TableInfo,

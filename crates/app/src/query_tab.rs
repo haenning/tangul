@@ -71,7 +71,8 @@ pub struct QueryTab {
     pub bookmark_id: Option<String>,
     /// Times the last query was run successfully, when it is worth bookmarking.
     pub bookmark_hint: Option<u32>,
-    /// Tab is pinned and won't be closed with close-all or middle-click.
+    /// Tab is pinned: no close button, and middle-click doesn't close it. Closing it
+    /// from the context menu or with the shortcut still works.
     pub pinned: bool,
     engine: EngineHandle,
     editor: Entity<EditorState>,
