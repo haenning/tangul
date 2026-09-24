@@ -57,6 +57,32 @@ pub(crate) fn char_to_byte(sql: &str, position: usize) -> Option<usize> {
         .or_else(|| (index == sql.chars().count()).then_some(sql.len()))
 }
 
+/// For errors without a position that name an object in quotes (MySQL's
+/// `Table 'app.x' doesn't exist`, `Unknown column 'u.nme' in 'field list'`): where
+/// the last part of the first quoted name appears in `sql`.
+pub(crate) fn quoted_name_position(message: &str, sql: &str) -> Option<usize> {
+    let start = message.find('\'')? + 1;
+    let end = start + message[start..].find('\'')?;
+    let name = message[start..end].rsplit('.').next()?;
+    if name.is_empty() {
+        return None;
+    }
+    let lower = sql.to_lowercase();
+    let needle = name.to_lowercase();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(&needle) {
+        let at = from + i;
+        let before = lower[..at].chars().next_back();
+        let after = lower[at + needle.len()..].chars().next();
+        let boundary = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        if boundary(before) && boundary(after) {
+            return Some(at);
+        }
+        from = at + needle.len();
+    }
+    None
+}
+
 /// Locates MySQL's `… near '<rest of statement>' at line N` in `sql`. The quoted part
 /// is the (possibly cut) remainder of the statement from the error on; empty means
 /// the statement ended unexpectedly.
@@ -104,6 +130,10 @@ pub trait Session: Send {
     /// Handle that can cancel the running statement from another task.
     fn cancel_handle(&self) -> Arc<dyn CancelHandle>;
 
+    /// Checks one statement on the server without running it (prepare only): syntax
+    /// and whether referenced objects exist. Errors carry a [`SqlError`] position.
+    async fn validate(&mut self, sql: &str) -> Result<()>;
+
     async fn list_tables(&mut self) -> Result<Vec<TableInfo>>;
 
     /// Columns of all listed tables, ordered by schema, table, position.
@@ -148,7 +178,7 @@ pub(crate) fn may_touch_transaction(sql: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{char_to_byte, may_touch_transaction, mysql_near};
+    use super::{char_to_byte, may_touch_transaction, mysql_near, quoted_name_position};
 
     #[test]
     fn error_positions() {
@@ -167,6 +197,21 @@ mod tests {
         let msg = "… to use near '' at line 1";
         assert_eq!(mysql_near(msg, "select * from;"), Some(13));
         assert_eq!(mysql_near("no position here", "x"), None);
+
+        let sql = "select nme from users u where u.idx = 1";
+        assert_eq!(
+            quoted_name_position("Unknown column 'u.idx' in 'where clause'", sql),
+            Some(sql.find("idx").unwrap())
+        );
+        assert_eq!(
+            quoted_name_position("Table 'app.users' doesn't exist", sql),
+            Some(sql.find("users").unwrap())
+        );
+        // Whole words only.
+        assert_eq!(
+            quoted_name_position("Unknown column 'u' in 'x'", "select users"),
+            None
+        );
     }
 
     #[test]

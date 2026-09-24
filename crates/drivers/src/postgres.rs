@@ -115,6 +115,15 @@ impl Session for PgSession {
         self.cancel.clone()
     }
 
+    async fn validate(&mut self, sql: &str) -> Result<()> {
+        // Parse + Describe only; the unnamed statement is closed when dropped.
+        self.client
+            .prepare(sql)
+            .await
+            .map(drop)
+            .map_err(|e| pg_error_in(e, Some(sql)))
+    }
+
     async fn list_tables(&mut self) -> Result<Vec<TableInfo>> {
         const SQL: &str = "SELECT n.nspname, c.relname, c.relkind \
             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \

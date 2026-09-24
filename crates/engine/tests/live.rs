@@ -150,6 +150,33 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
     let tab_a = TabId(1);
     let tab_b = TabId(2);
 
+    // Validation prepares without executing: syntax and unknown objects are
+    // reported with positions, and nothing runs (the CREATE must not happen).
+    h.engine.send(Command::Validate {
+        request: 1,
+        conn: h.conn,
+        statements: vec![
+            (0, "SELECT 1".into()),
+            (0, "SELECT * FORM x".into()),
+            (0, "SELECT * FROM rusdb_no_such_table".into()),
+            (0, "CREATE TABLE rusdb_validate_probe (id INT)".into()),
+        ],
+    });
+    let problems = loop {
+        if let Event::Validated { problems, .. } = h.next().await {
+            break problems;
+        }
+    };
+    let at = |i| problems.iter().find(|p| p.statement == i);
+    assert!(at(0).is_none() && at(3).is_none(), "{problems:?}");
+    assert_eq!(at(1).and_then(|p| p.position), Some(9), "{problems:?}");
+    assert_eq!(at(2).and_then(|p| p.position), Some(14), "{problems:?}");
+    let out = h.run(tab_a, "SELECT * FROM rusdb_validate_probe").await;
+    assert!(
+        out.error.is_some(),
+        "validation must not execute statements"
+    );
+
     // Syntax errors carry the byte position of the offending token.
     let out = h.run(tab_a, "SELECT * FORM x").await;
     assert!(out.error.is_some());

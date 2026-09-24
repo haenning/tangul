@@ -9,7 +9,10 @@ use rusdb_core::{
     ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
 };
 
-use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError, mysql_near};
+use crate::{
+    BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError, mysql_near,
+    quoted_name_position,
+};
 
 pub struct MysqlDriver;
 
@@ -100,6 +103,17 @@ impl Session for MysqlSession {
 
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
         self.cancel.clone()
+    }
+
+    async fn validate(&mut self, sql: &str) -> Result<()> {
+        /// ER_UNSUPPORTED_PS: statements the prepared protocol can't take (USE, …).
+        const UNSUPPORTED: u16 = 1295;
+        let conn = self.conn()?;
+        match conn.prep(sql).await {
+            Ok(stmt) => Ok(conn.close(stmt).await?),
+            Err(mysql_async::Error::Server(e)) if e.code == UNSUPPORTED => Ok(()),
+            Err(e) => Err(with_position(e.into(), sql)),
+        }
     }
 
     async fn list_tables(&mut self) -> Result<Vec<TableInfo>> {
@@ -286,7 +300,8 @@ fn with_position(e: anyhow::Error, sql: &str) -> anyhow::Error {
     match e.downcast_ref::<mysql_async::Error>() {
         Some(mysql_async::Error::Server(server)) => {
             let message = e.to_string();
-            let position = mysql_near(&server.message, sql);
+            let position = mysql_near(&server.message, sql)
+                .or_else(|| quoted_name_position(&server.message, sql));
             anyhow::anyhow!(SqlError { message, position })
         }
         _ => e,

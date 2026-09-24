@@ -86,6 +86,12 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 - Editor: gpui-component code editor (tree-sitter SQL highlighting, line numbers).
   Its engine has multi-cursor support (`AddCursorAbove/Below`, bound to ⌘⌥↑/↓ on macOS);
   not yet verified on a Mac. ⌘↵ runs the selection or the whole buffer.
+- Errors are underlined in the editor: after a run at the position the server reports,
+  and while typing: 1 s after the last change every statement is *prepared* (Postgres
+  Parse, MySQL COM_STMT_PREPARE) on a spare session, which checks syntax and objects
+  without executing anything. "Unfinished statement" errors at the end are not shown.
+  A spare session so a tab's open transaction is never aborted by a failed check;
+  temp tables of a tab's pinned session are therefore unknown to the check.
 - Simple own layout (sidebar | tab bar + tab content | status bar), stock components and
   the default dark theme. No custom styling system.
 - Pinned versions (`gpui-kit = "=0.6.6"`, Rust 1.98.1 = Zed's toolchain) — GPUI API

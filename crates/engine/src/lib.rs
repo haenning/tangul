@@ -56,6 +56,14 @@ pub enum Command {
     Cancel {
         query: QueryId,
     },
+    /// Checks statements without running them (prepare only), on a spare session so
+    /// an open transaction of a tab is never touched. `statements` are
+    /// (byte offset in the editor, text).
+    Validate {
+        request: u64,
+        conn: ConnId,
+        statements: Vec<(usize, String)>,
+    },
     /// Tab closed or switched connection: drop its pinned session (rolls back).
     ReleaseTab {
         tab: TabId,
@@ -93,6 +101,20 @@ pub enum Event {
         conn: ConnId,
         stats: PoolStats,
     },
+    /// Result of `Validate`: one entry per failing statement.
+    Validated {
+        request: u64,
+        problems: Vec<Problem>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// Index into the request's statements.
+    pub statement: usize,
+    /// Byte offset within that statement, when the server said where.
+    pub position: Option<usize>,
+    pub message: String,
 }
 
 #[derive(Debug)]
@@ -284,6 +306,21 @@ impl Engine {
                 let running = self.running.clone();
                 tokio::spawn(execute(pool, events, running, query, tab, conn, sql));
             }
+            Command::Validate {
+                request,
+                conn,
+                statements,
+            } => {
+                let Some(pool) = self.pools.get(&conn).cloned() else {
+                    return;
+                };
+                let events = self.events.clone();
+                tokio::spawn(async move {
+                    if let Some(problems) = validate(&pool, &statements).await {
+                        send(&events, Event::Validated { request, problems });
+                    }
+                });
+            }
             Command::Cancel { query } => {
                 // A query still waiting for a free connection can't be cancelled yet.
                 let handle = self.running.lock().unwrap().get_mut(&query).map(|r| {
@@ -378,6 +415,30 @@ async fn execute(
     );
     pool.release(Some(tab), lease);
     send_stats(&events, conn, &pool);
+}
+
+/// Longest wait for a spare session; validation is skipped when all are busy.
+const VALIDATE_WAIT: Duration = Duration::from_secs(2);
+
+/// `None` when no session was free in time (the caller keeps its last result).
+async fn validate(pool: &Pool, statements: &[(usize, String)]) -> Option<Vec<Problem>> {
+    let mut lease = tokio::time::timeout(VALIDATE_WAIT, pool.acquire(None))
+        .await
+        .ok()?
+        .ok()?;
+    let mut problems = Vec::new();
+    for (i, (_, sql)) in statements.iter().enumerate() {
+        if let Err(e) = lease.session.validate(sql).await {
+            let (message, position) = describe(&e);
+            problems.push(Problem {
+                statement: i,
+                position,
+                message,
+            });
+        }
+    }
+    pool.release(None, lease);
+    Some(problems)
 }
 
 /// Tables are required; columns and foreign keys are best effort (they only feed

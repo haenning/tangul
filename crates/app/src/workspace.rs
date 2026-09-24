@@ -160,6 +160,8 @@ pub struct Workspace {
     tabs: Vec<Entity<QueryTab>>,
     active_tab: usize,
     queries: HashMap<QueryId, RunningQuery>,
+    /// Pending editor checks: request → (tab, edit generation).
+    validations: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
     sidebar_rows: Vec<SidebarRow>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -222,6 +224,7 @@ impl Workspace {
             tabs: Vec::new(),
             active_tab: 0,
             queries: HashMap::new(),
+            validations: HashMap::new(),
             sidebar_rows: Vec::new(),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub],
@@ -345,6 +348,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            TabEvent::Validate {
+                generation,
+                statements,
+            } => {
+                let Some(conn) = tab.read(cx).conn.clone() else {
+                    return;
+                };
+                let request = self.next_id();
+                self.validations
+                    .insert(request, (tab.downgrade(), *generation));
+                self.engine.send(Command::Validate {
+                    request,
+                    conn: conn.id,
+                    statements: statements.clone(),
+                });
+            }
             TabEvent::OpenRelated { title, sql } => {
                 // Same connection as the tab the rows came from.
                 let conn = tab.read(cx).conn.clone();
@@ -1000,6 +1019,13 @@ impl Workspace {
                 }
                 Err(e) => window.push_notification(Notification::error(e), cx),
             },
+            Event::Validated { request, problems } => {
+                if let Some((tab, generation)) = self.validations.remove(&request)
+                    && let Some(tab) = tab.upgrade()
+                {
+                    tab.update(cx, |t, cx| t.apply_validation(generation, problems, cx));
+                }
+            }
             Event::PoolStats { conn, stats } => {
                 if let Some(state) = self.conn_state_mut(conn) {
                     state.stats = stats;

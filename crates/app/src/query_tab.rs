@@ -9,16 +9,23 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{CompletionProvider, Editor, EditorState},
+    input::{CompletionProvider, Editor, EditorState, InputEvent},
     table::{DataTable, TableState},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rusdb_assist::analyze::statements;
 use rusdb_assist::lexer::tokenize;
 use rusdb_assist::related::RelatedLink;
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
-use rusdb_engine::{Command, EngineHandle, ExecEvent, QueryEvent};
+use rusdb_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
+
+/// Pause in typing after which the editor is checked on the server.
+const VALIDATE_AFTER: Duration = Duration::from_secs(1);
+/// Limits per check; larger scripts are only checked in part.
+const MAX_VALIDATE_STATEMENTS: usize = 50;
+const MAX_VALIDATE_BYTES: usize = 100_000;
 
 use crate::{BookmarkQuery, RunQuery, assets::Lucide, results::ResultsDelegate};
 
@@ -33,6 +40,12 @@ pub struct TabConn {
 pub enum TabEvent {
     /// The user wants to run this SQL; the workspace assigns a QueryId.
     Run(String),
+    /// Check these statements (byte offset in the editor, text) on the server
+    /// without running them; the answer goes to `apply_validation(generation, …)`.
+    Validate {
+        generation: u64,
+        statements: Vec<(usize, String)>,
+    },
     /// The user wants to save the editor's SQL as a bookmark.
     Bookmark(String),
     /// Open (and run) a query for rows related to the selected ones, on this tab's
@@ -67,6 +80,12 @@ pub struct QueryTab {
     /// reported relative to the executed text), and that text.
     pending_origin: Option<usize>,
     run_origin: Option<(usize, String)>,
+    /// Bumped on every edit; validation results for older text are dropped.
+    edit_generation: u64,
+    /// The statements sent for the current generation's validation.
+    validating: Vec<(usize, String)>,
+    _validation: Task<()>,
+    _editor_changes: Subscription,
     /// Session pinned to this tab because a transaction is open.
     in_transaction: bool,
     has_result_set: bool,
@@ -92,6 +111,11 @@ impl QueryTab {
                 .default_value(sql.to_string())
                 .placeholder("SELECT ...   (⌘↵ to run)")
         });
+        let editor_changes = cx.subscribe(&editor, |this: &mut Self, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.schedule_validation(cx);
+            }
+        });
         let delegate = ResultsDelegate::new(cx.weak_entity());
         let table = cx.new(|cx| {
             TableState::new(delegate, window, cx)
@@ -108,6 +132,10 @@ impl QueryTab {
             bookmark_hint: None,
             pending_origin: None,
             run_origin: None,
+            edit_generation: 0,
+            validating: Vec::new(),
+            _validation: Task::ready(()),
+            _editor_changes: editor_changes,
             engine,
             editor,
             table,
@@ -163,6 +191,8 @@ impl QueryTab {
 
     /// Switching connection releases a pinned session (the engine rolls it back).
     pub fn set_conn(&mut self, conn: TabConn, cx: &mut Context<Self>) {
+        // The same SQL can be valid on one connection and not on another.
+        self.schedule_validation(cx);
         if let Some(old) = &self.conn
             && old.id != conn.id
             && self.in_transaction
@@ -275,6 +305,63 @@ impl QueryTab {
         cx.notify();
     }
 
+    /// Validates the editor once typing paused for [`VALIDATE_AFTER`].
+    fn schedule_validation(&mut self, cx: &mut Context<Self>) {
+        self.edit_generation += 1;
+        let generation = self.edit_generation;
+        self._validation = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(VALIDATE_AFTER).await;
+            let _ = this.update(cx, |tab, cx| tab.request_validation(generation, cx));
+        });
+    }
+
+    fn request_validation(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if generation != self.edit_generation || self.conn.is_none() {
+            return;
+        }
+        let text = self.sql(cx);
+        self.validating = statements(&text)
+            .into_iter()
+            .filter(|&(s, e)| !text[s..e].trim().is_empty() && e - s <= MAX_VALIDATE_BYTES)
+            .take(MAX_VALIDATE_STATEMENTS)
+            .map(|(s, e)| (s, text[s..e].to_string()))
+            .collect();
+        if self.validating.is_empty() {
+            self.set_markers(Vec::new(), cx);
+            return;
+        }
+        cx.emit(TabEvent::Validate {
+            generation,
+            statements: self.validating.clone(),
+        });
+    }
+
+    /// Marks the problems the server found, unless the text changed meanwhile.
+    /// Errors that only say the statement is unfinished are left out: that is the
+    /// normal state while typing.
+    pub fn apply_validation(
+        &mut self,
+        generation: u64,
+        problems: Vec<Problem>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.edit_generation {
+            return;
+        }
+        let markers = problems
+            .into_iter()
+            .filter_map(|p| {
+                let (offset, sql) = self.validating.get(p.statement)?;
+                if is_incomplete(sql, &p) {
+                    return None;
+                }
+                let span = error_span(sql, p.position.unwrap_or(0))?;
+                Some((offset + span.start..offset + span.end, p.message))
+            })
+            .collect();
+        self.set_markers(markers, cx);
+    }
+
     /// Underlines the token at `position` (byte offset in the executed SQL) with the
     /// error as hover text; `None` clears. Editing clears it too (the editor resets
     /// diagnostics on every change).
@@ -284,15 +371,25 @@ impl QueryTab {
             let span = error_span(sql, position)?;
             Some((origin + span.start..origin + span.end, message))
         });
+        self.set_markers(marker.into_iter().collect(), cx);
+    }
+
+    /// Replaces the editor's error underlines (byte ranges in the editor text).
+    fn set_markers(
+        &mut self,
+        markers: Vec<(std::ops::Range<usize>, String)>,
+        cx: &mut Context<Self>,
+    ) {
         self.editor.update(cx, |editor, cx| {
             let text = editor.text().clone();
             let Some(diagnostics) = editor.diagnostics_mut() else {
                 return;
             };
             diagnostics.reset(&text);
-            if let Some((range, message)) = marker
-                && range.end <= text.len()
-            {
+            for (range, message) in markers {
+                if range.end > text.len() {
+                    continue;
+                }
                 diagnostics.push(Diagnostic {
                     range: text.offset_to_position(range.start)..text.offset_to_position(range.end),
                     severity: DiagnosticSeverity::Error,
@@ -474,6 +571,17 @@ impl Focusable for QueryTab {
     }
 }
 
+/// Whether an error just means the statement isn't finished yet (the normal state
+/// while typing): errors at its very end, or about unterminated quotes.
+fn is_incomplete(sql: &str, problem: &Problem) -> bool {
+    let end = sql.trim_end().trim_end_matches(';').trim_end().len();
+    let message = problem.message.to_lowercase();
+    problem.position.is_some_and(|p| p >= end)
+        || message.contains("at end of input")
+        || message.contains("near '' at line")
+        || message.contains("unterminated")
+}
+
 /// The token an error position points at (or the last token if the error is at the
 /// end, e.g. an unfinished statement).
 fn error_span(sql: &str, position: usize) -> Option<std::ops::Range<usize>> {
@@ -490,7 +598,38 @@ fn error_span(sql: &str, position: usize) -> Option<std::ops::Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::error_span;
+    use super::{Problem, error_span, is_incomplete};
+
+    #[test]
+    fn incomplete_statements_are_not_errors() {
+        let p = |position, message: &str| Problem {
+            statement: 0,
+            position,
+            message: message.into(),
+        };
+        let sql = "select * from ";
+        assert!(is_incomplete(
+            sql,
+            &p(Some(14), "syntax error at end of input")
+        ));
+        // Position at the end, without the "end of input" wording.
+        assert!(is_incomplete(
+            "select * from users where;",
+            &p(Some(25), "syntax error")
+        ));
+        assert!(is_incomplete(
+            "select 'abc",
+            &p(Some(7), "unterminated quoted string")
+        ));
+        assert!(!is_incomplete(
+            "select * form users",
+            &p(Some(9), "syntax error at or near \"form\"")
+        ));
+        assert!(!is_incomplete(
+            "select nme from users",
+            &p(None, "Unknown column 'nme'")
+        ));
+    }
 
     #[test]
     fn spans() {
