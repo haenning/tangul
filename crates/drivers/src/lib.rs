@@ -132,6 +132,13 @@ pub trait Session: Send {
     /// allow them again. Applies to transactions started afterwards.
     async fn set_read_only(&mut self, on: bool) -> Result<()>;
 
+    /// Starts a transaction the server keeps read-only whatever the session's
+    /// setting; the caller ends it with `ROLLBACK`.
+    async fn begin_read_only(&mut self) -> Result<()> {
+        self.execute("START TRANSACTION READ ONLY", 0, &mut |_| {})
+            .await
+    }
+
     /// Makes the server stop statements that run longer than `limit` on this session
     /// (`None`: no limit).
     async fn set_statement_timeout(&mut self, limit: Option<std::time::Duration>) -> Result<()>;

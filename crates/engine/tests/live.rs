@@ -12,7 +12,7 @@ use tangul_core::{
 };
 use tangul_engine::{
     Approval, Caller, Command, EngineConfig, EngineHandle, Event, ExecEvent, QueryEvent,
-    SettingsSource,
+    QueryOptions, SettingsSource,
 };
 
 fn config(var: &str) -> Option<ConnectConfig> {
@@ -107,7 +107,6 @@ impl Harness {
             tab,
             conn: self.conn,
             sql: sql.into(),
-            caller: Caller::User,
             approval: Approval::Confirmed,
         });
         query
@@ -427,6 +426,50 @@ async fn read_only_checks(h: &mut Harness, switch_to_read_write: &str) {
     h.run(tab, "DROP TABLE tangul_ro_test").await;
 }
 
+/// The assistant through [`EngineHandle::query`]: reads run in a read-only
+/// transaction that is rolled back, so a write hidden in a read (`sneak`, a
+/// statement on the allow-list that writes) doesn't stay; an approved write runs on
+/// a session of its own, which is closed afterwards.
+async fn assistant_checks(h: &mut Harness, sneak: Option<(&str, &str)>) {
+    let tab = TabId(11);
+    h.set(false, None);
+    h.run(tab, "DROP TABLE IF EXISTS tangul_ai_test").await;
+    h.run(tab, "CREATE TABLE tangul_ai_test (id INT)").await;
+    h.run(tab, "INSERT INTO tangul_ai_test VALUES (1)").await;
+    let mut query = 1000;
+    let mut ask = async |h: &mut Harness, sql: &str, approval: Approval| {
+        query += 1;
+        let options = QueryOptions {
+            approval,
+            ..QueryOptions::new(Caller::Assistant)
+        };
+        h.engine.query(QueryId(query), h.conn, sql, options).await
+    };
+    let count = "SELECT count(*) FROM tangul_ai_test";
+    let out = ask(h, count, Approval::None).await.unwrap();
+    assert_eq!(out.results[0].cell(0, 0), Some("1"));
+
+    if let Some((create, call)) = sneak {
+        assert_eq!(h.run(tab, create).await.error, None);
+        let error = ask(h, call, Approval::None).await.unwrap_err();
+        assert!(error.held.is_none(), "{call} passes the allow-list");
+        let message = error.message.to_lowercase().replace('-', " ");
+        assert!(message.contains("read only"), "{error}");
+    }
+    let before = h.stats().await.open;
+
+    let write = "INSERT INTO tangul_ai_test VALUES (2)";
+    let held = ask(h, write, Approval::None).await.unwrap_err();
+    let pass = held.held.expect("held for approval").pass;
+    let out = ask(h, write, Approval::Pass(pass)).await.unwrap();
+    assert_eq!(out.rows, Some(1));
+    // The write stayed; the session it ran on is gone again.
+    assert_eq!(h.stats().await.open, before);
+    let out = ask(h, count, Approval::None).await.unwrap();
+    assert_eq!(out.results[0].cell(0, 0), Some("2"));
+    h.run(tab, "DROP TABLE tangul_ai_test").await;
+}
+
 #[tokio::test]
 async fn postgres() {
     let Some(cfg) = config("TANGUL_TEST_PG") else {
@@ -454,6 +497,16 @@ async fn postgres() {
     )
     .await;
     time_limit_checks(&mut h, "SELECT pg_sleep(30)", "SELECT pg_sleep(2)").await;
+    assistant_checks(
+        &mut h,
+        Some((
+            "CREATE OR REPLACE FUNCTION tangul_ai_sneak() RETURNS int LANGUAGE sql \
+             AS 'INSERT INTO tangul_ai_test VALUES (99) RETURNING id'",
+            "SELECT tangul_ai_sneak()",
+        )),
+    )
+    .await;
+    h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak()").await;
 }
 
 #[tokio::test]
@@ -481,6 +534,20 @@ async fn mysql() {
 
     read_only_checks(&mut h, "SET SESSION TRANSACTION READ WRITE").await;
     time_limit_checks(&mut h, "SELECT SLEEP(30)", "SELECT SLEEP(2)").await;
+    h.run(TabId(1), "DROP FUNCTION IF EXISTS tangul_ai_sneak")
+        .await;
+    // DETERMINISTIC: with binary logging on (MySQL 8 default) it can't be created
+    // otherwise.
+    assistant_checks(
+        &mut h,
+        Some((
+            "CREATE FUNCTION tangul_ai_sneak() RETURNS INT DETERMINISTIC MODIFIES SQL DATA \
+             BEGIN INSERT INTO tangul_ai_test VALUES (99); RETURN 1; END",
+            "SELECT tangul_ai_sneak()",
+        )),
+    )
+    .await;
+    h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak").await;
 }
 
 /// Through the SSH bastion to Postgres: an unknown host key is reported (not
@@ -568,7 +635,6 @@ async fn ssh_tunnel() {
         tab: TabId(1),
         conn: ConnId(1),
         sql: "SELECT 42".into(),
-        caller: Caller::User,
         approval: Approval::None,
     });
     loop {

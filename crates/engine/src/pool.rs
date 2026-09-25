@@ -106,6 +106,17 @@ impl Pool {
                 None => break,
             }
         }
+        self.open(permit).await
+    }
+
+    /// A new session of its own, never an idle one; the caller closes it rather
+    /// than giving it back. Waits if all slots are in use.
+    pub async fn acquire_own(&self) -> Result<Lease> {
+        let permit = self.permits.clone().acquire_owned().await?;
+        self.open(permit).await
+    }
+
+    async fn open(&self, permit: OwnedSemaphorePermit) -> Result<Lease> {
         let session = match &self.tunnel {
             Some(tunnel) => {
                 let cfg = ConnectConfig {

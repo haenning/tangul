@@ -76,7 +76,6 @@ async fn run(
         tab: TabId(1),
         conn: ConnId(1),
         sql: sql.into(),
-        caller: Caller::User,
         approval,
     });
     loop {
