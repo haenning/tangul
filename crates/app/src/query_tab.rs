@@ -72,6 +72,9 @@ pub enum TabEvent {
     /// Run a filtered / sorted version of the last result (`append: false`) or its
     /// next page (`append: true`). Not a run of its own.
     Refine { sql: String, append: bool },
+    /// Open a table (the target of a foreign key) in a new tab, like clicking it in
+    /// the schema tree.
+    OpenTable { schema: String, table: String },
 }
 
 enum Status {
@@ -355,7 +358,7 @@ impl QueryTab {
             let d = t.delegate_mut();
             d.related = links;
             d.edit = edit;
-            d.facts = facts;
+            d.set_facts(facts);
             cx.notify();
         });
     }

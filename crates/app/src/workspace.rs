@@ -600,6 +600,26 @@ impl Workspace {
                 self.open_bookmark_dialog(existing, sql.clone(), Some(tab.clone()), window, cx);
             }
             TabEvent::Refine { sql, append } => self.execute_derived(tab, sql, *append, cx),
+            TabEvent::OpenTable { schema, table } => {
+                // On the tab's connection, like related rows.
+                let Some(state) = tab
+                    .read(cx)
+                    .conn
+                    .as_ref()
+                    .and_then(|c| self.conn_users.get(&c.id))
+                    .and_then(|user| self.conns.get(user))
+                else {
+                    return;
+                };
+                let Some(ix) = state.schema.resolve(Some(schema), table) else {
+                    return;
+                };
+                let event = TabEvent::OpenRelated {
+                    title: table.clone(),
+                    sql: format!("SELECT * FROM {} LIMIT 100", state.schema.sql_name(ix)),
+                };
+                self.on_tab_event(tab, &event, window, cx);
+            }
             TabEvent::Run(sql) => {
                 let Some(conn) = tab.read(cx).conn.clone() else {
                     return;

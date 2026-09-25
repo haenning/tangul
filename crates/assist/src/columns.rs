@@ -23,8 +23,22 @@ pub struct ColumnFacts {
     pub data_type: String,
     pub numeric: bool,
     pub primary_key: bool,
-    /// `users.id` when the column is part of a foreign key.
-    pub references: Option<String>,
+    /// The column it points to, when it is part of a foreign key.
+    pub references: Option<ForeignRef>,
+}
+
+/// The target of a foreign key column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignRef {
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+}
+
+impl std::fmt::Display for ForeignRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.table, self.column)
+    }
 }
 
 /// One item of a select list.
@@ -150,7 +164,11 @@ fn facts_for(schema: &SchemaIndex, table: usize, name: &str) -> Option<ColumnFac
             return None;
         }
         let i = fk.columns.iter().position(|c| c == &col.name)?;
-        Some(format!("{}.{}", fk.ref_table, fk.ref_columns.get(i)?))
+        Some(ForeignRef {
+            schema: fk.ref_schema.clone(),
+            table: fk.ref_table.clone(),
+            column: fk.ref_columns.get(i)?.clone(),
+        })
     });
     Some(ColumnFacts {
         table: t.name.clone(),
@@ -333,7 +351,11 @@ mod tests {
         );
         let f: Vec<_> = f.into_iter().map(Option::unwrap).collect();
         assert!(f[0].primary_key && f[0].numeric && f[0].references.is_none());
-        assert_eq!(f[1].references.as_deref(), Some("users.id"));
+        assert_eq!(
+            f[1].references.as_ref().map(ToString::to_string).as_deref(),
+            Some("users.id")
+        );
+        assert_eq!(f[1].references.as_ref().unwrap().schema, "app");
         assert!(!f[2].primary_key && !f[2].numeric);
     }
 
