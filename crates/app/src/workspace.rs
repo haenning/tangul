@@ -3593,7 +3593,8 @@ impl Render for Workspace {
                 let content = v_flex()
                     .size_full()
                     .min_w_0()
-                    .child(self.render_tabs(cx))
+                    // No tab bar without tabs: the empty state fills the area.
+                    .when(!self.tabs.is_empty(), |this| this.child(self.render_tabs(cx)))
                     .child(match active {
                         Some(tab) => div().flex_1().min_h_0().child(tab).into_any_element(),
                         None => self.render_empty_state(cx),
