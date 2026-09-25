@@ -45,7 +45,7 @@ use rusdb_core::{
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
 use crate::{
-    CloseTab, NewTab, OpenPalette, OpenSettings, ToggleSidebar,
+    CloseTab, NewTab, NextSidebarPanel, OpenPalette, OpenSettings, PrevSidebarPanel, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
@@ -81,6 +81,18 @@ enum SidebarView {
 }
 
 impl SidebarView {
+    const ALL: [SidebarView; 3] = [
+        SidebarView::Schema,
+        SidebarView::Bookmarks,
+        SidebarView::History,
+    ];
+
+    /// The panel `step` places after this one, wrapping around.
+    fn cycle(self, step: isize) -> Self {
+        let n = Self::ALL.len() as isize;
+        Self::ALL[(self as isize + step).rem_euclid(n) as usize]
+    }
+
     fn icon(self) -> Lucide {
         match self {
             SidebarView::Schema => Lucide::ListTree,
@@ -1035,21 +1047,41 @@ impl Workspace {
                     .iter()
                     .map(|g| g.items.iter().map(|i| i.action.clone()).collect())
                     .collect();
+                let pills = {
+                    let workspace = workspace.clone();
+                    move |_: &CommandState, _: &mut Window, cx: &mut App| {
+                        palette_pills(&workspace, cx)
+                    }
+                };
+                let cycle = |step: isize| {
+                    let workspace = workspace.clone();
+                    move |window: &mut Window, cx: &mut App| {
+                        let _ = workspace.update(cx, |ws, cx| ws.cycle_panel(step, cx));
+                        // The dialog isn't part of the workspace view; redraw it too.
+                        window.refresh();
+                    }
+                };
+                let (next, prev) = (cycle(1), cycle(-1));
+                let command = command.header(pills);
                 let workspace = workspace.clone();
-                dialog
-                    .w(px(560.))
-                    .close_button(false)
-                    .child(command.on_confirm(move |path, window, cx| {
-                        let Some(action) = actions
-                            .get(path.section)
-                            .and_then(|items| items.get(path.row))
-                            .cloned()
-                        else {
-                            return;
-                        };
-                        window.close_dialog(cx);
-                        let _ = workspace.update(cx, |ws, cx| ws.run_palette(action, window, cx));
-                    }))
+                dialog.w(px(560.)).close_button(false).child(
+                    div()
+                        .key_context("Palette")
+                        .on_action(move |_: &NextSidebarPanel, window, cx| next(window, cx))
+                        .on_action(move |_: &PrevSidebarPanel, window, cx| prev(window, cx))
+                        .child(command.on_confirm(move |path, window, cx| {
+                            let Some(action) = actions
+                                .get(path.section)
+                                .and_then(|items| items.get(path.row))
+                                .cloned()
+                            else {
+                                return;
+                            };
+                            window.close_dialog(cx);
+                            let _ =
+                                workspace.update(cx, |ws, cx| ws.run_palette(action, window, cx));
+                        })),
+                )
             }
         });
         // The dialog is built on the next frame; focus the search field once it exists.
@@ -2890,12 +2922,7 @@ impl Workspace {
             chart_button(tab, data, shown, theme.chart_1, theme.muted_foreground)
         });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
-        let panels = [
-            SidebarView::Schema,
-            SidebarView::Bookmarks,
-            SidebarView::History,
-        ]
-        .map(|view| {
+        let panels = SidebarView::ALL.map(|view| {
             let active = self.sidebar_open && self.sidebar_view == view;
             Button::new(("panel", view as usize))
                 .icon(Icon::new(view.icon()))
@@ -2949,14 +2976,30 @@ impl Workspace {
     fn toggle_panel(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.sidebar_open && self.sidebar_view == view {
             self.sidebar_open = false;
+            cx.notify();
         } else {
-            self.sidebar_open = true;
-            self.sidebar_view = view;
-            if view == SidebarView::History {
-                self.refresh_history(cx);
-            }
+            self.show_panel(view, cx);
+        }
+    }
+
+    fn show_panel(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+        self.sidebar_open = true;
+        self.sidebar_view = view;
+        if view == SidebarView::History {
+            self.refresh_history(cx);
         }
         cx.notify();
+    }
+
+    /// Palette Tab / Shift-Tab: opens a closed sidebar, else moves to the next or
+    /// previous panel.
+    fn cycle_panel(&mut self, step: isize, cx: &mut Context<Self>) {
+        let view = if self.sidebar_open {
+            self.sidebar_view.cycle(step)
+        } else {
+            self.sidebar_view
+        };
+        self.show_panel(view, cx);
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -3401,4 +3444,41 @@ fn style_icon(style: Option<ChartStyle>) -> Lucide {
         Some(ChartStyle::Bars) => Lucide::ChartColumn,
         Some(ChartStyle::StackedBars) => Lucide::ChartColumnStacked,
     }
+}
+
+/// Command palette header: one pill per sidebar panel, the shown one selected.
+/// A click (or Tab / Shift-Tab) switches the sidebar; the palette stays open.
+fn palette_pills(workspace: &WeakEntity<Workspace>, cx: &App) -> AnyElement {
+    let Some(ws) = workspace.upgrade() else {
+        return div().into_any_element();
+    };
+    let ws = ws.read(cx);
+    let (open, current) = (ws.sidebar_open, ws.sidebar_view);
+    let theme = cx.theme();
+    h_flex()
+        .px_3()
+        .pt_2()
+        .gap_1()
+        .items_center()
+        .children(SidebarView::ALL.map(|view| {
+            let workspace = workspace.clone();
+            Button::new(("palette-panel", view as usize))
+                .icon(Icon::new(view.icon()))
+                .label(view.label())
+                .xsmall()
+                .ghost()
+                .selected(open && view == current)
+                .on_click(move |_, window, cx| {
+                    let _ = workspace.update(cx, |ws, cx| ws.show_panel(view, cx));
+                    window.refresh();
+                })
+        }))
+        .child(div().flex_1())
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("Tab to switch"),
+        )
+        .into_any_element()
 }

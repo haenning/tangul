@@ -26,6 +26,8 @@ actions!(
         ToggleSidebar,
         OpenPalette,
         OpenSettings,
+        NextSidebarPanel,
+        PrevSidebarPanel,
         Quit
     ]
 );
@@ -61,6 +63,9 @@ fn main() {
             KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
             KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
             KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
+            // In the command palette: switch the sidebar panel.
+            KeyBinding::new("tab", NextSidebarPanel, Some("Palette")),
+            KeyBinding::new("shift-tab", PrevSidebarPanel, Some("Palette")),
             KeyBinding::new("secondary-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
