@@ -8,10 +8,16 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 
 - `crates/core`: shared types, no I/O
 - `crates/drivers`: Postgres / MySQL sessions (text protocol)
-- `crates/engine`: tokio backend thread; the UI talks to it only via `Command` / `Event`
+- `crates/engine`: tokio backend thread; front ends talk to it only via `Command` / `Event`
+  (streamed into tabs) or `EngineHandle::query` (the whole result, for everything else)
 - `crates/assist`: SQL logic without UI (lexer, analysis, completion, filters); put
   testable logic here
 - `crates/tunnel`: SSH tunnels
+- `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`,
+  `metrics.db`, `settings.json`)
+- `crates/service`: what every front end shares, no UI: open connections by purpose,
+  the policy that decides whether and how a statement runs (the only safety gate;
+  schedules and the assistant only read), scheduled bookmarks
 - `crates/app`: the GPUI app
 
 ## Commands

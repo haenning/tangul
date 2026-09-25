@@ -12,7 +12,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode};
 
-use crate::store::new_id;
+use tangul_data::profiles::new_id;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum FormMode {

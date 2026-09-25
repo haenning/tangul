@@ -111,11 +111,15 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 ```
 crates/
   core/     # ids, Database/DbUser, ResultSet arena, SchemaInfo — no I/O
-  drivers/  # Driver/Session traits, postgres.rs, mysql.rs
+  drivers/  # Driver/Session traits, postgres.rs, mysql.rs, sqlite.rs (own data, read-only)
   engine/   # tokio thread, Command/Event, pool (D3); live integration tests
   assist/   # SQL lexer, analysis, completion, usage ranking, suggestions — no UI/I/O
   tunnel/   # SSH tunnels (russh): lazy session, local listener, known_hosts checks
-  app/      # GPUI binary `tangul`: workspace, query tab, results grid, forms, local.db
+  data/     # everything on disk, no UI: profiles + Keychain, local.db, metrics.db,
+            # settings.json; `Data` opens it all (app now, MCP server later)
+  service/  # shared by front ends, no UI: connections by purpose, the policy (the one
+            # safety gate: read-only, WHERE check, time limit), scheduled bookmarks
+  app/      # GPUI binary `tangul`: workspace, query tab, results grid, forms
 ```
 
 ---

@@ -9,10 +9,9 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, SshTarget, TlsMode};
 
+use crate::config::{LEGACY_NAME, config_dir};
+
 const KEYCHAIN_SERVICE: &str = "tangul";
-/// The app's name before it became tangul. Its config directory and Keychain
-/// entries are taken over the first time they are needed.
-const LEGACY_NAME: &str = "rusdb";
 
 #[derive(Default, Serialize, Deserialize)]
 struct ProfilesFile {
@@ -70,30 +69,7 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
     }
 }
 
-/// Where `profiles.toml` and `settings.json` live; `TANGUL_CONFIG_DIR` overrides it.
-pub fn config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("TANGUL_CONFIG_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    let base = dirs::config_dir()?;
-    let dir = base.join("tangul");
-    adopt_legacy_dir(&base.join(LEGACY_NAME), &dir);
-    Some(dir)
-}
-
-/// Moves the config directory of the old name to `dir`, if there is one and `dir`
-/// doesn't exist yet.
-fn adopt_legacy_dir(legacy: &std::path::Path, dir: &std::path::Path) {
-    if dir.exists() || !legacy.is_dir() {
-        return;
-    }
-    match std::fs::rename(legacy, dir) {
-        Ok(()) => eprintln!("moved {} to {}", legacy.display(), dir.display()),
-        Err(e) => eprintln!("could not move {}: {e}", legacy.display()),
-    }
-}
-
-pub struct Store {
+pub struct Profiles {
     path: Option<PathBuf>,
     pub databases: Vec<Database>,
     /// Session cache so the Keychain is hit once per profile, and so passwords work
@@ -101,7 +77,7 @@ pub struct Store {
     passwords: HashMap<String, String>,
 }
 
-impl Store {
+impl Profiles {
     pub fn load() -> Self {
         let path = config_dir().map(|d| d.join("profiles.toml"));
         let file = path
@@ -131,6 +107,22 @@ impl Store {
 
     pub fn database(&self, id: &str) -> Option<&Database> {
         self.databases.iter().find(|d| d.id == id)
+    }
+
+    /// Profiles that are never saved (tests, tools).
+    pub fn in_memory(databases: Vec<Database>) -> Self {
+        Self {
+            path: None,
+            databases,
+            passwords: HashMap::new(),
+        }
+    }
+
+    /// A database user by id, with its database.
+    pub fn user(&self, user_id: &str) -> Option<(&Database, &DbUser)> {
+        self.databases
+            .iter()
+            .find_map(|db| Some((db, db.users.iter().find(|u| u.id == user_id)?)))
     }
 
     pub fn save(&self) -> Result<()> {
@@ -250,25 +242,6 @@ pub fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn takes_over_the_legacy_config_dir() {
-        let base = std::env::temp_dir().join(format!("tangul-dirs-{}", std::process::id()));
-        let (legacy, dir) = (base.join("rusdb"), base.join("tangul"));
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("profiles.toml"), "x").unwrap();
-        adopt_legacy_dir(&legacy, &dir);
-        assert!(!legacy.exists());
-        assert_eq!(
-            std::fs::read_to_string(dir.join("profiles.toml")).unwrap(),
-            "x"
-        );
-        // An existing new directory is never replaced.
-        std::fs::create_dir_all(&legacy).unwrap();
-        adopt_legacy_dir(&legacy, &dir);
-        assert!(legacy.exists());
-        std::fs::remove_dir_all(&base).unwrap();
-    }
 
     #[test]
     fn migrates_legacy_profiles_by_target() {
