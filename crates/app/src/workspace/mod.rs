@@ -244,6 +244,8 @@ pub struct Workspace {
     _monitor_tick: Task<()>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
+    /// Each open tab's events; dropped with the tab.
+    tab_events: HashMap<TabId, Subscription>,
     _pump: Task<()>,
 }
 
@@ -344,6 +346,7 @@ impl Workspace {
             _monitor_tick: monitor_tick,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
+            tab_events: HashMap::new(),
             _pump: pump,
         };
         // Reopen the connection used last (else the first one) right away.

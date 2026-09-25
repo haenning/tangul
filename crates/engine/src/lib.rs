@@ -15,7 +15,7 @@ use std::{
 };
 
 pub use gate::{
-    Approval, Caller, Decision, Guard, Held, Pass, Run, SettingsSource, decide, user_run,
+    Approval, Caller, Decision, Guard, Held, Mode, Pass, Run, SettingsSource, decide, user_run,
 };
 use gate::{Enforced, Gate};
 pub use pool::PoolStats;
@@ -63,8 +63,9 @@ pub enum Command {
         tab: TabId,
         conn: ConnId,
         sql: String,
-        /// Who sent it; the gate decides read-only mode and the time limit.
-        caller: Caller,
+        /// The user's go-ahead from a dialog, if one was needed. Tabs are the user's
+        /// only: the assistant and schedules run through [`Command::Query`], so
+        /// their statements never touch a tab's session.
         approval: Approval,
     },
     /// `settings.json` changed; read it again now instead of within the second.
@@ -155,8 +156,6 @@ pub enum QueryEvent {
         /// The user cancelled the query. Not every cancel produces an error (MySQL's
         /// `SLEEP()` just returns 1), so this is reported separately.
         cancelled: bool,
-        /// Not run: a person has to approve it first.
-        held: Option<Held>,
     },
 }
 
@@ -511,9 +510,9 @@ impl Engine {
                 tab,
                 conn,
                 sql,
-                caller,
                 approval,
             } => {
+                let caller = Caller::User;
                 let Some(pool) = self.pools.get(&conn).cloned() else {
                     finish(
                         &self.events,
@@ -532,25 +531,12 @@ impl Engine {
                 };
                 let run = match self.gate.enforce(conn, pool.user(), &sql, caller, approval) {
                     Enforced::Run(run) => run,
-                    Enforced::Held(held) => {
-                        trace.record(&sql, "held", None, None, None);
-                        send(
-                            &self.events,
-                            Event::Query {
-                                query,
-                                event: QueryEvent::Finished {
-                                    elapsed: Duration::ZERO,
-                                    error: Some("waiting for approval".into()),
-                                    error_position: None,
-                                    in_transaction: false,
-                                    cancelled: false,
-                                    held: Some(held),
-                                },
-                            },
-                        );
-                        return;
-                    }
-                    Enforced::Refused(reason) => {
+                    refused => {
+                        // Only the assistant's statements are held, never the user's.
+                        let reason = match refused {
+                            Enforced::Refused(reason) => reason,
+                            _ => "waiting for approval".to_string(),
+                        };
                         trace.record(&sql, "refused", Some(reason.clone()), None, None);
                         finish(
                             &self.events,
@@ -824,13 +810,20 @@ async fn run_query(
         }
     };
     let started = Instant::now();
-    let mut lease = pool.acquire(None).await.map_err(|e| error(&e))?;
-    let synced = match sync_read_only(&mut lease, run.read_only).await {
+    let acquired = match run.mode {
+        Mode::OwnSession => pool.acquire_own().await,
+        Mode::AsSent | Mode::RolledBack => pool.acquire(None).await,
+    };
+    let mut lease = acquired.map_err(|e| error(&e))?;
+    let mut synced = match sync_read_only(&mut lease, run.read_only).await {
         Ok(()) => sync_timeout(&mut lease, run.timeout).await,
         Err(e) => Err(e),
     };
+    if synced.is_ok() && run.mode == Mode::RolledBack {
+        synced = lease.session.begin_read_only().await;
+    }
     if let Err(e) = synced {
-        pool.release(None, lease);
+        done_with(pool, lease, run.mode).await;
         return Err(error(&e));
     }
     running.lock().unwrap().insert(
@@ -853,14 +846,27 @@ async fn run_query(
     };
     let result = execute_limited(&mut lease, sql, row_limit, run.timeout, &mut sink).await;
     running.lock().unwrap().remove(&query);
-    if lease.session.in_transaction() {
+    done_with(pool, lease, run.mode).await;
+    result.map_err(|e| error(&e))?;
+    output.elapsed = started.elapsed();
+    Ok(output)
+}
+
+/// After a [`Command::Query`]: rolls back what [`Mode::RolledBack`] started, closes an
+/// own session, and gives any other session back unless it is left in a
+/// transaction (then it is closed, and the server rolls back).
+async fn done_with(pool: &Pool, mut lease: Lease, mode: Mode) {
+    if mode == Mode::RolledBack
+        && lease.session.in_transaction()
+        && let Err(e) = lease.session.execute("ROLLBACK", 0, &mut |_| {}).await
+    {
+        eprintln!("rollback after a read failed: {e:#}");
+    }
+    if mode == Mode::OwnSession || lease.session.in_transaction() {
         close_all(vec![lease], None);
     } else {
         pool.release(None, lease);
     }
-    result.map_err(|e| error(&e))?;
-    output.elapsed = started.elapsed();
-    Ok(output)
 }
 
 /// Makes the server side match `want` before a statement runs. In read-only mode it is
@@ -986,7 +992,6 @@ fn finish(
                 error: error.map(|e| e.0),
                 in_transaction,
                 cancelled,
-                held: None,
             },
         },
     );

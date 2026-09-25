@@ -18,8 +18,8 @@ impl Workspace {
             tab: tab.downgrade(),
         });
         tab.update(cx, |t, cx| t.set_completion(provider, cx));
-        self._subscriptions
-            .push(cx.subscribe_in(&tab, window, Self::on_tab_event));
+        self.tab_events
+            .insert(id, cx.subscribe_in(&tab, window, Self::on_tab_event));
         self.tabs.push(tab.clone());
         self.active_tab = self.tabs.len() - 1;
         QueryTab::focus_editor(&tab, window, cx);
@@ -49,8 +49,8 @@ impl Workspace {
                 let id = TabId(self.next_id());
                 let engine = self.engine.clone();
                 let tab = cx.new(|cx| QueryTab::new_file(id, path, engine, window, cx));
-                self._subscriptions
-                    .push(cx.subscribe_in(&tab, window, Self::on_tab_event));
+                self.tab_events
+                    .insert(id, cx.subscribe_in(&tab, window, Self::on_tab_event));
                 self.tabs.push(tab.clone());
                 self.active_tab = self.tabs.len() - 1;
                 tab
@@ -152,6 +152,7 @@ impl Workspace {
         }
         let tab = self.tabs.remove(ix);
         let tab = tab.read(cx);
+        self.tab_events.remove(&tab.id);
         if let Some(conn) = tab.conn_id(cx) {
             // Drops a pinned session (open transaction is rolled back by the server).
             self.engine.send(Command::ReleaseTab { tab: tab.id, conn });
@@ -224,8 +225,12 @@ impl Workspace {
                     return;
                 };
                 let request = self.next_id();
+                // The engine doesn't answer when no session was free: only the
+                // latest request per tab is kept, and none for closed tabs.
+                let weak = tab.downgrade();
                 self.validations
-                    .insert(request, (tab.downgrade(), *generation));
+                    .retain(|_, (t, _)| *t != weak && t.upgrade().is_some());
+                self.validations.insert(request, (weak, *generation));
                 self.engine.send(Command::Validate {
                     request,
                     conn,
@@ -349,7 +354,6 @@ impl Workspace {
             conn,
             sql: sql.to_string(),
             // The engine's gate decides read-only mode and the time limit.
-            caller: Caller::User,
             approval,
         });
         tab.update(cx, |t, cx| t.started(query, sql, cx));
@@ -387,7 +391,6 @@ impl Workspace {
             tab: tab.read(cx).id,
             conn,
             sql: sql.to_string(),
-            caller: Caller::User,
             approval: Approval::None,
         });
         tab.update(cx, |t, cx| t.started_derived(query, append, cx));

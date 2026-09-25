@@ -153,6 +153,11 @@ impl Session for SqliteSession {
         Ok(())
     }
 
+    /// The file is opened read-only; a plain transaction is enough.
+    async fn begin_read_only(&mut self) -> Result<()> {
+        self.execute("BEGIN", 0, &mut |_| {}).await
+    }
+
     /// No server setting; the engine interrupts a statement that runs over.
     async fn set_statement_timeout(&mut self, _: Option<Duration>) -> Result<()> {
         Ok(())

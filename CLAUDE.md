@@ -12,8 +12,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   (streamed into tabs) or `EngineHandle::query` (the whole result, for everything else).
   Its gate (`gate.rs`) is the only safety gate: every statement passes it with a `Caller`
   and an `Approval`; it reads `settings.json` itself. Users in write mode write freely;
-  schedules and the assistant run allow-listed reads read-only; an assistant write waits
-  for a single-use pass bound to connection and SQL. Assistant and schedule runs are
+  schedules and the assistant run allow-listed reads in a read-only transaction that
+  is rolled back; an assistant write waits for a single-use pass bound to connection and
+  SQL, then runs on a new session that is closed afterwards. Tabs are the user's only. Assistant and schedule runs are
   audited in `local.db`
 - `crates/assist`: SQL logic without UI (lexer, analysis, completion, filters); put
   testable logic here

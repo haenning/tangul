@@ -8,13 +8,16 @@
 //!   write mode the user writes; an `UPDATE` / `DELETE` without `WHERE` needs the
 //!   dialog's go-ahead ([`Approval::Confirmed`]). Read-only mode is lifted only in
 //!   the settings, never by a go-ahead.
-//! - **Schedule**: only statements on the read allow-list, read-only.
-//! - **Assistant**: reads on the allow-list run read-only. Anything else is held:
-//!   the engine issues a single-use [`Pass`] for exactly that SQL on that connection,
-//!   and it runs only when sent again with the pass after a person approved it.
+//! - **Schedule**: only statements on the read allow-list, in a read-only transaction
+//!   that is rolled back afterwards.
+//! - **Assistant**: reads on the allow-list run like a schedule's. Anything else is
+//!   held: the engine issues a single-use [`Pass`] for exactly that SQL on that
+//!   connection, and it runs only when sent again with the pass after a person
+//!   approved it, on a new session of its own that is closed afterwards. The
+//!   connection's pooled sessions never allow the assistant to write.
 
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher, RandomState};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -51,6 +54,20 @@ pub struct Run {
     pub read_only: bool,
     /// Stopped after this long.
     pub timeout: Option<Duration>,
+    pub mode: Mode,
+}
+
+/// Which session a statement runs on, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// As sent, on the tab's session (it may open a transaction and keep it).
+    #[default]
+    AsSent,
+    /// Inside a read-only transaction that is rolled back afterwards: nothing it
+    /// does stays, even if the server let a write through.
+    RolledBack,
+    /// On a new session of its own, closed afterwards (approved assistant writes).
+    OwnSession,
 }
 
 /// Why a person is asked first; the statements are (keyword, one line of SQL).
@@ -124,6 +141,7 @@ pub fn decide(settings: &Settings, db_user: Option<&str>, sql: &str, caller: Cal
                 return Decision::Run(Run {
                     read_only: true,
                     timeout: run.timeout,
+                    mode: Mode::RolledBack,
                 });
             }
             if caller == Caller::Schedule {
@@ -141,7 +159,10 @@ pub fn decide(settings: &Settings, db_user: Option<&str>, sql: &str, caller: Cal
                 guard: Guard::Assistant {
                     statements: not_reads,
                 },
-                then: run,
+                then: Run {
+                    mode: Mode::OwnSession,
+                    ..run
+                },
             }
         }
         Caller::User => {
@@ -185,6 +206,7 @@ pub fn user_run(settings: &Settings, db_user: Option<&str>) -> Run {
     Run {
         read_only: db_user.is_some_and(|u| settings.is_read_only(u)),
         timeout: settings.safety.max_query_time,
+        mode: Mode::AsSent,
     }
 }
 
@@ -218,7 +240,6 @@ pub(crate) struct Gate {
     /// Modification time of the file last read.
     seen: Option<Option<SystemTime>>,
     passes: HashMap<Pass, Issued>,
-    next_pass: u64,
 }
 
 fn fingerprint(sql: &str) -> u64 {
@@ -233,17 +254,11 @@ impl Gate {
             SettingsSource::Fixed(settings) => (**settings).clone(),
             SettingsSource::File(_) => Settings::default(),
         };
-        // Pass numbers aren't predictable from one run of the app to the next.
-        let seed = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(1);
         let mut gate = Self {
             source,
             settings,
             seen: None,
             passes: HashMap::new(),
-            next_pass: seed | 1,
         };
         gate.reload();
         gate
@@ -318,11 +333,14 @@ impl Gate {
     }
 
     fn issue(&mut self, conn: ConnId, sql: &str) -> Pass {
-        self.next_pass = self
-            .next_pass
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let pass = Pass(self.next_pass);
+        // Random (SipHash under keys std draws from the OS), so a pass can't be
+        // guessed from one seen before.
+        let pass = loop {
+            let pass = Pass(RandomState::new().build_hasher().finish());
+            if !self.passes.contains_key(&pass) {
+                break pass;
+            }
+        };
         self.passes.insert(
             pass,
             Issued {
@@ -377,14 +395,16 @@ mod tests {
             ),
             Decision::Run(Run {
                 read_only: false,
-                timeout: limit
+                timeout: limit,
+                mode: Mode::AsSent,
             })
         );
         assert_eq!(
             decide(&s, Some("ro"), "select 1", Caller::User),
             Decision::Run(Run {
                 read_only: true,
-                timeout: limit
+                timeout: limit,
+                mode: Mode::AsSent,
             })
         );
         assert!(matches!(
@@ -450,6 +470,7 @@ mod tests {
             g.enforce(c, "rw", "select * from t", Caller::Schedule, Approval::None),
             Enforced::Run(Run {
                 read_only: true,
+                mode: Mode::RolledBack,
                 ..
             })
         ));
@@ -483,6 +504,7 @@ mod tests {
             ),
             Enforced::Run(Run {
                 read_only: true,
+                mode: Mode::RolledBack,
                 ..
             })
         ));
@@ -509,11 +531,13 @@ mod tests {
             g.enforce(other, "rw", write, Caller::Assistant, pass),
             Enforced::Held(_)
         ));
-        // Exactly this statement: runs, with write access, once.
+        // Exactly this statement: runs, with write access on a session of its own,
+        // once.
         assert!(matches!(
             g.enforce(c, "rw", write, Caller::Assistant, pass),
             Enforced::Run(Run {
                 read_only: false,
+                mode: Mode::OwnSession,
                 ..
             })
         ));
