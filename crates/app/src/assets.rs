@@ -22,6 +22,7 @@ gpui_kit::assets::icon_assets!(
         Key,
         KeyRound,
         Lightbulb,
+        Link,
         ListTree,
         Pencil,
         PencilOff,
