@@ -964,7 +964,9 @@ impl Workspace {
             "Bookmark query"
         };
         let db_id = self.active_db.clone();
-        let form = cx.new(|cx| BookmarkForm::new(existing.as_ref(), sql, db_id, window, cx));
+        // From a tab: the bookmark shows its result the way the tab does now.
+        let view = tab.as_ref().map(|t| t.read(cx).chart_shown());
+        let form = cx.new(|cx| BookmarkForm::new(existing.as_ref(), sql, db_id, view, window, cx));
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let save = {
@@ -1041,6 +1043,7 @@ impl Workspace {
         tab.update(cx, |t, cx| {
             t.title = bookmark.name.clone().into();
             t.bookmark_id = Some(bookmark.id.clone());
+            t.set_chart_view(bookmark.view, cx);
             if run && t.conn.is_some() {
                 cx.emit(TabEvent::Run(bookmark.sql.clone()));
             }
@@ -2673,7 +2676,7 @@ impl Workspace {
                     .icon(Icon::new(Lucide::Pencil))
                     .ghost()
                     .xsmall()
-                    .tooltip("Rename")
+                    .tooltip("Edit")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_bookmark_dialog(
@@ -2707,8 +2710,9 @@ impl Workspace {
             .rounded(theme.radius)
             .hover(|s| s.bg(theme.sidebar_accent))
             .cursor_pointer()
+            // How its result is shown: the grid or the chart type.
             .child(
-                Icon::new(Lucide::Bookmark)
+                Icon::new(style_icon(bookmark.view.map(|v| v.style)))
                     .xsmall()
                     .text_color(theme.muted_foreground),
             )

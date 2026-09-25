@@ -68,6 +68,17 @@ impl ChartStyle {
     pub fn is_stacked(self) -> bool {
         matches!(self, ChartStyle::StackedArea | ChartStyle::StackedBars)
     }
+
+    /// Stable name for storing a view.
+    fn key(self) -> &'static str {
+        match self {
+            ChartStyle::Line => "line",
+            ChartStyle::Area => "area",
+            ChartStyle::StackedArea => "stacked_area",
+            ChartStyle::Bars => "bars",
+            ChartStyle::StackedBars => "stacked_bars",
+        }
+    }
 }
 
 /// What a chart shows: all value columns in one style, or a single one.
@@ -76,6 +87,26 @@ pub struct ChartView {
     pub style: ChartStyle,
     /// Index into [`ChartData::series`]; `None` shows all of them.
     pub series: Option<usize>,
+}
+
+impl ChartView {
+    /// Stored form: `"line"` for all value columns, `"bars:1"` for one of them.
+    pub fn to_key(self) -> String {
+        match self.series {
+            None => self.style.key().to_string(),
+            Some(i) => format!("{}:{i}", self.style.key()),
+        }
+    }
+
+    /// Reads [`ChartView::to_key`]'s form; `None` for anything else.
+    pub fn from_key(key: &str) -> Option<Self> {
+        let (style, series) = match key.split_once(':') {
+            Some((style, i)) => (style, Some(i.parse().ok()?)),
+            None => (key, None),
+        };
+        let style = ChartStyle::ALL.into_iter().find(|s| s.key() == style)?;
+        Some(Self { style, series })
+    }
 }
 
 /// One value column.
@@ -360,6 +391,19 @@ fn short(v: &str) -> String {
 mod tests {
     use super::*;
     use rusdb_core::{ColumnInfo, RowBatch};
+
+    #[test]
+    fn view_keys_round_trip() {
+        for style in ChartStyle::ALL {
+            for series in [None, Some(0), Some(3)] {
+                let view = ChartView { style, series };
+                assert_eq!(ChartView::from_key(&view.to_key()), Some(view));
+            }
+        }
+        assert_eq!(ChartView::from_key("bars:x"), None);
+        assert_eq!(ChartView::from_key("pie"), None);
+        assert_eq!(ChartView::from_key(""), None);
+    }
 
     fn result(cols: &[&str], rows: &[&[Option<&str>]]) -> ResultSet {
         let mut r = ResultSet::new(

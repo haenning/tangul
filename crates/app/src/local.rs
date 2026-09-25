@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use rusdb_assist::chart::ChartView;
 use rusdb_assist::suggest::HistoryPattern;
 use rusdb_assist::usage::{Usage, UsageKind, UsageStat};
 use rusdb_core::SchemaInfo;
@@ -12,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::Deserialize;
 
 /// A named, saved query.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Bookmark {
     pub id: String,
     pub name: String,
@@ -20,6 +21,12 @@ pub struct Bookmark {
     /// Database the bookmark belongs to; `None` shows it for every database.
     #[serde(default)]
     pub database_id: Option<String>,
+    /// How its result is shown: the grid (`None`) or a chart.
+    #[serde(skip)]
+    pub view: Option<ChartView>,
+    /// Run in the background now and then to track its duration and row count.
+    #[serde(skip)]
+    pub scheduled: bool,
 }
 
 /// One executed script.
@@ -84,6 +91,8 @@ const MIGRATIONS: &[&str] = &[
         name TEXT NOT NULL,
         PRIMARY KEY (database_id, schema, name)
     );",
+    "ALTER TABLE bookmarks ADD COLUMN view TEXT;
+    ALTER TABLE bookmarks ADD COLUMN scheduled INTEGER NOT NULL DEFAULT 0;",
 ];
 
 pub struct Local {
@@ -157,7 +166,7 @@ impl Local {
     /// Bookmarks shown for a database: its own plus the global ones, by name.
     pub fn bookmarks_for(&self, db_id: Option<&str>) -> Vec<Bookmark> {
         self.query_bookmarks(
-            "SELECT id, name, sql, database_id FROM bookmarks
+            "SELECT id, name, sql, database_id, view, scheduled FROM bookmarks
              WHERE database_id IS NULL OR database_id = ?1
              ORDER BY lower(name)",
             params![db_id],
@@ -166,7 +175,7 @@ impl Local {
 
     pub fn bookmark(&self, id: &str) -> Option<Bookmark> {
         self.query_bookmarks(
-            "SELECT id, name, sql, database_id FROM bookmarks WHERE id = ?1",
+            "SELECT id, name, sql, database_id, view, scheduled FROM bookmarks WHERE id = ?1",
             params![id],
         )
         .pop()
@@ -175,11 +184,14 @@ impl Local {
     fn query_bookmarks(&self, sql: &str, params: impl rusqlite::Params) -> Vec<Bookmark> {
         let result = self.conn.prepare_cached(sql).and_then(|mut stmt| {
             stmt.query_map(params, |r| {
+                let view: Option<String> = r.get(4)?;
                 Ok(Bookmark {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     sql: r.get(2)?,
                     database_id: r.get(3)?,
+                    view: view.as_deref().and_then(ChartView::from_key),
+                    scheduled: r.get(5)?,
                 })
             })?
             .collect()
@@ -193,10 +205,19 @@ impl Local {
     /// Inserts or replaces a bookmark (matched by id).
     pub fn upsert_bookmark(&self, b: &Bookmark) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO bookmarks (id, name, sql, database_id, fingerprint)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (id) DO UPDATE SET name = ?2, sql = ?3, database_id = ?4, fingerprint = ?5",
-            params![b.id, b.name, b.sql, b.database_id, rusdb_assist::lexer::fingerprint(&b.sql)],
+            "INSERT INTO bookmarks (id, name, sql, database_id, fingerprint, view, scheduled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (id) DO UPDATE SET name = ?2, sql = ?3, database_id = ?4,
+               fingerprint = ?5, view = ?6, scheduled = ?7",
+            params![
+                b.id,
+                b.name,
+                b.sql,
+                b.database_id,
+                rusdb_assist::lexer::fingerprint(&b.sql),
+                b.view.map(ChartView::to_key),
+                b.scheduled,
+            ],
         )?;
         Ok(())
     }
@@ -486,6 +507,7 @@ mod tests {
             name: name.into(),
             sql: "select * from t where id = 1".into(),
             database_id: db.map(Into::into),
+            ..Default::default()
         };
         l.upsert_bookmark(&b("1", "zeta", Some("pg"))).unwrap();
         l.upsert_bookmark(&b("2", "Alpha", None)).unwrap();
@@ -512,6 +534,7 @@ mod tests {
             name: format!("b{id}"),
             sql: sql.into(),
             database_id: db.map(Into::into),
+            ..Default::default()
         };
         l.upsert_bookmark(&b("1", "select * from t where id = 1;", None))
             .unwrap();
@@ -595,5 +618,22 @@ mod tests {
         l.set_favorite("pg", "public", "users", false).unwrap();
         assert_eq!(l.favorites("pg").len(), 1);
         assert_eq!(l.favorites("mysql").len(), 1);
+    }
+
+    #[test]
+    fn bookmark_view_and_schedule() {
+        let l = Local::in_memory();
+        let mut b = Bookmark {
+            id: "1".into(),
+            name: "b".into(),
+            sql: "select 1".into(),
+            ..Default::default()
+        };
+        l.upsert_bookmark(&b).unwrap();
+        assert_eq!(l.bookmark("1").unwrap(), b);
+        b.view = ChartView::from_key("bars:1");
+        b.scheduled = true;
+        l.upsert_bookmark(&b).unwrap();
+        assert_eq!(l.bookmark("1").unwrap(), b);
     }
 }

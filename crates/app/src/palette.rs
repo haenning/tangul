@@ -86,6 +86,7 @@ mod tests {
             name: name.into(),
             sql: sql.into(),
             database_id: None,
+            ..Default::default()
         }
     }
 
