@@ -733,6 +733,7 @@ impl Workspace {
             conn: conn.id,
             sql: sql.to_string(),
             read_only,
+            timeout: settings::current(cx).safety.max_query_time,
         });
         tab.update(cx, |t, cx| t.started(query, sql, cx));
     }
@@ -769,6 +770,7 @@ impl Workspace {
             conn: conn.id,
             sql: sql.to_string(),
             read_only,
+            timeout: settings::current(cx).safety.max_query_time,
         });
         tab.update(cx, |t, cx| t.started_derived(query, append, cx));
     }
@@ -978,7 +980,10 @@ impl Workspace {
     /// runs. One at a time, on a hidden read-only connection.
     fn monitor_tick(&mut self, cx: &mut Context<Self>) {
         let limits = settings::current(cx).monitoring.clone();
-        if self.monitor.stuck(limits.max_query_time) {
+        if self
+            .monitor
+            .stuck(settings::current(cx).safety.max_query_time)
+        {
             self.monitor_finish(0, Some("gave up waiting for the run".into()), cx);
         }
         if self.monitor.pending.is_some() || !self.monitor.is_quiet() || !self.queries.is_empty() {
@@ -1022,22 +1027,16 @@ impl Workspace {
             self.metrics.record(&record, &limits, now);
             return;
         };
-        let limit = limits.max_query_time;
-        let (conn, ready) = match self.monitor.conn_for(&user.id, limit) {
+        let (conn, ready) = match self.monitor.conn_for(&user.id) {
             Some(conn) => conn,
             None => {
-                if let Some(old) = self.monitor.replace(&user.id) {
-                    self.engine.send(Command::Disconnect { conn: old });
-                }
                 let id = ConnId(self.next_id());
-                self.monitor.connecting(&user.id, id, limit);
-                let mut cfg =
-                    rusdb_core::ConnectConfig::new(&db, &user, self.store.password(&user.id));
-                cfg.statement_timeout = limit;
+                self.monitor.connecting(&user.id, id);
+                let password = self.store.password(&user.id);
                 self.engine.send(Command::Connect {
                     conn: id,
                     driver: db.driver,
-                    cfg,
+                    cfg: rusdb_core::ConnectConfig::new(&db, &user, password),
                     ssh: self.store.ssh_target(&db),
                 });
                 (id, false)
@@ -1045,12 +1044,13 @@ impl Workspace {
         };
         self.monitor.start(bookmark, conn, now);
         if ready {
-            self.monitor_execute();
+            self.monitor_execute(cx);
         }
     }
 
     /// Sends the pending scheduled run's query, read-only.
-    fn monitor_execute(&mut self) {
+    fn monitor_execute(&mut self, cx: &mut Context<Self>) {
+        let timeout = settings::current(cx).safety.max_query_time;
         let query = QueryId(self.next_id());
         let Some(pending) = self.monitor.pending.as_mut() else {
             return;
@@ -1063,6 +1063,7 @@ impl Workspace {
             conn: pending.conn,
             sql: pending.bookmark.sql.clone(),
             read_only: true,
+            timeout,
         });
     }
 
@@ -1116,7 +1117,7 @@ impl Workspace {
                 self.monitor.connected(conn);
                 let waiting = self.monitor.pending.as_ref();
                 if waiting.is_some_and(|p| p.conn == conn && p.query.is_none()) {
-                    self.monitor_execute();
+                    self.monitor_execute(cx);
                 }
             }
             Event::ConnectFailed { conn, error } if self.monitor.owns(conn) => {
@@ -1182,7 +1183,6 @@ impl Workspace {
                         password: None,
                         database: path,
                         tls: rusdb_core::TlsMode::Disable,
-                        statement_timeout: settings::current(cx).monitoring.max_query_time,
                     },
                     ssh: None,
                 });

@@ -46,10 +46,6 @@ impl Driver for PgDriver {
         if !cfg.database.is_empty() {
             pg.dbname(&cfg.database);
         }
-        if let Some(limit) = cfg.statement_timeout {
-            // Set at startup, so no statement on this session can outlast it.
-            pg.options(format!("-c statement_timeout={}", limit.as_millis()));
-        }
 
         let tls = tls_connector()?;
         let (client, connection) = pg.connect(tls.clone()).await.map_err(pg_error)?;
@@ -121,6 +117,15 @@ impl Session for PgSession {
             .simple_query(&format!(
                 "SET SESSION CHARACTERISTICS AS TRANSACTION {mode}"
             ))
+            .await
+            .map_err(pg_error)?;
+        Ok(())
+    }
+
+    async fn set_statement_timeout(&mut self, limit: Option<Duration>) -> Result<()> {
+        let ms = limit.map_or(0, |l| l.as_millis());
+        self.client
+            .simple_query(&format!("SET statement_timeout = {ms}"))
             .await
             .map_err(pg_error)?;
         Ok(())

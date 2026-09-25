@@ -148,8 +148,6 @@ pub struct ConnectConfig {
     pub password: Option<String>,
     pub database: String,
     pub tls: TlsMode,
-    /// Statements running longer are stopped by the server (and the engine).
-    pub statement_timeout: Option<std::time::Duration>,
 }
 
 impl ConnectConfig {
@@ -161,7 +159,6 @@ impl ConnectConfig {
             password,
             database: db.database.clone(),
             tls: db.tls,
-            statement_timeout: None,
         }
     }
 }

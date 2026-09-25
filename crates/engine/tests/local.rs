@@ -26,6 +26,7 @@ async fn run(
         conn: ConnId(1),
         sql: sql.into(),
         read_only: true,
+        timeout: Some(Duration::from_millis(300)),
     });
     loop {
         if let Event::Query {
@@ -61,7 +62,6 @@ async fn local_file_is_read_only_and_time_limited() {
             password: None,
             database: path.to_string_lossy().into_owned(),
             tls: TlsMode::Disable,
-            statement_timeout: Some(Duration::from_millis(300)),
         },
         ssh: None,
     });

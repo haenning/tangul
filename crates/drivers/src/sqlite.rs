@@ -153,6 +153,11 @@ impl Session for SqliteSession {
         Ok(())
     }
 
+    /// No server setting; the engine interrupts a statement that runs over.
+    async fn set_statement_timeout(&mut self, _: Option<Duration>) -> Result<()> {
+        Ok(())
+    }
+
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
         self.cancel.clone()
     }
@@ -249,7 +254,6 @@ mod tests {
             password: None,
             database: path.to_string_lossy().into_owned(),
             tls: rusdb_core::TlsMode::Disable,
-            statement_timeout: None,
         }
     }
 

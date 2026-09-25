@@ -22,8 +22,6 @@ const STUCK_GRACE: Duration = Duration::from_secs(60);
 struct HiddenConn {
     id: ConnId,
     ready: bool,
-    /// The time limit it was opened with; a changed setting opens a new one.
-    limit: Option<Duration>,
 }
 
 /// The scheduled run in progress.
@@ -72,31 +70,15 @@ impl Monitor {
         self.users.contains_key(&conn)
     }
 
-    /// The hidden connection for `user_id` if it is open with `limit`; otherwise
-    /// `None`, and the caller connects and calls [`Self::connecting`].
-    pub fn conn_for(&self, user_id: &str, limit: Option<Duration>) -> Option<(ConnId, bool)> {
+    /// The hidden connection for `user_id` and whether it is up; `None` when there
+    /// is none yet, and the caller connects and calls [`Self::connecting`].
+    pub fn conn_for(&self, user_id: &str) -> Option<(ConnId, bool)> {
+        self.conns.get(user_id).map(|c| (c.id, c.ready))
+    }
+
+    pub fn connecting(&mut self, user_id: &str, id: ConnId) {
         self.conns
-            .get(user_id)
-            .filter(|c| c.limit == limit)
-            .map(|c| (c.id, c.ready))
-    }
-
-    /// A connection with an outdated time limit, to close before opening another.
-    pub fn replace(&mut self, user_id: &str) -> Option<ConnId> {
-        let old = self.conns.remove(user_id)?;
-        self.users.remove(&old.id);
-        Some(old.id)
-    }
-
-    pub fn connecting(&mut self, user_id: &str, id: ConnId, limit: Option<Duration>) {
-        self.conns.insert(
-            user_id.to_string(),
-            HiddenConn {
-                id,
-                ready: false,
-                limit,
-            },
-        );
+            .insert(user_id.to_string(), HiddenConn { id, ready: false });
         self.users.insert(id, user_id.to_string());
     }
 
@@ -239,20 +221,15 @@ mod tests {
     #[test]
     fn hidden_connections() {
         let mut m = Monitor::default();
-        let limit = Some(Duration::from_secs(60));
-        assert_eq!(m.conn_for("u", limit), None);
-        m.connecting("u", ConnId(7), limit);
+        assert_eq!(m.conn_for("u"), None);
+        m.connecting("u", ConnId(7));
         assert!(m.owns(ConnId(7)));
-        assert_eq!(m.conn_for("u", limit), Some((ConnId(7), false)));
+        assert_eq!(m.conn_for("u"), Some((ConnId(7), false)));
         m.connected(ConnId(7));
-        assert_eq!(m.conn_for("u", limit), Some((ConnId(7), true)));
-        // Another time limit needs another connection.
-        assert_eq!(m.conn_for("u", None), None);
-        assert_eq!(m.replace("u"), Some(ConnId(7)));
+        assert_eq!(m.conn_for("u"), Some((ConnId(7), true)));
+        m.failed(ConnId(7));
         assert!(!m.owns(ConnId(7)));
-        m.connecting("u", ConnId(8), None);
-        m.failed(ConnId(8));
-        assert_eq!(m.conn_for("u", None), None);
+        assert_eq!(m.conn_for("u"), None);
         assert!(!m.is_quiet());
     }
 }

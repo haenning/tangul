@@ -25,7 +25,6 @@ fn config(var: &str) -> Option<ConnectConfig> {
         password: (!password.is_empty()).then(|| password.into()),
         database: database.into(),
         tls: TlsMode::Prefer,
-        statement_timeout: None,
     })
 }
 
@@ -87,6 +86,7 @@ impl Harness {
             conn: self.conn,
             sql: sql.into(),
             read_only: false,
+            timeout: None,
         });
         query
     }
@@ -101,6 +101,22 @@ impl Harness {
             conn: self.conn,
             sql: sql.into(),
             read_only: true,
+            timeout: None,
+        });
+        self.wait(query).await
+    }
+
+    /// Runs `sql` with a statement time limit.
+    async fn run_limited(&mut self, tab: TabId, sql: &str, limit: Option<Duration>) -> Outcome {
+        self.next_query += 1;
+        let query = QueryId(self.next_query);
+        self.engine.send(Command::Execute {
+            query,
+            tab,
+            conn: self.conn,
+            sql: sql.into(),
+            read_only: false,
+            timeout: limit,
         });
         self.wait(query).await
     }
@@ -258,6 +274,24 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
     assert_eq!(h.run(tab_a, "SELECT 1").await.error, None);
 }
 
+/// A statement over the time limit is stopped; without a limit the same session
+/// runs long statements again.
+async fn time_limit_checks(h: &mut Harness, sleep_sql: &str, short_sleep_sql: &str) {
+    let tab = TabId(7);
+    let started = std::time::Instant::now();
+    let out = h
+        .run_limited(tab, sleep_sql, Some(Duration::from_secs(1)))
+        .await;
+    assert!(out.error.is_some(), "a statement over the limit must fail");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    let out = h.run_limited(tab, short_sleep_sql, None).await;
+    assert_eq!(out.error, None, "the limit is lifted again");
+}
+
 /// Creates `rusdb_fk_test.parent` / `.child` (child.parent_id → parent.id) and checks
 /// the columns and foreign key the schema loader reports. Self-contained: the CI
 /// service databases have no seed data.
@@ -397,6 +431,7 @@ async fn postgres() {
         "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
     )
     .await;
+    time_limit_checks(&mut h, "SELECT pg_sleep(30)", "SELECT pg_sleep(2)").await;
 }
 
 #[tokio::test]
@@ -423,6 +458,7 @@ async fn mysql() {
     assert_eq!(out.result.unwrap().cell(0, 0), Some("0xdeadbeef"));
 
     read_only_checks(&mut h, "SET SESSION TRANSACTION READ WRITE").await;
+    time_limit_checks(&mut h, "SELECT SLEEP(30)", "SELECT SLEEP(2)").await;
 }
 
 /// Through the SSH bastion to Postgres: an unknown host key is reported (not
@@ -462,7 +498,6 @@ async fn ssh_tunnel() {
         password: None,
         database: "postgres".into(),
         tls: TlsMode::Disable,
-        statement_timeout: None,
     };
     let (engine, events) = rusdb_engine::start();
     let connect = |ssh: &SshTarget| Command::Connect {
@@ -512,6 +547,7 @@ async fn ssh_tunnel() {
         conn: ConnId(1),
         sql: "SELECT 42".into(),
         read_only: false,
+        timeout: None,
     });
     loop {
         if let Event::Query {

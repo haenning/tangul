@@ -9,12 +9,12 @@
 //!   "safety": {
 //!     "read_only_users": ["reporting"],
 //!     "confirm_unfiltered_writes": true,
-//!     "relock_after": "5m"
+//!     "relock_after": "5m",
+//!     "max_query_time": "60s"
 //!   },
 //!   "monitoring": {
 //!     "interval": "1d",
 //!     "schedule_new_bookmarks": false,
-//!     "max_query_time": "60s",
 //!     "max_points": 10000,
 //!     "max_age": "365d",
 //!     "max_mb": 50
@@ -65,10 +65,6 @@ pub struct MonitoringSettings {
     pub interval: Duration,
     /// Whether a new bookmark starts out scheduled (if it only reads).
     pub schedule_new_bookmarks: bool,
-    /// Longest a scheduled run may take, enforced by the server too; `null` for no
-    /// limit.
-    #[serde(deserialize_with = "duration")]
-    pub max_query_time: Option<Duration>,
     /// Most runs kept per bookmark; `null` for no limit.
     pub max_points: Option<u64>,
     /// Runs older than this are dropped; `null` keeps them.
@@ -83,7 +79,6 @@ impl Default for MonitoringSettings {
         Self {
             interval: Duration::from_secs(24 * 3600),
             schedule_new_bookmarks: false,
-            max_query_time: Some(Duration::from_secs(60)),
             max_points: Some(10_000),
             max_age: Some(Duration::from_secs(365 * 24 * 3600)),
             max_mb: Some(50.),
@@ -122,6 +117,10 @@ pub struct SafetySettings {
     /// none ran). Written like `"30s"`, `"5m"` or `"1h"`; `null` never does.
     #[serde(deserialize_with = "duration")]
     pub relock_after: Option<Duration>,
+    /// Every statement (typed, bookmarked or scheduled) is stopped after this
+    /// long, by the server and by the app; `null` for no limit.
+    #[serde(deserialize_with = "duration")]
+    pub max_query_time: Option<Duration>,
 }
 
 impl Default for SafetySettings {
@@ -130,6 +129,7 @@ impl Default for SafetySettings {
             read_only_users: Vec::new(),
             confirm_unfiltered_writes: true,
             relock_after: None,
+            max_query_time: Some(Duration::from_secs(60)),
         }
     }
 }
@@ -278,11 +278,11 @@ pub fn ensure_file(cx: &App) -> Option<PathBuf> {
                 "read_only_users": [],
                 "confirm_unfiltered_writes": true,
                 "relock_after": null,
+                "max_query_time": "60s",
             },
             "monitoring": {
                 "interval": "1d",
                 "schedule_new_bookmarks": false,
-                "max_query_time": "60s",
                 "max_points": 10000,
                 "max_age": "365d",
                 "max_mb": 50,
@@ -506,6 +506,17 @@ mod tests {
     }
 
     #[test]
+    fn max_query_time() {
+        let limit = |json: &str| Settings::parse(json).unwrap().safety.max_query_time;
+        assert_eq!(limit("{}"), Some(Duration::from_secs(60)));
+        assert_eq!(
+            limit(r#"{"safety": {"max_query_time": "5m"}}"#),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(limit(r#"{"safety": {"max_query_time": null}}"#), None);
+    }
+
+    #[test]
     fn relock_after() {
         let after = |json: &str| Settings::parse(json).map(|s| s.safety.relock_after);
         assert_eq!(after("{}").unwrap(), None);
@@ -532,17 +543,16 @@ mod tests {
     fn monitoring_section() {
         let m = Settings::parse("{}").unwrap().monitoring;
         assert_eq!(m, MonitoringSettings::default());
-        assert_eq!(m.max_query_time, Some(Duration::from_secs(60)));
         let m = Settings::parse(
             r#"{"monitoring": {"interval": "1m", "schedule_new_bookmarks": true,
-                "max_query_time": null, "max_points": null, "max_age": "30d", "max_mb": 1.5}}"#,
+                "max_points": null, "max_age": "30d", "max_mb": 1.5}}"#,
         )
         .unwrap()
         .monitoring;
         // Kept between 5 minutes and a day.
         assert_eq!(m.interval(), Duration::from_secs(300));
         assert!(m.schedule_new_bookmarks);
-        assert_eq!((m.max_query_time, m.max_points), (None, None));
+        assert_eq!(m.max_points, None);
         assert_eq!(m.max_age, Some(Duration::from_secs(30 * 24 * 3600)));
         assert_eq!(m.max_mb, Some(1.5));
         let week = r#"{"monitoring": {"interval": "7d"}}"#;

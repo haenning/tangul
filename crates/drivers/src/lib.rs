@@ -132,6 +132,10 @@ pub trait Session: Send {
     /// allow them again. Applies to transactions started afterwards.
     async fn set_read_only(&mut self, on: bool) -> Result<()>;
 
+    /// Makes the server stop statements that run longer than `limit` on this session
+    /// (`None`: no limit).
+    async fn set_statement_timeout(&mut self, limit: Option<std::time::Duration>) -> Result<()>;
+
     /// Handle that can cancel the running statement from another task.
     fn cancel_handle(&self) -> Arc<dyn CancelHandle>;
 

@@ -27,6 +27,8 @@ pub struct Lease {
     pub session: Box<dyn Session>,
     /// Whether the server was told to refuse writes on this session.
     pub read_only: bool,
+    /// The statement time limit the server was told for this session.
+    pub timeout: Option<Duration>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -75,11 +77,6 @@ impl Pool {
         }
     }
 
-    /// Longest a statement may run on this pool's sessions.
-    pub fn statement_timeout(&self) -> Option<Duration> {
-        self.cfg.statement_timeout
-    }
-
     /// Returns the tab's pinned session, an idle one, or opens a new one. Waits if
     /// all slots are in use.
     pub async fn acquire(&self, tab: Option<TabId>) -> Result<Lease> {
@@ -113,6 +110,7 @@ impl Pool {
         Ok(Lease {
             session,
             read_only: false,
+            timeout: None,
             _permit: permit,
         })
     }

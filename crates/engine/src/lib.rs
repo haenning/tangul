@@ -54,6 +54,8 @@ pub enum Command {
         sql: String,
         /// The server refuses writes for this statement (read-only mode).
         read_only: bool,
+        /// Stop the statement after this long (the server, and the engine too).
+        timeout: Option<Duration>,
     },
     Cancel {
         query: QueryId,
@@ -293,6 +295,7 @@ impl Engine {
                 conn,
                 sql,
                 read_only,
+                timeout,
             } => {
                 let Some(pool) = self.pools.get(&conn).cloned() else {
                     finish(
@@ -313,6 +316,7 @@ impl Engine {
                     conn,
                     sql,
                     read_only,
+                    timeout,
                 };
                 tokio::spawn(execute(pool, events, running, job));
             }
@@ -372,6 +376,7 @@ struct Job {
     conn: ConnId,
     sql: String,
     read_only: bool,
+    timeout: Option<Duration>,
 }
 
 async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
@@ -381,6 +386,7 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
         conn,
         sql,
         read_only,
+        timeout,
     } = job;
     let started = Instant::now();
     let mut lease = match pool.acquire(Some(tab)).await {
@@ -397,7 +403,11 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
             return;
         }
     };
-    if let Err(e) = sync_read_only(&mut lease, read_only).await {
+    let synced = match sync_read_only(&mut lease, read_only).await {
+        Ok(()) => sync_timeout(&mut lease, timeout).await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = synced {
         let in_tx = lease.session.in_transaction();
         finish(
             &events,
@@ -429,9 +439,9 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
             },
         )
     };
-    // The server stops a statement at the pool's time limit, too; this also covers
-    // one it doesn't (SQLite, a server that ignored the setting).
-    let limit = pool.statement_timeout();
+    // The server stops a statement at the time limit, too; this also covers one it
+    // doesn't (SQLite, MySQL for anything but SELECT).
+    let limit = timeout;
     let cancel = lease.session.cancel_handle();
     let mut timed_out = false;
     let mut result = {
@@ -493,6 +503,15 @@ async fn sync_read_only(lease: &mut Lease, want: bool) -> anyhow::Result<()> {
     if want || lease.read_only {
         lease.session.set_read_only(want).await?;
         lease.read_only = want;
+    }
+    Ok(())
+}
+
+/// Tells the server the statement time limit when it changed for this session.
+async fn sync_timeout(lease: &mut Lease, want: Option<Duration>) -> anyhow::Result<()> {
+    if lease.timeout != want {
+        lease.session.set_statement_timeout(want).await?;
+        lease.timeout = want;
     }
     Ok(())
 }
