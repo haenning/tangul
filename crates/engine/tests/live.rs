@@ -536,6 +536,8 @@ async fn mysql() {
     time_limit_checks(&mut h, "SELECT SLEEP(30)", "SELECT SLEEP(2)").await;
     h.run(TabId(1), "DROP FUNCTION IF EXISTS tangul_ai_sneak")
         .await;
+    // DETERMINISTIC: with binary logging on (MySQL 8 default) it can't be created
+    // otherwise.
     assistant_checks(
         &mut h,
         Some((
