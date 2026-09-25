@@ -2602,9 +2602,11 @@ impl Workspace {
                 .child(div().flex_1().child(label))
                 .child(div().text_xs().text_color(muted).child(keys))
         };
+        // The top bar's colour: a shade lighter than the editor in dark mode.
         v_flex()
             .flex_1()
             .size_full()
+            .bg(theme.title_bar)
             .items_center()
             .justify_center()
             .gap_8()
