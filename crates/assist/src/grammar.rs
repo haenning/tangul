@@ -6,7 +6,7 @@
 //! This is a state machine over clause keywords, not a parser: it only needs to be
 //! right about the position in front of the cursor, and must cope with unfinished SQL.
 
-use rusdb_core::DriverKind;
+use tangul_core::DriverKind;
 
 use crate::lexer::{Token, TokenKind};
 
@@ -497,6 +497,8 @@ fn keyword_step(st: &mut State, kw: &str, prev: Option<&str>, in_call: bool) {
 
 pub fn statement_keywords(d: DriverKind) -> &'static [&'static str] {
     match d {
+        // Only the app's own data, read-only.
+        DriverKind::Sqlite => &["SELECT", "WITH", "EXPLAIN QUERY PLAN"],
         DriverKind::Postgres => &[
             "SELECT",
             "WITH",
@@ -668,6 +670,24 @@ pub fn operand_keywords(clause: Clause, first: bool) -> &'static [&'static str] 
 /// Common functions; inserted with an opening parenthesis.
 pub fn functions(d: DriverKind) -> &'static [&'static str] {
     match d {
+        DriverKind::Sqlite => &[
+            "count",
+            "sum",
+            "avg",
+            "min",
+            "max",
+            "coalesce",
+            "nullif",
+            "lower",
+            "upper",
+            "length",
+            "trim",
+            "round",
+            "datetime",
+            "date",
+            "strftime",
+            "group_concat",
+        ],
         DriverKind::Postgres => &[
             "count",
             "sum",

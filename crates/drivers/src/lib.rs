@@ -3,12 +3,13 @@
 
 mod mysql;
 mod postgres;
+mod sqlite;
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use rusdb_core::{
+use tangul_core::{
     ColumnInfo, ColumnMeta, ConnectConfig, DriverKind, ForeignKey, RowBatch, TableInfo,
 };
 
@@ -131,6 +132,10 @@ pub trait Session: Send {
     /// allow them again. Applies to transactions started afterwards.
     async fn set_read_only(&mut self, on: bool) -> Result<()>;
 
+    /// Makes the server stop statements that run longer than `limit` on this session
+    /// (`None`: no limit).
+    async fn set_statement_timeout(&mut self, limit: Option<std::time::Duration>) -> Result<()>;
+
     /// Handle that can cancel the running statement from another task.
     fn cancel_handle(&self) -> Arc<dyn CancelHandle>;
 
@@ -160,6 +165,7 @@ pub fn driver_for(kind: DriverKind) -> Arc<dyn Driver> {
     match kind {
         DriverKind::Postgres => Arc::new(postgres::PgDriver),
         DriverKind::Mysql => Arc::new(mysql::MysqlDriver),
+        DriverKind::Sqlite => Arc::new(sqlite::SqliteDriver),
     }
 }
 

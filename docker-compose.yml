@@ -31,7 +31,7 @@ services:
       retries: 60
 
   # SSH bastion for tunnel tests; the databases are reachable from it as
-  # postgres:5432 / mysql:3306. Login rusdb/rusdb.
+  # postgres:5432 / mysql:3306. Login tangul/tangul.
   ssh:
     build: dev/ssh
     ports: ["127.0.0.1:52222:22"]

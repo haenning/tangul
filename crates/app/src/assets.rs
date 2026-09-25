@@ -17,6 +17,7 @@ gpui_kit::assets::icon_assets!(
         ChartColumn,
         ChartColumnStacked,
         ChartLine,
+        Clock,
         Database,
         Funnel,
         Key,

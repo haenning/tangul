@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use mysql_async::{
     Conn, Opts, OptsBuilder, Row, SslOpts, Value, consts::StatusFlags, prelude::Queryable,
 };
-use rusdb_core::{
+use tangul_core::{
     ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
 };
 
@@ -107,6 +107,24 @@ impl Session for MysqlSession {
             .query_drop(format!("SET SESSION TRANSACTION {mode}"))
             .await?;
         Ok(())
+    }
+
+    /// MySQL limits `SELECT`s by `max_execution_time` (ms); MariaDB limits every
+    /// statement by `max_statement_time` (seconds). 0 is no limit for both.
+    async fn set_statement_timeout(&mut self, limit: Option<std::time::Duration>) -> Result<()> {
+        let conn = self.conn()?;
+        let ms = limit.map_or(0, |l| l.as_millis());
+        if conn
+            .query_drop(format!("SET SESSION max_execution_time = {ms}"))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let secs = limit.map_or(0., |l| l.as_secs_f64());
+        conn.query_drop(format!("SET SESSION max_statement_time = {secs}"))
+            .await
+            .map_err(|e| anyhow!("could not limit the statement time: {e}"))
     }
 
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {

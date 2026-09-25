@@ -1,15 +1,18 @@
 //! Saved databases (each with its users) as TOML in the config dir
-//! (`~/Library/Application Support/rusdb/profiles.toml` on macOS, overridable with
-//! `RUSDB_CONFIG_DIR`, used by `make run-dev`).
+//! (`~/Library/Application Support/tangul/profiles.toml` on macOS, overridable with
+//! `TANGUL_CONFIG_DIR`, used by `make run-dev`).
 //! Passwords go to the Keychain (one entry per user), never into the file.
 
 use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context as _, Result};
-use rusdb_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, SshTarget, TlsMode};
 use serde::{Deserialize, Serialize};
+use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, SshTarget, TlsMode};
 
-const KEYCHAIN_SERVICE: &str = "rusdb";
+const KEYCHAIN_SERVICE: &str = "tangul";
+/// The app's name before it became tangul. Its config directory and Keychain
+/// entries are taken over the first time they are needed.
+const LEGACY_NAME: &str = "rusdb";
 
 #[derive(Default, Serialize, Deserialize)]
 struct ProfilesFile {
@@ -67,11 +70,27 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
     }
 }
 
-/// Where `profiles.toml` and `settings.json` live; `RUSDB_CONFIG_DIR` overrides it.
+/// Where `profiles.toml` and `settings.json` live; `TANGUL_CONFIG_DIR` overrides it.
 pub fn config_dir() -> Option<PathBuf> {
-    std::env::var_os("RUSDB_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::config_dir().map(|d| d.join("rusdb")))
+    if let Some(dir) = std::env::var_os("TANGUL_CONFIG_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let base = dirs::config_dir()?;
+    let dir = base.join("tangul");
+    adopt_legacy_dir(&base.join(LEGACY_NAME), &dir);
+    Some(dir)
+}
+
+/// Moves the config directory of the old name to `dir`, if there is one and `dir`
+/// doesn't exist yet.
+fn adopt_legacy_dir(legacy: &std::path::Path, dir: &std::path::Path) {
+    if dir.exists() || !legacy.is_dir() {
+        return;
+    }
+    match std::fs::rename(legacy, dir) {
+        Ok(()) => eprintln!("moved {} to {}", legacy.display(), dir.display()),
+        Err(e) => eprintln!("could not move {}: {e}", legacy.display()),
+    }
 }
 
 pub struct Store {
@@ -191,7 +210,18 @@ impl Store {
         if let Some(pw) = self.passwords.get(account) {
             return Some(pw.clone());
         }
-        let pw = keychain(account).ok()?.get_password().ok()?;
+        let pw = match keychain(account).ok()?.get_password() {
+            Ok(pw) => pw,
+            // Saved under the old name: copy it over (the old entry stays).
+            Err(_) => {
+                let pw = keyring::Entry::new(LEGACY_NAME, account)
+                    .ok()?
+                    .get_password()
+                    .ok()?;
+                set_keychain(&mut self.passwords, account, pw.clone());
+                pw
+            }
+        };
         self.passwords.insert(account.to_string(), pw.clone());
         Some(pw)
     }
@@ -220,6 +250,25 @@ pub fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn takes_over_the_legacy_config_dir() {
+        let base = std::env::temp_dir().join(format!("tangul-dirs-{}", std::process::id()));
+        let (legacy, dir) = (base.join("rusdb"), base.join("tangul"));
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("profiles.toml"), "x").unwrap();
+        adopt_legacy_dir(&legacy, &dir);
+        assert!(!legacy.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("profiles.toml")).unwrap(),
+            "x"
+        );
+        // An existing new directory is never replaced.
+        std::fs::create_dir_all(&legacy).unwrap();
+        adopt_legacy_dir(&legacy, &dir);
+        assert!(legacy.exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn migrates_legacy_profiles_by_target() {

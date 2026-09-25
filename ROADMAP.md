@@ -1,4 +1,4 @@
-# rusdb roadmap
+# tangul roadmap
 
 Planned work lives as GitHub issues (label `roadmap`) in a GitHub Project. This file is
 the source for setting that project up and the reference for its structure.
@@ -6,7 +6,7 @@ Design decisions: [PLAN.md](PLAN.md).
 
 ## Scope
 
-rusdb is a fast, focused database **viewer**: explore, query, understand.
+tangul is a fast, focused database **viewer**: explore, query, understand.
 
 - **In scope:** querying, navigating schemas and relations, understanding data (charts,
   graphs, profiles), safe access (read-only), AI help that works from local context.
@@ -16,7 +16,7 @@ rusdb is a fast, focused database **viewer**: explore, query, understand.
 
 ## Project structure
 
-- **Project:** `rusdb roadmap` (owner `haenning`), linked to `haenning/rusdb`.
+- **Project:** `tangul roadmap` (owner `haenning`), linked to `haenning/rusdb`.
 - **Items:** one issue per feature, labels `enhancement`, `roadmap` and one `area:*`.
 - **Fields**
   - `Status` (built-in): Todo · In Progress · Done
@@ -76,7 +76,7 @@ Needs the `project` scope once: `gh auth refresh -s project`.
 ```sh
 OWNER=haenning
 # 1. Project, linked to the repo
-gh project create --owner $OWNER --title "rusdb roadmap" --format json   # note "number" and "id"
+gh project create --owner $OWNER --title "tangul roadmap" --format json   # note "number" and "id"
 gh project link <number> --owner $OWNER --repo haenning/rusdb
 
 # 2. Horizon field

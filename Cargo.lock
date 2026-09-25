@@ -6654,77 +6654,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusdb"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-channel",
- "chrono",
- "dirs 7.0.0",
- "gpui-kit",
- "keyring",
- "lsp-types",
- "rusdb-assist",
- "rusdb-core",
- "rusdb-engine",
- "rusqlite",
- "serde",
- "serde_json",
- "toml 1.1.6+spec-1.1.0",
-]
-
-[[package]]
-name = "rusdb-assist"
-version = "0.1.0"
-dependencies = [
- "rusdb-core",
-]
-
-[[package]]
-name = "rusdb-core"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "rusdb-drivers"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "mysql_async",
- "native-tls",
- "postgres-native-tls",
- "rusdb-core",
- "tokio",
- "tokio-postgres",
-]
-
-[[package]]
-name = "rusdb-engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-channel",
- "rusdb-core",
- "rusdb-drivers",
- "rusdb-tunnel",
- "tokio",
-]
-
-[[package]]
-name = "rusdb-tunnel"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rusdb-core",
- "russh",
- "tokio",
-]
-
-[[package]]
 name = "rusqlite"
 version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8022,6 +7951,79 @@ dependencies = [
  "serde",
  "slotmap",
  "smallvec",
+]
+
+[[package]]
+name = "tangul"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "chrono",
+ "dirs 7.0.0",
+ "gpui-kit",
+ "keyring",
+ "lsp-types",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tangul-assist",
+ "tangul-core",
+ "tangul-engine",
+ "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
+name = "tangul-assist"
+version = "0.1.0"
+dependencies = [
+ "tangul-core",
+]
+
+[[package]]
+name = "tangul-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "tangul-drivers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "mysql_async",
+ "native-tls",
+ "postgres-native-tls",
+ "rusqlite",
+ "tangul-core",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "tangul-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "rusqlite",
+ "tangul-core",
+ "tangul-drivers",
+ "tangul-tunnel",
+ "tokio",
+]
+
+[[package]]
+name = "tangul-tunnel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "russh",
+ "tangul-core",
+ "tokio",
 ]
 
 [[package]]

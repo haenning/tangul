@@ -3,18 +3,18 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>rusdb</string>
+    <string>tangul</string>
     <key>CFBundleDisplayName</key>
-    <string>rusdb</string>
+    <string>tangul</string>
     <key>CFBundleExecutable</key>
-    <string>rusdb</string>
+    <string>tangul</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.haenning.rusdb</string>
+    <string>io.github.haenning.tangul</string>
     <key>CFBundleIconFile</key>
-    <string>rusdb</string>
+    <string>tangul</string>
     <!-- Icon Composer icon (Assets.car, macOS 26+); CFBundleIconFile is the fallback. -->
     <key>CFBundleIconName</key>
-    <string>rusdb</string>
+    <string>tangul</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

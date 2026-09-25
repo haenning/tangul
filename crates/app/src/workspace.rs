@@ -23,11 +23,12 @@ use gpui_kit::component::{
     resizable::{ResizableState, h_resizable, resizable_panel},
     spinner::Spinner,
     tab::{Tab, TabBar},
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_assist::{
+use tangul_assist::{
     chart::{ChartData, ChartStyle, ChartView},
     columns::column_facts,
     edit::row_edit,
@@ -38,11 +39,11 @@ use rusdb_assist::{
     suggest::{QuerySuggestion, one_line, suggest_for_table},
     usage::{Usage, learn},
 };
-use rusdb_core::{
+use tangul_core::{
     ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo,
     TableKind,
 };
-use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
+use tangul_engine::{Command, EngineHandle, Event, ExecEvent, PoolStats, QueryEvent};
 
 use crate::{
     CloseTab, NewTab, NextSidebarPanel, OpenPalette, OpenSettings, PrevSidebarPanel, ToggleSidebar,
@@ -51,6 +52,8 @@ use crate::{
     completion::{AssistData, SharedAssist, SqlCompletion},
     connection_form::{ConnectionForm, FormMode, FormOutput},
     local::{Bookmark, HistoryEntry, Local, NewHistory, bare_sql},
+    metrics::{self, Metrics},
+    monitor::{self, Monitor},
     palette::{self, PaletteAction, PaletteKind},
     query_tab::{QueryTab, TabConn, TabEvent},
     settings,
@@ -237,6 +240,15 @@ pub struct Workspace {
     /// Pending returns to read-only mode (`safety.relock_after`) by database user
     /// name; replaced to restart the wait, dropped to cancel it.
     relock: HashMap<String, Task<()>>,
+    /// Duration and rows of bookmark runs.
+    metrics: Metrics,
+    /// Scheduled bookmark runs on hidden connections.
+    monitor: Monitor,
+    /// Read-only connection to `metrics.db` for query tabs, and whether it is up.
+    metrics_conn: Option<(ConnId, bool)>,
+    /// Tabs to run once `metrics_conn` is up.
+    metrics_waiting: Vec<WeakEntity<QueryTab>>,
+    _monitor_tick: Task<()>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -270,6 +282,16 @@ impl Workspace {
 
         let store = Store::load();
         let local = Local::open(store.dir());
+        let metrics = Metrics::open(store.dir());
+        metrics.prune(&settings::current(cx).monitoring, now_ms());
+        let monitor_tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(monitor::TICK).await;
+                if this.update(cx, |ws, cx| ws.monitor_tick(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let history_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search history"));
         let search_sub = cx.subscribe(
             &history_search,
@@ -326,6 +348,11 @@ impl Workspace {
             sidebar_rows: Vec::new(),
             favorites: Vec::new(),
             relock: HashMap::new(),
+            metrics,
+            monitor: Monitor::default(),
+            metrics_conn: None,
+            metrics_waiting: Vec::new(),
+            _monitor_tick: monitor_tick,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
             _pump: pump,
@@ -706,6 +733,7 @@ impl Workspace {
             conn: conn.id,
             sql: sql.to_string(),
             read_only,
+            timeout: settings::current(cx).safety.max_query_time,
         });
         tab.update(cx, |t, cx| t.started(query, sql, cx));
     }
@@ -742,6 +770,7 @@ impl Workspace {
             conn: conn.id,
             sql: sql.to_string(),
             read_only,
+            timeout: settings::current(cx).safety.max_query_time,
         });
         tab.update(cx, |t, cx| t.started_derived(query, append, cx));
     }
@@ -945,6 +974,249 @@ impl Workspace {
         });
     }
 
+    // ---- scheduled bookmark runs -------------------------------------------------
+
+    /// Starts the next due scheduled bookmark, if the app is quiet and nothing else
+    /// runs. One at a time, on a hidden read-only connection.
+    fn monitor_tick(&mut self, cx: &mut Context<Self>) {
+        let limits = settings::current(cx).monitoring.clone();
+        if self
+            .monitor
+            .stuck(settings::current(cx).safety.max_query_time)
+        {
+            self.monitor_finish(0, Some("gave up waiting for the run".into()), cx);
+        }
+        if self.monitor.pending.is_some() || !self.monitor.is_quiet() || !self.queries.is_empty() {
+            return;
+        }
+        let bookmarks = self.local.scheduled_bookmarks();
+        let now = now_ms();
+        let Some(bookmark) = monitor::due(
+            &bookmarks,
+            |id| self.metrics.last_run(id),
+            now,
+            limits.interval(),
+        )
+        .cloned() else {
+            return;
+        };
+        let db = bookmark
+            .database_id
+            .as_deref()
+            .and_then(|id| self.store.database(id))
+            .cloned();
+        // The user last used on the database, else its first one.
+        let user = db.as_ref().and_then(|db| {
+            let last = self.local.last_user(&db.id);
+            db.users
+                .iter()
+                .find(|u| Some(&u.id) == last.as_ref())
+                .or(db.users.first())
+                .cloned()
+        });
+        let (Some(db), Some(user)) = (db, user) else {
+            let record = metrics::Run {
+                bookmark_id: bookmark.id,
+                bookmark_name: bookmark.name,
+                started_at: now,
+                duration_ms: 0,
+                rows: None,
+                error: Some("no database user to run it with".into()),
+                scheduled: true,
+            };
+            self.metrics.record(&record, &limits, now);
+            return;
+        };
+        let (conn, ready) = match self.monitor.conn_for(&user.id) {
+            Some(conn) => conn,
+            None => {
+                let id = ConnId(self.next_id());
+                self.monitor.connecting(&user.id, id);
+                let password = self.store.password(&user.id);
+                self.engine.send(Command::Connect {
+                    conn: id,
+                    driver: db.driver,
+                    cfg: tangul_core::ConnectConfig::new(&db, &user, password),
+                    ssh: self.store.ssh_target(&db),
+                });
+                (id, false)
+            }
+        };
+        self.monitor.start(bookmark, conn, now);
+        if ready {
+            self.monitor_execute(cx);
+        }
+    }
+
+    /// Sends the pending scheduled run's query, read-only.
+    fn monitor_execute(&mut self, cx: &mut Context<Self>) {
+        let timeout = settings::current(cx).safety.max_query_time;
+        let query = QueryId(self.next_id());
+        let Some(pending) = self.monitor.pending.as_mut() else {
+            return;
+        };
+        pending.query = Some(query);
+        self.engine.send(Command::Execute {
+            query,
+            // A tab of its own, so no session of a real tab is used.
+            tab: TabId(query.0),
+            conn: pending.conn,
+            sql: pending.bookmark.sql.clone(),
+            read_only: true,
+            timeout,
+        });
+    }
+
+    /// Records the pending scheduled run.
+    fn monitor_finish(&mut self, duration_ms: i64, error: Option<String>, cx: &mut Context<Self>) {
+        let Some(pending) = self.monitor.pending.take() else {
+            return;
+        };
+        if let Some(query) = pending.query {
+            self.engine.send(Command::ReleaseTab {
+                tab: TabId(query.0),
+                conn: pending.conn,
+            });
+        }
+        let record = metrics::Run {
+            bookmark_id: pending.bookmark.id,
+            bookmark_name: pending.bookmark.name,
+            started_at: pending.started_at,
+            duration_ms,
+            rows: pending.rows.filter(|_| error.is_none()),
+            error,
+            scheduled: true,
+        };
+        self.metrics
+            .record(&record, &settings::current(cx).monitoring, now_ms());
+    }
+
+    /// Handles events of the hidden connections, scheduled runs and the metrics
+    /// connection; returns every other event.
+    fn monitor_event(
+        &mut self,
+        event: Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Event> {
+        let pending_query = self.monitor.pending.as_ref().and_then(|p| p.query);
+        let metrics_conn = self.metrics_conn.map(|(id, _)| id);
+        match event {
+            Event::Query { query, event } if Some(query) == pending_query => match event {
+                QueryEvent::Exec(ExecEvent::StatementDone { rows }) => {
+                    if let Some(p) = self.monitor.pending.as_mut() {
+                        p.rows = Some(rows as i64);
+                    }
+                }
+                QueryEvent::Finished { elapsed, error, .. } => {
+                    self.monitor_finish(elapsed.as_millis() as i64, error, cx);
+                }
+                QueryEvent::Exec(_) => {}
+            },
+            Event::Connected { conn } if self.monitor.owns(conn) => {
+                self.monitor.connected(conn);
+                let waiting = self.monitor.pending.as_ref();
+                if waiting.is_some_and(|p| p.conn == conn && p.query.is_none()) {
+                    self.monitor_execute(cx);
+                }
+            }
+            Event::ConnectFailed { conn, error } if self.monitor.owns(conn) => {
+                self.monitor.failed(conn);
+                self.monitor_finish(0, Some(error), cx);
+            }
+            Event::HostKeyUnknown { conn, .. } if self.monitor.owns(conn) => {
+                self.monitor.failed(conn);
+                let error = "unknown SSH host key: connect once to trust it".to_string();
+                self.monitor_finish(0, Some(error), cx);
+            }
+            Event::Schema { conn, .. } | Event::PoolStats { conn, .. }
+                if self.monitor.owns(conn) || Some(conn) == metrics_conn => {}
+            Event::Connected { conn } if Some(conn) == metrics_conn => {
+                self.metrics_conn = Some((conn, true));
+                for tab in std::mem::take(&mut self.metrics_waiting) {
+                    if let Some(tab) = tab.upgrade() {
+                        tab.update(cx, |t, cx| cx.emit(TabEvent::Run(t.sql(cx))));
+                    }
+                }
+            }
+            Event::ConnectFailed { conn, error } if Some(conn) == metrics_conn => {
+                self.metrics_conn = None;
+                self.metrics_waiting.clear();
+                window.push_notification(
+                    Notification::error(format!("Could not open the metrics: {error}")),
+                    cx,
+                );
+            }
+            event => return Some(event),
+        }
+        None
+    }
+
+    /// Opens a tab querying the bookmark's runs over time in `metrics.db`
+    /// (read-only), shown as a line chart of the duration.
+    fn open_metrics(&mut self, bookmark_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bookmark) = self.local.bookmark(bookmark_id) else {
+            return;
+        };
+        let Some(path) = self
+            .metrics
+            .path()
+            .map(|p| p.to_string_lossy().into_owned())
+        else {
+            window.push_notification(
+                Notification::error("Metrics are only kept in memory; there is no file to query."),
+                cx,
+            );
+            return;
+        };
+        let (conn, ready) = match self.metrics_conn {
+            Some(conn) => conn,
+            None => {
+                let id = ConnId(self.next_id());
+                self.engine.send(Command::Connect {
+                    conn: id,
+                    driver: DriverKind::Sqlite,
+                    cfg: tangul_core::ConnectConfig {
+                        host: String::new(),
+                        port: 0,
+                        user: String::new(),
+                        password: None,
+                        database: path,
+                        tls: tangul_core::TlsMode::Disable,
+                    },
+                    ssh: None,
+                });
+                self.metrics_conn = Some((id, false));
+                (id, false)
+            }
+        };
+        let sql = metrics::runs_sql(&bookmark.id);
+        let tab = self.add_tab(&sql, window, cx);
+        tab.update(cx, |t, cx| {
+            t.title = format!("{} · runs", bookmark.name).into();
+            let tab_conn = TabConn {
+                id: conn,
+                name: "tangul metrics".into(),
+                driver: DriverKind::Sqlite,
+            };
+            t.set_conn(tab_conn, cx);
+            // Duration over time; rows are one pick away in the chart menu.
+            t.set_chart_view(
+                Some(ChartView {
+                    style: ChartStyle::Line,
+                    series: Some(0),
+                }),
+                cx,
+            );
+            if ready {
+                cx.emit(TabEvent::Run(sql.clone()));
+            }
+        });
+        if !ready {
+            self.metrics_waiting.push(tab.downgrade());
+        }
+    }
+
     // ---- bookmarks -------------------------------------------------------------
 
     /// Asks for a name and saves `sql` as a bookmark (updating `existing` if set).
@@ -964,7 +1236,9 @@ impl Workspace {
             "Bookmark query"
         };
         let db_id = self.active_db.clone();
-        let form = cx.new(|cx| BookmarkForm::new(existing.as_ref(), sql, db_id, window, cx));
+        // From a tab: the bookmark shows its result the way the tab does now.
+        let view = tab.as_ref().map(|t| t.read(cx).chart_shown());
+        let form = cx.new(|cx| BookmarkForm::new(existing.as_ref(), sql, db_id, view, window, cx));
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let save = {
@@ -1018,6 +1292,7 @@ impl Workspace {
     }
 
     fn delete_bookmark(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.metrics.delete_bookmark(id);
         if let Err(e) = self.local.delete_bookmark(id) {
             window.push_notification(
                 Notification::error(format!("Could not delete bookmark: {e:#}")),
@@ -1041,6 +1316,7 @@ impl Workspace {
         tab.update(cx, |t, cx| {
             t.title = bookmark.name.clone().into();
             t.bookmark_id = Some(bookmark.id.clone());
+            t.set_chart_view(bookmark.view, cx);
             if run && t.conn.is_some() {
                 cx.emit(TabEvent::Run(bookmark.sql.clone()));
             }
@@ -1171,6 +1447,25 @@ impl Workspace {
             .map(|n| n as i64);
         let fp = fingerprint(&run.sql);
         let succeeded = error.is_none();
+        // A run of the tab's bookmark (the whole of it) counts for its metrics.
+        let bookmark = tab
+            .as_ref()
+            .and_then(|t| t.read(cx).bookmark_id.clone())
+            .and_then(|id| self.local.bookmark(&id))
+            .filter(|b| bare_sql(&b.sql) == bare_sql(&run.sql));
+        if let Some(b) = bookmark {
+            let record = metrics::Run {
+                bookmark_id: b.id,
+                bookmark_name: b.name,
+                started_at: run.started_at,
+                duration_ms: elapsed_ms,
+                rows,
+                error: error.clone(),
+                scheduled: false,
+            };
+            self.metrics
+                .record(&record, &settings::current(cx).monitoring, now_ms());
+        }
         let entry = NewHistory {
             database_id: &db_id,
             user_id: &run.user_id,
@@ -1334,7 +1629,7 @@ impl Workspace {
         self.engine.send(Command::Connect {
             conn: id,
             driver: db.driver,
-            cfg: rusdb_core::ConnectConfig::new(&db, &user, password),
+            cfg: tangul_core::ConnectConfig::new(&db, &user, password),
             ssh,
         });
         cx.notify();
@@ -1599,6 +1894,9 @@ impl Workspace {
     }
 
     fn on_engine_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(event) = self.monitor_event(event, window, cx) else {
+            return;
+        };
         match event {
             Event::Query { query, event } => {
                 let finished = match &event {
@@ -2652,11 +2950,27 @@ impl Workspace {
             bookmark.id.clone(),
         );
         let edit_sql = bookmark.sql.clone();
+        let metrics_id = bookmark.id.clone();
         let group: SharedString = format!("bookmark-{ix}").into();
+        let scheduled = monitor::schedulable(bookmark).then(|| {
+            let every = settings::current(cx).monitoring.interval();
+            format!("Runs about every {}", monitor::human_duration(every))
+        });
         let actions = h_flex()
             .gap_0p5()
             .invisible()
             .group_hover(group.clone(), |s| s.visible())
+            .child(
+                Button::new(("bookmark-metrics", ix))
+                    .icon(Icon::new(Lucide::ChartLine))
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Duration and rows over time")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_metrics(&metrics_id, window, cx)
+                    })),
+            )
             .child(
                 Button::new(("bookmark-run", ix))
                     .icon(IconName::Play)
@@ -2673,7 +2987,7 @@ impl Workspace {
                     .icon(Icon::new(Lucide::Pencil))
                     .ghost()
                     .xsmall()
-                    .tooltip("Rename")
+                    .tooltip("Edit")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_bookmark_dialog(
@@ -2707,8 +3021,9 @@ impl Workspace {
             .rounded(theme.radius)
             .hover(|s| s.bg(theme.sidebar_accent))
             .cursor_pointer()
+            // How its result is shown: the grid or the chart type.
             .child(
-                Icon::new(Lucide::Bookmark)
+                Icon::new(style_icon(bookmark.view.map(|v| v.style)))
                     .xsmall()
                     .text_color(theme.muted_foreground),
             )
@@ -2721,6 +3036,20 @@ impl Workspace {
                             .gap_1()
                             .text_sm()
                             .child(div().min_w_0().truncate().child(bookmark.name.clone()))
+                            .when_some(scheduled, |this, tooltip| {
+                                this.child(
+                                    div()
+                                        .id(("bookmark-scheduled", ix))
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(tooltip.clone()).build(window, cx)
+                                        })
+                                        .child(
+                                            Icon::new(Lucide::Clock)
+                                                .xsmall()
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
+                            })
                             .when(global, |this| {
                                 this.child(
                                     Icon::new(IconName::Globe)
@@ -3142,6 +3471,11 @@ impl Render for Workspace {
         v_flex()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            // Any input postpones scheduled bookmark runs until it's quiet again.
+            .capture_key_down(cx.listener(|this, _, _, _| this.monitor.touch()))
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.monitor.touch()))
+            .on_mouse_move(cx.listener(|this, _, _, _| this.monitor.touch()))
+            .on_scroll_wheel(cx.listener(|this, _, _, _| this.monitor.touch()))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))

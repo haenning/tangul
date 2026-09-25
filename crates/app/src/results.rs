@@ -25,10 +25,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_assist::columns::ColumnFacts;
-use rusdb_assist::refine::{ColumnKind, Refine};
-use rusdb_assist::{edit::RowEdit, related::RelatedLink};
-use rusdb_core::{ColumnInfo, ResultSet};
+use tangul_assist::columns::ColumnFacts;
+use tangul_assist::refine::{ColumnKind, Refine};
+use tangul_assist::{edit::RowEdit, related::RelatedLink};
+use tangul_core::{ColumnInfo, ResultSet};
 
 use crate::assets::Lucide;
 use crate::column_filter::FilterPanel;
@@ -51,7 +51,7 @@ pub struct ResultsDelegate {
     /// Column under the last right click, for "Copy cell".
     menu_col: Option<usize>,
     /// Foreign-key links of the current result, most used first (see
-    /// `rusdb_assist::related`).
+    /// `tangul_assist::related`).
     pub related: Vec<RelatedLink>,
     /// UPDATE / DELETE statements for the rows, if the result is from one table.
     pub edit: Option<RowEdit>,
@@ -938,8 +938,8 @@ mod tests {
     // Not `super::*`: gpui's `test` attribute would shadow the standard one.
     use super::{KeyMarker, ResultsDelegate, column_stats, format_decimal};
     use gpui_kit::Modifiers;
-    use rusdb_assist::columns::{ColumnFacts, ForeignRef};
-    use rusdb_core::{ColumnInfo, RowBatch};
+    use tangul_assist::columns::{ColumnFacts, ForeignRef};
+    use tangul_core::{ColumnInfo, RowBatch};
 
     fn delegate() -> ResultsDelegate {
         let mut d = ResultsDelegate::default();

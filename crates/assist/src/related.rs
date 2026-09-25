@@ -2,7 +2,7 @@
 //! its rows can open the rows they reference (outgoing keys) and the rows that
 //! reference them (incoming keys), filtered by the exact key values.
 
-use rusdb_core::DriverKind;
+use tangul_core::DriverKind;
 
 use crate::analyze::{analyze, statements};
 use crate::schema::SchemaIndex;
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn ranks_by_joins_tables_and_bookmarks() {
-        use rusdb_core::{ColumnMeta, ForeignKey, SchemaInfo, TableInfo, TableKind};
+        use tangul_core::{ColumnMeta, ForeignKey, SchemaInfo, TableInfo, TableKind};
         let table = |name: &str| TableInfo {
             schema: "public".into(),
             name: name.into(),

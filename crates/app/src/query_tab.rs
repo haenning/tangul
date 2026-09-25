@@ -19,14 +19,14 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_assist::analyze::statements;
-use rusdb_assist::chart::{ChartData, ChartView, chart_data};
-use rusdb_assist::columns::ColumnFacts;
-use rusdb_assist::lexer::tokenize;
-use rusdb_assist::refine::{ColumnFilter, Refine, Sort, refinable, refined_sql};
-use rusdb_assist::{edit::RowEdit, related::RelatedLink};
-use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
-use rusdb_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
+use tangul_assist::analyze::statements;
+use tangul_assist::chart::{ChartData, ChartView, chart_data};
+use tangul_assist::columns::ColumnFacts;
+use tangul_assist::lexer::tokenize;
+use tangul_assist::refine::{ColumnFilter, Refine, Sort, refinable, refined_sql};
+use tangul_assist::{edit::RowEdit, related::RelatedLink};
+use tangul_core::{ConnId, DriverKind, QueryId, TabId};
+use tangul_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
 
 /// Pause in typing after which the editor is checked on the server.
 const VALIDATE_AFTER: Duration = Duration::from_secs(1);
@@ -569,7 +569,7 @@ impl QueryTab {
             &d.refine,
             driver,
             offset,
-            rusdb_engine::ROW_LIMIT + 1,
+            tangul_engine::ROW_LIMIT + 1,
         ))
     }
 
@@ -1100,7 +1100,7 @@ impl QueryTab {
                 } else if more {
                     s.push_str(" · scroll for more");
                 } else if self.truncated {
-                    s.push_str(&format!(" · limited to {} rows", rusdb_engine::ROW_LIMIT));
+                    s.push_str(&format!(" · limited to {} rows", tangul_engine::ROW_LIMIT));
                 }
                 s.into()
             }
