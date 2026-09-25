@@ -48,12 +48,12 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy -p tangul-core -p tangul-drivers -p tangul-engine -p tangul-assist -p tangul-tunnel --all-targets -- -D warnings
+        run: cargo clippy -p tangul-core -p tangul-drivers -p tangul-engine -p tangul-assist -p tangul-tunnel -p tangul-data --all-targets -- -D warnings
       - name: Tests (incl. live DB tests)
         env:
           TANGUL_TEST_PG: postgres:@127.0.0.1:55432/postgres
           TANGUL_TEST_MYSQL: root:@127.0.0.1:53306/app
-        run: cargo test -p tangul-core -p tangul-drivers -p tangul-engine -p tangul-assist -p tangul-tunnel
+        run: cargo test -p tangul-core -p tangul-drivers -p tangul-engine -p tangul-assist -p tangul-tunnel -p tangul-data
 
   # Dependency checks: advisories, licenses, sources (deny.toml) and unused deps.
   deps:

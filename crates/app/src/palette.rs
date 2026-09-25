@@ -3,7 +3,7 @@
 
 use tangul_assist::suggest::one_line;
 
-use crate::local::{Bookmark, HistoryEntry};
+use tangul_data::local::{Bookmark, HistoryEntry};
 
 /// Length at which a history entry's SQL is cut in the list.
 const LABEL_LEN: usize = 120;

@@ -12,10 +12,10 @@ use gpui_kit::*;
 use tangul_assist::chart::ChartView;
 use tangul_assist::guard;
 
-use crate::local::Bookmark;
 use crate::monitor;
 use crate::settings;
-use crate::store::new_id;
+use tangul_data::local::Bookmark;
+use tangul_data::profiles::new_id;
 
 pub struct BookmarkForm {
     id: Option<String>,

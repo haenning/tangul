@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tangul_assist::guard;
 use tangul_core::{ConnId, QueryId};
 
-use crate::local::Bookmark;
+use tangul_data::local::Bookmark;
 
 /// No input for this long counts as quiet.
 pub const QUIET: Duration = Duration::from_secs(120);

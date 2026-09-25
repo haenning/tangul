@@ -43,6 +43,9 @@ use tangul_core::{
     ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo,
     TableKind,
 };
+use tangul_data::Data;
+use tangul_data::local::{Bookmark, HistoryEntry, NewHistory, bare_sql};
+use tangul_data::metrics;
 use tangul_engine::{Command, EngineHandle, Event, ExecEvent, PoolStats, QueryEvent};
 
 use crate::{
@@ -51,13 +54,10 @@ use crate::{
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
     connection_form::{ConnectionForm, FormMode, FormOutput},
-    local::{Bookmark, HistoryEntry, Local, NewHistory, bare_sql},
-    metrics::{self, Metrics},
     monitor::{self, Monitor},
     palette::{self, PaletteAction, PaletteKind},
     query_tab::{QueryTab, TabConn, TabEvent},
     settings,
-    store::Store,
 };
 
 const SIDEBAR_WIDTH: f32 = 260.;
@@ -196,8 +196,8 @@ enum SidebarRow {
 
 pub struct Workspace {
     engine: EngineHandle,
-    store: Store,
-    local: Local,
+    /// Saved databases, local.db and metrics.db.
+    data: Data,
     /// Schema and usage per connection, shared with the editors' completion.
     assist: SharedAssist,
     /// Learned usage by database id.
@@ -240,8 +240,6 @@ pub struct Workspace {
     /// Pending returns to read-only mode (`safety.relock_after`) by database user
     /// name; replaced to restart the wait, dropped to cancel it.
     relock: HashMap<String, Task<()>>,
-    /// Duration and rows of bookmark runs.
-    metrics: Metrics,
     /// Scheduled bookmark runs on hidden connections.
     monitor: Monitor,
     /// Read-only connection to `metrics.db` for query tabs, and whether it is up.
@@ -280,10 +278,9 @@ impl Workspace {
             }
         });
 
-        let store = Store::load();
-        let local = Local::open(store.dir());
-        let metrics = Metrics::open(store.dir());
-        metrics.prune(&settings::current(cx).monitoring, now_ms());
+        let data = Data::open();
+        data.metrics
+            .prune(&settings::current(cx).monitoring, now_ms());
         let monitor_tick = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(monitor::TICK).await;
@@ -312,15 +309,15 @@ impl Workspace {
         };
         let bookmark_sub = cx.subscribe(&bookmark_search, redraw);
         let schema_sub = cx.subscribe(&schema_search, redraw);
-        let sidebar_width = local
+        let sidebar_width = data
+            .local
             .setting(SIDEBAR_WIDTH_SETTING)
             .and_then(|w| w.parse::<f32>().ok())
             .unwrap_or(SIDEBAR_WIDTH)
             .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         let mut this = Self {
             engine,
-            store,
-            local,
+            data,
             assist: Rc::new(RefCell::new(HashMap::new())),
             usage: HashMap::new(),
             history: Vec::new(),
@@ -348,7 +345,6 @@ impl Workspace {
             sidebar_rows: Vec::new(),
             favorites: Vec::new(),
             relock: HashMap::new(),
-            metrics,
             monitor: Monitor::default(),
             metrics_conn: None,
             metrics_waiting: Vec::new(),
@@ -358,13 +354,13 @@ impl Workspace {
             _pump: pump,
         };
         // Reopen the connection used last (else the first one) right away.
-        let last = this.local.setting(LAST_USER_SETTING);
+        let last = this.data.local.setting(LAST_USER_SETTING);
         let start = last
             .as_deref()
             .and_then(|id| this.find_user(id))
             .map(|(db, u)| (db.id.clone(), Some(u.id.clone())))
             .or_else(|| {
-                let db = this.store.databases.first()?;
+                let db = this.data.profiles.databases.first()?;
                 Some((db.id.clone(), db.users.first().map(|u| u.id.clone())))
             });
         if let Some((db_id, user_id)) = start {
@@ -388,7 +384,7 @@ impl Workspace {
     }
 
     fn active_database(&self) -> Option<&Database> {
-        self.store.database(self.active_db.as_deref()?)
+        self.data.profiles.database(self.active_db.as_deref()?)
     }
 
     fn active_conn(&self) -> Option<&ConnState> {
@@ -396,7 +392,8 @@ impl Workspace {
     }
 
     fn find_user(&self, user_id: &str) -> Option<(&Database, &DbUser)> {
-        self.store
+        self.data
+            .profiles
             .databases
             .iter()
             .find_map(|db| Some((db, db.user(user_id)?)))
@@ -700,7 +697,7 @@ impl Workspace {
         let bookmark = self
             .find_user(&user_id)
             .filter(|_| whole_editor)
-            .and_then(|(db, _)| self.local.bookmark_for_sql(&db.id, sql));
+            .and_then(|(db, _)| self.data.local.bookmark_for_sql(&db.id, sql));
         if let Some(bookmark) = bookmark
             && tab.read(cx).bookmark_id.as_deref() != Some(bookmark.id.as_str())
         {
@@ -992,11 +989,11 @@ impl Workspace {
         if self.monitor.pending.is_some() || !self.monitor.is_quiet() || !self.queries.is_empty() {
             return;
         }
-        let bookmarks = self.local.scheduled_bookmarks();
+        let bookmarks = self.data.local.scheduled_bookmarks();
         let now = now_ms();
         let Some(bookmark) = monitor::due(
             &bookmarks,
-            |id| self.metrics.last_run(id),
+            |id| self.data.metrics.last_run(id),
             now,
             limits.interval(),
         )
@@ -1006,11 +1003,11 @@ impl Workspace {
         let db = bookmark
             .database_id
             .as_deref()
-            .and_then(|id| self.store.database(id))
+            .and_then(|id| self.data.profiles.database(id))
             .cloned();
         // The user last used on the database, else its first one.
         let user = db.as_ref().and_then(|db| {
-            let last = self.local.last_user(&db.id);
+            let last = self.data.local.last_user(&db.id);
             db.users
                 .iter()
                 .find(|u| Some(&u.id) == last.as_ref())
@@ -1027,7 +1024,7 @@ impl Workspace {
                 error: Some("no database user to run it with".into()),
                 scheduled: true,
             };
-            self.metrics.record(&record, &limits, now);
+            self.data.metrics.record(&record, &limits, now);
             return;
         };
         let (conn, ready) = match self.monitor.conn_for(&user.id) {
@@ -1035,12 +1032,12 @@ impl Workspace {
             None => {
                 let id = ConnId(self.next_id());
                 self.monitor.connecting(&user.id, id);
-                let password = self.store.password(&user.id);
+                let password = self.data.profiles.password(&user.id);
                 self.engine.send(Command::Connect {
                     conn: id,
                     driver: db.driver,
                     cfg: tangul_core::ConnectConfig::new(&db, &user, password),
-                    ssh: self.store.ssh_target(&db),
+                    ssh: self.data.profiles.ssh_target(&db),
                 });
                 (id, false)
             }
@@ -1090,7 +1087,8 @@ impl Workspace {
             error,
             scheduled: true,
         };
-        self.metrics
+        self.data
+            .metrics
             .record(&record, &settings::current(cx).monitoring, now_ms());
     }
 
@@ -1158,10 +1156,11 @@ impl Workspace {
     /// Opens a tab querying the bookmark's runs over time in `metrics.db`
     /// (read-only), shown as a line chart of the duration.
     fn open_metrics(&mut self, bookmark_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(bookmark) = self.local.bookmark(bookmark_id) else {
+        let Some(bookmark) = self.data.local.bookmark(bookmark_id) else {
             return;
         };
         let Some(path) = self
+            .data
             .metrics
             .path()
             .map(|p| p.to_string_lossy().into_owned())
@@ -1232,7 +1231,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let existing = existing.and_then(|id| self.local.bookmark(&id));
+        let existing = existing.and_then(|id| self.data.local.bookmark(&id));
         let title = if existing.is_some() {
             "Update bookmark"
         } else {
@@ -1285,7 +1284,7 @@ impl Workspace {
                 tab.update(cx, |t, _| t.title = title.clone());
             }
         }
-        if let Err(e) = self.local.upsert_bookmark(&bookmark) {
+        if let Err(e) = self.data.local.upsert_bookmark(&bookmark) {
             window.push_notification(
                 Notification::error(format!("Could not save bookmark: {e:#}")),
                 cx,
@@ -1295,8 +1294,7 @@ impl Workspace {
     }
 
     fn delete_bookmark(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.metrics.delete_bookmark(id);
-        if let Err(e) = self.local.delete_bookmark(id) {
+        if let Err(e) = self.data.delete_bookmark(id) {
             window.push_notification(
                 Notification::error(format!("Could not delete bookmark: {e:#}")),
                 cx,
@@ -1312,7 +1310,7 @@ impl Workspace {
 
     /// Opens a bookmark in a new tab, optionally running it right away.
     fn open_bookmark(&mut self, id: &str, run: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(bookmark) = self.local.bookmark(id) else {
+        let Some(bookmark) = self.data.local.bookmark(id) else {
             return;
         };
         let tab = self.add_tab(&bookmark.sql, window, cx);
@@ -1336,9 +1334,9 @@ impl Workspace {
 
     fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
         let db = self.active_db.clone();
-        let bookmarks = self.local.bookmarks_for(db.as_deref());
+        let bookmarks = self.data.local.bookmarks_for(db.as_deref());
         let history = match &db {
-            Some(db) => self.local.history(db, "", HISTORY_LIMIT),
+            Some(db) => self.data.local.history(db, "", HISTORY_LIMIT),
             None => Vec::new(),
         };
         let groups = palette::groups(&bookmarks, &history);
@@ -1426,7 +1424,7 @@ impl Workspace {
     fn refresh_history(&mut self, cx: &mut Context<Self>) {
         let search = self.history_search.read(cx).value().trim().to_string();
         self.history = match &self.active_db {
-            Some(db) => self.local.history(db, &search, HISTORY_LIMIT),
+            Some(db) => self.data.local.history(db, &search, HISTORY_LIMIT),
             None => Vec::new(),
         };
         cx.notify();
@@ -1454,8 +1452,7 @@ impl Workspace {
         let bookmark = tab
             .as_ref()
             .and_then(|t| t.read(cx).bookmark_id.clone())
-            .and_then(|id| self.local.bookmark(&id))
-            .filter(|b| bare_sql(&b.sql) == bare_sql(&run.sql));
+            .and_then(|id| self.data.bookmark_run(&id, &run.sql));
         if let Some(b) = bookmark {
             let record = metrics::Run {
                 bookmark_id: b.id,
@@ -1466,7 +1463,8 @@ impl Workspace {
                 error: error.clone(),
                 scheduled: false,
             };
-            self.metrics
+            self.data
+                .metrics
                 .record(&record, &settings::current(cx).monitoring, now_ms());
         }
         let entry = NewHistory {
@@ -1482,17 +1480,17 @@ impl Workspace {
                 error,
             },
         };
-        if let Err(e) = self.local.add_history(&entry) {
+        if let Err(e) = self.data.local.add_history(&entry) {
             eprintln!("could not record history: {e:#}");
         }
         if succeeded {
             if let Some(state) = self.conns.get(&run.user_id) {
                 let learned = learn(&run.sql, &state.schema);
                 let now = now_ms() / 1000;
-                if let Err(e) = self.local.record_usage(&db_id, &learned, now) {
+                if let Err(e) = self.data.local.record_usage(&db_id, &learned, now) {
                     eprintln!("could not record usage: {e:#}");
                 }
-                let usage = Arc::new(self.local.usage(&db_id, now));
+                let usage = Arc::new(self.data.local.usage(&db_id, now));
                 self.usage.insert(db_id.clone(), usage.clone());
                 // Related rows (foreign keys, most used first) and UPDATE / DELETE
                 // statements in the result's context menu.
@@ -1501,6 +1499,7 @@ impl Workspace {
                     let mut links = related_links(&run.sql, &columns, &state.schema);
                     if links.len() > 1 {
                         let bookmarked: Vec<_> = self
+                            .data
                             .local
                             .bookmarks_for(Some(&db_id))
                             .iter()
@@ -1514,8 +1513,8 @@ impl Workspace {
                 }
                 self.sync_assist_for_db(&db_id);
             }
-            let runs = self.local.runs(&db_id, &fp);
-            let hint = (runs >= BOOKMARK_HINT_RUNS && !self.local.is_bookmarked(&db_id, &fp))
+            let runs = self.data.local.runs(&db_id, &fp);
+            let hint = (runs >= BOOKMARK_HINT_RUNS && !self.data.local.is_bookmarked(&db_id, &fp))
                 .then_some(runs);
             if let Some(tab) = tab {
                 tab.update(cx, |t, cx| {
@@ -1533,7 +1532,7 @@ impl Workspace {
         if let Some(u) = self.usage.get(db_id) {
             return u.clone();
         }
-        let u = Arc::new(self.local.usage(db_id, now_ms() / 1000));
+        let u = Arc::new(self.data.local.usage(db_id, now_ms() / 1000));
         self.usage.insert(db_id.to_string(), u.clone());
         u
     }
@@ -1570,7 +1569,8 @@ impl Workspace {
 
     fn sync_assist_for_db(&mut self, db_id: &str) {
         let users: Vec<String> = self
-            .store
+            .data
+            .profiles
             .database(db_id)
             .into_iter()
             .flat_map(|db| &db.users)
@@ -1591,7 +1591,7 @@ impl Workspace {
         let Some(ix) = state.schema.resolve(Some(&table.schema), &table.name) else {
             return Vec::new();
         };
-        let patterns = self.local.patterns(db, 200);
+        let patterns = self.data.local.patterns(db, 200);
         suggest_for_table(ix, &state.schema, &patterns)
     }
 
@@ -1608,14 +1608,14 @@ impl Workspace {
             Some(state) => state.id,
             None => ConnId(self.next_id()),
         };
-        let password = self.store.password(user_id);
-        let ssh = self.store.ssh_target(&db);
+        let password = self.data.profiles.password(user_id);
+        let ssh = self.data.profiles.ssh_target(&db);
         // Show (and complete against) the cached schema until the server answers.
         let schema = match self.conns.get(user_id) {
             Some(state) => state.schema.clone(),
             None => self.schema_index(
                 user_id,
-                self.local.cached_schema(user_id).unwrap_or_default(),
+                self.data.local.cached_schema(user_id).unwrap_or_default(),
             ),
         };
         self.conns.insert(
@@ -1656,7 +1656,7 @@ impl Workspace {
         }
         self.active_db = Some(db_id);
         self.active_user = Some(user_id.clone());
-        self.local.set_setting(LAST_USER_SETTING, &user_id);
+        self.data.local.set_setting(LAST_USER_SETTING, &user_id);
         self.assign_active_tab(&user_id, window, cx);
         self.refresh_history(cx);
         cx.notify();
@@ -1665,7 +1665,7 @@ impl Workspace {
     /// Switches to a database with a user that is already connected, else its first
     /// user. A database without users asks for one.
     fn select_database(&mut self, db_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(db) = self.store.database(&db_id) else {
+        let Some(db) = self.data.profiles.database(&db_id) else {
             return;
         };
         let user = db
@@ -1773,7 +1773,7 @@ impl Workspace {
     ) {
         let db = db_id
             .as_deref()
-            .and_then(|id| self.store.database(id))
+            .and_then(|id| self.data.profiles.database(id))
             .cloned();
         let user = db
             .as_ref()
@@ -1845,7 +1845,7 @@ impl Workspace {
         } = output;
         let db_id = database.id.clone();
         let target_changed = ssh_secret.is_some()
-            || self.store.database(&db_id).is_some_and(|old| {
+            || self.data.profiles.database(&db_id).is_some_and(|old| {
                 (
                     old.driver,
                     &old.host,
@@ -1862,14 +1862,14 @@ impl Workspace {
                     &database.ssh,
                 )
             });
-        let mut result = self.store.upsert_database(database);
+        let mut result = self.data.profiles.upsert_database(database);
         if let Some(secret) = ssh_secret {
-            self.store.set_ssh_secret(&db_id, secret);
+            self.data.profiles.set_ssh_secret(&db_id, secret);
         }
         let user_id = user.map(|(user, password)| {
             let id = user.id.clone();
             result = std::mem::replace(&mut result, Ok(()))
-                .and_then(|_| self.store.upsert_user(&db_id, user, password));
+                .and_then(|_| self.data.profiles.upsert_user(&db_id, user, password));
             id
         });
         if let Err(e) = result {
@@ -1882,7 +1882,8 @@ impl Workspace {
         // working; the engine replaces the old pool.
         if target_changed {
             let open: Vec<String> = self
-                .store
+                .data
+                .profiles
                 .database(&db_id)
                 .into_iter()
                 .flat_map(|db| &db.users)
@@ -1953,7 +1954,7 @@ impl Workspace {
             Event::Schema { conn, result } => match result {
                 Ok(info) => {
                     if let Some(user_id) = self.conn_users.get(&conn).cloned() {
-                        if let Err(e) = self.local.save_schema(&user_id, &info) {
+                        if let Err(e) = self.data.local.save_schema(&user_id, &info) {
                             eprintln!("could not cache schema: {e:#}");
                         }
                         let schema = self.schema_index(&user_id, info);
@@ -2279,6 +2280,7 @@ impl Workspace {
         };
         let on = !self.is_favorite(table);
         if let Err(e) = self
+            .data
             .local
             .set_favorite(&db_id, &table.schema, &table.name, on)
         {
@@ -2731,7 +2733,8 @@ impl Workspace {
 
     fn save_sidebar_width(&mut self, width: f32) {
         self.sidebar_width = width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
-        self.local
+        self.data
+            .local
             .set_setting(SIDEBAR_WIDTH_SETTING, &self.sidebar_width.to_string());
     }
 
@@ -2756,7 +2759,7 @@ impl Workspace {
         self.favorites = self
             .active_db
             .as_deref()
-            .map(|db| self.local.favorites(db))
+            .map(|db| self.data.local.favorites(db))
             .unwrap_or_default();
         self.sidebar_rows = self.build_sidebar_rows(&search);
         if let Some((schema, table)) = self.reveal.take() {
@@ -2850,7 +2853,7 @@ impl Workspace {
     fn render_bookmarks_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let search = self.bookmark_search.read(cx).value().trim().to_lowercase();
-        let all: Vec<Bookmark> = self.local.bookmarks_for(self.active_db.as_deref());
+        let all: Vec<Bookmark> = self.data.local.bookmarks_for(self.active_db.as_deref());
         let total = all.len();
         let bookmarks: Vec<Bookmark> = all
             .into_iter()
@@ -3185,7 +3188,8 @@ impl Workspace {
         let active_user = self.active_user.clone();
 
         let databases: Vec<(String, String)> = self
-            .store
+            .data
+            .profiles
             .databases
             .iter()
             .map(|d| (d.id.clone(), d.display_name()))

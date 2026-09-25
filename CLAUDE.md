@@ -12,6 +12,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/assist`: SQL logic without UI (lexer, analysis, completion, filters); put
   testable logic here
 - `crates/tunnel`: SSH tunnels
+- `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`,
+  `metrics.db`, `settings.json`)
 - `crates/app`: the GPUI app
 
 ## Commands

@@ -7960,17 +7960,12 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
- "dirs 7.0.0",
  "gpui-kit",
- "keyring",
  "lsp-types",
- "rusqlite",
- "serde",
- "serde_json",
  "tangul-assist",
  "tangul-core",
+ "tangul-data",
  "tangul-engine",
- "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
@@ -7985,6 +7980,21 @@ name = "tangul-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "tangul-data"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 7.0.0",
+ "keyring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tangul-assist",
+ "tangul-core",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
