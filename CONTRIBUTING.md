@@ -73,5 +73,6 @@ when started by hand (Actions → CI → Run workflow).
 The app icon is `packaging/macos/tangul.icon`, an Icon Composer document (open it with
 Icon Composer from Xcode 26). macOS draws the glass and the light/dark background itself.
 `scripts/bundle-macos.sh` compiles it with `actool`; without Xcode 26 it falls back to
-`packaging/macos/icon.png`. The bars' source SVGs are in `packaging/macos/icon-src/`,
-and `packaging/macos/tangul-mono.icon` is a grey alternative.
+`packaging/macos/icon.png`. The icon has three flat layers, the two strands of a helix
+and a bar, with no highlights of their own; their source SVGs are in
+`packaging/macos/icon-src/`. `packaging/macos/tangul-mono.icon` is a grey alternative.
