@@ -33,48 +33,8 @@
             }
           ],
           "hidden": false,
-          "image-name": "yellow.png",
-          "name": "yellow",
-          "opacity": 1,
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        },
-        {
-          "blend-mode": "normal",
-          "fill-specializations": [
-            {
-              "value": {
-                "solid": "srgb:0.28235,0.28235,0.29020,1.00000"
-              }
-            },
-            {
-              "appearance": "dark",
-              "value": {
-                "solid": "srgb:0.92549,0.90980,0.87451,1.00000"
-              }
-            }
-          ],
-          "glass-specializations": [
-            {
-              "value": true
-            },
-            {
-              "appearance": "dark",
-              "value": true
-            },
-            {
-              "appearance": "tinted",
-              "value": true
-            }
-          ],
-          "hidden": false,
-          "image-name": "orange.png",
-          "name": "orange",
+          "image-name": "red.png",
+          "name": "red",
           "opacity": 1,
           "position": {
             "scale": 1,
@@ -113,8 +73,48 @@
             }
           ],
           "hidden": false,
-          "image-name": "blue.png",
-          "name": "blue",
+          "image-name": "grey.png",
+          "name": "grey",
+          "opacity": 1,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "blend-mode": "normal",
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.55686,0.55686,0.57647,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass-specializations": [
+            {
+              "value": true
+            },
+            {
+              "appearance": "dark",
+              "value": true
+            },
+            {
+              "appearance": "tinted",
+              "value": true
+            }
+          ],
+          "hidden": false,
+          "image-name": "bar.png",
+          "name": "bar",
           "opacity": 1,
           "position": {
             "scale": 1,
@@ -126,7 +126,7 @@
         }
       ],
       "lighting": "combined",
-      "name": "Asterisk",
+      "name": "Helix",
       "shadow": {
         "kind": "neutral",
         "opacity": 0.5
