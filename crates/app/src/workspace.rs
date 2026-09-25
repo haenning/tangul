@@ -160,6 +160,10 @@ enum SidebarRow {
     Table {
         table: TableInfo,
     },
+    /// Above the tree: a favorite table or view.
+    Favorite {
+        table: TableInfo,
+    },
     /// While searching: a group title, then the hits.
     Heading(SharedString),
     SchemaHit {
@@ -215,6 +219,8 @@ pub struct Workspace {
     /// Pending editor checks: request → (tab, edit generation).
     validations: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
     sidebar_rows: Vec<SidebarRow>,
+    /// Favorite tables and views of the active database as (schema, name).
+    favorites: Vec<(String, String)>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -302,6 +308,7 @@ impl Workspace {
             queries: HashMap::new(),
             validations: HashMap::new(),
             sidebar_rows: Vec::new(),
+            favorites: Vec::new(),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
             _pump: pump,
@@ -1716,6 +1723,25 @@ impl Workspace {
             return self.search_rows(&state.schema, search);
         }
         let mut rows = Vec::new();
+        let favorites: Vec<SidebarRow> = self
+            .favorites
+            .iter()
+            .filter_map(|(schema, name)| {
+                let ix = state.schema.resolve(Some(schema), name)?;
+                Some(SidebarRow::Favorite {
+                    table: state.schema.table(ix).clone(),
+                })
+            })
+            .collect();
+        if !favorites.is_empty() {
+            rows.push(SidebarRow::Heading("Favorites".into()));
+            rows.extend(favorites);
+            let title = match self.active_database().map(|db| db.driver) {
+                Some(DriverKind::Mysql) => "Databases",
+                _ => "Schemas",
+            };
+            rows.push(SidebarRow::Heading(title.into()));
+        }
         // Drivers return tables ordered by schema, then name.
         for tables in state.schema.tables().chunk_by(|a, b| a.schema == b.schema) {
             let schema: SharedString = tables[0].schema.clone().into();
@@ -1850,6 +1876,65 @@ impl Workspace {
         cx.notify();
     }
 
+    fn is_favorite(&self, table: &TableInfo) -> bool {
+        self.favorites
+            .iter()
+            .any(|(schema, name)| *schema == table.schema && *name == table.name)
+    }
+
+    fn toggle_favorite(&mut self, table: &TableInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(db_id) = self.active_db.clone() else {
+            return;
+        };
+        let on = !self.is_favorite(table);
+        if let Err(e) = self
+            .local
+            .set_favorite(&db_id, &table.schema, &table.name, on)
+        {
+            window.push_notification(
+                Notification::error(format!("Could not save favorite: {e:#}")),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Star toggling `table` as a favorite: filled and always shown for a favorite,
+    /// else only while `group` is hovered.
+    fn favorite_button(
+        &self,
+        ix: usize,
+        table: &TableInfo,
+        group: SharedString,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let favorite = self.is_favorite(table);
+        let (icon, tooltip) = if favorite {
+            (Lucide::StarFill, "Remove from favorites")
+        } else {
+            (Lucide::Star, "Add to favorites")
+        };
+        let table = table.clone();
+        div()
+            .when(!favorite, |d| {
+                d.invisible().group_hover(group, |s| s.visible())
+            })
+            .id(("table-favorite-wrap", ix))
+            // Keep the click from also opening the table.
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new(("table-favorite", ix))
+                    .icon(Icon::new(icon))
+                    .ghost()
+                    .xsmall()
+                    .tooltip(tooltip)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_favorite(&table, window, cx)
+                    })),
+            )
+    }
+
     fn render_sidebar_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let user_id = self.active_user.clone().unwrap_or_default();
@@ -1888,7 +1973,9 @@ impl Workspace {
             })
         };
 
-        match self.sidebar_rows[ix].clone() {
+        let row_kind = self.sidebar_rows[ix].clone();
+        let in_favorites = matches!(row_kind, SidebarRow::Favorite { .. });
+        match row_kind {
             SidebarRow::Schema { schema, expanded } => {
                 // A MySQL "schema" is a database.
                 let icon: Icon = match driver {
@@ -1937,7 +2024,7 @@ impl Workspace {
                     }))
                     .into_any_element()
             }
-            SidebarRow::Table { table } => {
+            SidebarRow::Table { table } | SidebarRow::Favorite { table } => {
                 let icon = match table.kind {
                     TableKind::Table => Icon::new(Lucide::Table),
                     TableKind::View => Icon::new(IconName::Eye),
@@ -1958,15 +2045,31 @@ impl Workspace {
                         let list = ws.read(cx).table_suggestions(&menu_table);
                         suggestions_menu(menu, &menu_table.name, list, &weak)
                     });
-                let revealed = self
-                    .revealed
-                    .as_ref()
-                    .is_some_and(|(s, t)| *s == table.schema && t.as_ref() == Some(&table.name));
-                row(2)
+                let revealed = !in_favorites
+                    && self.revealed.as_ref().is_some_and(|(s, t)| {
+                        *s == table.schema && t.as_ref() == Some(&table.name)
+                    });
+                let favorite = self.favorite_button(ix, &table, group.clone(), cx);
+                row(if in_favorites { 0 } else { 2 })
                     .when(revealed, |r| r.bg(theme.sidebar_accent))
                     .group(group.clone())
                     .child(icon.small().text_color(theme.muted_foreground))
-                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .map(|r| {
+                        if in_favorites {
+                            r.child(div().min_w_0().truncate().child(name)).child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(table.schema.clone()),
+                            )
+                        } else {
+                            r.child(div().flex_1().min_w_0().truncate().child(name))
+                        }
+                    })
+                    .child(favorite)
                     .child(
                         div()
                             .invisible()
@@ -2014,7 +2117,10 @@ impl Workspace {
                     TableKind::Table => Icon::new(Lucide::Table),
                     TableKind::View => Icon::new(IconName::Eye),
                 };
+                let group: SharedString = format!("table-hit-{ix}").into();
+                let favorite = self.favorite_button(ix, &table, group.clone(), cx);
                 row(0)
+                    .group(group)
                     .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(table.name.clone()))
                     .child(
@@ -2026,6 +2132,7 @@ impl Workspace {
                             .text_color(theme.muted_foreground)
                             .child(table.schema.clone()),
                     )
+                    .child(favorite)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.reveal(table.schema.clone().into(), Some(&table), window, cx)
                     }))
@@ -2163,6 +2270,11 @@ impl Workspace {
 
     fn render_schema_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let search = self.schema_search.read(cx).value().trim().to_string();
+        self.favorites = self
+            .active_db
+            .as_deref()
+            .map(|db| self.local.favorites(db))
+            .unwrap_or_default();
         self.sidebar_rows = self.build_sidebar_rows(&search);
         if let Some((schema, table)) = self.reveal.take() {
             let target = self.sidebar_rows.iter().position(|row| match row {
