@@ -2151,7 +2151,6 @@ impl Workspace {
                             r.child(div().flex_1().min_w_0().truncate().child(name))
                         }
                     })
-                    .child(favorite)
                     .child(
                         div()
                             .invisible()
@@ -2161,6 +2160,8 @@ impl Workspace {
                             .on_click(|_, _, cx| cx.stop_propagation())
                             .child(suggestions),
                     )
+                    // Rightmost, so a favorite's star lines up at the edge.
+                    .child(favorite)
                     .on_click({
                         let table = table.clone();
                         cx.listener(move |this, _, window, cx| this.open_table(&table, window, cx))
