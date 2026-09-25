@@ -1,6 +1,7 @@
 mod assets;
 mod bookmark_form;
 mod chart;
+mod column_filter;
 mod completion;
 mod connection_form;
 mod local;

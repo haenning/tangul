@@ -21,7 +21,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::analyze::statements;
 use rusdb_assist::chart::{ChartData, ChartView, chart_data};
+use rusdb_assist::columns::ColumnFacts;
 use rusdb_assist::lexer::tokenize;
+use rusdb_assist::refine::{ColumnFilter, Refine, Sort, refinable, refined_sql};
 use rusdb_assist::{edit::RowEdit, related::RelatedLink};
 use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
 use rusdb_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
@@ -37,7 +39,8 @@ const EDITOR_HEIGHT: f32 = 240.;
 const EDITOR_SNAP_HIDE: f32 = 60.;
 
 use crate::{
-    BookmarkQuery, RunQuery, SaveFile, assets::Lucide, chart::ResultChart, results::ResultsDelegate,
+    BookmarkQuery, RunQuery, SaveFile, assets::Lucide, chart::ResultChart,
+    column_filter::FilterPanel, results::ResultsDelegate,
 };
 
 /// Connection a tab runs against.
@@ -66,6 +69,9 @@ pub enum TabEvent {
     /// Open SQL for the selected rows in a new tab on this tab's connection, without
     /// running it (UPDATE / DELETE statements).
     OpenSql { title: String, sql: String },
+    /// Run a filtered / sorted version of the last result (`append: false`) or its
+    /// next page (`append: true`). Not a run of its own.
+    Refine { sql: String, append: bool },
 }
 
 enum Status {
@@ -122,6 +128,13 @@ pub struct QueryTab {
     smooth_lines: bool,
     /// Set for a file tab (no SQL, no results).
     file: Option<FileTab>,
+    /// The last run's statement, when its result can be filtered, sorted and paged.
+    base_sql: Option<String>,
+    /// While a derived query runs (see [`TabEvent::Refine`]): whether it appends a
+    /// page.
+    derived: Option<bool>,
+    /// Loading a further page failed (the loaded rows stay).
+    page_error: Option<SharedString>,
 }
 
 /// Why there is no chart before a result is complete.
@@ -160,11 +173,14 @@ impl QueryTab {
                 this.schedule_validation(cx);
             }
         });
-        let delegate = ResultsDelegate::new(cx.weak_entity());
+        let tab = cx.weak_entity();
+        let filter_panel = cx.new(|cx| FilterPanel::new(tab, window, cx));
+        let delegate = ResultsDelegate::new(cx.weak_entity(), filter_panel);
         let table = cx.new(|cx| {
             TableState::new(delegate, window, cx)
                 .sortable(false)
                 .col_movable(false)
+                .col_selectable(false)
                 // Rows are selected by the delegate (multi-selection).
                 .row_selectable(false)
         });
@@ -196,6 +212,9 @@ impl QueryTab {
             chart_view: None,
             smooth_lines: false,
             file: None,
+            base_sql: None,
+            derived: None,
+            page_error: None,
         }
     }
 
@@ -324,16 +343,20 @@ impl QueryTab {
 
     /// What the result rows' context menu offers besides copying: foreign-key links
     /// (most used first) and UPDATE / DELETE statements.
+    /// Also takes what the schema says about the result's columns (keys, types).
     pub fn set_row_actions(
         &mut self,
         links: Vec<RelatedLink>,
         edit: Option<RowEdit>,
+        facts: Vec<Option<ColumnFacts>>,
         cx: &mut Context<Self>,
     ) {
-        self.table.update(cx, |t, _| {
+        self.table.update(cx, |t, cx| {
             let d = t.delegate_mut();
             d.related = links;
             d.edit = edit;
+            d.facts = facts;
+            cx.notify();
         });
     }
 
@@ -425,12 +448,122 @@ impl QueryTab {
         self.truncated = false;
         self.last_rows = None;
         self.chart = Err(NO_RESULT.into());
+        self.base_sql = refinable(sql);
+        self.derived = None;
+        self.page_error = None;
+        let refinable = self.base_sql.is_some();
         self.table.update(cx, |t, cx| {
-            t.delegate_mut().clear();
+            let d = t.delegate_mut();
+            d.clear();
+            d.refine = Refine::default();
+            d.refinable = refinable;
             t.refresh(cx);
             cx.notify();
         });
         cx.notify();
+    }
+
+    /// Called by the workspace once a derived query (filter, sort, next page) was
+    /// sent. A new filter or sort replaces the rows; a page adds to them.
+    pub fn started_derived(&mut self, query: QueryId, append: bool, cx: &mut Context<Self>) {
+        self.running = Some(query);
+        self.derived = Some(append);
+        self.page_error = None;
+        self.truncated = false;
+        if !append {
+            self.status = Status::Running;
+            self.table.update(cx, |t, cx| {
+                t.delegate_mut().clear_rows();
+                cx.notify();
+            });
+        }
+        cx.notify();
+    }
+
+    /// Filters `column` (or removes its filter) and runs the result again.
+    pub fn set_filter(
+        &mut self,
+        column: usize,
+        filter: Option<ColumnFilter>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.running.is_some() {
+            return;
+        }
+        self.table.update(cx, |t, _| {
+            let d = t.delegate_mut();
+            match filter {
+                Some(filter) => d.refine.set_filter(filter),
+                None => d.refine.remove_filter(column),
+            }
+            d.close_filter();
+        });
+        self.run_refined(cx);
+    }
+
+    pub fn set_sort(&mut self, sort: Option<Sort>, cx: &mut Context<Self>) {
+        if self.running.is_some() {
+            return;
+        }
+        self.table.update(cx, |t, _| {
+            let d = t.delegate_mut();
+            d.refine.sort = sort;
+            d.close_filter();
+        });
+        self.run_refined(cx);
+    }
+
+    fn clear_refine(&mut self, cx: &mut Context<Self>) {
+        if self.running.is_some() {
+            return;
+        }
+        self.table
+            .update(cx, |t, _| t.delegate_mut().refine = Refine::default());
+        self.run_refined(cx);
+    }
+
+    /// Runs the last statement again with the current filters and sort, from the
+    /// first row.
+    fn run_refined(&mut self, cx: &mut Context<Self>) {
+        if let Some(sql) = self.refined_sql(0, cx) {
+            cx.emit(TabEvent::Refine { sql, append: false });
+        }
+        cx.notify();
+    }
+
+    /// The next page, when the table is scrolled to the end of the loaded rows.
+    pub fn load_more(&mut self, cx: &mut Context<Self>) {
+        let d = self.table.read(cx).delegate();
+        if !d.more || self.page_error.is_some() {
+            return;
+        }
+        let offset = d.result.row_count();
+        if let Some(sql) = self.refined_sql(offset, cx) {
+            cx.emit(TabEvent::Refine { sql, append: true });
+        }
+    }
+
+    /// The last statement filtered, sorted and cut to a page from `offset`. One row
+    /// more than a page is asked for; the engine's row limit drops it and reports
+    /// the result truncated, which says there are more.
+    fn refined_sql(&self, offset: usize, cx: &App) -> Option<String> {
+        if self.running.is_some() {
+            return None;
+        }
+        let base = self.base_sql.as_ref()?;
+        let driver = self.conn.as_ref()?.driver;
+        let d = self.table.read(cx).delegate();
+        let columns = d.column_names();
+        let kinds: Vec<_> = (0..columns.len()).map(|c| d.kind(c)).collect();
+        Some(refined_sql(
+            base,
+            &columns,
+            &kinds,
+            &d.refine,
+            driver,
+            offset,
+            rusdb_engine::ROW_LIMIT + 1,
+        ))
     }
 
     fn cancel(&mut self, _: &ClickEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -441,6 +574,10 @@ impl QueryTab {
 
     pub fn on_query_event(&mut self, event: QueryEvent, cx: &mut Context<Self>) {
         match event {
+            // A derived query returns the same columns: keep them (widths, keys).
+            QueryEvent::Exec(ExecEvent::ResultStart(cols))
+                if self.derived.is_some()
+                    && cols.len() == self.table.read(cx).delegate().result.columns().len() => {}
             QueryEvent::Exec(ExecEvent::ResultStart(cols)) => {
                 // Multiple statements: the last result set is shown.
                 self.has_result_set = true;
@@ -466,11 +603,29 @@ impl QueryTab {
                 in_transaction,
                 cancelled,
             } => {
-                if let (Some(message), Some(position)) = (&error, error_position) {
+                let derived = self.derived.take();
+                // Positions of a derived query are in the wrapped SQL, not the editor.
+                if derived.is_none()
+                    && let (Some(message), Some(position)) = (&error, error_position)
+                {
                     self.set_error_marker(Some((position, message.clone())), cx);
                 }
                 self.running = None;
                 self.in_transaction = in_transaction;
+                let more = self.truncated && self.base_sql.is_some() && error.is_none();
+                self.table.update(cx, |t, cx| {
+                    t.delegate_mut().more = more;
+                    cx.notify();
+                });
+                if derived == Some(true) {
+                    // A failed page keeps the rows already loaded.
+                    self.page_error = error.map(Into::into);
+                    if let Status::Done { elapsed: e, .. } = &mut self.status {
+                        *e = elapsed;
+                    }
+                    cx.notify();
+                    return;
+                }
                 if error.is_none() && self.has_result_set {
                     let sql = self.run_origin.as_ref().map_or("", |(_, sql)| sql.as_str());
                     let result = &self.table.read(cx).delegate().result;
@@ -774,7 +929,93 @@ impl QueryTab {
             .into_any_element()
     }
 
+    /// The results, with the active filters and sort above them.
     fn render_results(&self, cx: &mut Context<Self>) -> AnyElement {
+        let chips = self.render_refine_bar(cx);
+        let results = self.render_result_body(cx);
+        match chips {
+            Some(chips) => v_flex()
+                .size_full()
+                .child(chips)
+                .child(div().flex_1().min_h_0().child(results))
+                .into_any_element(),
+            None => results,
+        }
+    }
+
+    /// One chip per filter and for the sort; clicking a chip's ✕ removes it.
+    fn render_refine_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let d = self.table.read(cx).delegate();
+        if d.refine.is_empty() || matches!(self.status, Status::Idle) {
+            return None;
+        }
+        let names = d.column_names();
+        let name = |c: usize| names.get(c).cloned().unwrap_or_default();
+        let sort = d.refine.sort.map(|sort| {
+            let dir = if sort.descending { "↓" } else { "↑" };
+            let label = format!("sorted by {} {dir}", name(sort.column));
+            (SharedString::from(label), None)
+        });
+        let chips = d
+            .refine
+            .filters
+            .iter()
+            .map(|f| (f.describe(&name(f.column)).into(), Some(f.column)))
+            .chain(sort);
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .px_2()
+                .py_1()
+                .gap_1()
+                .flex_wrap()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .text_xs()
+                .child(
+                    Icon::new(Lucide::Funnel)
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                )
+                .children(chips.enumerate().map(
+                    |(i, (label, filter)): (usize, (SharedString, Option<usize>))| {
+                        h_flex()
+                            .pl_2()
+                            .gap_0p5()
+                            .items_center()
+                            .rounded(theme.radius)
+                            .bg(theme.secondary)
+                            .child(label)
+                            .child(
+                                Button::new(("refine-chip", i))
+                                    .icon(IconName::Close)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip(if filter.is_some() {
+                                        "Remove filter"
+                                    } else {
+                                        "Remove sort"
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| match filter {
+                                        Some(column) => this.set_filter(column, None, cx),
+                                        None => this.set_sort(None, cx),
+                                    })),
+                            )
+                    },
+                ))
+                .child(
+                    Button::new("refine-clear")
+                        .label("Clear all")
+                        .xsmall()
+                        .ghost()
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_refine(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_result_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         match &self.status {
             Status::Done {
@@ -817,7 +1058,12 @@ impl QueryTab {
 
     /// Timing and row count of the last run, shown in the workspace status bar.
     pub fn status_text(&self, cx: &App) -> SharedString {
-        let rows = self.table.read(cx).delegate().result.row_count();
+        let d = self.table.read(cx).delegate();
+        let rows = d.result.row_count();
+        let (more, filtered) = (d.more, !d.refine.is_empty());
+        if self.derived == Some(true) {
+            return format!("{rows} rows · loading more…").into();
+        }
         match &self.status {
             Status::Idle => "".into(),
             Status::Running => format!("Running… {rows} rows").into(),
@@ -829,10 +1075,17 @@ impl QueryTab {
                     let noun = if rows == 1 { "row" } else { "rows" };
                     s = format!("{rows} {noun} · {s}");
                 }
+                if filtered {
+                    s.push_str(" · filtered");
+                }
                 if *cancelled {
                     s.push_str(" · cancelled");
                 }
-                if self.truncated {
+                if let Some(e) = &self.page_error {
+                    s.push_str(&format!(" · loading more failed: {e}"));
+                } else if more {
+                    s.push_str(" · scroll for more");
+                } else if self.truncated {
                     s.push_str(&format!(" · limited to {} rows", rusdb_engine::ROW_LIMIT));
                 }
                 s.into()
