@@ -29,6 +29,8 @@ gpui_kit::assets::icon_assets!(
         Pin,
         RotateCcwClock,
         Sparkles,
+        Star,
+        StarFill,
         Table
     ]
 );

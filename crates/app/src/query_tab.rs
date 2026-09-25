@@ -39,8 +39,12 @@ const EDITOR_HEIGHT: f32 = 240.;
 const EDITOR_SNAP_HIDE: f32 = 60.;
 
 use crate::{
-    BookmarkQuery, RunQuery, SaveFile, assets::Lucide, chart::ResultChart,
-    column_filter::FilterPanel, results::ResultsDelegate,
+    BookmarkQuery, RunQuery, SaveFile,
+    assets::Lucide,
+    chart::{self, ResultChart},
+    column_filter::FilterPanel,
+    results::ResultsDelegate,
+    settings,
 };
 
 /// Connection a tab runs against.
@@ -285,7 +289,7 @@ impl QueryTab {
             );
             return false;
         }
-        file.problem = crate::settings::problem(&text).map(Into::into);
+        file.problem = settings::problem(&text).map(Into::into);
         file.saved = text;
         cx.notify();
         true
@@ -901,11 +905,17 @@ impl QueryTab {
                         .child(s.name.clone())
                 }))
         });
+        let settings = settings::current(cx);
+        let label_size = settings.chart_font_size();
         v_flex()
             .size_full()
             .p_3()
             .gap_2()
             .text_xs()
+            .when_some(label_size, |this, size| this.text_size(px(size)))
+            .when_some(settings.chart.font.family(), |this, family| {
+                this.font_family(SharedString::from(family.to_string()))
+            })
             .text_color(theme.muted_foreground)
             .when(curve_switch.is_some() || legend.is_some(), |this| {
                 this.child(
@@ -928,6 +938,7 @@ impl QueryTab {
                 style,
                 colors,
                 self.smooth_lines,
+                label_size.unwrap_or(chart::LABEL_SIZE),
             )))
             .into_any_element()
     }
