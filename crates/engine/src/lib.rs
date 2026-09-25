@@ -429,7 +429,34 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
             },
         )
     };
-    let result = lease.session.execute(&sql, ROW_LIMIT, &mut sink).await;
+    // The server stops a statement at the pool's time limit, too; this also covers
+    // one it doesn't (SQLite, a server that ignored the setting).
+    let limit = pool.statement_timeout();
+    let cancel = lease.session.cancel_handle();
+    let mut timed_out = false;
+    let mut result = {
+        let exec = lease.session.execute(&sql, ROW_LIMIT, &mut sink);
+        tokio::pin!(exec);
+        match limit {
+            None => exec.await,
+            Some(limit) => tokio::select! {
+                result = &mut exec => result,
+                _ = tokio::time::sleep(limit) => {
+                    timed_out = true;
+                    if let Err(e) = cancel.cancel().await {
+                        eprintln!("cancel after time limit failed: {e:#}");
+                    }
+                    exec.await
+                }
+            },
+        }
+    };
+    if let (true, Some(limit)) = (timed_out, limit) {
+        result = Err(anyhow::anyhow!(
+            "stopped after the time limit of {}s",
+            limit.as_secs_f64()
+        ));
+    }
 
     let cancelled = running
         .lock()

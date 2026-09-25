@@ -25,6 +25,7 @@ fn config(var: &str) -> Option<ConnectConfig> {
         password: (!password.is_empty()).then(|| password.into()),
         database: database.into(),
         tls: TlsMode::Prefer,
+        statement_timeout: None,
     })
 }
 
@@ -265,6 +266,7 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
     let drop = match driver {
         DriverKind::Postgres => "DROP SCHEMA IF EXISTS rusdb_fk_test CASCADE",
         DriverKind::Mysql => "DROP SCHEMA IF EXISTS rusdb_fk_test",
+        DriverKind::Sqlite => unreachable!("no schemas to create in a read-only file"),
     };
     let mut h = Harness::connect(driver, cfg).await;
     let tab = TabId(1);
@@ -460,6 +462,7 @@ async fn ssh_tunnel() {
         password: None,
         database: "postgres".into(),
         tls: TlsMode::Disable,
+        statement_timeout: None,
     };
     let (engine, events) = rusdb_engine::start();
     let connect = |ssh: &SshTarget| Command::Connect {

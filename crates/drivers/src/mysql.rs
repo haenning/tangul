@@ -38,10 +38,23 @@ fn opts(cfg: &ConnectConfig, tls: bool) -> Opts {
     b.into()
 }
 
+/// MySQL limits `SELECT`s by `max_execution_time` (ms); MariaDB limits every
+/// statement by `max_statement_time` (seconds).
+async fn set_statement_timeout(conn: &mut Conn, limit: std::time::Duration) -> Result<()> {
+    let mysql = format!("SET SESSION max_execution_time = {}", limit.as_millis());
+    if conn.query_drop(mysql).await.is_ok() {
+        return Ok(());
+    }
+    let mariadb = format!("SET SESSION max_statement_time = {}", limit.as_secs_f64());
+    conn.query_drop(mariadb)
+        .await
+        .map_err(|e| anyhow!("could not limit the statement time: {e}"))
+}
+
 #[async_trait]
 impl Driver for MysqlDriver {
     async fn connect(&self, cfg: &ConnectConfig) -> Result<Box<dyn Session>> {
-        let conn = match cfg.tls {
+        let mut conn = match cfg.tls {
             TlsMode::Disable => Conn::new(opts(cfg, false)).await?,
             TlsMode::Require => Conn::new(opts(cfg, true)).await?,
             // mysql_async has no native "prefer": try TLS first, fall back to plain.
@@ -50,6 +63,9 @@ impl Driver for MysqlDriver {
                 Err(_) => Conn::new(opts(cfg, false)).await?,
             },
         };
+        if let Some(limit) = cfg.statement_timeout {
+            set_statement_timeout(&mut conn, limit).await?;
+        }
         let cancel = Arc::new(MysqlCancel {
             opts: conn.opts().clone(),
             conn_id: conn.id(),

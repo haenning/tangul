@@ -46,6 +46,10 @@ impl Driver for PgDriver {
         if !cfg.database.is_empty() {
             pg.dbname(&cfg.database);
         }
+        if let Some(limit) = cfg.statement_timeout {
+            // Set at startup, so no statement on this session can outlast it.
+            pg.options(format!("-c statement_timeout={}", limit.as_millis()));
+        }
 
         let tls = tls_connector()?;
         let (client, connection) = pg.connect(tls.clone()).await.map_err(pg_error)?;

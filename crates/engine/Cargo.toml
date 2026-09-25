@@ -13,6 +13,7 @@ rusdb-tunnel = { version = "0.1.0", path = "../tunnel" }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 
 [dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 [lints]

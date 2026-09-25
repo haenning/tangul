@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub enum DriverKind {
     Postgres,
     Mysql,
+    /// Only the app's own data (bookmark metrics), read-only; not for profiles.
+    Sqlite,
 }
 
 impl DriverKind {
@@ -12,6 +14,7 @@ impl DriverKind {
         match self {
             DriverKind::Postgres => 5432,
             DriverKind::Mysql => 3306,
+            DriverKind::Sqlite => 0,
         }
     }
 
@@ -19,6 +22,7 @@ impl DriverKind {
         match self {
             DriverKind::Postgres => "PostgreSQL",
             DriverKind::Mysql => "MySQL",
+            DriverKind::Sqlite => "SQLite",
         }
     }
 }
@@ -144,6 +148,8 @@ pub struct ConnectConfig {
     pub password: Option<String>,
     pub database: String,
     pub tls: TlsMode,
+    /// Statements running longer are stopped by the server (and the engine).
+    pub statement_timeout: Option<std::time::Duration>,
 }
 
 impl ConnectConfig {
@@ -155,6 +161,7 @@ impl ConnectConfig {
             password,
             database: db.database.clone(),
             tls: db.tls,
+            statement_timeout: None,
         }
     }
 }

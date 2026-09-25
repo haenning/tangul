@@ -12,6 +12,7 @@ mysql_async = { version = "0.37.1", default-features = false, features = ["minim
 native-tls = "0.2.18"
 postgres-native-tls = "0.5.3"
 rusdb-core = { version = "0.1.0", path = "../core" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio = { workspace = true, features = ["rt", "net", "macros", "rt-multi-thread"] }
 tokio-postgres = "0.7.18"
 

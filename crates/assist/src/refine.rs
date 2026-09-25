@@ -326,6 +326,8 @@ fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, driver: DriverKind) 
         let (text, op) = match driver {
             DriverKind::Postgres => (format!("CAST({col} AS text)"), "ILIKE"),
             DriverKind::Mysql => (format!("CAST({col} AS CHAR)"), "LIKE"),
+            // SQLite's LIKE ignores ASCII case already.
+            DriverKind::Sqlite => (format!("CAST({col} AS TEXT)"), "LIKE"),
         };
         let not = if not { "NOT " } else { "" };
         format!(
@@ -362,6 +364,7 @@ fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, driver: DriverKind) 
                     match driver {
                         DriverKind::Postgres => format!("{col} < CAST({lit} AS date) + 1"),
                         DriverKind::Mysql => format!("{col} < {lit} + INTERVAL 1 DAY"),
+                        DriverKind::Sqlite => format!("{col} < date({lit}, '+1 day')"),
                     }
                 } else {
                     format!("{col} <= {lit}")

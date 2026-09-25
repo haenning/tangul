@@ -55,6 +55,7 @@ impl SchemaIndex {
         match driver {
             DriverKind::Postgres => Some("public".into()),
             DriverKind::Mysql => (!database.is_empty()).then(|| database.to_string()),
+            DriverKind::Sqlite => Some("main".into()),
         }
     }
 
@@ -196,7 +197,7 @@ pub fn quote_ident(driver: DriverKind, ident: &str) -> String {
                 || c.is_ascii_digit()
                 || match driver {
                     DriverKind::Postgres => c.is_ascii_lowercase(),
-                    DriverKind::Mysql => c.is_ascii_alphabetic(),
+                    DriverKind::Mysql | DriverKind::Sqlite => c.is_ascii_alphabetic(),
                 }
         })
         && !is_reserved(ident)
@@ -205,7 +206,9 @@ pub fn quote_ident(driver: DriverKind, ident: &str) -> String {
         return ident.to_string();
     }
     match driver {
-        DriverKind::Postgres => format!("\"{}\"", ident.replace('"', "\"\"")),
+        DriverKind::Postgres | DriverKind::Sqlite => {
+            format!("\"{}\"", ident.replace('"', "\"\""))
+        }
         DriverKind::Mysql => format!("`{}`", ident.replace('`', "``")),
     }
 }

@@ -75,6 +75,11 @@ impl Pool {
         }
     }
 
+    /// Longest a statement may run on this pool's sessions.
+    pub fn statement_timeout(&self) -> Option<Duration> {
+        self.cfg.statement_timeout
+    }
+
     /// Returns the tab's pinned session, an idle one, or opens a new one. Waits if
     /// all slots are in use.
     pub async fn acquire(&self, tab: Option<TabId>) -> Result<Lease> {

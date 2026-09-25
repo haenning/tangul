@@ -3,6 +3,7 @@
 
 mod mysql;
 mod postgres;
+mod sqlite;
 
 use std::sync::Arc;
 
@@ -160,6 +161,7 @@ pub fn driver_for(kind: DriverKind) -> Arc<dyn Driver> {
     match kind {
         DriverKind::Postgres => Arc::new(postgres::PgDriver),
         DriverKind::Mysql => Arc::new(mysql::MysqlDriver),
+        DriverKind::Sqlite => Arc::new(sqlite::SqliteDriver),
     }
 }
 
