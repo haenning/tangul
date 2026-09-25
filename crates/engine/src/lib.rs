@@ -12,11 +12,13 @@ use std::{
 
 pub use pool::PoolStats;
 use pool::{Lease, Pool};
-use tangul_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, SshTarget, TabId};
+use tangul_core::{
+    ConnId, ConnectConfig, DriverKind, QueryId, ResultSet, SchemaInfo, SshTarget, TabId,
+};
 pub use tangul_drivers::ExecEvent;
 use tangul_drivers::{CancelHandle, SqlError, driver_for};
 use tangul_tunnel::{HostKeyError, Tunnel};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Max rows kept per result set. TODO(fetch-more): make configurable / page on demand.
 pub const ROW_LIMIT: usize = 10_000;
@@ -56,6 +58,15 @@ pub enum Command {
         read_only: bool,
         /// Stop the statement after this long (the server, and the engine too).
         timeout: Option<Duration>,
+    },
+    /// Runs `sql` on a spare session (never a tab's) and answers on `reply` with the
+    /// whole result instead of streaming events. See [`EngineHandle::query`].
+    Query {
+        query: QueryId,
+        conn: ConnId,
+        sql: String,
+        options: QueryOptions,
+        reply: oneshot::Sender<Result<QueryOutput, QueryError>>,
     },
     Cancel {
         query: QueryId,
@@ -137,6 +148,54 @@ pub enum QueryEvent {
     },
 }
 
+/// How a [`Command::Query`] runs.
+#[derive(Debug, Clone)]
+pub struct QueryOptions {
+    /// The server refuses writes.
+    pub read_only: bool,
+    /// Stop the statement after this long (the server, and the engine too).
+    pub timeout: Option<Duration>,
+    /// Rows kept per result set; the rest are dropped and `truncated` is set.
+    pub row_limit: usize,
+}
+
+impl Default for QueryOptions {
+    fn default() -> Self {
+        Self {
+            read_only: true,
+            timeout: None,
+            row_limit: ROW_LIMIT,
+        }
+    }
+}
+
+/// The whole result of a [`Command::Query`].
+#[derive(Debug, Default)]
+pub struct QueryOutput {
+    /// One per statement that returned rows.
+    pub results: Vec<ResultSet>,
+    /// Rows the last statement returned or changed, as the server reported them.
+    pub rows: Option<u64>,
+    /// A result set had more rows than `row_limit`.
+    pub truncated: bool,
+    pub elapsed: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryError {
+    pub message: String,
+    /// Byte offset of the error in the SQL, when the server said where.
+    pub position: Option<usize>,
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for QueryError {}
+
 /// Cheap to clone; sending never blocks.
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -147,6 +206,32 @@ impl EngineHandle {
     pub fn send(&self, cmd: Command) {
         // Only fails if the engine thread died; nothing sensible to do then.
         let _ = self.tx.send(cmd);
+    }
+
+    /// Runs `sql` on `conn` and returns the whole result, for callers that want an
+    /// answer rather than a stream (scheduled runs, the assistant). Works from any
+    /// executor. `query` identifies it for [`Command::Cancel`].
+    pub async fn query(
+        &self,
+        query: QueryId,
+        conn: ConnId,
+        sql: impl Into<String>,
+        options: QueryOptions,
+    ) -> Result<QueryOutput, QueryError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Query {
+            query,
+            conn,
+            sql: sql.into(),
+            options,
+            reply,
+        });
+        answer.await.unwrap_or_else(|_| {
+            Err(QueryError {
+                message: "the engine stopped".into(),
+                position: None,
+            })
+        })
     }
 }
 
@@ -320,6 +405,27 @@ impl Engine {
                 };
                 tokio::spawn(execute(pool, events, running, job));
             }
+            Command::Query {
+                query,
+                conn,
+                sql,
+                options,
+                reply,
+            } => {
+                let Some(pool) = self.pools.get(&conn).cloned() else {
+                    let _ = reply.send(Err(QueryError {
+                        message: "not connected".into(),
+                        position: None,
+                    }));
+                    return;
+                };
+                let (events, running) = (self.events.clone(), self.running.clone());
+                tokio::spawn(async move {
+                    let output = run_query(&pool, &running, query, &sql, &options).await;
+                    let _ = reply.send(output);
+                    send_stats(&events, conn, &pool);
+                });
+            }
             Command::Validate {
                 request,
                 conn,
@@ -439,34 +545,7 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
             },
         )
     };
-    // The server stops a statement at the time limit, too; this also covers one it
-    // doesn't (SQLite, MySQL for anything but SELECT).
-    let limit = timeout;
-    let cancel = lease.session.cancel_handle();
-    let mut timed_out = false;
-    let mut result = {
-        let exec = lease.session.execute(&sql, ROW_LIMIT, &mut sink);
-        tokio::pin!(exec);
-        match limit {
-            None => exec.await,
-            Some(limit) => tokio::select! {
-                result = &mut exec => result,
-                _ = tokio::time::sleep(limit) => {
-                    timed_out = true;
-                    if let Err(e) = cancel.cancel().await {
-                        eprintln!("cancel after time limit failed: {e:#}");
-                    }
-                    exec.await
-                }
-            },
-        }
-    };
-    if let (true, Some(limit)) = (timed_out, limit) {
-        result = Err(anyhow::anyhow!(
-            "stopped after the time limit of {}s",
-            limit.as_secs_f64()
-        ));
-    }
+    let result = execute_limited(&mut lease, &sql, ROW_LIMIT, timeout, &mut sink).await;
 
     let cancelled = running
         .lock()
@@ -484,6 +563,104 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
     );
     pool.release(Some(tab), lease);
     send_stats(&events, conn, &pool);
+}
+
+/// Runs `sql` on the session, stopping it at `limit`. The server stops a statement
+/// at the time limit, too; this also covers one it doesn't (SQLite, MySQL for
+/// anything but SELECT).
+async fn execute_limited(
+    lease: &mut Lease,
+    sql: &str,
+    row_limit: usize,
+    limit: Option<Duration>,
+    sink: tangul_drivers::Sink<'_>,
+) -> anyhow::Result<()> {
+    let cancel = lease.session.cancel_handle();
+    let mut timed_out = false;
+    let result = {
+        let exec = lease.session.execute(sql, row_limit, sink);
+        tokio::pin!(exec);
+        match limit {
+            None => exec.await,
+            Some(limit) => tokio::select! {
+                result = &mut exec => result,
+                _ = tokio::time::sleep(limit) => {
+                    timed_out = true;
+                    if let Err(e) = cancel.cancel().await {
+                        eprintln!("cancel after time limit failed: {e:#}");
+                    }
+                    exec.await
+                }
+            },
+        }
+    };
+    match (timed_out, limit) {
+        (true, Some(limit)) => Err(anyhow::anyhow!(
+            "stopped after the time limit of {}s",
+            limit.as_secs_f64()
+        )),
+        _ => result,
+    }
+}
+
+/// A [`Command::Query`]: a spare session, the whole result collected. A session left
+/// inside a transaction is closed rather than reused (the server rolls it back).
+async fn run_query(
+    pool: &Arc<Pool>,
+    running: &Running,
+    query: QueryId,
+    sql: &str,
+    options: &QueryOptions,
+) -> Result<QueryOutput, QueryError> {
+    let error = |e: &anyhow::Error| {
+        let (message, position) = describe(e);
+        QueryError { message, position }
+    };
+    let started = Instant::now();
+    let mut lease = pool.acquire(None).await.map_err(|e| error(&e))?;
+    let synced = match sync_read_only(&mut lease, options.read_only).await {
+        Ok(()) => sync_timeout(&mut lease, options.timeout).await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = synced {
+        pool.release(None, lease);
+        return Err(error(&e));
+    }
+    running.lock().unwrap().insert(
+        query,
+        RunningQuery {
+            cancel: lease.session.cancel_handle(),
+            cancel_requested: false,
+        },
+    );
+    let mut output = QueryOutput::default();
+    let mut sink = |ev: ExecEvent| match ev {
+        ExecEvent::ResultStart(columns) => output.results.push(ResultSet::new(columns)),
+        ExecEvent::Rows(batch) => {
+            if let Some(result) = output.results.last_mut() {
+                result.append(batch);
+            }
+        }
+        ExecEvent::StatementDone { rows } => output.rows = Some(rows),
+        ExecEvent::Truncated => output.truncated = true,
+    };
+    let result = execute_limited(
+        &mut lease,
+        sql,
+        options.row_limit,
+        options.timeout,
+        &mut sink,
+    )
+    .await;
+    running.lock().unwrap().remove(&query);
+    if lease.session.in_transaction() {
+        close_all(vec![lease], None);
+    } else {
+        pool.release(None, lease);
+    }
+    result.map_err(|e| error(&e))?;
+    output.elapsed = started.elapsed();
+    Ok(output)
 }
 
 /// Makes the server side match `want` before a statement runs. In read-only mode it is

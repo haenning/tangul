@@ -109,6 +109,22 @@ impl Profiles {
         self.databases.iter().find(|d| d.id == id)
     }
 
+    /// Profiles that are never saved (tests, tools).
+    pub fn in_memory(databases: Vec<Database>) -> Self {
+        Self {
+            path: None,
+            databases,
+            passwords: HashMap::new(),
+        }
+    }
+
+    /// A database user by id, with its database.
+    pub fn user(&self, user_id: &str) -> Option<(&Database, &DbUser)> {
+        self.databases
+            .iter()
+            .find_map(|db| Some((db, db.users.iter().find(|u| u.id == user_id)?)))
+    }
+
     pub fn save(&self) -> Result<()> {
         let path = self.path.as_ref().context("no config directory")?;
         if let Some(dir) = path.parent() {

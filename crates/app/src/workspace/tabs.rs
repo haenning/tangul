@@ -268,7 +268,7 @@ impl Workspace {
                     .read(cx)
                     .conn
                     .as_ref()
-                    .and_then(|c| self.conn_users.get(&c.id))
+                    .and_then(|c| self.connections.tab_user(c.id))
                     .and_then(|user| self.conns.get(user))
                 else {
                     return;
@@ -286,21 +286,36 @@ impl Workspace {
                 let Some(conn) = tab.read(cx).conn.clone() else {
                     return;
                 };
-                match self.run_guard(conn.id, sql, cx) {
-                    None => self.execute(tab, sql, cx),
-                    Some(guard) => self.hold_back(tab.clone(), sql.clone(), guard, window, cx),
+                match self.decide_for_tab(conn.id, sql, cx) {
+                    Decision::Run(run) => self.execute(tab, sql, run, cx),
+                    Decision::Confirm { guard, then } => {
+                        self.hold_back(tab.clone(), sql.clone(), guard, then, window, cx)
+                    }
+                    Decision::Refuse(reason) => {
+                        window.push_notification(Notification::error(reason), cx)
+                    }
                 }
             }
         }
     }
 
-    /// Sends `sql` to the engine on the tab's connection.
-    pub(super) fn execute(&mut self, tab: &Entity<QueryTab>, sql: &str, cx: &mut Context<Self>) {
+    /// Sends `sql` to the engine on the tab's connection, as the policy decided.
+    pub(super) fn execute(
+        &mut self,
+        tab: &Entity<QueryTab>,
+        sql: &str,
+        run: Run,
+        cx: &mut Context<Self>,
+    ) {
         let Some(conn) = tab.read(cx).conn.clone() else {
             return;
         };
         let query = QueryId(self.next_id());
-        let user_id = self.conn_users.get(&conn.id).cloned().unwrap_or_default();
+        let user_id = self
+            .connections
+            .tab_user(conn.id)
+            .unwrap_or_default()
+            .to_string();
         // Running a bookmarked query: the tab shows the bookmark's name, and its
         // bookmark button edits that bookmark. Only when the whole editor ran, since
         // the button saves the whole editor.
@@ -329,9 +344,6 @@ impl Workspace {
         );
         // The server refuses writes, too, so read-only mode can't be sidestepped.
         let user = self.conn_user_name(conn.id);
-        let read_only = user
-            .as_ref()
-            .is_some_and(|user| settings::current(cx).is_read_only(user));
         // A write while read-only mode is lifted restarts the wait until it is back.
         if let Some(user) = user.filter(|u| self.relock.contains_key(u))
             && guard::check(sql).iter().any(|c| c.writes)
@@ -343,8 +355,8 @@ impl Workspace {
             tab: tab.read(cx).id,
             conn: conn.id,
             sql: sql.to_string(),
-            read_only,
-            timeout: settings::current(cx).safety.max_query_time,
+            read_only: run.read_only,
+            timeout: run.timeout,
         });
         tab.update(cx, |t, cx| t.started(query, sql, cx));
     }
@@ -367,21 +379,24 @@ impl Workspace {
             RunningQuery {
                 tab: tab.downgrade(),
                 sql: sql.to_string(),
-                user_id: self.conn_users.get(&conn.id).cloned().unwrap_or_default(),
+                user_id: self
+                    .connections
+                    .tab_user(conn.id)
+                    .unwrap_or_default()
+                    .to_string(),
                 started_at: now_ms(),
                 derived: true,
             },
         );
-        let read_only = self
-            .conn_user_name(conn.id)
-            .is_some_and(|user| settings::current(cx).is_read_only(&user));
+        let user = self.conn_user_name(conn.id);
+        let run = policy::user_run(settings::current(cx), user.as_deref());
         self.engine.send(Command::Execute {
             query,
             tab: tab.read(cx).id,
             conn: conn.id,
             sql: sql.to_string(),
-            read_only,
-            timeout: settings::current(cx).safety.max_query_time,
+            read_only: run.read_only,
+            timeout: run.timeout,
         });
         tab.update(cx, |t, cx| t.started_derived(query, append, cx));
     }

@@ -4,18 +4,14 @@ use super::*;
 
 impl Workspace {
     pub(super) fn connect(&mut self, user_id: &str, cx: &mut Context<Self>) {
-        let Some((db, user)) = self
-            .find_user(user_id)
-            .map(|(db, user)| (db.clone(), user.clone()))
-        else {
+        let Some(id) = self.connections.connect_user(
+            &self.engine,
+            &mut self.data.profiles,
+            user_id,
+            Purpose::Tab,
+        ) else {
             return;
         };
-        let id = match self.conns.get(user_id) {
-            Some(state) => state.id,
-            None => ConnId(self.next_id()),
-        };
-        let password = self.data.profiles.password(user_id);
-        let ssh = self.data.profiles.ssh_target(&db);
         // Show (and complete against) the cached schema until the server answers.
         let schema = match self.conns.get(user_id) {
             Some(state) => state.schema.clone(),
@@ -33,14 +29,7 @@ impl Workspace {
                 stats: PoolStats::default(),
             },
         );
-        self.conn_users.insert(id, user_id.to_string());
         self.sync_assist(user_id);
-        self.engine.send(Command::Connect {
-            conn: id,
-            driver: db.driver,
-            cfg: tangul_core::ConnectConfig::new(&db, &user, password),
-            ssh,
-        });
         cx.notify();
     }
 
@@ -269,7 +258,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(event) = self.monitor_event(event, window, cx) else {
+        let Some(event) = self.hidden_event(event, window, cx) else {
             return;
         };
         match event {
@@ -295,7 +284,7 @@ impl Workspace {
                     state.status = ConnStatus::Connected;
                 }
                 // Tabs without a connection pick up the newly connected one.
-                if let Some(user_id) = self.conn_users.get(&conn).cloned()
+                if let Some(user_id) = self.connections.tab_user(conn).map(str::to_string)
                     && let Some(tc) = self.tab_conn(&user_id)
                 {
                     for tab in &self.tabs {
@@ -320,7 +309,7 @@ impl Workspace {
             }
             Event::Schema { conn, result } => match result {
                 Ok(info) => {
-                    if let Some(user_id) = self.conn_users.get(&conn).cloned() {
+                    if let Some(user_id) = self.connections.tab_user(conn).map(str::to_string) {
                         if let Err(e) = self.data.local.save_schema(&user_id, &info) {
                             eprintln!("could not cache schema: {e:#}");
                         }
@@ -362,7 +351,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(user_id) = self.conn_users.get(&conn).cloned() else {
+        let Some(user_id) = self.connections.tab_user(conn).map(str::to_string) else {
             return;
         };
         let workspace = cx.entity().downgrade();
@@ -454,7 +443,7 @@ impl Workspace {
     }
 
     pub(super) fn conn_state_mut(&mut self, conn: ConnId) -> Option<&mut ConnState> {
-        let user_id = self.conn_users.get(&conn)?;
+        let user_id = self.connections.tab_user(conn)?;
         self.conns.get_mut(user_id).filter(|s| s.id == conn)
     }
 }

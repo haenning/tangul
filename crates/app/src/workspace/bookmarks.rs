@@ -206,9 +206,9 @@ impl Workspace {
         let edit_sql = bookmark.sql.clone();
         let metrics_id = bookmark.id.clone();
         let group: SharedString = format!("bookmark-{ix}").into();
-        let scheduled = monitor::schedulable(bookmark).then(|| {
+        let scheduled = schedule::schedulable(bookmark).then(|| {
             let every = settings::current(cx).monitoring.interval();
-            format!("Runs about every {}", monitor::human_duration(every))
+            format!("Runs about every {}", schedule::human_duration(every))
         });
         let actions = h_flex()
             .gap_0p5()

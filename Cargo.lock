@@ -7966,6 +7966,7 @@ dependencies = [
  "tangul-core",
  "tangul-data",
  "tangul-engine",
+ "tangul-service",
 ]
 
 [[package]]
@@ -8023,6 +8024,17 @@ dependencies = [
  "tangul-core",
  "tangul-drivers",
  "tangul-tunnel",
+ "tokio",
+]
+
+[[package]]
+name = "tangul-service"
+version = "0.1.0"
+dependencies = [
+ "tangul-assist",
+ "tangul-core",
+ "tangul-data",
+ "tangul-engine",
  "tokio",
 ]
 

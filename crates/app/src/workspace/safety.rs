@@ -5,7 +5,7 @@ use super::*;
 impl Workspace {
     /// The database user name of a connection.
     pub(super) fn conn_user_name(&self, conn: ConnId) -> Option<String> {
-        let user_id = self.conn_users.get(&conn)?;
+        let user_id = self.connections.tab_user(conn)?;
         Some(self.find_user(user_id)?.1.user.clone())
     }
 
@@ -64,34 +64,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Why `sql` shouldn't run on `conn` right away: it changes data in read-only mode
-    /// (which takes precedence), or it is an `UPDATE` / `DELETE` without a `WHERE`.
-    pub(super) fn run_guard(&self, conn: ConnId, sql: &str, cx: &App) -> Option<RunGuard> {
-        let settings = settings::current(cx);
-        let user = self
-            .conn_user_name(conn)
-            .filter(|user| settings.is_read_only(user));
-        let checks = guard::check(sql);
-        let described = |keep: &dyn Fn(&guard::Check) -> bool| -> Vec<(String, String)> {
-            checks
-                .iter()
-                .filter(|c| keep(c))
-                .map(|c| (c.keyword.clone(), one_line(&c.statement, 160)))
-                .collect()
-        };
-        if let Some(user) = user {
-            let statements = described(&|c| c.writes);
-            if !statements.is_empty() {
-                return Some(RunGuard::ReadOnly { user, statements });
-            }
-        }
-        if settings.safety.confirm_unfiltered_writes {
-            let statements = described(&|c| c.unfiltered);
-            if !statements.is_empty() {
-                return Some(RunGuard::Unfiltered { statements });
-            }
-        }
-        None
+    /// Whether and how the user's `sql` runs on a tab's connection.
+    pub(super) fn decide_for_tab(&self, conn: ConnId, sql: &str, cx: &App) -> Decision {
+        let user = self.conn_user_name(conn);
+        policy::decide(settings::current(cx), user.as_deref(), sql, Caller::User)
     }
 
     /// Explains why `sql` did not run. The red button lifts the guard: "Allow writes"
@@ -101,13 +77,14 @@ impl Workspace {
         &mut self,
         tab: Entity<QueryTab>,
         sql: String,
-        guard: RunGuard,
+        guard: Guard,
+        then: Run,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let workspace = cx.entity().downgrade();
         let (title, intro, statements, allow) = match &guard {
-            RunGuard::ReadOnly { user, statements } => (
+            Guard::ReadOnly { user, statements } => (
                 "Read-only mode",
                 format!(
                     "Read-only mode is on for {user}. Nothing was run; these statements change data:"
@@ -115,7 +92,7 @@ impl Workspace {
                 statements.clone(),
                 "Allow writes".to_string(),
             ),
-            RunGuard::Unfiltered { statements } => {
+            Guard::Unfiltered { statements } => {
                 let has = |keyword: &str| statements.iter().any(|(k, _)| k == keyword);
                 let allow = match (has("DELETE"), has("UPDATE")) {
                     (true, false) => "Allow deletes",
@@ -131,8 +108,8 @@ impl Workspace {
             }
         };
         let read_only_user = match &guard {
-            RunGuard::ReadOnly { user, .. } => Some(user.clone()),
-            RunGuard::Unfiltered { .. } => None,
+            Guard::ReadOnly { user, .. } => Some(user.clone()),
+            Guard::Unfiltered { .. } => None,
         };
         window.open_dialog(cx, move |dialog, _, cx| {
             let theme = cx.theme();
@@ -174,7 +151,7 @@ impl Workspace {
                             ),
                         },
                         None => {
-                            let _ = workspace.update(cx, |ws, cx| ws.execute(&tab, &sql, cx));
+                            let _ = workspace.update(cx, |ws, cx| ws.execute(&tab, &sql, then, cx));
                         }
                     }
                 }

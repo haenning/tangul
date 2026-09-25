@@ -117,6 +117,8 @@ crates/
   tunnel/   # SSH tunnels (russh): lazy session, local listener, known_hosts checks
   data/     # everything on disk, no UI: profiles + Keychain, local.db, metrics.db,
             # settings.json; `Data` opens it all (app now, MCP server later)
+  service/  # shared by front ends, no UI: connections by purpose, the policy (the one
+            # safety gate: read-only, WHERE check, time limit), scheduled bookmarks
   app/      # GPUI binary `tangul`: workspace, query tab, results grid, forms
 ```
 

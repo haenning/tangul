@@ -4,118 +4,132 @@ use super::*;
 
 impl Workspace {
     /// Starts the next due scheduled bookmark, if the app is quiet and nothing else
-    /// runs. One at a time, on a hidden read-only connection.
+    /// runs. One at a time, on a hidden read-only connection, through the same
+    /// policy as everything else.
     pub(super) fn monitor_tick(&mut self, cx: &mut Context<Self>) {
-        let limits = settings::current(cx).monitoring.clone();
-        if self
-            .monitor
-            .stuck(settings::current(cx).safety.max_query_time)
-        {
-            self.monitor_finish(0, Some("gave up waiting for the run".into()), cx);
+        let settings = settings::current(cx).clone();
+        if self.monitor.stuck(settings.safety.max_query_time) {
+            self.monitor_finish(Err("gave up waiting for the run".into()), cx);
         }
         if self.monitor.pending.is_some() || !self.monitor.is_quiet() || !self.queries.is_empty() {
             return;
         }
         let bookmarks = self.data.local.scheduled_bookmarks();
         let now = now_ms();
-        let Some(bookmark) = monitor::due(
+        let Some(bookmark) = schedule::due(
             &bookmarks,
             |id| self.data.metrics.last_run(id),
             now,
-            limits.interval(),
+            settings.monitoring.interval(),
         )
         .cloned() else {
             return;
         };
-        let db = bookmark
+        // The user last used on the database, else its first one.
+        let user = bookmark
             .database_id
             .as_deref()
             .and_then(|id| self.data.profiles.database(id))
-            .cloned();
-        // The user last used on the database, else its first one.
-        let user = db.as_ref().and_then(|db| {
-            let last = self.data.local.last_user(&db.id);
-            db.users
-                .iter()
-                .find(|u| Some(&u.id) == last.as_ref())
-                .or(db.users.first())
-                .cloned()
-        });
-        let (Some(db), Some(user)) = (db, user) else {
-            let record = metrics::Run {
-                bookmark_id: bookmark.id,
-                bookmark_name: bookmark.name,
-                started_at: now,
-                duration_ms: 0,
-                rows: None,
-                error: Some("no database user to run it with".into()),
-                scheduled: true,
-            };
-            self.data.metrics.record(&record, &limits, now);
+            .and_then(|db| {
+                let last = self.data.local.last_user(&db.id);
+                db.users
+                    .iter()
+                    .find(|u| Some(&u.id) == last.as_ref())
+                    .or(db.users.first())
+                    .cloned()
+            });
+        let Some(user) = user else {
+            self.record_scheduled(
+                &bookmark,
+                now,
+                0,
+                Err("no database user to run it with".into()),
+                cx,
+            );
             return;
         };
-        let (conn, ready) = match self.monitor.conn_for(&user.id) {
+        let run = match policy::decide(&settings, Some(&user.user), &bookmark.sql, Caller::Schedule)
+        {
+            Decision::Run(run) => run,
+            Decision::Refuse(reason) => {
+                self.record_scheduled(&bookmark, now, 0, Err(reason), cx);
+                return;
+            }
+            Decision::Confirm { .. } => return,
+        };
+        let conn = match self.connections.get(Purpose::Background, &user.id) {
             Some(conn) => conn,
             None => {
-                let id = ConnId(self.next_id());
-                self.monitor.connecting(&user.id, id);
-                let password = self.data.profiles.password(&user.id);
-                self.engine.send(Command::Connect {
-                    conn: id,
-                    driver: db.driver,
-                    cfg: tangul_core::ConnectConfig::new(&db, &user, password),
-                    ssh: self.data.profiles.ssh_target(&db),
-                });
-                (id, false)
+                let Some(conn) = self.connections.connect_user(
+                    &self.engine,
+                    &mut self.data.profiles,
+                    &user.id,
+                    Purpose::Background,
+                ) else {
+                    return;
+                };
+                conn
             }
         };
-        self.monitor.start(bookmark, conn, now);
-        if ready {
-            self.monitor_execute(cx);
-        }
-    }
-
-    /// Sends the pending scheduled run's query, read-only.
-    pub(super) fn monitor_execute(&mut self, cx: &mut Context<Self>) {
-        let timeout = settings::current(cx).safety.max_query_time;
-        let query = QueryId(self.next_id());
-        let Some(pending) = self.monitor.pending.as_mut() else {
-            return;
+        let (engine, query, sql) = (
+            self.engine.clone(),
+            QueryId(self.next_id()),
+            bookmark.sql.clone(),
+        );
+        let options = QueryOptions {
+            read_only: run.read_only,
+            timeout: run.timeout,
+            ..QueryOptions::default()
         };
-        pending.query = Some(query);
-        self.engine.send(Command::Execute {
-            query,
-            // A tab of its own, so no session of a real tab is used.
-            tab: TabId(query.0),
-            conn: pending.conn,
-            sql: pending.bookmark.sql.clone(),
-            read_only: true,
-            timeout,
+        let task = cx.spawn(async move |this, cx| {
+            let result = engine.query(query, conn, sql, options).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.monitor_finish(result.map_err(|e| e.message), cx)
+            });
         });
+        self.monitor.start(bookmark, conn, now, task);
     }
 
-    /// Records the pending scheduled run.
+    /// Records the pending scheduled run. A failed run forgets its connection, so
+    /// the next one connects again.
     pub(super) fn monitor_finish(
         &mut self,
-        duration_ms: i64,
-        error: Option<String>,
+        result: Result<QueryOutput, String>,
         cx: &mut Context<Self>,
     ) {
         let Some(pending) = self.monitor.pending.take() else {
             return;
         };
-        if let Some(query) = pending.query {
-            self.engine.send(Command::ReleaseTab {
-                tab: TabId(query.0),
-                conn: pending.conn,
-            });
+        if result.is_err() {
+            self.engine.send(Command::Disconnect { conn: pending.conn });
+            self.connections.forget(pending.conn);
         }
+        let duration_ms = match &result {
+            Ok(out) => out.elapsed.as_millis() as i64,
+            Err(_) => pending.elapsed().as_millis() as i64,
+        };
+        let rows = result.map(|out| out.rows.map(|n| n as i64));
+        self.record_scheduled(&pending.bookmark, pending.started_at, duration_ms, rows, cx);
+    }
+
+    fn record_scheduled(
+        &self,
+        bookmark: &Bookmark,
+        started_at: i64,
+        duration_ms: i64,
+        rows: Result<Option<i64>, String>,
+        cx: &App,
+    ) {
+        let (rows, error) = match rows {
+            Ok(rows) => (rows, None),
+            Err(e) => (None, Some(e)),
+        };
         let record = metrics::Run {
-            bookmark_id: pending.bookmark.id,
-            bookmark_name: pending.bookmark.name,
-            started_at: pending.started_at,
+            bookmark_id: bookmark.id.clone(),
+            bookmark_name: bookmark.name.clone(),
+            started_at,
             duration_ms,
-            rows: pending.rows.filter(|_| error.is_none()),
+            rows,
             error,
             scheduled: true,
         };
@@ -124,63 +138,33 @@ impl Workspace {
             .record(&record, &settings::current(cx).monitoring, now_ms());
     }
 
-    /// Handles events of the hidden connections, scheduled runs and the metrics
-    /// connection; returns every other event.
-    pub(super) fn monitor_event(
+    /// Handles the events of connections the UI doesn't show (scheduled runs, the
+    /// assistant, local files); returns the tabs' events.
+    pub(super) fn hidden_event(
         &mut self,
         event: Event,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Event> {
-        let pending_query = self.monitor.pending.as_ref().and_then(|p| p.query);
-        let metrics_conn = self.metrics_conn.map(|(id, _)| id);
-        match event {
-            Event::Query { query, event } if Some(query) == pending_query => match event {
-                QueryEvent::Exec(ExecEvent::StatementDone { rows }) => {
-                    if let Some(p) = self.monitor.pending.as_mut() {
-                        p.rows = Some(rows as i64);
-                    }
-                }
-                QueryEvent::Finished { elapsed, error, .. } => {
-                    self.monitor_finish(elapsed.as_millis() as i64, error, cx);
-                }
-                QueryEvent::Exec(_) => {}
-            },
-            Event::Connected { conn } if self.monitor.owns(conn) => {
-                self.monitor.connected(conn);
-                let waiting = self.monitor.pending.as_ref();
-                if waiting.is_some_and(|p| p.conn == conn && p.query.is_none()) {
-                    self.monitor_execute(cx);
-                }
-            }
-            Event::ConnectFailed { conn, error } if self.monitor.owns(conn) => {
-                self.monitor.failed(conn);
-                self.monitor_finish(0, Some(error), cx);
-            }
-            Event::HostKeyUnknown { conn, .. } if self.monitor.owns(conn) => {
-                self.monitor.failed(conn);
-                let error = "unknown SSH host key: connect once to trust it".to_string();
-                self.monitor_finish(0, Some(error), cx);
-            }
-            Event::Schema { conn, .. } | Event::PoolStats { conn, .. }
-                if self.monitor.owns(conn) || Some(conn) == metrics_conn => {}
-            Event::Connected { conn } if Some(conn) == metrics_conn => {
-                self.metrics_conn = Some((conn, true));
-                for tab in std::mem::take(&mut self.metrics_waiting) {
-                    if let Some(tab) = tab.upgrade() {
-                        tab.update(cx, |t, cx| cx.emit(TabEvent::Run(t.sql(cx))));
-                    }
-                }
-            }
-            Event::ConnectFailed { conn, error } if Some(conn) == metrics_conn => {
-                self.metrics_conn = None;
-                self.metrics_waiting.clear();
+        let conn = match &event {
+            Event::Connected { conn }
+            | Event::ConnectFailed { conn, .. }
+            | Event::HostKeyUnknown { conn, .. }
+            | Event::Schema { conn, .. }
+            | Event::PoolStats { conn, .. } => *conn,
+            Event::Query { .. } | Event::Validated { .. } => return Some(event),
+        };
+        match (self.connections.purpose(conn), event) {
+            (None | Some(Purpose::Tab), event) => return Some(event),
+            (Some(Purpose::LocalFile), Event::ConnectFailed { error, .. }) => {
+                self.connections.forget(conn);
                 window.push_notification(
                     Notification::error(format!("Could not open the metrics: {error}")),
                     cx,
                 );
             }
-            event => return Some(event),
+            // A scheduled run on it fails by itself and forgets it.
+            (Some(_), _) => {}
         }
         None
     }
@@ -208,27 +192,8 @@ impl Workspace {
             );
             return;
         };
-        let (conn, ready) = match self.metrics_conn {
-            Some(conn) => conn,
-            None => {
-                let id = ConnId(self.next_id());
-                self.engine.send(Command::Connect {
-                    conn: id,
-                    driver: DriverKind::Sqlite,
-                    cfg: tangul_core::ConnectConfig {
-                        host: String::new(),
-                        port: 0,
-                        user: String::new(),
-                        password: None,
-                        database: path,
-                        tls: tangul_core::TlsMode::Disable,
-                    },
-                    ssh: None,
-                });
-                self.metrics_conn = Some((id, false));
-                (id, false)
-            }
-        };
+        // Runs right away: the engine opens the file before it takes the query.
+        let (conn, _) = self.connections.open_file(&self.engine, &path);
         let sql = metrics::runs_sql(&bookmark.id);
         let tab = self.add_tab(&sql, window, cx);
         tab.update(cx, |t, cx| {
@@ -247,12 +212,7 @@ impl Workspace {
                 }),
                 cx,
             );
-            if ready {
-                cx.emit(TabEvent::Run(sql.clone()));
-            }
+            cx.emit(TabEvent::Run(sql.clone()));
         });
-        if !ready {
-            self.metrics_waiting.push(tab.downgrade());
-        }
     }
 }

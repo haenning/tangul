@@ -14,6 +14,7 @@ tangul-assist = { version = "0.1.0", path = "../assist" }
 tangul-core = { version = "0.1.0", path = "../core" }
 tangul-data = { version = "0.1.0", path = "../data" }
 tangul-engine = { version = "0.1.0", path = "../engine" }
+tangul-service = { version = "0.1.0", path = "../service" }
 
 [lints]
 workspace = true

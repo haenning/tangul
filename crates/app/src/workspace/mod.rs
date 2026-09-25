@@ -65,7 +65,12 @@ use tangul_core::{
 use tangul_data::Data;
 use tangul_data::local::{Bookmark, HistoryEntry, NewHistory, bare_sql};
 use tangul_data::metrics;
-use tangul_engine::{Command, EngineHandle, Event, ExecEvent, PoolStats, QueryEvent};
+use tangul_engine::{
+    Command, EngineHandle, Event, PoolStats, QueryEvent, QueryOptions, QueryOutput,
+};
+use tangul_service::connections::{Connections, Purpose};
+use tangul_service::policy::{self, Caller, Decision, Guard, Run};
+use tangul_service::schedule;
 
 use crate::{
     CloseTab, NewTab, NextSidebarPanel, OpenPalette, OpenSettings, PrevSidebarPanel, ToggleSidebar,
@@ -133,18 +138,6 @@ impl SidebarView {
 }
 
 /// A query sent to the engine, kept until it finishes to record it in history.
-/// Why a statement is held back before it runs.
-enum RunGuard {
-    /// Read-only mode: nothing changes until the user allows writes.
-    ReadOnly {
-        user: String,
-        /// (keyword, statement on one line)
-        statements: Vec<(String, String)>,
-    },
-    /// `UPDATE` / `DELETE` without `WHERE`.
-    Unfiltered { statements: Vec<(String, String)> },
-}
-
 struct RunningQuery {
     tab: WeakEntity<QueryTab>,
     sql: String,
@@ -232,7 +225,8 @@ pub struct Workspace {
     revealed: Option<(SharedString, Option<String>)>,
     /// Connection state by user id.
     conns: HashMap<String, ConnState>,
-    conn_users: HashMap<ConnId, String>,
+    /// Every open connection and what it is for (tabs, scheduled runs, files).
+    connections: Connections,
     /// Selected database and user; the sidebar shows this connection.
     active_db: Option<String>,
     active_user: Option<String>,
@@ -261,10 +255,6 @@ pub struct Workspace {
     relock: HashMap<String, Task<()>>,
     /// Scheduled bookmark runs on hidden connections.
     monitor: Monitor,
-    /// Read-only connection to `metrics.db` for query tabs, and whether it is up.
-    metrics_conn: Option<(ConnId, bool)>,
-    /// Tabs to run once `metrics_conn` is up.
-    metrics_waiting: Vec<WeakEntity<QueryTab>>,
     _monitor_tick: Task<()>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -347,7 +337,7 @@ impl Workspace {
             reveal: None,
             revealed: None,
             conns: HashMap::new(),
-            conn_users: HashMap::new(),
+            connections: Connections::default(),
             active_db: None,
             active_user: None,
             schema_open: HashMap::new(),
@@ -365,8 +355,6 @@ impl Workspace {
             favorites: Vec::new(),
             relock: HashMap::new(),
             monitor: Monitor::default(),
-            metrics_conn: None,
-            metrics_waiting: Vec::new(),
             _monitor_tick: monitor_tick,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
@@ -411,11 +399,7 @@ impl Workspace {
     }
 
     fn find_user(&self, user_id: &str) -> Option<(&Database, &DbUser)> {
-        self.data
-            .profiles
-            .databases
-            .iter()
-            .find_map(|db| Some((db, db.user(user_id)?)))
+        self.data.profiles.user(user_id)
     }
 
     /// The tab connection for a user, if it is connected (or connecting).
