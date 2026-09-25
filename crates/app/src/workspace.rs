@@ -39,7 +39,8 @@ use rusdb_assist::{
     usage::{Usage, learn},
 };
 use rusdb_core::{
-    ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo, TableKind,
+    ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo,
+    TableKind,
 };
 use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
 
@@ -159,6 +160,19 @@ enum SidebarRow {
     Table {
         table: TableInfo,
     },
+    /// While searching: a group title, then the hits.
+    Heading(SharedString),
+    SchemaHit {
+        schema: SharedString,
+    },
+    TableHit {
+        table: TableInfo,
+    },
+    ColumnHit {
+        table: TableInfo,
+        column: SharedString,
+        data_type: SharedString,
+    },
 }
 
 pub struct Workspace {
@@ -171,6 +185,13 @@ pub struct Workspace {
     usage: HashMap<String, Arc<Usage>>,
     history: Vec<HistoryEntry>,
     history_search: Entity<InputState>,
+    bookmark_search: Entity<InputState>,
+    schema_search: Entity<InputState>,
+    sidebar_scroll: UniformListScrollHandle,
+    /// A search hit to show in the tree on the next render: schema, table.
+    reveal: Option<(SharedString, Option<String>)>,
+    /// The row last revealed, highlighted until the next search.
+    revealed: Option<(SharedString, Option<String>)>,
     /// Connection state by user id.
     conns: HashMap<String, ConnState>,
     conn_users: HashMap<ConnId, String>,
@@ -236,6 +257,17 @@ impl Workspace {
                 }
             },
         );
+        let bookmark_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search bookmarks"));
+        let schema_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let redraw = |this: &mut Self, _, ev: &InputEvent, cx: &mut Context<Self>| {
+            if matches!(ev, InputEvent::Change) {
+                this.revealed = None;
+                cx.notify();
+            }
+        };
+        let bookmark_sub = cx.subscribe(&bookmark_search, redraw);
+        let schema_sub = cx.subscribe(&schema_search, redraw);
         let sidebar_width = local
             .setting(SIDEBAR_WIDTH_SETTING)
             .and_then(|w| w.parse::<f32>().ok())
@@ -249,6 +281,11 @@ impl Workspace {
             usage: HashMap::new(),
             history: Vec::new(),
             history_search,
+            bookmark_search,
+            schema_search,
+            sidebar_scroll: UniformListScrollHandle::new(),
+            reveal: None,
+            revealed: None,
             conns: HashMap::new(),
             conn_users: HashMap::new(),
             active_db: None,
@@ -266,7 +303,7 @@ impl Workspace {
             validations: HashMap::new(),
             sidebar_rows: Vec::new(),
             focus_handle: cx.focus_handle(),
-            _subscriptions: vec![search_sub],
+            _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
             _pump: pump,
         };
         // Reopen the connection used last (else the first one) right away.
@@ -1647,7 +1684,7 @@ impl Workspace {
 
     // ---- rendering ---------------------------------------------------------------
 
-    fn build_sidebar_rows(&self) -> Vec<SidebarRow> {
+    fn build_sidebar_rows(&self, search: &str) -> Vec<SidebarRow> {
         let Some((user_id, state)) = self
             .active_user
             .as_ref()
@@ -1655,6 +1692,9 @@ impl Workspace {
         else {
             return Vec::new();
         };
+        if !search.is_empty() {
+            return self.search_rows(&state.schema, search);
+        }
         let mut rows = Vec::new();
         // Drivers return tables ordered by schema, then name.
         for tables in state.schema.tables().chunk_by(|a, b| a.schema == b.schema) {
@@ -1694,6 +1734,100 @@ impl Workspace {
             }
         }
         rows
+    }
+
+    /// Search results: schemas and tables whose names match, then matching columns.
+    /// Case-insensitive; names starting with the text come first.
+    fn search_rows(&self, schema: &SchemaIndex, search: &str) -> Vec<SidebarRow> {
+        let needle = search.to_lowercase();
+        let rank = |name: &str| {
+            let name = name.to_lowercase();
+            if name == needle {
+                Some(0)
+            } else if name.starts_with(&needle) {
+                Some(1)
+            } else if name.contains(&needle) {
+                Some(2)
+            } else {
+                None
+            }
+        };
+        let mut schemas: Vec<(u8, SharedString)> = Vec::new();
+        for tables in schema.tables().chunk_by(|a, b| a.schema == b.schema) {
+            if let Some(r) = rank(&tables[0].schema) {
+                schemas.push((r, tables[0].schema.clone().into()));
+            }
+        }
+        let mut tables: Vec<(u8, &TableInfo)> = schema
+            .tables()
+            .iter()
+            .filter_map(|t| Some((rank(&t.name)?, t)))
+            .collect();
+        let mut columns: Vec<(u8, &ColumnMeta)> = schema
+            .info()
+            .columns
+            .iter()
+            .filter_map(|c| Some((rank(&c.name)?, c)))
+            .collect();
+        // Stable: keeps schema / table order within a rank.
+        schemas.sort_by_key(|(r, _)| *r);
+        tables.sort_by_key(|(r, _)| *r);
+        columns.sort_by_key(|(r, _)| *r);
+
+        let mut rows = Vec::new();
+        if !schemas.is_empty() || !tables.is_empty() {
+            let title = match self.active_database().map(|db| db.driver) {
+                Some(DriverKind::Mysql) => "Databases and tables",
+                _ => "Schemas and tables",
+            };
+            rows.push(SidebarRow::Heading(title.into()));
+            rows.extend(
+                schemas
+                    .into_iter()
+                    .map(|(_, schema)| SidebarRow::SchemaHit { schema }),
+            );
+            rows.extend(
+                tables
+                    .into_iter()
+                    .map(|(_, t)| SidebarRow::TableHit { table: t.clone() }),
+            );
+        }
+        if !columns.is_empty() {
+            rows.push(SidebarRow::Heading("Columns".into()));
+            rows.extend(columns.into_iter().filter_map(|(_, c)| {
+                let ix = schema.resolve(Some(&c.schema), &c.table)?;
+                Some(SidebarRow::ColumnHit {
+                    table: schema.table(ix).clone(),
+                    column: c.name.clone().into(),
+                    data_type: c.data_type.clone().into(),
+                })
+            }));
+        }
+        rows
+    }
+
+    /// Clears the search and shows `schema` (and `table` in it) in the tree.
+    fn reveal(
+        &mut self,
+        schema: SharedString,
+        table: Option<&TableInfo>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(user_id) = self.active_user.clone() {
+            self.expanded_schemas
+                .insert((user_id.clone(), schema.clone()));
+            if let Some(t) = table {
+                self.collapsed_groups
+                    .remove(&(user_id, schema.clone(), t.kind));
+            }
+        }
+        let target = (schema, table.map(|t| t.name.clone()));
+        self.reveal = Some(target.clone());
+        self.schema_search
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.revealed = Some(target);
+        cx.notify();
     }
 
     fn render_sidebar_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -1742,7 +1876,9 @@ impl Workspace {
                     _ => folder(expanded),
                 };
                 let key = (user_id, schema.clone());
+                let revealed = self.revealed == Some((schema.clone(), None));
                 row(0)
+                    .when(revealed, |r| r.bg(theme.sidebar_accent))
                     .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(schema))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1802,7 +1938,12 @@ impl Workspace {
                         let list = ws.read(cx).table_suggestions(&menu_table);
                         suggestions_menu(menu, &menu_table.name, list, &weak)
                     });
+                let revealed = self
+                    .revealed
+                    .as_ref()
+                    .is_some_and(|(s, t)| *s == table.schema && t.as_ref() == Some(&table.name));
                 row(2)
+                    .when(revealed, |r| r.bg(theme.sidebar_accent))
                     .group(group.clone())
                     .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().flex_1().min_w_0().truncate().child(name))
@@ -1825,6 +1966,75 @@ impl Workspace {
                     })
                     .into_any_element()
             }
+            SidebarRow::Heading(title) => h_flex()
+                .h(px(ROW_HEIGHT))
+                .px_2()
+                .items_end()
+                .pb_1()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(title)
+                .into_any_element(),
+            SidebarRow::SchemaHit { schema } => {
+                let icon = match driver {
+                    Some(DriverKind::Mysql) => Icon::new(Lucide::Database),
+                    _ => folder(false),
+                };
+                let target = schema.clone();
+                row(0)
+                    .child(icon.small().text_color(theme.muted_foreground))
+                    .child(div().min_w_0().truncate().child(schema))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.reveal(target.clone(), None, window, cx)
+                    }))
+                    .into_any_element()
+            }
+            SidebarRow::TableHit { table } => {
+                let icon = match table.kind {
+                    TableKind::Table => Icon::new(Lucide::Table),
+                    TableKind::View => Icon::new(IconName::Eye),
+                };
+                row(0)
+                    .child(icon.small().text_color(theme.muted_foreground))
+                    .child(div().min_w_0().truncate().child(table.name.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(table.schema.clone()),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.reveal(table.schema.clone().into(), Some(&table), window, cx)
+                    }))
+                    .into_any_element()
+            }
+            SidebarRow::ColumnHit {
+                table,
+                column,
+                data_type,
+            } => row(0)
+                .child(
+                    Icon::new(IconName::Minus)
+                        .small()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(div().flex_none().child(column))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{}.{} · {data_type}", table.schema, table.name)),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.reveal(table.schema.clone().into(), Some(&table), window, cx)
+                }))
+                .into_any_element(),
         }
     }
 
@@ -1932,7 +2142,25 @@ impl Workspace {
     }
 
     fn render_schema_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sidebar_rows = self.build_sidebar_rows();
+        let search = self.schema_search.read(cx).value().trim().to_string();
+        self.sidebar_rows = self.build_sidebar_rows(&search);
+        if let Some((schema, table)) = self.reveal.take() {
+            let target = self.sidebar_rows.iter().position(|row| match row {
+                SidebarRow::Table { table: t } => {
+                    table.as_ref() == Some(&t.name) && t.schema == schema.as_ref()
+                }
+                SidebarRow::Schema { schema: s, .. } => table.is_none() && *s == schema,
+                _ => false,
+            });
+            if let Some(ix) = target {
+                self.sidebar_scroll
+                    .scroll_to_item(ix, ScrollStrategy::Center);
+            }
+        }
+        let has_schema = self
+            .active_conn()
+            .is_some_and(|c| !c.schema.tables().is_empty());
+        let no_hits = !search.is_empty() && self.sidebar_rows.is_empty();
         let empty = self.render_sidebar_empty(cx);
         let theme = cx.theme();
         let count = self.sidebar_rows.len();
@@ -1969,7 +2197,25 @@ impl Workspace {
                         )
                     }),
             )
+            .when(has_schema, |this| {
+                this.child(
+                    div()
+                        .px_2()
+                        .pb_2()
+                        .child(Input::new(&self.schema_search).small().cleanable(true)),
+                )
+            })
             .children(empty)
+            .when(no_hits, |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("Nothing matches."),
+                )
+            })
             .child(
                 uniform_list(
                     "sidebar",
@@ -1980,6 +2226,7 @@ impl Workspace {
                             .collect::<Vec<_>>()
                     }),
                 )
+                .track_scroll(&self.sidebar_scroll)
                 .px_1()
                 .flex_1(),
             )
@@ -1987,8 +2234,23 @@ impl Workspace {
 
     fn render_bookmarks_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let bookmarks: Vec<Bookmark> = self.local.bookmarks_for(self.active_db.as_deref());
+        let search = self.bookmark_search.read(cx).value().trim().to_lowercase();
+        let all: Vec<Bookmark> = self.local.bookmarks_for(self.active_db.as_deref());
+        let total = all.len();
+        let bookmarks: Vec<Bookmark> = all
+            .into_iter()
+            .filter(|b| {
+                search.is_empty()
+                    || b.name.to_lowercase().contains(&search)
+                    || b.sql.to_lowercase().contains(&search)
+            })
+            .collect();
         let count = bookmarks.len();
+        let empty = match (total, count) {
+            (0, _) => Some("No bookmarks yet. Press ⌘D in a query tab to save one."),
+            (_, 0) => Some("No matching bookmarks."),
+            _ => None,
+        };
         v_flex()
             .flex_1()
             .min_h_0()
@@ -2001,16 +2263,22 @@ impl Workspace {
                     .text_color(theme.muted_foreground)
                     .child("BOOKMARKS"),
             )
-            .when(count == 0, |this| {
+            .when(total > 0, |this| {
                 this.child(
                     div()
-                        .px_3()
-                        .py_2()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No bookmarks yet. Press ⌘D in a query tab to save one."),
+                        .px_2()
+                        .pb_2()
+                        .child(Input::new(&self.bookmark_search).small().cleanable(true)),
                 )
             })
+            .children(empty.map(|text| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(text)
+            }))
             .child(
                 uniform_list(
                     "bookmarks",
