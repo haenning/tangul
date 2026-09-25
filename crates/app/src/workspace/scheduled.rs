@@ -4,8 +4,8 @@ use super::*;
 
 impl Workspace {
     /// Starts the next due scheduled bookmark, if the app is quiet and nothing else
-    /// runs. One at a time, on a hidden read-only connection, through the same
-    /// policy as everything else.
+    /// runs. One at a time, on a hidden connection; the engine's gate only lets
+    /// reads through for schedules.
     pub(super) fn monitor_tick(&mut self, cx: &mut Context<Self>) {
         let settings = settings::current(cx).clone();
         if self.monitor.stuck(settings.safety.max_query_time) {
@@ -48,15 +48,6 @@ impl Workspace {
             );
             return;
         };
-        let run = match policy::decide(&settings, Some(&user.user), &bookmark.sql, Caller::Schedule)
-        {
-            Decision::Run(run) => run,
-            Decision::Refuse(reason) => {
-                self.record_scheduled(&bookmark, now, 0, Err(reason), cx);
-                return;
-            }
-            Decision::Confirm { .. } => return,
-        };
         let conn = match self.connections.get(Purpose::Background, &user.id) {
             Some(conn) => conn,
             None => {
@@ -76,11 +67,8 @@ impl Workspace {
             QueryId(self.next_id()),
             bookmark.sql.clone(),
         );
-        let options = QueryOptions {
-            read_only: run.read_only,
-            timeout: run.timeout,
-            ..QueryOptions::default()
-        };
+        // The engine's gate makes it read-only and refuses anything but reads.
+        let options = QueryOptions::new(Caller::Schedule);
         let task = cx.spawn(async move |this, cx| {
             let result = engine.query(query, conn, sql, options).await;
             let _ = this.update(cx, |ws, cx| {

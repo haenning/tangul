@@ -62,6 +62,8 @@ pub struct ConnectionForm {
     ssh_user: Entity<InputState>,
     ssh_key_path: Entity<InputState>,
     ssh_secret: Entity<InputState>,
+    /// The user the AI assistant connects as; `None` uses the selected one.
+    assistant_user: Option<String>,
     error: Option<SharedString>,
 }
 
@@ -167,6 +169,7 @@ impl ConnectionForm {
                         "optional"
                     })
             }),
+            assistant_user: db.and_then(|d| d.assistant_user.clone()),
             error: None,
         }
     }
@@ -225,6 +228,7 @@ impl ConnectionForm {
                 database: value(&self.database),
                 tls: self.tls,
                 users: base.as_ref().map(|b| b.users.clone()).unwrap_or_default(),
+                assistant_user: self.assistant_user.clone(),
                 ssh: ssh.then(|| SshConfig {
                     host: value(&self.ssh_host),
                     port: ssh_port.clone().unwrap_or(22),
@@ -377,6 +381,55 @@ impl Render for ConnectionForm {
                     })),
             )
             .when(self.ssh, |this| this.child(ssh_fields));
+        // Which user the AI assistant connects as; only once the database has users.
+        let users = self
+            .base
+            .as_ref()
+            .map(|b| b.users.clone())
+            .unwrap_or_default();
+        let assistant_button = |id: Option<String>,
+                                label: String,
+                                current: &Option<String>,
+                                cx: &mut Context<Self>| {
+            let key = format!("assistant-{}", id.as_deref().unwrap_or("-"));
+            let b = Button::new(SharedString::from(key)).label(label).xsmall();
+            let b = if &id == current {
+                b.primary()
+            } else {
+                b.ghost()
+            };
+            b.on_click(cx.listener(move |this, _, _, cx| {
+                this.assistant_user = id.clone();
+                cx.notify();
+            }))
+        };
+        let db_fields = db_fields.when(!users.is_empty(), |this| {
+            let current = self.assistant_user.clone();
+            this.child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_wrap()
+                            .child(div().text_xs().child("AI uses"))
+                            .child(assistant_button(None, "Selected user".into(), &current, cx))
+                            .children(users.iter().map(|u| {
+                                assistant_button(Some(u.id.clone()), u.user.clone(), &current, cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                "A user that may only read keeps the assistant from changing \
+                                 data, whatever it asks for.",
+                            ),
+                    ),
+            )
+        });
         let user_fields = h_flex()
             .gap_2()
             .child(field("User", Input::new(&self.user)).flex_1())

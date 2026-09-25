@@ -26,7 +26,7 @@ impl Workspace {
             return;
         };
         let on = !settings::current(cx).is_read_only(&user);
-        match settings::set_read_only(&user, on, cx) {
+        match self.set_read_only(&user, on, cx) {
             Ok(()) if on => {
                 self.relock.remove(&user);
             }
@@ -58,16 +58,30 @@ impl Workspace {
         if settings::current(cx).is_read_only(user) {
             return;
         }
-        if let Err(e) = settings::set_read_only(user, true, cx) {
+        if let Err(e) = self.set_read_only(user, true, cx) {
             eprintln!("could not turn read-only mode back on for {user}: {e}");
         }
         cx.notify();
     }
 
-    /// Whether and how the user's `sql` runs on a tab's connection.
+    /// Turns read-only mode on or off for `user` in `settings.json` and has the
+    /// engine read it again right away (it decides from its own copy).
+    pub(super) fn set_read_only(
+        &mut self,
+        user: &str,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let result = settings::set_read_only(user, on, cx);
+        self.engine.send(Command::ReloadSettings);
+        result
+    }
+
+    /// Whether and how the user's `sql` runs on a tab's connection: the same decision
+    /// the engine makes, asked first to show a dialog.
     pub(super) fn decide_for_tab(&self, conn: ConnId, sql: &str, cx: &App) -> Decision {
         let user = self.conn_user_name(conn);
-        policy::decide(settings::current(cx), user.as_deref(), sql, Caller::User)
+        tangul_engine::decide(settings::current(cx), user.as_deref(), sql, Caller::User)
     }
 
     /// Explains why `sql` did not run. The red button lifts the guard: "Allow writes"
@@ -78,7 +92,6 @@ impl Workspace {
         tab: Entity<QueryTab>,
         sql: String,
         guard: Guard,
-        then: Run,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -106,10 +119,17 @@ impl Workspace {
                     allow.to_string(),
                 )
             }
+            // Not from tabs: the assistant's statements are approved in its panel.
+            Guard::Assistant { statements } => (
+                "Approve the assistant's statements",
+                "The assistant wants to run statements that change data:".to_string(),
+                statements.clone(),
+                "Allow".to_string(),
+            ),
         };
         let read_only_user = match &guard {
             Guard::ReadOnly { user, .. } => Some(user.clone()),
-            Guard::Unfiltered { .. } => None,
+            Guard::Unfiltered { .. } | Guard::Assistant { .. } => None,
         };
         window.open_dialog(cx, move |dialog, _, cx| {
             let theme = cx.theme();
@@ -133,7 +153,10 @@ impl Workspace {
                     window.close_dialog(cx);
                     match &read_only_user {
                         // Lifts read-only mode; running the statement is a second, deliberate step.
-                        Some(user) => match settings::set_read_only(user, false, cx) {
+                        Some(user) => match workspace
+                            .update(cx, |ws, cx| ws.set_read_only(user, false, cx))
+                            .unwrap_or_else(|_| Err("the window is gone".into()))
+                        {
                             Ok(()) => {
                                 let _ = workspace.update(cx, |ws, cx| ws.schedule_relock(user, cx));
                                 window.push_notification(
@@ -151,7 +174,9 @@ impl Workspace {
                             ),
                         },
                         None => {
-                            let _ = workspace.update(cx, |ws, cx| ws.execute(&tab, &sql, then, cx));
+                            let _ = workspace.update(cx, |ws, cx| {
+                                ws.execute(&tab, &sql, Approval::Confirmed, cx)
+                            });
                         }
                     }
                 }

@@ -9,15 +9,19 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/core`: shared types, no I/O
 - `crates/drivers`: Postgres / MySQL sessions (text protocol)
 - `crates/engine`: tokio backend thread; front ends talk to it only via `Command` / `Event`
-  (streamed into tabs) or `EngineHandle::query` (the whole result, for everything else)
+  (streamed into tabs) or `EngineHandle::query` (the whole result, for everything else).
+  Its gate (`gate.rs`) is the only safety gate: every statement passes it with a `Caller`
+  and an `Approval`; it reads `settings.json` itself. Users in write mode write freely;
+  schedules and the assistant run allow-listed reads read-only; an assistant write waits
+  for a single-use pass bound to connection and SQL. Assistant and schedule runs are
+  audited in `local.db`
 - `crates/assist`: SQL logic without UI (lexer, analysis, completion, filters); put
   testable logic here
 - `crates/tunnel`: SSH tunnels
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`,
   `metrics.db`, `settings.json`)
-- `crates/service`: what every front end shares, no UI: open connections by purpose,
-  the policy that decides whether and how a statement runs (the only safety gate;
-  schedules and the assistant only read), scheduled bookmarks
+- `crates/service`: what every front end shares, no UI: open connections by purpose
+  (the assistant uses the database's optional assistant user), scheduled bookmarks
 - `crates/app`: the GPUI app
 
 ## Commands

@@ -11,7 +11,7 @@ use tangul_data::local::Bookmark;
 pub fn schedulable(bookmark: &Bookmark) -> bool {
     bookmark.scheduled
         && bookmark.database_id.is_some()
-        && !guard::check(&bookmark.sql).iter().any(|c| c.writes)
+        && guard::not_reads(&bookmark.sql).is_empty()
 }
 
 /// The scheduled bookmark that waited longest past `interval` since its last run
