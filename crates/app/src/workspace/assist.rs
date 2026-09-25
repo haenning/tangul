@@ -26,12 +26,12 @@ impl Workspace {
     }
 
     /// Publishes a connection's schema and usage to the completion providers.
-    pub(super) fn sync_assist(&mut self, user_id: &str) {
+    pub(super) fn sync_assist(&mut self, user_id: &str, cx: &App) {
         let Some(db_id) = self.find_user(user_id).map(|(db, _)| db.id.clone()) else {
             return;
         };
         let usage = self.usage_for(&db_id);
-        if let Some(state) = self.conns.get(user_id) {
+        if let Some(state) = self.conns.get(user_id).map(|c| c.read(cx)) {
             self.assist.borrow_mut().insert(
                 state.id,
                 AssistData {
@@ -42,7 +42,7 @@ impl Workspace {
         }
     }
 
-    pub(super) fn sync_assist_for_db(&mut self, db_id: &str) {
+    pub(super) fn sync_assist_for_db(&mut self, db_id: &str, cx: &App) {
         let users: Vec<String> = self
             .data
             .profiles
@@ -53,14 +53,14 @@ impl Workspace {
             .map(|u| u.id.clone())
             .collect();
         for u in users {
-            self.sync_assist(&u);
+            self.sync_assist(&u, cx);
         }
     }
 
     /// Suggestions for a table of the active connection: learned from history first,
     /// then generated from its keys.
-    pub(super) fn table_suggestions(&self, table: &TableInfo) -> Vec<QuerySuggestion> {
-        let (Some(state), Some(db)) = (self.active_conn(), self.active_db.as_deref()) else {
+    pub(super) fn table_suggestions(&self, table: &TableInfo, cx: &App) -> Vec<QuerySuggestion> {
+        let (Some(state), Some(db)) = (self.active_conn(cx), self.active_db.as_deref()) else {
             return Vec::new();
         };
         let Some(ix) = state.schema.resolve(Some(&table.schema), &table.name) else {

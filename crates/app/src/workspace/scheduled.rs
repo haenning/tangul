@@ -186,12 +186,8 @@ impl Workspace {
         let tab = self.add_tab(&sql, window, cx);
         tab.update(cx, |t, cx| {
             t.title = format!("{} · runs", bookmark.name).into();
-            let tab_conn = TabConn {
-                id: conn,
-                name: "tangul metrics".into(),
-                driver: DriverKind::Sqlite,
-            };
-            t.set_conn(tab_conn, cx);
+            let file = cx.new(|_| Connection::local_file(conn, "tangul metrics"));
+            t.set_conn(file, cx);
             // Duration over time; rows are one pick away in the chart menu.
             t.set_chart_view(
                 Some(ChartView {

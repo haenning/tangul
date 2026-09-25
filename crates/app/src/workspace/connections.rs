@@ -12,24 +12,35 @@ impl Workspace {
         ) else {
             return;
         };
-        // Show (and complete against) the cached schema until the server answers.
-        let schema = match self.conns.get(user_id) {
-            Some(state) => state.schema.clone(),
-            None => self.schema_index(
+        let Some((name, driver)) = self.conn_name(user_id) else {
+            return;
+        };
+        // Tabs on it see it reconnect: the entity stays, its state changes.
+        if let Some(conn) = self.conns.get(user_id) {
+            conn.update(cx, |c, cx| {
+                c.id = id;
+                c.name = name;
+                c.driver = driver;
+                c.status = ConnStatus::Connecting;
+                cx.notify();
+            });
+        } else {
+            // Show (and complete against) the cached schema until the server answers.
+            let schema = self.schema_index(
                 user_id,
                 self.data.local.cached_schema(user_id).unwrap_or_default(),
-            ),
-        };
-        self.conns.insert(
-            user_id.to_string(),
-            ConnState {
+            );
+            let conn = cx.new(|_| Connection {
                 id,
+                name,
+                driver,
                 status: ConnStatus::Connecting,
                 schema,
                 stats: PoolStats::default(),
-            },
-        );
-        self.sync_assist(user_id);
+            });
+            self.conns.insert(user_id.to_string(), conn);
+        }
+        self.sync_assist(user_id, cx);
         cx.notify();
     }
 
@@ -43,7 +54,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let needs_connect = !matches!(
-            self.conns.get(&user_id).map(|c| &c.status),
+            self.conns.get(&user_id).map(|c| &c.read(cx).status),
             Some(ConnStatus::Connected | ConnStatus::Connecting)
         );
         if needs_connect {
@@ -72,10 +83,9 @@ impl Workspace {
             .users
             .iter()
             .find(|u| {
-                matches!(
-                    self.conns.get(&u.id).map(|c| &c.status),
-                    Some(ConnStatus::Connected)
-                )
+                self.conns
+                    .get(&u.id)
+                    .is_some_and(|c| c.read(cx).is_connected())
             })
             .or(db.users.first())
             .map(|u| u.id.clone());
@@ -223,6 +233,7 @@ impl Workspace {
                 .and_then(|_| self.data.profiles.upsert_user(&db_id, user, password));
             id
         });
+        self.rename_conns(&db_id, cx);
         if let Err(e) = result {
             window.push_notification(
                 Notification::error(format!("Could not save connection: {e:#}")),
@@ -280,9 +291,7 @@ impl Workspace {
                 }
             }
             Event::Connected { conn } => {
-                if let Some(state) = self.conn_state_mut(conn) {
-                    state.status = ConnStatus::Connected;
-                }
+                self.update_conn(conn, cx, |c| c.status = ConnStatus::Connected);
                 // Tabs without a connection pick up the newly connected one.
                 if let Some(user_id) = self.connections.tab_user(conn).map(str::to_string)
                     && let Some(tc) = self.tab_conn(&user_id)
@@ -302,9 +311,8 @@ impl Workspace {
                 key,
             } => self.confirm_host_key(conn, host, port, fingerprint, key, window, cx),
             Event::ConnectFailed { conn, error } => {
-                if let Some(state) = self.conn_state_mut(conn) {
-                    state.status = ConnStatus::Failed(error.clone().into());
-                }
+                let failed = ConnStatus::Failed(error.clone().into());
+                self.update_conn(conn, cx, |c| c.status = failed);
                 window.push_notification(Notification::error(error), cx);
             }
             Event::Schema { conn, result } => match result {
@@ -314,10 +322,8 @@ impl Workspace {
                             eprintln!("could not cache schema: {e:#}");
                         }
                         let schema = self.schema_index(&user_id, info);
-                        if let Some(state) = self.conn_state_mut(conn) {
-                            state.schema = schema;
-                        }
-                        self.sync_assist(&user_id);
+                        self.update_conn(conn, cx, |c| c.schema = schema);
+                        self.sync_assist(&user_id, cx);
                     }
                 }
                 Err(e) => window.push_notification(Notification::error(e), cx),
@@ -330,8 +336,11 @@ impl Workspace {
                 }
             }
             Event::PoolStats { conn, stats } => {
-                if let Some(state) = self.conn_state_mut(conn) {
-                    state.stats = stats;
+                // Only the title bar shows them: tabs aren't redrawn for every tick.
+                if let Some(c) = self.tab_connection(conn, cx)
+                    && c.read(cx).stats != stats
+                {
+                    self.update_conn(conn, cx, |c| c.stats = stats);
                 }
             }
         }
@@ -385,8 +394,11 @@ impl Workspace {
                 let (workspace, user_id) = (workspace.clone(), user_id.clone());
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let _ = workspace.update(cx, |ws, cx| {
-                        if let Some(state) = ws.conns.get_mut(&user_id) {
-                            state.status = ConnStatus::Failed("SSH host key not trusted".into());
+                        if let Some(conn) = ws.conns.get(&user_id) {
+                            conn.update(cx, |c, cx| {
+                                c.status = ConnStatus::Failed("SSH host key not trusted".into());
+                                cx.notify();
+                            });
                         }
                         cx.notify();
                     });
@@ -442,8 +454,54 @@ impl Workspace {
         });
     }
 
-    pub(super) fn conn_state_mut(&mut self, conn: ConnId) -> Option<&mut ConnState> {
+    /// The tab connection with engine id `conn`, if it is still its user's.
+    pub(super) fn tab_connection(&self, conn: ConnId, cx: &App) -> Option<Entity<Connection>> {
         let user_id = self.connections.tab_user(conn)?;
-        self.conns.get_mut(user_id).filter(|s| s.id == conn)
+        self.conns
+            .get(user_id)
+            .filter(|c| c.read(cx).id == conn)
+            .cloned()
+    }
+
+    /// Changes the tab connection `conn` and redraws the tabs on it.
+    pub(super) fn update_conn(
+        &self,
+        conn: ConnId,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut Connection),
+    ) {
+        if let Some(entity) = self.tab_connection(conn, cx) {
+            entity.update(cx, |c, cx| {
+                change(c);
+                cx.notify();
+            });
+        }
+    }
+
+    /// A user's connection name (`user@database`) and driver.
+    fn conn_name(&self, user_id: &str) -> Option<(SharedString, DriverKind)> {
+        let (db, user) = self.find_user(user_id)?;
+        Some((
+            format!("{}@{}", user.user, db.display_name()).into(),
+            db.driver,
+        ))
+    }
+
+    /// Renamed database or users: the open connections show the new names.
+    fn rename_conns(&self, db_id: &str, cx: &mut Context<Self>) {
+        let Some(db) = self.data.profiles.database(db_id) else {
+            return;
+        };
+        for user in &db.users {
+            if let Some(conn) = self.conns.get(&user.id)
+                && let Some((name, _)) = self.conn_name(&user.id)
+                && conn.read(cx).name != name
+            {
+                conn.update(cx, |c, cx| {
+                    c.name = name;
+                    cx.notify();
+                });
+            }
+        }
     }
 }

@@ -15,8 +15,8 @@ impl Workspace {
 
     /// The table's name for generated SQL: without the default schema (`public`, or
     /// the MySQL connection's database) and quoted only where needed.
-    pub(super) fn sql_name(&self, table: &TableInfo) -> Option<String> {
-        let schema = &self.active_conn()?.schema;
+    pub(super) fn sql_name(&self, table: &TableInfo, cx: &App) -> Option<String> {
+        let schema = &self.active_conn(cx)?.schema;
         match schema.resolve(Some(&table.schema), &table.name) {
             Some(ix) => Some(schema.sql_name(ix)),
             None => self.qualified_name(table),
@@ -29,7 +29,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = self.sql_name(table) else {
+        let Some(name) = self.sql_name(table, cx) else {
             return;
         };
         self.run_in_new_tab(
@@ -46,7 +46,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = self.sql_name(table) else {
+        let Some(name) = self.sql_name(table, cx) else {
             return;
         };
         self.run_in_new_tab(
@@ -72,11 +72,11 @@ impl Workspace {
         });
     }
 
-    pub(super) fn build_sidebar_rows(&self, search: &str) -> Vec<SidebarRow> {
+    pub(super) fn build_sidebar_rows(&self, search: &str, cx: &App) -> Vec<SidebarRow> {
         let Some((user_id, state)) = self
             .active_user
             .as_ref()
-            .and_then(|id| Some((id, self.conns.get(id)?)))
+            .and_then(|id| Some((id, self.conns.get(id)?.read(cx))))
         else {
             return Vec::new();
         };
@@ -415,7 +415,7 @@ impl Workspace {
                         let Some(ws) = weak.upgrade() else {
                             return menu;
                         };
-                        let list = ws.read(cx).table_suggestions(&menu_table);
+                        let list = ws.read(cx).table_suggestions(&menu_table, cx);
                         suggestions_menu(menu, &menu_table.name, list, &weak)
                     });
                 let revealed = !in_favorites
@@ -596,7 +596,7 @@ impl Workspace {
                 }))
         };
         match self
-            .active_conn()
+            .active_conn(cx)
             .map(|c| (&c.status, c.schema.tables().is_empty()))
         {
             None => Some(
@@ -627,7 +627,7 @@ impl Workspace {
             .as_deref()
             .map(|db| self.data.local.favorites(db))
             .unwrap_or_default();
-        self.sidebar_rows = self.build_sidebar_rows(&search);
+        self.sidebar_rows = self.build_sidebar_rows(&search, cx);
         if let Some((schema, table)) = self.reveal.take() {
             let target = self.sidebar_rows.iter().position(|row| match row {
                 SidebarRow::Table { table: t } => {
@@ -642,7 +642,7 @@ impl Workspace {
             }
         }
         let has_schema = self
-            .active_conn()
+            .active_conn(cx)
             .is_some_and(|c| !c.schema.tables().is_empty());
         let no_hits = !search.is_empty() && self.sidebar_rows.is_empty();
         let empty = self.render_sidebar_empty(cx);
@@ -653,8 +653,8 @@ impl Workspace {
             _ => "SCHEMAS",
         };
         let refresh = self
-            .active_conn()
-            .filter(|c| c.status == ConnStatus::Connected)
+            .active_conn(cx)
+            .filter(|c| c.is_connected())
             .map(|c| c.id);
         v_flex()
             .flex_1()
