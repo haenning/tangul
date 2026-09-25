@@ -15,9 +15,9 @@ use std::{
 };
 
 use anyhow::Result;
-use rusdb_core::{ConnectConfig, TabId};
-use rusdb_drivers::{Driver, Session};
-use rusdb_tunnel::Tunnel;
+use tangul_core::{ConnectConfig, TabId};
+use tangul_drivers::{Driver, Session};
+use tangul_tunnel::Tunnel;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -27,6 +27,8 @@ pub struct Lease {
     pub session: Box<dyn Session>,
     /// Whether the server was told to refuse writes on this session.
     pub read_only: bool,
+    /// The statement time limit the server was told for this session.
+    pub timeout: Option<Duration>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -108,6 +110,7 @@ impl Pool {
         Ok(Lease {
             session,
             read_only: false,
+            timeout: None,
             _permit: permit,
         })
     }

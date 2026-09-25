@@ -1,4 +1,4 @@
-//! Bridges `rusdb_assist::complete` into the editor's completion menu.
+//! Bridges `tangul_assist::complete` into the editor's completion menu.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -12,10 +12,10 @@ use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
     TextEdit,
 };
-use rusdb_assist::complete::{SuggestionKind, complete};
-use rusdb_assist::schema::SchemaIndex;
-use rusdb_assist::usage::Usage;
-use rusdb_core::ConnId;
+use tangul_assist::complete::{SuggestionKind, complete};
+use tangul_assist::schema::SchemaIndex;
+use tangul_assist::usage::Usage;
+use tangul_core::ConnId;
 
 use crate::query_tab::QueryTab;
 

@@ -19,14 +19,14 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_assist::analyze::statements;
-use rusdb_assist::chart::{ChartData, ChartView, chart_data};
-use rusdb_assist::columns::ColumnFacts;
-use rusdb_assist::lexer::tokenize;
-use rusdb_assist::refine::{ColumnFilter, Refine, Sort, refinable, refined_sql};
-use rusdb_assist::{edit::RowEdit, related::RelatedLink};
-use rusdb_core::{ConnId, DriverKind, QueryId, TabId};
-use rusdb_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
+use tangul_assist::analyze::statements;
+use tangul_assist::chart::{ChartData, ChartView, chart_data};
+use tangul_assist::columns::ColumnFacts;
+use tangul_assist::lexer::tokenize;
+use tangul_assist::refine::{ColumnFilter, Refine, Sort, refinable, refined_sql};
+use tangul_assist::{edit::RowEdit, related::RelatedLink};
+use tangul_core::{ConnId, DriverKind, QueryId, TabId};
+use tangul_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
 
 /// Pause in typing after which the editor is checked on the server.
 const VALIDATE_AFTER: Duration = Duration::from_secs(1);
@@ -39,8 +39,12 @@ const EDITOR_HEIGHT: f32 = 240.;
 const EDITOR_SNAP_HIDE: f32 = 60.;
 
 use crate::{
-    BookmarkQuery, RunQuery, SaveFile, assets::Lucide, chart::ResultChart,
-    column_filter::FilterPanel, results::ResultsDelegate,
+    BookmarkQuery, RunQuery, SaveFile,
+    assets::Lucide,
+    chart::{self, ResultChart},
+    column_filter::FilterPanel,
+    results::ResultsDelegate,
+    settings,
 };
 
 /// Connection a tab runs against.
@@ -72,6 +76,9 @@ pub enum TabEvent {
     /// Run a filtered / sorted version of the last result (`append: false`) or its
     /// next page (`append: true`). Not a run of its own.
     Refine { sql: String, append: bool },
+    /// Open a table (the target of a foreign key) in a new tab, like clicking it in
+    /// the schema tree.
+    OpenTable { schema: String, table: String },
 }
 
 enum Status {
@@ -282,7 +289,7 @@ impl QueryTab {
             );
             return false;
         }
-        file.problem = crate::settings::problem(&text).map(Into::into);
+        file.problem = settings::problem(&text).map(Into::into);
         file.saved = text;
         cx.notify();
         true
@@ -355,7 +362,7 @@ impl QueryTab {
             let d = t.delegate_mut();
             d.related = links;
             d.edit = edit;
-            d.facts = facts;
+            d.set_facts(facts);
             cx.notify();
         });
     }
@@ -562,7 +569,7 @@ impl QueryTab {
             &d.refine,
             driver,
             offset,
-            rusdb_engine::ROW_LIMIT + 1,
+            tangul_engine::ROW_LIMIT + 1,
         ))
     }
 
@@ -898,11 +905,17 @@ impl QueryTab {
                         .child(s.name.clone())
                 }))
         });
+        let settings = settings::current(cx);
+        let label_size = settings.chart_font_size();
         v_flex()
             .size_full()
             .p_3()
             .gap_2()
             .text_xs()
+            .when_some(label_size, |this, size| this.text_size(px(size)))
+            .when_some(settings.chart.font.family(), |this, family| {
+                this.font_family(SharedString::from(family.to_string()))
+            })
             .text_color(theme.muted_foreground)
             .when(curve_switch.is_some() || legend.is_some(), |this| {
                 this.child(
@@ -925,6 +938,7 @@ impl QueryTab {
                 style,
                 colors,
                 self.smooth_lines,
+                label_size.unwrap_or(chart::LABEL_SIZE),
             )))
             .into_any_element()
     }
@@ -1086,7 +1100,7 @@ impl QueryTab {
                 } else if more {
                     s.push_str(" · scroll for more");
                 } else if self.truncated {
-                    s.push_str(&format!(" · limited to {} rows", rusdb_engine::ROW_LIMIT));
+                    s.push_str(&format!(" · limited to {} rows", tangul_engine::ROW_LIMIT));
                 }
                 s.into()
             }

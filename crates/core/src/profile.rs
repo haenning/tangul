@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub enum DriverKind {
     Postgres,
     Mysql,
+    /// Only the app's own data (bookmark metrics), read-only; not for profiles.
+    Sqlite,
 }
 
 impl DriverKind {
@@ -12,6 +14,7 @@ impl DriverKind {
         match self {
             DriverKind::Postgres => 5432,
             DriverKind::Mysql => 3306,
+            DriverKind::Sqlite => 0,
         }
     }
 
@@ -19,6 +22,7 @@ impl DriverKind {
         match self {
             DriverKind::Postgres => "PostgreSQL",
             DriverKind::Mysql => "MySQL",
+            DriverKind::Sqlite => "SQLite",
         }
     }
 }

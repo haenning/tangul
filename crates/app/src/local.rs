@@ -5,14 +5,15 @@
 use std::path::Path;
 
 use anyhow::Result;
-use rusdb_assist::suggest::HistoryPattern;
-use rusdb_assist::usage::{Usage, UsageKind, UsageStat};
-use rusdb_core::SchemaInfo;
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::Deserialize;
+use tangul_assist::chart::ChartView;
+use tangul_assist::suggest::HistoryPattern;
+use tangul_assist::usage::{Usage, UsageKind, UsageStat};
+use tangul_core::SchemaInfo;
 
 /// A named, saved query.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Bookmark {
     pub id: String,
     pub name: String,
@@ -20,6 +21,12 @@ pub struct Bookmark {
     /// Database the bookmark belongs to; `None` shows it for every database.
     #[serde(default)]
     pub database_id: Option<String>,
+    /// How its result is shown: the grid (`None`) or a chart.
+    #[serde(skip)]
+    pub view: Option<ChartView>,
+    /// Run in the background now and then to track its duration and row count.
+    #[serde(skip)]
+    pub scheduled: bool,
 }
 
 /// One executed script.
@@ -78,6 +85,14 @@ const MIGRATIONS: &[&str] = &[
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );",
+    "CREATE TABLE favorites (
+        database_id TEXT NOT NULL,
+        schema TEXT NOT NULL,
+        name TEXT NOT NULL,
+        PRIMARY KEY (database_id, schema, name)
+    );",
+    "ALTER TABLE bookmarks ADD COLUMN view TEXT;
+    ALTER TABLE bookmarks ADD COLUMN scheduled INTEGER NOT NULL DEFAULT 0;",
 ];
 
 pub struct Local {
@@ -151,7 +166,7 @@ impl Local {
     /// Bookmarks shown for a database: its own plus the global ones, by name.
     pub fn bookmarks_for(&self, db_id: Option<&str>) -> Vec<Bookmark> {
         self.query_bookmarks(
-            "SELECT id, name, sql, database_id FROM bookmarks
+            "SELECT id, name, sql, database_id, view, scheduled FROM bookmarks
              WHERE database_id IS NULL OR database_id = ?1
              ORDER BY lower(name)",
             params![db_id],
@@ -160,20 +175,33 @@ impl Local {
 
     pub fn bookmark(&self, id: &str) -> Option<Bookmark> {
         self.query_bookmarks(
-            "SELECT id, name, sql, database_id FROM bookmarks WHERE id = ?1",
+            "SELECT id, name, sql, database_id, view, scheduled FROM bookmarks WHERE id = ?1",
             params![id],
         )
         .pop()
     }
 
+    /// Bookmarks that run on a schedule (only ones for a single database).
+    pub fn scheduled_bookmarks(&self) -> Vec<Bookmark> {
+        self.query_bookmarks(
+            "SELECT id, name, sql, database_id, view, scheduled FROM bookmarks
+             WHERE scheduled AND database_id IS NOT NULL
+             ORDER BY lower(name)",
+            [],
+        )
+    }
+
     fn query_bookmarks(&self, sql: &str, params: impl rusqlite::Params) -> Vec<Bookmark> {
         let result = self.conn.prepare_cached(sql).and_then(|mut stmt| {
             stmt.query_map(params, |r| {
+                let view: Option<String> = r.get(4)?;
                 Ok(Bookmark {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     sql: r.get(2)?,
                     database_id: r.get(3)?,
+                    view: view.as_deref().and_then(ChartView::from_key),
+                    scheduled: r.get(5)?,
                 })
             })?
             .collect()
@@ -187,10 +215,19 @@ impl Local {
     /// Inserts or replaces a bookmark (matched by id).
     pub fn upsert_bookmark(&self, b: &Bookmark) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO bookmarks (id, name, sql, database_id, fingerprint)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (id) DO UPDATE SET name = ?2, sql = ?3, database_id = ?4, fingerprint = ?5",
-            params![b.id, b.name, b.sql, b.database_id, rusdb_assist::lexer::fingerprint(&b.sql)],
+            "INSERT INTO bookmarks (id, name, sql, database_id, fingerprint, view, scheduled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (id) DO UPDATE SET name = ?2, sql = ?3, database_id = ?4,
+               fingerprint = ?5, view = ?6, scheduled = ?7",
+            params![
+                b.id,
+                b.name,
+                b.sql,
+                b.database_id,
+                tangul_assist::lexer::fingerprint(&b.sql),
+                b.view.map(ChartView::to_key),
+                b.scheduled,
+            ],
         )?;
         Ok(())
     }
@@ -284,6 +321,19 @@ impl Local {
             eprintln!("history query failed: {e}");
             Vec::new()
         })
+    }
+
+    /// The user who last ran something on the database.
+    pub fn last_user(&self, db_id: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT user_id FROM history WHERE database_id = ?1
+                 ORDER BY started_at DESC LIMIT 1",
+                params![db_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()?
     }
 
     /// Successful runs of queries with this fingerprint.
@@ -389,6 +439,36 @@ impl Local {
         }
     }
 
+    // ---- favorites -----------------------------------------------------------------
+
+    /// Favorite tables and views of a database as (schema, name), ordered.
+    pub fn favorites(&self, db_id: &str) -> Vec<(String, String)> {
+        let result = self
+            .conn
+            .prepare_cached(
+                "SELECT schema, name FROM favorites WHERE database_id = ?1
+                 ORDER BY schema, name",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map(params![db_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect()
+            });
+        result.unwrap_or_else(|e| {
+            eprintln!("favorites query failed: {e}");
+            Vec::new()
+        })
+    }
+
+    pub fn set_favorite(&self, db_id: &str, schema: &str, name: &str, on: bool) -> Result<()> {
+        let sql = if on {
+            "INSERT OR IGNORE INTO favorites (database_id, schema, name) VALUES (?1, ?2, ?3)"
+        } else {
+            "DELETE FROM favorites WHERE database_id = ?1 AND schema = ?2 AND name = ?3"
+        };
+        self.conn.execute(sql, params![db_id, schema, name])?;
+        Ok(())
+    }
+
     // ---- schema cache --------------------------------------------------------------
 
     pub fn save_schema(&self, user_id: &str, schema: &SchemaInfo) -> Result<()> {
@@ -430,7 +510,7 @@ mod tests {
                 database_id: "db",
                 user_id: "u",
                 sql,
-                fingerprint: &rusdb_assist::lexer::fingerprint(sql),
+                fingerprint: &tangul_assist::lexer::fingerprint(sql),
                 entry: HistoryEntry {
                     sql: sql.into(),
                     started_at: at,
@@ -450,6 +530,7 @@ mod tests {
             name: name.into(),
             sql: "select * from t where id = 1".into(),
             database_id: db.map(Into::into),
+            ..Default::default()
         };
         l.upsert_bookmark(&b("1", "zeta", Some("pg"))).unwrap();
         l.upsert_bookmark(&b("2", "Alpha", None)).unwrap();
@@ -462,7 +543,7 @@ mod tests {
         assert_eq!(ids, ["2", "1"]);
         assert!(l.is_bookmarked(
             "pg",
-            &rusdb_assist::lexer::fingerprint("SELECT * FROM t WHERE id = 7")
+            &tangul_assist::lexer::fingerprint("SELECT * FROM t WHERE id = 7")
         ));
         l.delete_bookmark("2").unwrap();
         assert!(l.bookmark("2").is_none());
@@ -476,6 +557,7 @@ mod tests {
             name: format!("b{id}"),
             sql: sql.into(),
             database_id: db.map(Into::into),
+            ..Default::default()
         };
         l.upsert_bookmark(&b("1", "select * from t where id = 1;", None))
             .unwrap();
@@ -514,11 +596,13 @@ mod tests {
         assert_eq!(
             l.runs(
                 "db",
-                &rusdb_assist::lexer::fingerprint("select * from t where id = 9")
+                &tangul_assist::lexer::fingerprint("select * from t where id = 9")
             ),
             2
         );
         assert_eq!(l.history("db", "", 10)[0].error.as_deref(), Some("boom"));
+        assert_eq!(l.last_user("db").as_deref(), Some("u"));
+        assert_eq!(l.last_user("other"), None);
         assert_eq!(l.history("db", "%", 10).len(), 1);
     }
 
@@ -539,5 +623,47 @@ mod tests {
         l.set_setting("last_user", "a");
         l.set_setting("last_user", "b");
         assert_eq!(l.setting("last_user").as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn favorites_per_database() {
+        let l = Local::in_memory();
+        l.set_favorite("pg", "public", "users", true).unwrap();
+        l.set_favorite("pg", "app", "orders", true).unwrap();
+        // Adding twice is harmless.
+        l.set_favorite("pg", "app", "orders", true).unwrap();
+        l.set_favorite("mysql", "app", "users", true).unwrap();
+        assert_eq!(
+            l.favorites("pg"),
+            vec![
+                ("app".to_string(), "orders".to_string()),
+                ("public".to_string(), "users".to_string()),
+            ]
+        );
+        l.set_favorite("pg", "public", "users", false).unwrap();
+        assert_eq!(l.favorites("pg").len(), 1);
+        assert_eq!(l.favorites("mysql").len(), 1);
+    }
+
+    #[test]
+    fn bookmark_view_and_schedule() {
+        let l = Local::in_memory();
+        let mut b = Bookmark {
+            id: "1".into(),
+            name: "b".into(),
+            sql: "select 1".into(),
+            ..Default::default()
+        };
+        l.upsert_bookmark(&b).unwrap();
+        assert_eq!(l.bookmark("1").unwrap(), b);
+        b.view = ChartView::from_key("bars:1");
+        b.scheduled = true;
+        l.upsert_bookmark(&b).unwrap();
+        assert_eq!(l.bookmark("1").unwrap(), b);
+        // Only bookmarks for one database run on a schedule.
+        assert!(l.scheduled_bookmarks().is_empty());
+        b.database_id = Some("pg".into());
+        l.upsert_bookmark(&b).unwrap();
+        assert_eq!(l.scheduled_bookmarks(), vec![b]);
     }
 }

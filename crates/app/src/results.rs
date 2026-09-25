@@ -16,6 +16,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    hover_card::HoverCard,
     menu::{PopupMenu, PopupMenuItem},
     popover::Popover,
     table::{Column, TableDelegate, TableState},
@@ -24,14 +25,15 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_assist::columns::ColumnFacts;
-use rusdb_assist::refine::{ColumnKind, Refine};
-use rusdb_assist::{edit::RowEdit, related::RelatedLink};
-use rusdb_core::{ColumnInfo, ResultSet};
+use tangul_assist::columns::ColumnFacts;
+use tangul_assist::refine::{ColumnKind, Refine};
+use tangul_assist::{edit::RowEdit, related::RelatedLink};
+use tangul_core::{ColumnInfo, ResultSet};
 
 use crate::assets::Lucide;
 use crate::column_filter::FilterPanel;
 use crate::query_tab::{QueryTab, TabEvent};
+use crate::settings;
 
 /// Longer values are cut in the grid (full value view is a later feature).
 const MAX_CELL_CHARS: usize = 200;
@@ -49,7 +51,7 @@ pub struct ResultsDelegate {
     /// Column under the last right click, for "Copy cell".
     menu_col: Option<usize>,
     /// Foreign-key links of the current result, most used first (see
-    /// `rusdb_assist::related`).
+    /// `tangul_assist::related`).
     pub related: Vec<RelatedLink>,
     /// UPDATE / DELETE statements for the rows, if the result is from one table.
     pub edit: Option<RowEdit>,
@@ -66,6 +68,8 @@ pub struct ResultsDelegate {
     hovered: Option<usize>,
     /// Column whose filter popover is open.
     filter_open: Option<usize>,
+    /// Column whose foreign-key card is open (hides the aggregates meanwhile).
+    key_card: Option<usize>,
     filter_panel: Option<Entity<FilterPanel>>,
     /// Bumped whenever the selection changes (invalidates `stats`).
     selection_gen: u64,
@@ -102,7 +106,16 @@ impl ResultsDelegate {
         self.more = false;
         self.hovered = None;
         self.filter_open = None;
+        self.key_card = None;
         self.selection_gen += 1;
+        self.stats = None;
+    }
+
+    /// What the schema says about the columns; they decide which columns get
+    /// aggregates, so cached ones are dropped.
+    pub fn set_facts(&mut self, facts: Vec<Option<ColumnFacts>>) {
+        self.facts = facts;
+        self.stats = None;
     }
 
     /// Drops the rows but keeps the columns (and their widths, keys, filters): a
@@ -114,6 +127,8 @@ impl ResultsDelegate {
         self.more = false;
         self.filter_open = None;
         self.selection_gen += 1;
+        // Same row count as before is likely (a full page): don't reuse old stats.
+        self.stats = None;
     }
 
     /// What the column holds: by its type when it is a known table column,
@@ -285,6 +300,121 @@ impl ResultsDelegate {
     pub fn close_filter(&mut self) {
         self.filter_open = None;
     }
+
+    /// Key and link markers left of a column name: a gold key for a primary-key
+    /// column, a blue key when that key part also references another table, a
+    /// chain for any other foreign-key column. Hovering a reference shows its
+    /// target with a button that opens that table.
+    fn key_icon(
+        &self,
+        col_ix: usize,
+        facts: &ColumnFacts,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let (icon, color, label) = match KeyMarker::of(facts)? {
+            KeyMarker::Primary => {
+                return Some(
+                    div()
+                        .id(("pk", col_ix))
+                        .flex_none()
+                        .tooltip(|window, cx| Tooltip::new("Primary key").build(window, cx))
+                        .child(
+                            Icon::new(Lucide::KeyRound)
+                                .size_3()
+                                .text_color(theme.warning),
+                        )
+                        .into_any_element(),
+                );
+            }
+            KeyMarker::PrimaryForeign => (Lucide::Key, theme.info, "Primary key, foreign key"),
+            KeyMarker::Foreign => (Lucide::Link, theme.muted_foreground, "Foreign key"),
+        };
+        let target = facts.references.clone()?;
+        let tab = self.tab.clone();
+        let table = cx.entity().downgrade();
+        Some(
+            HoverCard::new(("fk", col_ix))
+                .anchor(Anchor::TopLeft)
+                .open_delay(std::time::Duration::from_millis(250))
+                .on_open_change(move |open, _, cx| {
+                    let _ = table.update(cx, |t, cx| {
+                        let d = t.delegate_mut();
+                        if *open {
+                            d.key_card = Some(col_ix);
+                        } else if d.key_card == Some(col_ix) {
+                            d.key_card = None;
+                        }
+                        cx.notify();
+                    });
+                })
+                .trigger(
+                    div()
+                        .flex_none()
+                        .child(Icon::new(icon).size_3().text_color(color)),
+                )
+                .content(move |_, _, cx| {
+                    let theme = cx.theme();
+                    let tab = tab.clone();
+                    let jump = target.clone();
+                    v_flex()
+                        .gap_1p5()
+                        .text_xs()
+                        .child(div().text_color(theme.muted_foreground).child(label))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(Icon::new(Lucide::Link).size_3())
+                                .child(
+                                    div()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .child(format!("{}.{}", target.schema, target)),
+                                ),
+                        )
+                        .child(
+                            Button::new("jump-to-table")
+                                .label("Jump to table")
+                                .icon(Icon::new(Lucide::Table))
+                                .xsmall()
+                                .outline()
+                                .on_click(move |_, _, cx| {
+                                    let Some(tab) = tab.as_ref().and_then(WeakEntity::upgrade)
+                                    else {
+                                        return;
+                                    };
+                                    let event = TabEvent::OpenTable {
+                                        schema: jump.schema.clone(),
+                                        table: jump.table.clone(),
+                                    };
+                                    tab.update(cx, |_, cx| cx.emit(event));
+                                }),
+                        )
+                })
+                .into_any_element(),
+        )
+    }
+}
+
+/// The marker a column gets left of its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyMarker {
+    /// Part of the primary key, local to the table (gold key).
+    Primary,
+    /// Part of the primary key that also references another table (blue key).
+    PrimaryForeign,
+    /// A foreign-key column outside the primary key (chain).
+    Foreign,
+}
+
+impl KeyMarker {
+    fn of(facts: &ColumnFacts) -> Option<Self> {
+        match (facts.primary_key, facts.references.is_some()) {
+            (true, false) => Some(Self::Primary),
+            (true, true) => Some(Self::PrimaryForeign),
+            (false, true) => Some(Self::Foreign),
+            (false, false) => None,
+        }
+    }
 }
 
 fn stats_card(scope: String, stats: &ColumnStats, cx: &App) -> impl IntoElement {
@@ -313,14 +443,20 @@ fn stats_card(scope: String, stats: &ColumnStats, cx: &App) -> impl IntoElement 
         .text_color(theme.popover_foreground)
         .shadow_md()
         .child(div().pb_1().text_color(theme.muted_foreground).child(scope))
-        .child(row("count", stats.count.to_string().into()))
+        .child(row("rows", stats.rows.to_string().into()))
         .when(stats.nulls > 0, |this| {
-            this.child(row("nulls", stats.nulls.to_string().into()))
+            this.child(row("non-null", stats.count.to_string().into()))
+                .child(row("nulls", stats.nulls.to_string().into()))
         })
         .when(stats.count > 0, |this| {
-            this.child(row("sum", stats.sum.clone().into()))
-                .child(row("avg", stats.avg.clone().into()))
-                .child(row("min", stats.min.clone().into()))
+            let this = this.child(row("sum", stats.sum.clone().into()));
+            let this = if stats.nulls > 0 {
+                this.child(row("avg (all rows)", stats.avg_all.clone().into()))
+                    .child(row("avg (non-null)", stats.avg.clone().into()))
+            } else {
+                this.child(row("avg", stats.avg.clone().into()))
+            };
+            this.child(row("min", stats.min.clone().into()))
                 .child(row("max", stats.max.clone().into()))
         })
 }
@@ -328,10 +464,15 @@ fn stats_card(scope: String, stats: &ColumnStats, cx: &App) -> impl IntoElement 
 /// Aggregates of a numeric column; values as the server wrote them.
 #[derive(Debug, Clone, PartialEq)]
 struct ColumnStats {
+    /// All rows looked at.
+    rows: usize,
     /// Non-NULL values.
     count: usize,
     nulls: usize,
     sum: String,
+    /// Sum over all rows, NULL counting as 0.
+    avg_all: String,
+    /// Sum over the non-NULL values only (like SQL's AVG).
     avg: String,
     min: String,
     max: String,
@@ -373,20 +514,23 @@ fn column_stats<'a>(values: impl Iterator<Item = Option<&'a str>>) -> Option<Col
     if count == 0 && nulls == 0 {
         return None;
     }
-    let (sum, avg) = match exact {
-        Some((sum, scale)) => {
-            let avg = sum as f64 / 10f64.powi(scale as i32) / count.max(1) as f64;
-            (format_decimal(sum, scale), format_float(avg, scale + 2))
-        }
-        None => (
-            format_float(float_sum, 6),
-            format_float(float_sum / count.max(1) as f64, 6),
+    let rows = count + nulls;
+    let (sum, sum_f, decimals) = match exact {
+        Some((sum, scale)) => (
+            format_decimal(sum, scale),
+            sum as f64 / 10f64.powi(scale as i32),
+            scale + 2,
         ),
+        None => (format_float(float_sum, 6), float_sum, 6),
     };
+    let avg = format_float(sum_f / count.max(1) as f64, decimals);
+    let avg_all = format_float(sum_f / rows.max(1) as f64, decimals);
     Some(ColumnStats {
+        rows,
         count,
         nulls,
         sum,
+        avg_all,
         avg,
         min: min.map_or_else(String::new, |(_, v)| v.to_string()),
         max: max.map_or_else(String::new, |(_, v)| v.to_string()),
@@ -463,6 +607,8 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let facts = self.facts.get(col_ix).cloned().flatten();
+        let key_icon = facts.and_then(|f| self.key_icon(col_ix, &f, cx));
         let theme = cx.theme();
         let name = self.columns[col_ix].name.clone();
         let hovered = self.hovered == Some(col_ix);
@@ -470,29 +616,6 @@ impl TableDelegate for ResultsDelegate {
         let filtered = self.refine.filter(col_ix).is_some();
         let sorted = self.refine.sort.filter(|s| s.column == col_ix);
         let active = filtered || sorted.is_some();
-
-        let key = self
-            .facts
-            .get(col_ix)
-            .and_then(Option::as_ref)
-            .and_then(|f| {
-                f.primary_key.then(|| match &f.references {
-                    // Part of the key that points to another table.
-                    Some(target) => (
-                        Lucide::Key,
-                        theme.info,
-                        SharedString::from(format!("Primary key, references {target}")),
-                    ),
-                    None => (Lucide::KeyRound, theme.warning, "Primary key".into()),
-                })
-            });
-        let key_icon = key.map(|(icon, color, tip)| {
-            div()
-                .id(("pk", col_ix))
-                .flex_none()
-                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                .child(Icon::new(icon).size_3().text_color(color))
-        });
 
         let table = cx.entity().downgrade();
         let filter_button = (self.refinable && (hovered || open || active)).then(|| {
@@ -545,7 +668,7 @@ impl TableDelegate for ResultsDelegate {
                 )
         });
 
-        let stats_card = (hovered && self.filter_open.is_none())
+        let stats_card = (hovered && self.filter_open.is_none() && self.key_card.is_none())
             .then(|| self.stats(col_ix).cloned())
             .flatten()
             .map(|stats| {
@@ -582,7 +705,17 @@ impl TableDelegate for ResultsDelegate {
                 cx.notify();
             }))
             .children(key_icon)
-            .child(div().min_w_0().overflow_hidden().child(name))
+            .child({
+                let s = settings::current(cx);
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .when_some(s.table.family(), |d, family| {
+                        d.font_family(SharedString::from(family.to_string()))
+                    })
+                    .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
+                    .child(name)
+            })
             .children(filter_button)
             .children(stats_card)
     }
@@ -761,10 +894,16 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let s = settings::current(cx);
+        let family = s.table.family().map_or_else(
+            || cx.theme().mono_font_family.clone(),
+            |f| f.to_string().into(),
+        );
         let cell = div()
             .size_full()
-            .font_family(cx.theme().mono_font_family.clone())
+            .font_family(family)
             .text_xs()
+            .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
             .whitespace_nowrap()
             .overflow_hidden()
             .on_mouse_down(
@@ -797,9 +936,10 @@ fn display_value(value: &str) -> SharedString {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's `test` attribute would shadow the standard one.
-    use super::{ResultsDelegate, column_stats, format_decimal};
+    use super::{KeyMarker, ResultsDelegate, column_stats, format_decimal};
     use gpui_kit::Modifiers;
-    use rusdb_core::{ColumnInfo, RowBatch};
+    use tangul_assist::columns::{ColumnFacts, ForeignRef};
+    use tangul_core::{ColumnInfo, RowBatch};
 
     fn delegate() -> ResultsDelegate {
         let mut d = ResultsDelegate::default();
@@ -820,6 +960,19 @@ mod tests {
         d
     }
 
+    /// A delegate holding one numeric column `n` with these values.
+    fn numbers(values: &[Option<&str>]) -> ResultsDelegate {
+        let mut d = ResultsDelegate::default();
+        d.reset(vec![ColumnInfo { name: "n".into() }]);
+        let mut batch = RowBatch::default();
+        for v in values {
+            batch.push_cell(*v);
+            batch.finish_row();
+        }
+        d.result.append(batch);
+        d
+    }
+
     #[test]
     fn copies_tsv() {
         let d = delegate();
@@ -832,15 +985,131 @@ mod tests {
         let s =
             column_stats([Some("0.1"), Some("0.2"), None, Some("-1.25"), Some("3")].into_iter())
                 .unwrap();
-        assert_eq!((s.count, s.nulls), (4, 1));
+        assert_eq!((s.rows, s.count, s.nulls), (5, 4, 1));
         assert_eq!(s.sum, "2.05");
         assert_eq!(s.avg, "0.5125");
+        assert_eq!(s.avg_all, "0.41");
         assert_eq!((s.min.as_str(), s.max.as_str()), ("-1.25", "3"));
         let s = column_stats([Some("1e3"), Some("2")].into_iter()).unwrap();
         assert_eq!((s.sum.as_str(), s.avg.as_str()), ("1002", "501"));
         assert!(column_stats([Some("1"), Some("abc")].into_iter()).is_none());
         assert_eq!(format_decimal(-5, 2), "-0.05");
         assert_eq!(format_decimal(1234, 0), "1234");
+    }
+
+    #[test]
+    fn averages_with_nulls() {
+        // 10, NULL, 20, NULL: SQL's AVG is 15; over all four rows it is 7.5.
+        let s = column_stats([Some("10"), None, Some("20"), None].into_iter()).unwrap();
+        assert_eq!((s.rows, s.count, s.nulls), (4, 2, 2));
+        assert_eq!(
+            (s.sum.as_str(), s.avg.as_str(), s.avg_all.as_str()),
+            ("30", "15", "7.5")
+        );
+        assert_eq!((s.min.as_str(), s.max.as_str()), ("10", "20"));
+        // No NULLs: both averages agree.
+        let s = column_stats([Some("1"), Some("2")].into_iter()).unwrap();
+        assert_eq!((s.avg.as_str(), s.avg_all.as_str()), ("1.5", "1.5"));
+        // Only NULLs: counted, nothing to sum.
+        let s = column_stats([None, None].into_iter()).unwrap();
+        assert_eq!((s.rows, s.count, s.nulls), (2, 0, 2));
+        // Nothing at all.
+        assert!(column_stats(std::iter::empty()).is_none());
+    }
+
+    #[test]
+    fn large_sums_stay_exact() {
+        // 0.01 added 100 000 times drifts in floating point; the sum is exact.
+        let s = column_stats(std::iter::repeat_n(Some("0.01"), 100_000)).unwrap();
+        assert_eq!(
+            (s.rows, s.sum.as_str(), s.avg.as_str()),
+            (100_000, "1000.00", "0.01")
+        );
+        // Integers beyond f64's exact range.
+        let big = "9007199254740993";
+        let s = column_stats([Some(big), Some(big)].into_iter()).unwrap();
+        assert_eq!(s.sum, "18014398509481986");
+        // 1..=10 000 plus as many NULLs.
+        let values: Vec<String> = (1..=10_000).map(|i| i.to_string()).collect();
+        let s = column_stats(
+            values
+                .iter()
+                .map(|v| Some(v.as_str()))
+                .chain(std::iter::repeat_n(None, 10_000)),
+        )
+        .unwrap();
+        assert_eq!((s.rows, s.count, s.nulls), (20_000, 10_000, 10_000));
+        assert_eq!((s.sum.as_str(), s.avg.as_str()), ("50005000", "5000.5"));
+        assert_eq!(s.avg_all, "2500.25");
+        assert_eq!((s.min.as_str(), s.max.as_str()), ("1", "10000"));
+    }
+
+    #[test]
+    fn stats_follow_selection_and_new_results() {
+        let mut d = numbers(&[Some("1"), Some("2"), Some("3")]);
+        assert_eq!(d.stats(0).unwrap().sum, "6");
+        d.click(1, Modifiers::default());
+        d.click(2, Modifiers::secondary_key());
+        assert_eq!(d.stats(0).unwrap().sum, "5");
+
+        // A new result with the same number of rows (the bug of #79 / #81).
+        d.reset(vec![ColumnInfo { name: "n".into() }]);
+        let mut batch = RowBatch::default();
+        for v in ["10", "20", "30"] {
+            batch.push_cell(Some(v));
+            batch.finish_row();
+        }
+        d.result.append(batch);
+        assert_eq!(d.stats(0).unwrap().sum, "60");
+
+        // Filtered or sorted rows replacing the old ones, same count again.
+        d.clear_rows();
+        let mut batch = RowBatch::default();
+        for v in ["7", "7", "7"] {
+            batch.push_cell(Some(v));
+            batch.finish_row();
+        }
+        d.result.append(batch);
+        assert_eq!(d.stats(0).unwrap().sum, "21");
+
+        // Once the schema says the column is text, there are no aggregates.
+        d.set_facts(vec![Some(facts("text", false, None))]);
+        assert!(d.stats(0).is_none());
+        // Numbers that are not all numbers: none either.
+        let mut d = numbers(&[Some("1"), Some("x")]);
+        assert!(d.stats(0).is_none());
+    }
+
+    fn facts(data_type: &str, primary_key: bool, references: Option<&str>) -> ColumnFacts {
+        ColumnFacts {
+            table: "t".into(),
+            column: "c".into(),
+            data_type: data_type.into(),
+            numeric: data_type == "integer",
+            primary_key,
+            references: references.map(|t| ForeignRef {
+                schema: "app".into(),
+                table: t.into(),
+                column: "id".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn key_markers() {
+        assert_eq!(
+            KeyMarker::of(&facts("integer", true, None)),
+            Some(KeyMarker::Primary)
+        );
+        assert_eq!(
+            KeyMarker::of(&facts("integer", true, Some("users"))),
+            Some(KeyMarker::PrimaryForeign)
+        );
+        assert_eq!(
+            KeyMarker::of(&facts("integer", false, Some("users"))),
+            Some(KeyMarker::Foreign)
+        );
+        assert_eq!(KeyMarker::of(&facts("text", false, None)), None);
     }
 
     #[test]

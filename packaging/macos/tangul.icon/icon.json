@@ -21,8 +21,8 @@
             }
           ],
           "hidden": false,
-          "image-name": "yellow.png",
-          "name": "yellow",
+          "image-name": "red.png",
+          "name": "red",
           "opacity": 1,
           "position": {
             "scale": 1,
@@ -34,7 +34,19 @@
         },
         {
           "blend-mode": "normal",
-          "fill": "none",
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.78039,0.80784,0.85490,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.60392,0.61569,0.65098,1.00000"
+              }
+            }
+          ],
           "glass-specializations": [
             {
               "value": true
@@ -49,8 +61,8 @@
             }
           ],
           "hidden": false,
-          "image-name": "orange.png",
-          "name": "orange",
+          "image-name": "grey.png",
+          "name": "grey",
           "opacity": 1,
           "position": {
             "scale": 1,
@@ -62,7 +74,19 @@
         },
         {
           "blend-mode": "normal",
-          "fill": "none",
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.78039,0.80784,0.85490,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.60392,0.61569,0.65098,1.00000"
+              }
+            }
+          ],
           "glass-specializations": [
             {
               "value": true
@@ -77,8 +101,8 @@
             }
           ],
           "hidden": false,
-          "image-name": "blue.png",
-          "name": "blue",
+          "image-name": "bar.png",
+          "name": "bar",
           "opacity": 1,
           "position": {
             "scale": 1,
@@ -90,7 +114,7 @@
         }
       ],
       "lighting": "combined",
-      "name": "Asterisk",
+      "name": "Helix",
       "shadow": {
         "kind": "neutral",
         "opacity": 0.5

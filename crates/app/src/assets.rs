@@ -17,17 +17,21 @@ gpui_kit::assets::icon_assets!(
         ChartColumn,
         ChartColumnStacked,
         ChartLine,
+        Clock,
         Database,
         Funnel,
         Key,
         KeyRound,
         Lightbulb,
+        Link,
         ListTree,
         Pencil,
         PencilOff,
         Pin,
         RotateCcwClock,
         Sparkles,
+        Star,
+        StarFill,
         Table
     ]
 );

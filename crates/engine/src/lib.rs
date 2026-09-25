@@ -12,10 +12,10 @@ use std::{
 
 pub use pool::PoolStats;
 use pool::{Lease, Pool};
-use rusdb_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, SshTarget, TabId};
-pub use rusdb_drivers::ExecEvent;
-use rusdb_drivers::{CancelHandle, SqlError, driver_for};
-use rusdb_tunnel::{HostKeyError, Tunnel};
+use tangul_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, SshTarget, TabId};
+pub use tangul_drivers::ExecEvent;
+use tangul_drivers::{CancelHandle, SqlError, driver_for};
+use tangul_tunnel::{HostKeyError, Tunnel};
 use tokio::sync::mpsc;
 
 /// Max rows kept per result set. TODO(fetch-more): make configurable / page on demand.
@@ -54,6 +54,8 @@ pub enum Command {
         sql: String,
         /// The server refuses writes for this statement (read-only mode).
         read_only: bool,
+        /// Stop the statement after this long (the server, and the engine too).
+        timeout: Option<Duration>,
     },
     Cancel {
         query: QueryId,
@@ -154,7 +156,7 @@ pub fn start() -> (EngineHandle, async_channel::Receiver<Event>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let (events_tx, events_rx) = async_channel::unbounded();
     std::thread::Builder::new()
-        .name("rusdb-engine".into())
+        .name("tangul-engine".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -260,7 +262,7 @@ impl Engine {
             }
             Command::TrustHostKey { host, port, key } => {
                 // A small file append; done inline so a following Connect sees it.
-                if let Err(e) = rusdb_tunnel::trust_host_key(&host, port, &key) {
+                if let Err(e) = tangul_tunnel::trust_host_key(&host, port, &key) {
                     eprintln!("could not update known_hosts: {e:#}");
                 }
             }
@@ -293,6 +295,7 @@ impl Engine {
                 conn,
                 sql,
                 read_only,
+                timeout,
             } => {
                 let Some(pool) = self.pools.get(&conn).cloned() else {
                     finish(
@@ -313,6 +316,7 @@ impl Engine {
                     conn,
                     sql,
                     read_only,
+                    timeout,
                 };
                 tokio::spawn(execute(pool, events, running, job));
             }
@@ -372,6 +376,7 @@ struct Job {
     conn: ConnId,
     sql: String,
     read_only: bool,
+    timeout: Option<Duration>,
 }
 
 async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
@@ -381,6 +386,7 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
         conn,
         sql,
         read_only,
+        timeout,
     } = job;
     let started = Instant::now();
     let mut lease = match pool.acquire(Some(tab)).await {
@@ -397,7 +403,11 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
             return;
         }
     };
-    if let Err(e) = sync_read_only(&mut lease, read_only).await {
+    let synced = match sync_read_only(&mut lease, read_only).await {
+        Ok(()) => sync_timeout(&mut lease, timeout).await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = synced {
         let in_tx = lease.session.in_transaction();
         finish(
             &events,
@@ -429,7 +439,34 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
             },
         )
     };
-    let result = lease.session.execute(&sql, ROW_LIMIT, &mut sink).await;
+    // The server stops a statement at the time limit, too; this also covers one it
+    // doesn't (SQLite, MySQL for anything but SELECT).
+    let limit = timeout;
+    let cancel = lease.session.cancel_handle();
+    let mut timed_out = false;
+    let mut result = {
+        let exec = lease.session.execute(&sql, ROW_LIMIT, &mut sink);
+        tokio::pin!(exec);
+        match limit {
+            None => exec.await,
+            Some(limit) => tokio::select! {
+                result = &mut exec => result,
+                _ = tokio::time::sleep(limit) => {
+                    timed_out = true;
+                    if let Err(e) = cancel.cancel().await {
+                        eprintln!("cancel after time limit failed: {e:#}");
+                    }
+                    exec.await
+                }
+            },
+        }
+    };
+    if let (true, Some(limit)) = (timed_out, limit) {
+        result = Err(anyhow::anyhow!(
+            "stopped after the time limit of {}s",
+            limit.as_secs_f64()
+        ));
+    }
 
     let cancelled = running
         .lock()
@@ -466,6 +503,15 @@ async fn sync_read_only(lease: &mut Lease, want: bool) -> anyhow::Result<()> {
     if want || lease.read_only {
         lease.session.set_read_only(want).await?;
         lease.read_only = want;
+    }
+    Ok(())
+}
+
+/// Tells the server the statement time limit when it changed for this session.
+async fn sync_timeout(lease: &mut Lease, want: Option<Duration>) -> anyhow::Result<()> {
+    if lease.timeout != want {
+        lease.session.set_statement_timeout(want).await?;
+        lease.timeout = want;
     }
     Ok(())
 }

@@ -5,6 +5,8 @@ mod column_filter;
 mod completion;
 mod connection_form;
 mod local;
+mod metrics;
+mod monitor;
 mod palette;
 mod query_tab;
 mod results;
@@ -16,7 +18,7 @@ use gpui_kit::component::{Root, Theme, ThemeMode, TitleBar};
 use gpui_kit::*;
 
 actions!(
-    rusdb,
+    tangul,
     [
         RunQuery,
         BookmarkQuery,
@@ -26,13 +28,15 @@ actions!(
         ToggleSidebar,
         OpenPalette,
         OpenSettings,
+        NextSidebarPanel,
+        PrevSidebarPanel,
         Quit
     ]
 );
 
 fn main() {
     // The engine owns its own tokio runtime thread; the UI only exchanges messages.
-    let (engine, events) = rusdb_engine::start();
+    let (engine, events) = tangul_engine::start();
 
     let app = application().with_assets(assets::AppAssets);
     // macOS keeps the app running when its window closes; clicking the Dock icon
@@ -61,6 +65,9 @@ fn main() {
             KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
             KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
             KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
+            // In the command palette: switch the sidebar panel.
+            KeyBinding::new("tab", NextSidebarPanel, Some("Palette")),
+            KeyBinding::new("shift-tab", PrevSidebarPanel, Some("Palette")),
             KeyBinding::new("secondary-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -73,15 +80,15 @@ fn main() {
 /// Opens the workspace window. Only one exists at a time: the engine's event stream
 /// goes to the workspace that is alive.
 fn open_main_window(
-    engine: rusdb_engine::EngineHandle,
-    events: async_channel::Receiver<rusdb_engine::Event>,
+    engine: tangul_engine::EngineHandle,
+    events: async_channel::Receiver<tangul_engine::Event>,
     cx: &mut App,
 ) {
     let options = WindowOptions {
         // The title is not drawn (custom title bar) but names the window in the
         // Dock's and the Window menu's window list.
         titlebar: Some(TitlebarOptions {
-            title: Some("rusdb".into()),
+            title: Some("tangul".into()),
             ..TitleBar::title_bar_options()
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

@@ -3,7 +3,7 @@
 //! Routes engine events to the tab that started the query.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,11 +23,12 @@ use gpui_kit::component::{
     resizable::{ResizableState, h_resizable, resizable_panel},
     spinner::Spinner,
     tab::{Tab, TabBar},
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_assist::{
+use tangul_assist::{
     chart::{ChartData, ChartStyle, ChartView},
     columns::column_facts,
     edit::row_edit,
@@ -38,19 +39,21 @@ use rusdb_assist::{
     suggest::{QuerySuggestion, one_line, suggest_for_table},
     usage::{Usage, learn},
 };
-use rusdb_core::{
+use tangul_core::{
     ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo,
     TableKind,
 };
-use rusdb_engine::{Command, EngineHandle, Event, PoolStats, QueryEvent};
+use tangul_engine::{Command, EngineHandle, Event, ExecEvent, PoolStats, QueryEvent};
 
 use crate::{
-    CloseTab, NewTab, OpenPalette, OpenSettings, ToggleSidebar,
+    CloseTab, NewTab, NextSidebarPanel, OpenPalette, OpenSettings, PrevSidebarPanel, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
     connection_form::{ConnectionForm, FormMode, FormOutput},
     local::{Bookmark, HistoryEntry, Local, NewHistory, bare_sql},
+    metrics::{self, Metrics},
+    monitor::{self, Monitor},
     palette::{self, PaletteAction, PaletteKind},
     query_tab::{QueryTab, TabConn, TabEvent},
     settings,
@@ -81,6 +84,18 @@ enum SidebarView {
 }
 
 impl SidebarView {
+    const ALL: [SidebarView; 3] = [
+        SidebarView::Schema,
+        SidebarView::Bookmarks,
+        SidebarView::History,
+    ];
+
+    /// The panel `step` places after this one, wrapping around.
+    fn cycle(self, step: isize) -> Self {
+        let n = Self::ALL.len() as isize;
+        Self::ALL[(self as isize + step).rem_euclid(n) as usize]
+    }
+
     fn icon(self) -> Lucide {
         match self {
             SidebarView::Schema => Lucide::ListTree,
@@ -160,6 +175,10 @@ enum SidebarRow {
     Table {
         table: TableInfo,
     },
+    /// Above the tree: a favorite table or view.
+    Favorite {
+        table: TableInfo,
+    },
     /// While searching: a group title, then the hits.
     Heading(SharedString),
     SchemaHit {
@@ -198,10 +217,11 @@ pub struct Workspace {
     /// Selected database and user; the sidebar shows this connection.
     active_db: Option<String>,
     active_user: Option<String>,
-    /// (user id, schema)
-    expanded_schemas: HashSet<(String, SharedString)>,
-    /// (user id, schema, kind). Groups start expanded.
-    collapsed_groups: HashSet<(String, SharedString, TableKind)>,
+    /// Schemas opened or closed by hand: (user id, schema) → open. Unset, the tree
+    /// opens until there is a choice: the only schema, a schema's only group.
+    schema_open: HashMap<(String, SharedString), bool>,
+    /// Groups opened or closed by hand: (user id, schema, kind) → open.
+    group_open: HashMap<(String, SharedString, TableKind), bool>,
     sidebar_view: SidebarView,
     sidebar_open: bool,
     /// Sidebar/content split; the sidebar is the first panel.
@@ -215,6 +235,20 @@ pub struct Workspace {
     /// Pending editor checks: request → (tab, edit generation).
     validations: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
     sidebar_rows: Vec<SidebarRow>,
+    /// Favorite tables and views of the active database as (schema, name).
+    favorites: Vec<(String, String)>,
+    /// Pending returns to read-only mode (`safety.relock_after`) by database user
+    /// name; replaced to restart the wait, dropped to cancel it.
+    relock: HashMap<String, Task<()>>,
+    /// Duration and rows of bookmark runs.
+    metrics: Metrics,
+    /// Scheduled bookmark runs on hidden connections.
+    monitor: Monitor,
+    /// Read-only connection to `metrics.db` for query tabs, and whether it is up.
+    metrics_conn: Option<(ConnId, bool)>,
+    /// Tabs to run once `metrics_conn` is up.
+    metrics_waiting: Vec<WeakEntity<QueryTab>>,
+    _monitor_tick: Task<()>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -248,6 +282,16 @@ impl Workspace {
 
         let store = Store::load();
         let local = Local::open(store.dir());
+        let metrics = Metrics::open(store.dir());
+        metrics.prune(&settings::current(cx).monitoring, now_ms());
+        let monitor_tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(monitor::TICK).await;
+                if this.update(cx, |ws, cx| ws.monitor_tick(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let history_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search history"));
         let search_sub = cx.subscribe(
             &history_search,
@@ -290,8 +334,8 @@ impl Workspace {
             conn_users: HashMap::new(),
             active_db: None,
             active_user: None,
-            expanded_schemas: HashSet::new(),
-            collapsed_groups: HashSet::new(),
+            schema_open: HashMap::new(),
+            group_open: HashMap::new(),
             sidebar_view: SidebarView::Schema,
             sidebar_open: true,
             layout: cx.new(|_| ResizableState::default()),
@@ -302,6 +346,13 @@ impl Workspace {
             queries: HashMap::new(),
             validations: HashMap::new(),
             sidebar_rows: Vec::new(),
+            favorites: Vec::new(),
+            relock: HashMap::new(),
+            metrics,
+            monitor: Monitor::default(),
+            metrics_conn: None,
+            metrics_waiting: Vec::new(),
+            _monitor_tick: monitor_tick,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
             _pump: pump,
@@ -600,6 +651,26 @@ impl Workspace {
                 self.open_bookmark_dialog(existing, sql.clone(), Some(tab.clone()), window, cx);
             }
             TabEvent::Refine { sql, append } => self.execute_derived(tab, sql, *append, cx),
+            TabEvent::OpenTable { schema, table } => {
+                // On the tab's connection, like related rows.
+                let Some(state) = tab
+                    .read(cx)
+                    .conn
+                    .as_ref()
+                    .and_then(|c| self.conn_users.get(&c.id))
+                    .and_then(|user| self.conns.get(user))
+                else {
+                    return;
+                };
+                let Some(ix) = state.schema.resolve(Some(schema), table) else {
+                    return;
+                };
+                let event = TabEvent::OpenRelated {
+                    title: table.clone(),
+                    sql: format!("SELECT * FROM {} LIMIT 100", state.schema.sql_name(ix)),
+                };
+                self.on_tab_event(tab, &event, window, cx);
+            }
             TabEvent::Run(sql) => {
                 let Some(conn) = tab.read(cx).conn.clone() else {
                     return;
@@ -646,15 +717,23 @@ impl Workspace {
             },
         );
         // The server refuses writes, too, so read-only mode can't be sidestepped.
-        let read_only = self
-            .conn_user_name(conn.id)
-            .is_some_and(|user| settings::current(cx).is_read_only(&user));
+        let user = self.conn_user_name(conn.id);
+        let read_only = user
+            .as_ref()
+            .is_some_and(|user| settings::current(cx).is_read_only(user));
+        // A write while read-only mode is lifted restarts the wait until it is back.
+        if let Some(user) = user.filter(|u| self.relock.contains_key(u))
+            && guard::check(sql).iter().any(|c| c.writes)
+        {
+            self.schedule_relock(&user, cx);
+        }
         self.engine.send(Command::Execute {
             query,
             tab: tab.read(cx).id,
             conn: conn.id,
             sql: sql.to_string(),
             read_only,
+            timeout: settings::current(cx).safety.max_query_time,
         });
         tab.update(cx, |t, cx| t.started(query, sql, cx));
     }
@@ -691,6 +770,7 @@ impl Workspace {
             conn: conn.id,
             sql: sql.to_string(),
             read_only,
+            timeout: settings::current(cx).safety.max_query_time,
         });
         tab.update(cx, |t, cx| t.started_derived(query, append, cx));
     }
@@ -720,11 +800,40 @@ impl Workspace {
             return;
         };
         let on = !settings::current(cx).is_read_only(&user);
-        if let Err(e) = settings::set_read_only(&user, on, cx) {
-            window.push_notification(
+        match settings::set_read_only(&user, on, cx) {
+            Ok(()) if on => {
+                self.relock.remove(&user);
+            }
+            Ok(()) => self.schedule_relock(&user, cx),
+            Err(e) => window.push_notification(
                 Notification::error(format!("Could not change read-only mode: {e}")),
                 cx,
-            );
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Turns read-only mode back on for `user` after `safety.relock_after`, if set.
+    fn schedule_relock(&mut self, user: &str, cx: &mut Context<Self>) {
+        let Some(after) = settings::current(cx).safety.relock_after else {
+            self.relock.remove(user);
+            return;
+        };
+        let name = user.to_string();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(after).await;
+            let _ = this.update(cx, |ws, cx| ws.relock(&name, cx));
+        });
+        self.relock.insert(user.to_string(), task);
+    }
+
+    fn relock(&mut self, user: &str, cx: &mut Context<Self>) {
+        self.relock.remove(user);
+        if settings::current(cx).is_read_only(user) {
+            return;
+        }
+        if let Err(e) = settings::set_read_only(user, true, cx) {
+            eprintln!("could not turn read-only mode back on for {user}: {e}");
         }
         cx.notify();
     }
@@ -822,12 +931,15 @@ impl Workspace {
                     match &read_only_user {
                         // Lifts read-only mode; running the statement is a second, deliberate step.
                         Some(user) => match settings::set_read_only(user, false, cx) {
-                            Ok(()) => window.push_notification(
-                                Notification::info(format!(
-                                    "Read-only mode is off for {user}. Run the statement again."
-                                )),
-                                cx,
-                            ),
+                            Ok(()) => {
+                                let _ = workspace.update(cx, |ws, cx| ws.schedule_relock(user, cx));
+                                window.push_notification(
+                                    Notification::info(format!(
+                                        "Read-only mode is off for {user}. Run the statement again."
+                                    )),
+                                    cx,
+                                )
+                            }
                             Err(e) => window.push_notification(
                                 Notification::error(format!(
                                     "Could not change read-only mode: {e}"
@@ -862,6 +974,249 @@ impl Workspace {
         });
     }
 
+    // ---- scheduled bookmark runs -------------------------------------------------
+
+    /// Starts the next due scheduled bookmark, if the app is quiet and nothing else
+    /// runs. One at a time, on a hidden read-only connection.
+    fn monitor_tick(&mut self, cx: &mut Context<Self>) {
+        let limits = settings::current(cx).monitoring.clone();
+        if self
+            .monitor
+            .stuck(settings::current(cx).safety.max_query_time)
+        {
+            self.monitor_finish(0, Some("gave up waiting for the run".into()), cx);
+        }
+        if self.monitor.pending.is_some() || !self.monitor.is_quiet() || !self.queries.is_empty() {
+            return;
+        }
+        let bookmarks = self.local.scheduled_bookmarks();
+        let now = now_ms();
+        let Some(bookmark) = monitor::due(
+            &bookmarks,
+            |id| self.metrics.last_run(id),
+            now,
+            limits.interval(),
+        )
+        .cloned() else {
+            return;
+        };
+        let db = bookmark
+            .database_id
+            .as_deref()
+            .and_then(|id| self.store.database(id))
+            .cloned();
+        // The user last used on the database, else its first one.
+        let user = db.as_ref().and_then(|db| {
+            let last = self.local.last_user(&db.id);
+            db.users
+                .iter()
+                .find(|u| Some(&u.id) == last.as_ref())
+                .or(db.users.first())
+                .cloned()
+        });
+        let (Some(db), Some(user)) = (db, user) else {
+            let record = metrics::Run {
+                bookmark_id: bookmark.id,
+                bookmark_name: bookmark.name,
+                started_at: now,
+                duration_ms: 0,
+                rows: None,
+                error: Some("no database user to run it with".into()),
+                scheduled: true,
+            };
+            self.metrics.record(&record, &limits, now);
+            return;
+        };
+        let (conn, ready) = match self.monitor.conn_for(&user.id) {
+            Some(conn) => conn,
+            None => {
+                let id = ConnId(self.next_id());
+                self.monitor.connecting(&user.id, id);
+                let password = self.store.password(&user.id);
+                self.engine.send(Command::Connect {
+                    conn: id,
+                    driver: db.driver,
+                    cfg: tangul_core::ConnectConfig::new(&db, &user, password),
+                    ssh: self.store.ssh_target(&db),
+                });
+                (id, false)
+            }
+        };
+        self.monitor.start(bookmark, conn, now);
+        if ready {
+            self.monitor_execute(cx);
+        }
+    }
+
+    /// Sends the pending scheduled run's query, read-only.
+    fn monitor_execute(&mut self, cx: &mut Context<Self>) {
+        let timeout = settings::current(cx).safety.max_query_time;
+        let query = QueryId(self.next_id());
+        let Some(pending) = self.monitor.pending.as_mut() else {
+            return;
+        };
+        pending.query = Some(query);
+        self.engine.send(Command::Execute {
+            query,
+            // A tab of its own, so no session of a real tab is used.
+            tab: TabId(query.0),
+            conn: pending.conn,
+            sql: pending.bookmark.sql.clone(),
+            read_only: true,
+            timeout,
+        });
+    }
+
+    /// Records the pending scheduled run.
+    fn monitor_finish(&mut self, duration_ms: i64, error: Option<String>, cx: &mut Context<Self>) {
+        let Some(pending) = self.monitor.pending.take() else {
+            return;
+        };
+        if let Some(query) = pending.query {
+            self.engine.send(Command::ReleaseTab {
+                tab: TabId(query.0),
+                conn: pending.conn,
+            });
+        }
+        let record = metrics::Run {
+            bookmark_id: pending.bookmark.id,
+            bookmark_name: pending.bookmark.name,
+            started_at: pending.started_at,
+            duration_ms,
+            rows: pending.rows.filter(|_| error.is_none()),
+            error,
+            scheduled: true,
+        };
+        self.metrics
+            .record(&record, &settings::current(cx).monitoring, now_ms());
+    }
+
+    /// Handles events of the hidden connections, scheduled runs and the metrics
+    /// connection; returns every other event.
+    fn monitor_event(
+        &mut self,
+        event: Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Event> {
+        let pending_query = self.monitor.pending.as_ref().and_then(|p| p.query);
+        let metrics_conn = self.metrics_conn.map(|(id, _)| id);
+        match event {
+            Event::Query { query, event } if Some(query) == pending_query => match event {
+                QueryEvent::Exec(ExecEvent::StatementDone { rows }) => {
+                    if let Some(p) = self.monitor.pending.as_mut() {
+                        p.rows = Some(rows as i64);
+                    }
+                }
+                QueryEvent::Finished { elapsed, error, .. } => {
+                    self.monitor_finish(elapsed.as_millis() as i64, error, cx);
+                }
+                QueryEvent::Exec(_) => {}
+            },
+            Event::Connected { conn } if self.monitor.owns(conn) => {
+                self.monitor.connected(conn);
+                let waiting = self.monitor.pending.as_ref();
+                if waiting.is_some_and(|p| p.conn == conn && p.query.is_none()) {
+                    self.monitor_execute(cx);
+                }
+            }
+            Event::ConnectFailed { conn, error } if self.monitor.owns(conn) => {
+                self.monitor.failed(conn);
+                self.monitor_finish(0, Some(error), cx);
+            }
+            Event::HostKeyUnknown { conn, .. } if self.monitor.owns(conn) => {
+                self.monitor.failed(conn);
+                let error = "unknown SSH host key: connect once to trust it".to_string();
+                self.monitor_finish(0, Some(error), cx);
+            }
+            Event::Schema { conn, .. } | Event::PoolStats { conn, .. }
+                if self.monitor.owns(conn) || Some(conn) == metrics_conn => {}
+            Event::Connected { conn } if Some(conn) == metrics_conn => {
+                self.metrics_conn = Some((conn, true));
+                for tab in std::mem::take(&mut self.metrics_waiting) {
+                    if let Some(tab) = tab.upgrade() {
+                        tab.update(cx, |t, cx| cx.emit(TabEvent::Run(t.sql(cx))));
+                    }
+                }
+            }
+            Event::ConnectFailed { conn, error } if Some(conn) == metrics_conn => {
+                self.metrics_conn = None;
+                self.metrics_waiting.clear();
+                window.push_notification(
+                    Notification::error(format!("Could not open the metrics: {error}")),
+                    cx,
+                );
+            }
+            event => return Some(event),
+        }
+        None
+    }
+
+    /// Opens a tab querying the bookmark's runs over time in `metrics.db`
+    /// (read-only), shown as a line chart of the duration.
+    fn open_metrics(&mut self, bookmark_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bookmark) = self.local.bookmark(bookmark_id) else {
+            return;
+        };
+        let Some(path) = self
+            .metrics
+            .path()
+            .map(|p| p.to_string_lossy().into_owned())
+        else {
+            window.push_notification(
+                Notification::error("Metrics are only kept in memory; there is no file to query."),
+                cx,
+            );
+            return;
+        };
+        let (conn, ready) = match self.metrics_conn {
+            Some(conn) => conn,
+            None => {
+                let id = ConnId(self.next_id());
+                self.engine.send(Command::Connect {
+                    conn: id,
+                    driver: DriverKind::Sqlite,
+                    cfg: tangul_core::ConnectConfig {
+                        host: String::new(),
+                        port: 0,
+                        user: String::new(),
+                        password: None,
+                        database: path,
+                        tls: tangul_core::TlsMode::Disable,
+                    },
+                    ssh: None,
+                });
+                self.metrics_conn = Some((id, false));
+                (id, false)
+            }
+        };
+        let sql = metrics::runs_sql(&bookmark.id);
+        let tab = self.add_tab(&sql, window, cx);
+        tab.update(cx, |t, cx| {
+            t.title = format!("{} · runs", bookmark.name).into();
+            let tab_conn = TabConn {
+                id: conn,
+                name: "tangul metrics".into(),
+                driver: DriverKind::Sqlite,
+            };
+            t.set_conn(tab_conn, cx);
+            // Duration over time; rows are one pick away in the chart menu.
+            t.set_chart_view(
+                Some(ChartView {
+                    style: ChartStyle::Line,
+                    series: Some(0),
+                }),
+                cx,
+            );
+            if ready {
+                cx.emit(TabEvent::Run(sql.clone()));
+            }
+        });
+        if !ready {
+            self.metrics_waiting.push(tab.downgrade());
+        }
+    }
+
     // ---- bookmarks -------------------------------------------------------------
 
     /// Asks for a name and saves `sql` as a bookmark (updating `existing` if set).
@@ -881,7 +1236,9 @@ impl Workspace {
             "Bookmark query"
         };
         let db_id = self.active_db.clone();
-        let form = cx.new(|cx| BookmarkForm::new(existing.as_ref(), sql, db_id, window, cx));
+        // From a tab: the bookmark shows its result the way the tab does now.
+        let view = tab.as_ref().map(|t| t.read(cx).chart_shown());
+        let form = cx.new(|cx| BookmarkForm::new(existing.as_ref(), sql, db_id, view, window, cx));
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let save = {
@@ -935,6 +1292,7 @@ impl Workspace {
     }
 
     fn delete_bookmark(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.metrics.delete_bookmark(id);
         if let Err(e) = self.local.delete_bookmark(id) {
             window.push_notification(
                 Notification::error(format!("Could not delete bookmark: {e:#}")),
@@ -958,6 +1316,7 @@ impl Workspace {
         tab.update(cx, |t, cx| {
             t.title = bookmark.name.clone().into();
             t.bookmark_id = Some(bookmark.id.clone());
+            t.set_chart_view(bookmark.view, cx);
             if run && t.conn.is_some() {
                 cx.emit(TabEvent::Run(bookmark.sql.clone()));
             }
@@ -1008,21 +1367,41 @@ impl Workspace {
                     .iter()
                     .map(|g| g.items.iter().map(|i| i.action.clone()).collect())
                     .collect();
+                let pills = {
+                    let workspace = workspace.clone();
+                    move |_: &CommandState, _: &mut Window, cx: &mut App| {
+                        palette_pills(&workspace, cx)
+                    }
+                };
+                let cycle = |step: isize| {
+                    let workspace = workspace.clone();
+                    move |window: &mut Window, cx: &mut App| {
+                        let _ = workspace.update(cx, |ws, cx| ws.cycle_panel(step, cx));
+                        // The dialog isn't part of the workspace view; redraw it too.
+                        window.refresh();
+                    }
+                };
+                let (next, prev) = (cycle(1), cycle(-1));
+                let command = command.header(pills);
                 let workspace = workspace.clone();
-                dialog
-                    .w(px(560.))
-                    .close_button(false)
-                    .child(command.on_confirm(move |path, window, cx| {
-                        let Some(action) = actions
-                            .get(path.section)
-                            .and_then(|items| items.get(path.row))
-                            .cloned()
-                        else {
-                            return;
-                        };
-                        window.close_dialog(cx);
-                        let _ = workspace.update(cx, |ws, cx| ws.run_palette(action, window, cx));
-                    }))
+                dialog.w(px(560.)).close_button(false).child(
+                    div()
+                        .key_context("Palette")
+                        .on_action(move |_: &NextSidebarPanel, window, cx| next(window, cx))
+                        .on_action(move |_: &PrevSidebarPanel, window, cx| prev(window, cx))
+                        .child(command.on_confirm(move |path, window, cx| {
+                            let Some(action) = actions
+                                .get(path.section)
+                                .and_then(|items| items.get(path.row))
+                                .cloned()
+                            else {
+                                return;
+                            };
+                            window.close_dialog(cx);
+                            let _ =
+                                workspace.update(cx, |ws, cx| ws.run_palette(action, window, cx));
+                        })),
+                )
             }
         });
         // The dialog is built on the next frame; focus the search field once it exists.
@@ -1068,6 +1447,25 @@ impl Workspace {
             .map(|n| n as i64);
         let fp = fingerprint(&run.sql);
         let succeeded = error.is_none();
+        // A run of the tab's bookmark (the whole of it) counts for its metrics.
+        let bookmark = tab
+            .as_ref()
+            .and_then(|t| t.read(cx).bookmark_id.clone())
+            .and_then(|id| self.local.bookmark(&id))
+            .filter(|b| bare_sql(&b.sql) == bare_sql(&run.sql));
+        if let Some(b) = bookmark {
+            let record = metrics::Run {
+                bookmark_id: b.id,
+                bookmark_name: b.name,
+                started_at: run.started_at,
+                duration_ms: elapsed_ms,
+                rows,
+                error: error.clone(),
+                scheduled: false,
+            };
+            self.metrics
+                .record(&record, &settings::current(cx).monitoring, now_ms());
+        }
         let entry = NewHistory {
             database_id: &db_id,
             user_id: &run.user_id,
@@ -1231,7 +1629,7 @@ impl Workspace {
         self.engine.send(Command::Connect {
             conn: id,
             driver: db.driver,
-            cfg: rusdb_core::ConnectConfig::new(&db, &user, password),
+            cfg: tangul_core::ConnectConfig::new(&db, &user, password),
             ssh,
         });
         cx.notify();
@@ -1496,6 +1894,9 @@ impl Workspace {
     }
 
     fn on_engine_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(event) = self.monitor_event(event, window, cx) else {
+            return;
+        };
         match event {
             Event::Query { query, event } => {
                 let finished = match &event {
@@ -1696,12 +2097,39 @@ impl Workspace {
             return self.search_rows(&state.schema, search);
         }
         let mut rows = Vec::new();
+        let favorites: Vec<SidebarRow> = self
+            .favorites
+            .iter()
+            .filter_map(|(schema, name)| {
+                let ix = state.schema.resolve(Some(schema), name)?;
+                Some(SidebarRow::Favorite {
+                    table: state.schema.table(ix).clone(),
+                })
+            })
+            .collect();
+        if !favorites.is_empty() {
+            rows.push(SidebarRow::Heading("Favorites".into()));
+            rows.extend(favorites);
+            let title = match self.active_database().map(|db| db.driver) {
+                Some(DriverKind::Mysql) => "Databases",
+                _ => "Schemas",
+            };
+            rows.push(SidebarRow::Heading(title.into()));
+        }
         // Drivers return tables ordered by schema, then name.
-        for tables in state.schema.tables().chunk_by(|a, b| a.schema == b.schema) {
+        let schemas: Vec<&[TableInfo]> = state
+            .schema
+            .tables()
+            .chunk_by(|a, b| a.schema == b.schema)
+            .collect();
+        let only_schema = schemas.len() == 1;
+        for tables in schemas {
             let schema: SharedString = tables[0].schema.clone().into();
             let expanded = self
-                .expanded_schemas
-                .contains(&(user_id.clone(), schema.clone()));
+                .schema_open
+                .get(&(user_id.clone(), schema.clone()))
+                .copied()
+                .unwrap_or(only_schema);
             rows.push(SidebarRow::Schema {
                 schema: schema.clone(),
                 expanded,
@@ -1709,15 +2137,17 @@ impl Workspace {
             if !expanded {
                 continue;
             }
+            let only_kind = tables.iter().all(|t| t.kind == tables[0].kind);
             for kind in [TableKind::Table, TableKind::View] {
                 let items: Vec<&TableInfo> = tables.iter().filter(|t| t.kind == kind).collect();
                 if items.is_empty() {
                     continue;
                 }
-                let expanded =
-                    !self
-                        .collapsed_groups
-                        .contains(&(user_id.clone(), schema.clone(), kind));
+                let expanded = self
+                    .group_open
+                    .get(&(user_id.clone(), schema.clone(), kind))
+                    .copied()
+                    .unwrap_or(only_kind);
                 rows.push(SidebarRow::Group {
                     schema: schema.clone(),
                     kind,
@@ -1815,11 +2245,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(user_id) = self.active_user.clone() {
-            self.expanded_schemas
-                .insert((user_id.clone(), schema.clone()));
+            self.schema_open
+                .insert((user_id.clone(), schema.clone()), true);
             if let Some(t) = table {
-                self.collapsed_groups
-                    .remove(&(user_id, schema.clone(), t.kind));
+                self.group_open
+                    .insert((user_id, schema.clone(), t.kind), true);
             }
         }
         let target = (schema, table.map(|t| t.name.clone()));
@@ -1828,6 +2258,65 @@ impl Workspace {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.revealed = Some(target);
         cx.notify();
+    }
+
+    fn is_favorite(&self, table: &TableInfo) -> bool {
+        self.favorites
+            .iter()
+            .any(|(schema, name)| *schema == table.schema && *name == table.name)
+    }
+
+    fn toggle_favorite(&mut self, table: &TableInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(db_id) = self.active_db.clone() else {
+            return;
+        };
+        let on = !self.is_favorite(table);
+        if let Err(e) = self
+            .local
+            .set_favorite(&db_id, &table.schema, &table.name, on)
+        {
+            window.push_notification(
+                Notification::error(format!("Could not save favorite: {e:#}")),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Star toggling `table` as a favorite: filled and always shown for a favorite,
+    /// else only while `group` is hovered.
+    fn favorite_button(
+        &self,
+        ix: usize,
+        table: &TableInfo,
+        group: SharedString,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let favorite = self.is_favorite(table);
+        let (icon, tooltip) = if favorite {
+            (Lucide::StarFill, "Remove from favorites")
+        } else {
+            (Lucide::Star, "Add to favorites")
+        };
+        let table = table.clone();
+        div()
+            .when(!favorite, |d| {
+                d.invisible().group_hover(group, |s| s.visible())
+            })
+            .id(("table-favorite-wrap", ix))
+            // Keep the click from also opening the table.
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new(("table-favorite", ix))
+                    .icon(Icon::new(icon))
+                    .ghost()
+                    .xsmall()
+                    .tooltip(tooltip)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_favorite(&table, window, cx)
+                    })),
+            )
     }
 
     fn render_sidebar_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -1868,7 +2357,9 @@ impl Workspace {
             })
         };
 
-        match self.sidebar_rows[ix].clone() {
+        let row_kind = self.sidebar_rows[ix].clone();
+        let in_favorites = matches!(row_kind, SidebarRow::Favorite { .. });
+        match row_kind {
             SidebarRow::Schema { schema, expanded } => {
                 // A MySQL "schema" is a database.
                 let icon: Icon = match driver {
@@ -1882,9 +2373,7 @@ impl Workspace {
                     .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(schema))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.expanded_schemas.remove(&key) {
-                            this.expanded_schemas.insert(key.clone());
-                        }
+                        this.schema_open.insert(key.clone(), !expanded);
                         cx.notify();
                     }))
                     .into_any_element()
@@ -1910,14 +2399,12 @@ impl Workspace {
                             .child(count.to_string()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.collapsed_groups.remove(&key) {
-                            this.collapsed_groups.insert(key.clone());
-                        }
+                        this.group_open.insert(key.clone(), !expanded);
                         cx.notify();
                     }))
                     .into_any_element()
             }
-            SidebarRow::Table { table } => {
+            SidebarRow::Table { table } | SidebarRow::Favorite { table } => {
                 let icon = match table.kind {
                     TableKind::Table => Icon::new(Lucide::Table),
                     TableKind::View => Icon::new(IconName::Eye),
@@ -1938,15 +2425,30 @@ impl Workspace {
                         let list = ws.read(cx).table_suggestions(&menu_table);
                         suggestions_menu(menu, &menu_table.name, list, &weak)
                     });
-                let revealed = self
-                    .revealed
-                    .as_ref()
-                    .is_some_and(|(s, t)| *s == table.schema && t.as_ref() == Some(&table.name));
-                row(2)
+                let revealed = !in_favorites
+                    && self.revealed.as_ref().is_some_and(|(s, t)| {
+                        *s == table.schema && t.as_ref() == Some(&table.name)
+                    });
+                let favorite = self.favorite_button(ix, &table, group.clone(), cx);
+                row(if in_favorites { 0 } else { 2 })
                     .when(revealed, |r| r.bg(theme.sidebar_accent))
                     .group(group.clone())
                     .child(icon.small().text_color(theme.muted_foreground))
-                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .map(|r| {
+                        if in_favorites {
+                            r.child(div().min_w_0().truncate().child(name)).child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(table.schema.clone()),
+                            )
+                        } else {
+                            r.child(div().flex_1().min_w_0().truncate().child(name))
+                        }
+                    })
                     .child(
                         div()
                             .invisible()
@@ -1956,6 +2458,8 @@ impl Workspace {
                             .on_click(|_, _, cx| cx.stop_propagation())
                             .child(suggestions),
                     )
+                    // Rightmost, so a favorite's star lines up at the edge.
+                    .child(favorite)
                     .on_click({
                         let table = table.clone();
                         cx.listener(move |this, _, window, cx| this.open_table(&table, window, cx))
@@ -1994,7 +2498,10 @@ impl Workspace {
                     TableKind::Table => Icon::new(Lucide::Table),
                     TableKind::View => Icon::new(IconName::Eye),
                 };
+                let group: SharedString = format!("table-hit-{ix}").into();
+                let favorite = self.favorite_button(ix, &table, group.clone(), cx);
                 row(0)
+                    .group(group)
                     .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(table.name.clone()))
                     .child(
@@ -2006,6 +2513,7 @@ impl Workspace {
                             .text_color(theme.muted_foreground)
                             .child(table.schema.clone()),
                     )
+                    .child(favorite)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.reveal(table.schema.clone().into(), Some(&table), window, cx)
                     }))
@@ -2143,6 +2651,11 @@ impl Workspace {
 
     fn render_schema_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let search = self.schema_search.read(cx).value().trim().to_string();
+        self.favorites = self
+            .active_db
+            .as_deref()
+            .map(|db| self.local.favorites(db))
+            .unwrap_or_default();
         self.sidebar_rows = self.build_sidebar_rows(&search);
         if let Some((schema, table)) = self.reveal.take() {
             let target = self.sidebar_rows.iter().position(|row| match row {
@@ -2437,11 +2950,27 @@ impl Workspace {
             bookmark.id.clone(),
         );
         let edit_sql = bookmark.sql.clone();
+        let metrics_id = bookmark.id.clone();
         let group: SharedString = format!("bookmark-{ix}").into();
+        let scheduled = monitor::schedulable(bookmark).then(|| {
+            let every = settings::current(cx).monitoring.interval();
+            format!("Runs about every {}", monitor::human_duration(every))
+        });
         let actions = h_flex()
             .gap_0p5()
             .invisible()
             .group_hover(group.clone(), |s| s.visible())
+            .child(
+                Button::new(("bookmark-metrics", ix))
+                    .icon(Icon::new(Lucide::ChartLine))
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Duration and rows over time")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_metrics(&metrics_id, window, cx)
+                    })),
+            )
             .child(
                 Button::new(("bookmark-run", ix))
                     .icon(IconName::Play)
@@ -2458,7 +2987,7 @@ impl Workspace {
                     .icon(Icon::new(Lucide::Pencil))
                     .ghost()
                     .xsmall()
-                    .tooltip("Rename")
+                    .tooltip("Edit")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_bookmark_dialog(
@@ -2492,8 +3021,9 @@ impl Workspace {
             .rounded(theme.radius)
             .hover(|s| s.bg(theme.sidebar_accent))
             .cursor_pointer()
+            // How its result is shown: the grid or the chart type.
             .child(
-                Icon::new(Lucide::Bookmark)
+                Icon::new(style_icon(bookmark.view.map(|v| v.style)))
                     .xsmall()
                     .text_color(theme.muted_foreground),
             )
@@ -2506,6 +3036,20 @@ impl Workspace {
                             .gap_1()
                             .text_sm()
                             .child(div().min_w_0().truncate().child(bookmark.name.clone()))
+                            .when_some(scheduled, |this, tooltip| {
+                                this.child(
+                                    div()
+                                        .id(("bookmark-scheduled", ix))
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(tooltip.clone()).build(window, cx)
+                                        })
+                                        .child(
+                                            Icon::new(Lucide::Clock)
+                                                .xsmall()
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
+                            })
                             .when(global, |this| {
                                 this.child(
                                     Icon::new(IconName::Globe)
@@ -2758,12 +3302,7 @@ impl Workspace {
             chart_button(tab, data, shown, theme.chart_1, theme.muted_foreground)
         });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
-        let panels = [
-            SidebarView::Schema,
-            SidebarView::Bookmarks,
-            SidebarView::History,
-        ]
-        .map(|view| {
+        let panels = SidebarView::ALL.map(|view| {
             let active = self.sidebar_open && self.sidebar_view == view;
             Button::new(("panel", view as usize))
                 .icon(Icon::new(view.icon()))
@@ -2817,14 +3356,30 @@ impl Workspace {
     fn toggle_panel(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.sidebar_open && self.sidebar_view == view {
             self.sidebar_open = false;
+            cx.notify();
         } else {
-            self.sidebar_open = true;
-            self.sidebar_view = view;
-            if view == SidebarView::History {
-                self.refresh_history(cx);
-            }
+            self.show_panel(view, cx);
+        }
+    }
+
+    fn show_panel(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+        self.sidebar_open = true;
+        self.sidebar_view = view;
+        if view == SidebarView::History {
+            self.refresh_history(cx);
         }
         cx.notify();
+    }
+
+    /// Palette Tab / Shift-Tab: opens a closed sidebar, else moves to the next or
+    /// previous panel.
+    fn cycle_panel(&mut self, step: isize, cx: &mut Context<Self>) {
+        let view = if self.sidebar_open {
+            self.sidebar_view.cycle(step)
+        } else {
+            self.sidebar_view
+        };
+        self.show_panel(view, cx);
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -2916,6 +3471,11 @@ impl Render for Workspace {
         v_flex()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            // Any input postpones scheduled bookmark runs until it's quiet again.
+            .capture_key_down(cx.listener(|this, _, _, _| this.monitor.touch()))
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.monitor.touch()))
+            .on_mouse_move(cx.listener(|this, _, _, _| this.monitor.touch()))
+            .on_scroll_wheel(cx.listener(|this, _, _, _| this.monitor.touch()))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
@@ -3269,4 +3829,41 @@ fn style_icon(style: Option<ChartStyle>) -> Lucide {
         Some(ChartStyle::Bars) => Lucide::ChartColumn,
         Some(ChartStyle::StackedBars) => Lucide::ChartColumnStacked,
     }
+}
+
+/// Command palette header: one pill per sidebar panel, the shown one selected.
+/// A click (or Tab / Shift-Tab) switches the sidebar; the palette stays open.
+fn palette_pills(workspace: &WeakEntity<Workspace>, cx: &App) -> AnyElement {
+    let Some(ws) = workspace.upgrade() else {
+        return div().into_any_element();
+    };
+    let ws = ws.read(cx);
+    let (open, current) = (ws.sidebar_open, ws.sidebar_view);
+    let theme = cx.theme();
+    h_flex()
+        .px_3()
+        .pt_2()
+        .gap_1()
+        .items_center()
+        .children(SidebarView::ALL.map(|view| {
+            let workspace = workspace.clone();
+            Button::new(("palette-panel", view as usize))
+                .icon(Icon::new(view.icon()))
+                .label(view.label())
+                .xsmall()
+                .ghost()
+                .selected(open && view == current)
+                .on_click(move |_, window, cx| {
+                    let _ = workspace.update(cx, |ws, cx| ws.show_panel(view, cx));
+                    window.refresh();
+                })
+        }))
+        .child(div().flex_1())
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("Tab to switch"),
+        )
+        .into_any_element()
 }
