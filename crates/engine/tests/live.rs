@@ -539,7 +539,7 @@ async fn mysql() {
     assistant_checks(
         &mut h,
         Some((
-            "CREATE FUNCTION tangul_ai_sneak() RETURNS INT MODIFIES SQL DATA \
+            "CREATE FUNCTION tangul_ai_sneak() RETURNS INT DETERMINISTIC MODIFIES SQL DATA \
              BEGIN INSERT INTO tangul_ai_test VALUES (99); RETURN 1; END",
             "SELECT tangul_ai_sneak()",
         )),
