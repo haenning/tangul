@@ -1,5 +1,5 @@
 [package]
-name = "rusdb-tunnel"
+name = "tangul-tunnel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 russh = { version = "0.63.3", default-features = false, features = ["ring", "rsa", "flate2"] }
-rusdb-core = { version = "0.1.0", path = "../core" }
+tangul-core = { version = "0.1.0", path = "../core" }
 tokio = { workspace = true, features = ["rt", "net", "sync", "io-util", "macros"] }
 
 

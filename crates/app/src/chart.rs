@@ -1,5 +1,5 @@
 //! One chart for a result: all series (value columns) over column 0, as lines,
-//! areas, stacked areas, grouped bars or stacked bars (see `rusdb_assist::chart`).
+//! areas, stacked areas, grouped bars or stacked bars (see `tangul_assist::chart`).
 //! Drawn with gpui-kit's plot shapes; the layout math is done here.
 
 use std::rc::Rc;
@@ -13,7 +13,7 @@ use gpui_kit::component::{
     },
 };
 use gpui_kit::*;
-use rusdb_assist::chart::{ChartData, ChartStyle, format_value, ticks};
+use tangul_assist::chart::{ChartData, ChartStyle, format_value, ticks};
 
 /// Room left of the plot for the value labels, at the default label size.
 const VALUE_GUTTER: f32 = 44.;

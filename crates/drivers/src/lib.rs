@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use rusdb_core::{
+use tangul_core::{
     ColumnInfo, ColumnMeta, ConnectConfig, DriverKind, ForeignKey, RowBatch, TableInfo,
 };
 

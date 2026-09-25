@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use rusdb_core::{ColumnMeta, DriverKind, ForeignKey, SchemaInfo, TableInfo};
+use tangul_core::{ColumnMeta, DriverKind, ForeignKey, SchemaInfo, TableInfo};
 
 use crate::analyze::is_reserved;
 
@@ -216,7 +216,7 @@ pub fn quote_ident(driver: DriverKind, ident: &str) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use rusdb_core::TableKind;
+    use tangul_core::TableKind;
 
     /// `app.users(id pk, email, name)`, `app.orders(id pk, user_id → users.id, total)`,
     /// `public.Logs(id)`.

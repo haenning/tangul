@@ -9,8 +9,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use rusdb_assist::chart::ChartView;
-use rusdb_assist::guard;
+use tangul_assist::chart::ChartView;
+use tangul_assist::guard;
 
 use crate::local::Bookmark;
 use crate::monitor;

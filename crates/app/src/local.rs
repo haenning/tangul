@@ -5,12 +5,12 @@
 use std::path::Path;
 
 use anyhow::Result;
-use rusdb_assist::chart::ChartView;
-use rusdb_assist::suggest::HistoryPattern;
-use rusdb_assist::usage::{Usage, UsageKind, UsageStat};
-use rusdb_core::SchemaInfo;
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::Deserialize;
+use tangul_assist::chart::ChartView;
+use tangul_assist::suggest::HistoryPattern;
+use tangul_assist::usage::{Usage, UsageKind, UsageStat};
+use tangul_core::SchemaInfo;
 
 /// A named, saved query.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -224,7 +224,7 @@ impl Local {
                 b.name,
                 b.sql,
                 b.database_id,
-                rusdb_assist::lexer::fingerprint(&b.sql),
+                tangul_assist::lexer::fingerprint(&b.sql),
                 b.view.map(ChartView::to_key),
                 b.scheduled,
             ],
@@ -510,7 +510,7 @@ mod tests {
                 database_id: "db",
                 user_id: "u",
                 sql,
-                fingerprint: &rusdb_assist::lexer::fingerprint(sql),
+                fingerprint: &tangul_assist::lexer::fingerprint(sql),
                 entry: HistoryEntry {
                     sql: sql.into(),
                     started_at: at,
@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(ids, ["2", "1"]);
         assert!(l.is_bookmarked(
             "pg",
-            &rusdb_assist::lexer::fingerprint("SELECT * FROM t WHERE id = 7")
+            &tangul_assist::lexer::fingerprint("SELECT * FROM t WHERE id = 7")
         ));
         l.delete_bookmark("2").unwrap();
         assert!(l.bookmark("2").is_none());
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(
             l.runs(
                 "db",
-                &rusdb_assist::lexer::fingerprint("select * from t where id = 9")
+                &tangul_assist::lexer::fingerprint("select * from t where id = 9")
             ),
             2
         );

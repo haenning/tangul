@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::{TryStreamExt, pin_mut};
 use postgres_native_tls::MakeTlsConnector;
-use rusdb_core::{
+use tangul_core::{
     ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
 };
 use tokio_postgres::{CancelToken, Client, SimpleQueryMessage, config::SslMode};
@@ -33,7 +33,7 @@ impl Driver for PgDriver {
         pg.host(&cfg.host)
             .port(cfg.port)
             .user(&cfg.user)
-            .application_name("rusdb")
+            .application_name("tangul")
             .connect_timeout(Duration::from_secs(10))
             .ssl_mode(match cfg.tls {
                 TlsMode::Disable => SslMode::Disable,

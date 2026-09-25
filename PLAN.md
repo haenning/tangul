@@ -1,4 +1,4 @@
-# rusdb – Plan
+# tangul – Plan
 
 Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 (`gpui-component`). MVP adapters: PostgreSQL, MySQL. Look: plain, Zed-like, dark.
@@ -8,7 +8,7 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 ## 1. Key decisions
 
 ### D1 — UI thread never touches the network
-- One **tokio runtime on its own thread** (`rusdb-engine`). UI sends `Command`s over an
+- One **tokio runtime on its own thread** (`tangul-engine`). UI sends `Command`s over an
   unbounded channel; the engine sends `Event`s back over an `async_channel`, which the UI
   awaits on GPUI's executor.
 - The UI drains all queued events per wake-up → a stream of row batches causes one
@@ -53,7 +53,7 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 - Opened lazily by the pool; a dead session is re-opened on the next connection.
 - Host keys are checked against `~/.ssh/known_hosts`, never accepted silently: an unknown
   key asks the user (fingerprint dialog, "Trust & connect" appends it); a changed key is
-  an error. `RUSDB_KNOWN_HOSTS` overrides the file (tests).
+  an error. `TANGUL_KNOWN_HOSTS` overrides the file (tests).
 - ring crypto backend (no aws-lc/cmake build dependency).
 
 ### D5 — Result storage
@@ -62,8 +62,8 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
   straight from the arena. Long values are cut at 200 chars in the grid.
 
 ### D6 — Profiles & secrets
-- Profiles: TOML in `~/Library/Application Support/rusdb/profiles.toml`.
-- Passwords: macOS Keychain (`keyring`, service `rusdb`). On Linux (dev only) an
+- Profiles: TOML in `~/Library/Application Support/tangul/profiles.toml`.
+- Passwords: macOS Keychain (`keyring`, service `tangul`). On Linux (dev only) an
   in-memory mock store is used → passwords are not persisted there.
 - "User management" = multiple users per saved database, switched from the title bar. No role/grant UI.
 
@@ -115,7 +115,7 @@ crates/
   engine/   # tokio thread, Command/Event, pool (D3); live integration tests
   assist/   # SQL lexer, analysis, completion, usage ranking, suggestions — no UI/I/O
   tunnel/   # SSH tunnels (russh): lazy session, local listener, known_hosts checks
-  app/      # GPUI binary `rusdb`: workspace, query tab, results grid, forms, local.db
+  app/      # GPUI binary `tangul`: workspace, query tab, results grid, forms, local.db
 ```
 
 ---

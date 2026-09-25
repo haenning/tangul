@@ -1,16 +1,16 @@
 //! Integration tests against real servers. Skipped unless the env vars are set, e.g.:
-//!   RUSDB_TEST_PG=postgres:@127.0.0.1:55432/postgres
-//!   RUSDB_TEST_MYSQL=root:@127.0.0.1:53306/app
-//!   RUSDB_TEST_SSH=rusdb:rusdb@127.0.0.1:52222  (bastion that reaches postgres:5432)
+//!   TANGUL_TEST_PG=postgres:@127.0.0.1:55432/postgres
+//!   TANGUL_TEST_MYSQL=root:@127.0.0.1:53306/app
+//!   TANGUL_TEST_SSH=tangul:tangul@127.0.0.1:52222  (bastion that reaches postgres:5432)
 //! (`make test-live` starts the databases from docker-compose.yml and sets all three.)
 
 use std::time::Duration;
 
-use rusdb_core::{
+use tangul_core::{
     ConnId, ConnectConfig, DriverKind, QueryId, ResultSet, SshAuth, SshConfig, SshTarget, TabId,
     TlsMode,
 };
-use rusdb_engine::{Command, EngineHandle, Event, ExecEvent, QueryEvent};
+use tangul_engine::{Command, EngineHandle, Event, ExecEvent, QueryEvent};
 
 fn config(var: &str) -> Option<ConnectConfig> {
     let url = std::env::var(var).ok()?;
@@ -46,7 +46,7 @@ struct Outcome {
 
 impl Harness {
     async fn connect(driver: DriverKind, cfg: ConnectConfig) -> Self {
-        let (engine, events) = rusdb_engine::start();
+        let (engine, events) = tangul_engine::start();
         let conn = ConnId(1);
         engine.send(Command::Connect {
             conn,
@@ -163,7 +163,7 @@ impl Harness {
         self.wait(q).await
     }
 
-    async fn stats(&mut self) -> rusdb_engine::PoolStats {
+    async fn stats(&mut self) -> tangul_engine::PoolStats {
         // Stats are sent after every release; drain until the latest one.
         let mut last = None;
         while let Ok(Ok(ev)) =
@@ -190,8 +190,8 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
         statements: vec![
             (0, "SELECT 1".into()),
             (0, "SELECT * FORM x".into()),
-            (0, "SELECT * FROM rusdb_no_such_table".into()),
-            (0, "CREATE TABLE rusdb_validate_probe (id INT)".into()),
+            (0, "SELECT * FROM tangul_no_such_table".into()),
+            (0, "CREATE TABLE tangul_validate_probe (id INT)".into()),
         ],
     });
     let problems = loop {
@@ -203,7 +203,7 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
     assert!(at(0).is_none() && at(3).is_none(), "{problems:?}");
     assert_eq!(at(1).and_then(|p| p.position), Some(9), "{problems:?}");
     assert_eq!(at(2).and_then(|p| p.position), Some(14), "{problems:?}");
-    let out = h.run(tab_a, "SELECT * FROM rusdb_validate_probe").await;
+    let out = h.run(tab_a, "SELECT * FROM tangul_validate_probe").await;
     assert!(
         out.error.is_some(),
         "validation must not execute statements"
@@ -292,23 +292,23 @@ async fn time_limit_checks(h: &mut Harness, sleep_sql: &str, short_sleep_sql: &s
     assert_eq!(out.error, None, "the limit is lifted again");
 }
 
-/// Creates `rusdb_fk_test.parent` / `.child` (child.parent_id → parent.id) and checks
+/// Creates `tangul_fk_test.parent` / `.child` (child.parent_id → parent.id) and checks
 /// the columns and foreign key the schema loader reports. Self-contained: the CI
 /// service databases have no seed data.
 async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
     // MySQL's schemas are databases; neither DROP SCHEMA variant runs on both.
     let drop = match driver {
-        DriverKind::Postgres => "DROP SCHEMA IF EXISTS rusdb_fk_test CASCADE",
-        DriverKind::Mysql => "DROP SCHEMA IF EXISTS rusdb_fk_test",
+        DriverKind::Postgres => "DROP SCHEMA IF EXISTS tangul_fk_test CASCADE",
+        DriverKind::Mysql => "DROP SCHEMA IF EXISTS tangul_fk_test",
         DriverKind::Sqlite => unreachable!("no schemas to create in a read-only file"),
     };
     let mut h = Harness::connect(driver, cfg).await;
     let tab = TabId(1);
     let setup = format!(
-        "{drop}; CREATE SCHEMA rusdb_fk_test; \
-         CREATE TABLE rusdb_fk_test.parent (id INT PRIMARY KEY); \
-         CREATE TABLE rusdb_fk_test.child (id INT PRIMARY KEY, parent_id INT NOT NULL, \
-           FOREIGN KEY (parent_id) REFERENCES rusdb_fk_test.parent (id))"
+        "{drop}; CREATE SCHEMA tangul_fk_test; \
+         CREATE TABLE tangul_fk_test.parent (id INT PRIMARY KEY); \
+         CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, parent_id INT NOT NULL, \
+           FOREIGN KEY (parent_id) REFERENCES tangul_fk_test.parent (id))"
     );
     assert_eq!(h.run(tab, &setup).await.error, None);
 
@@ -317,7 +317,7 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
         if let Event::Schema { result, .. } = h.next().await {
             let info = result.expect("schema failed");
             // Skip a schema load that started before the tables existed.
-            if info.tables.iter().any(|t| t.schema == "rusdb_fk_test") {
+            if info.tables.iter().any(|t| t.schema == "tangul_fk_test") {
                 break info;
             }
         }
@@ -325,7 +325,7 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
     let col = |table: &str, name: &str| {
         info.columns
             .iter()
-            .find(|c| c.schema == "rusdb_fk_test" && c.table == table && c.name == name)
+            .find(|c| c.schema == "tangul_fk_test" && c.table == table && c.name == name)
             .unwrap_or_else(|| panic!("column {table}.{name}"))
     };
     assert!(!col("child", "parent_id").nullable);
@@ -334,7 +334,7 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
     let fk = info
         .foreign_keys
         .iter()
-        .find(|f| f.schema == "rusdb_fk_test" && f.table == "child")
+        .find(|f| f.schema == "tangul_fk_test" && f.table == "child")
         .expect("child foreign key");
     assert_eq!(fk.columns, ["parent_id"]);
     assert_eq!(
@@ -343,7 +343,7 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
             fk.ref_table.as_str(),
             &fk.ref_columns[..]
         ),
-        ("rusdb_fk_test", "parent", &["id".to_string()][..])
+        ("tangul_fk_test", "parent", &["id".to_string()][..])
     );
 
     assert_eq!(h.run(tab, drop).await.error, None);
@@ -353,28 +353,28 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
 /// that switches the session back to read-write does not get around it.
 async fn read_only_checks(h: &mut Harness, switch_to_read_write: &str) {
     let tab = TabId(9);
-    h.run(tab, "DROP TABLE IF EXISTS rusdb_ro_test").await;
+    h.run(tab, "DROP TABLE IF EXISTS tangul_ro_test").await;
     assert_eq!(
-        h.run(tab, "CREATE TABLE rusdb_ro_test (id INT)")
+        h.run(tab, "CREATE TABLE tangul_ro_test (id INT)")
             .await
             .error,
         None
     );
     assert_eq!(
-        h.run(tab, "INSERT INTO rusdb_ro_test VALUES (1)")
+        h.run(tab, "INSERT INTO tangul_ro_test VALUES (1)")
             .await
             .error,
         None
     );
 
-    let out = h.run_read_only(tab, "SELECT * FROM rusdb_ro_test").await;
+    let out = h.run_read_only(tab, "SELECT * FROM tangul_ro_test").await;
     assert_eq!(out.error, None);
     assert_eq!(out.result.unwrap().row_count(), 1);
     for write in [
-        "INSERT INTO rusdb_ro_test VALUES (2)",
-        "UPDATE rusdb_ro_test SET id = 5",
-        "DELETE FROM rusdb_ro_test",
-        "DROP TABLE rusdb_ro_test",
+        "INSERT INTO tangul_ro_test VALUES (2)",
+        "UPDATE tangul_ro_test SET id = 5",
+        "DELETE FROM tangul_ro_test",
+        "DROP TABLE tangul_ro_test",
     ] {
         let out = h.run_read_only(tab, write).await;
         assert!(out.error.is_some(), "{write} must fail in read-only mode");
@@ -383,15 +383,15 @@ async fn read_only_checks(h: &mut Harness, switch_to_read_write: &str) {
     // read-only again.
     h.run_read_only(tab, switch_to_read_write).await;
     let out = h
-        .run_read_only(tab, "INSERT INTO rusdb_ro_test VALUES (3)")
+        .run_read_only(tab, "INSERT INTO tangul_ro_test VALUES (3)")
         .await;
     assert!(out.error.is_some(), "read-only mode must be re-applied");
 
     // Nothing changed, and turning read-only off allows writes again.
-    let out = h.run(tab, "SELECT * FROM rusdb_ro_test").await;
+    let out = h.run(tab, "SELECT * FROM tangul_ro_test").await;
     assert_eq!(out.result.unwrap().row_count(), 1);
     assert_eq!(
-        h.run(tab, "INSERT INTO rusdb_ro_test VALUES (4)")
+        h.run(tab, "INSERT INTO tangul_ro_test VALUES (4)")
             .await
             .error,
         None
@@ -402,13 +402,13 @@ async fn read_only_checks(h: &mut Harness, switch_to_read_write: &str) {
     let out = h.run_read_only(tab, "SELECT 1").await;
     assert!(out.error.is_some_and(|e| e.contains("Read-only")));
     h.run(tab, "ROLLBACK").await;
-    h.run(tab, "DROP TABLE rusdb_ro_test").await;
+    h.run(tab, "DROP TABLE tangul_ro_test").await;
 }
 
 #[tokio::test]
 async fn postgres() {
-    let Some(cfg) = config("RUSDB_TEST_PG") else {
-        eprintln!("RUSDB_TEST_PG not set, skipping");
+    let Some(cfg) = config("TANGUL_TEST_PG") else {
+        eprintln!("TANGUL_TEST_PG not set, skipping");
         return;
     };
     common_checks(DriverKind::Postgres, cfg.clone(), "SELECT pg_sleep(30)").await;
@@ -419,7 +419,7 @@ async fn postgres() {
         .run(TabId(1), "SELECT g FROM generate_series(1, 25000) g")
         .await;
     assert!(out.truncated);
-    assert_eq!(out.result.unwrap().row_count(), rusdb_engine::ROW_LIMIT);
+    assert_eq!(out.result.unwrap().row_count(), tangul_engine::ROW_LIMIT);
 
     // A failed statement inside a transaction keeps the tab pinned (aborted txn).
     h.run(TabId(1), "BEGIN").await;
@@ -436,8 +436,8 @@ async fn postgres() {
 
 #[tokio::test]
 async fn mysql() {
-    let Some(cfg) = config("RUSDB_TEST_MYSQL") else {
-        eprintln!("RUSDB_TEST_MYSQL not set, skipping");
+    let Some(cfg) = config("TANGUL_TEST_MYSQL") else {
+        eprintln!("TANGUL_TEST_MYSQL not set, skipping");
         return;
     };
     common_checks(DriverKind::Mysql, cfg.clone(), "SELECT SLEEP(30)").await;
@@ -465,20 +465,20 @@ async fn mysql() {
 /// accepted), and after trusting it the connection works.
 #[tokio::test]
 async fn ssh_tunnel() {
-    let Some(url) = std::env::var("RUSDB_TEST_SSH").ok() else {
-        eprintln!("RUSDB_TEST_SSH not set, skipping");
+    let Some(url) = std::env::var("TANGUL_TEST_SSH").ok() else {
+        eprintln!("TANGUL_TEST_SSH not set, skipping");
         return;
     };
     let (creds, hostport) = url.split_once('@').expect("user:pw@host:port");
     let (user, password) = creds.split_once(':').expect("user:pw");
     let (host, port) = hostport.split_once(':').expect("host:port");
     let known_hosts =
-        std::env::temp_dir().join(format!("rusdb-known-hosts-{}", std::process::id()));
+        std::env::temp_dir().join(format!("tangul-known-hosts-{}", std::process::id()));
     let _ = std::fs::remove_file(&known_hosts);
     // SAFETY: only this test reads the variable (in the tunnel code it starts).
     #[allow(unsafe_code)]
     unsafe {
-        std::env::set_var("RUSDB_KNOWN_HOSTS", &known_hosts)
+        std::env::set_var("TANGUL_KNOWN_HOSTS", &known_hosts)
     };
 
     let ssh = SshTarget {
@@ -499,7 +499,7 @@ async fn ssh_tunnel() {
         database: "postgres".into(),
         tls: TlsMode::Disable,
     };
-    let (engine, events) = rusdb_engine::start();
+    let (engine, events) = tangul_engine::start();
     let connect = |ssh: &SshTarget| Command::Connect {
         conn: ConnId(1),
         driver: DriverKind::Postgres,

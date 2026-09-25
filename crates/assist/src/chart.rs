@@ -4,7 +4,7 @@
 //!
 //! Charts are a view of the result, never stored data.
 
-use rusdb_core::ResultSet;
+use tangul_core::ResultSet;
 
 use crate::analyze::{significant, statements};
 
@@ -390,7 +390,7 @@ fn short(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusdb_core::{ColumnInfo, RowBatch};
+    use tangul_core::{ColumnInfo, RowBatch};
 
     #[test]
     fn view_keys_round_trip() {

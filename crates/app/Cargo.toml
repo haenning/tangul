@@ -1,5 +1,5 @@
 [package]
-name = "rusdb"
+name = "tangul"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,9 +11,9 @@ async-channel.workspace = true
 dirs = "7.0.0"
 gpui-kit = { version = "=0.6.6", features = ["tree-sitter-sql"] }
 lsp-types = { version = "0.97.0", features = ["proposed"] }
-rusdb-assist = { version = "0.1.0", path = "../assist" }
-rusdb-core = { version = "0.1.0", path = "../core" }
-rusdb-engine = { version = "0.1.0", path = "../engine" }
+tangul-assist = { version = "0.1.0", path = "../assist" }
+tangul-core = { version = "0.1.0", path = "../core" }
+tangul-engine = { version = "0.1.0", path = "../engine" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.151"

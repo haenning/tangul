@@ -28,7 +28,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rusdb_assist::{
+use tangul_assist::{
     chart::{ChartData, ChartStyle, ChartView},
     columns::column_facts,
     edit::row_edit,
@@ -39,11 +39,11 @@ use rusdb_assist::{
     suggest::{QuerySuggestion, one_line, suggest_for_table},
     usage::{Usage, learn},
 };
-use rusdb_core::{
+use tangul_core::{
     ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo,
     TableKind,
 };
-use rusdb_engine::{Command, EngineHandle, Event, ExecEvent, PoolStats, QueryEvent};
+use tangul_engine::{Command, EngineHandle, Event, ExecEvent, PoolStats, QueryEvent};
 
 use crate::{
     CloseTab, NewTab, NextSidebarPanel, OpenPalette, OpenSettings, PrevSidebarPanel, ToggleSidebar,
@@ -1036,7 +1036,7 @@ impl Workspace {
                 self.engine.send(Command::Connect {
                     conn: id,
                     driver: db.driver,
-                    cfg: rusdb_core::ConnectConfig::new(&db, &user, password),
+                    cfg: tangul_core::ConnectConfig::new(&db, &user, password),
                     ssh: self.store.ssh_target(&db),
                 });
                 (id, false)
@@ -1176,13 +1176,13 @@ impl Workspace {
                 self.engine.send(Command::Connect {
                     conn: id,
                     driver: DriverKind::Sqlite,
-                    cfg: rusdb_core::ConnectConfig {
+                    cfg: tangul_core::ConnectConfig {
                         host: String::new(),
                         port: 0,
                         user: String::new(),
                         password: None,
                         database: path,
-                        tls: rusdb_core::TlsMode::Disable,
+                        tls: tangul_core::TlsMode::Disable,
                     },
                     ssh: None,
                 });
@@ -1196,7 +1196,7 @@ impl Workspace {
             t.title = format!("{} · runs", bookmark.name).into();
             let tab_conn = TabConn {
                 id: conn,
-                name: "rusdb metrics".into(),
+                name: "tangul metrics".into(),
                 driver: DriverKind::Sqlite,
             };
             t.set_conn(tab_conn, cx);
@@ -1629,7 +1629,7 @@ impl Workspace {
         self.engine.send(Command::Connect {
             conn: id,
             driver: db.driver,
-            cfg: rusdb_core::ConnectConfig::new(&db, &user, password),
+            cfg: tangul_core::ConnectConfig::new(&db, &user, password),
             ssh,
         });
         cx.notify();

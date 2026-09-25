@@ -1,12 +1,12 @@
-# rusdb
+# tangul
 
 **A light, fast window into your data.** A native macOS viewer for PostgreSQL and MySQL,
 for anyone who wants to look at their data, understand it and dig into it. It isn't a
 tool for administering a database.
 
-![rusdb](docs/screenshot.png)
+![tangul](docs/screenshot.png)
 
-rusdb starts instantly, stays out of your way and keeps your connections safe. It is
+tangul starts instantly, stays out of your way and keeps your connections safe. It is
 written in Rust on [GPUI](https://www.gpui.rs), the UI framework behind the
 [Zed](https://zed.dev) editor, and is heavily inspired by Zed: the plain, dense look,
 the title bar that switches database and user the way Zed switches project and branch,
@@ -17,7 +17,7 @@ immediate.
 
 ## A viewer, on purpose
 
-rusdb shows you what is in your database. It does not design it.
+tangul shows you what is in your database. It does not design it.
 
 - **No table designers, no `CREATE TABLE` dialogs, no schema editing.** Your schema
   belongs to your migration tool ([golang-migrate](https://github.com/golang-migrate/migrate),
@@ -25,7 +25,7 @@ rusdb shows you what is in your database. It does not design it.
 - **No editing cells in the grid.** Changing data stays explicit SQL that you read before
   it runs.
 
-These won't be added later. Leaving them out is what keeps rusdb small, fast and safe
+These won't be added later. Leaving them out is what keeps tangul small, fast and safe
 to point at production.
 
 ## See your data
@@ -75,7 +75,7 @@ to point at production.
 - **TLS** for connections that need it (`prefer` / `require`). Certificate verification
   is on the roadmap.
 - **Local and private.** No account and no telemetry. Profiles, history and bookmarks
-  stay on your Mac. rusdb only talks to your databases.
+  stay on your Mac. tangul only talks to your databases.
 
 ## Light and fast
 
@@ -101,7 +101,7 @@ to point at production.
 
 ## Status
 
-rusdb is young and under active development. It runs on macOS (Apple Silicon and
+tangul is young and under active development. It runs on macOS (Apple Silicon and
 Intel) and supports PostgreSQL and MySQL. Plans and ideas are in the
 [roadmap](ROADMAP.md); requests are welcome as
 [issues](https://github.com/haenning/rusdb/issues).

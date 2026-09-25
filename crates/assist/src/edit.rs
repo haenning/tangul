@@ -5,7 +5,7 @@
 //! the query left a key column out) they are matched by all of their columns, and the
 //! statement starts with a warning comment.
 
-use rusdb_core::DriverKind;
+use tangul_core::DriverKind;
 
 use crate::related::{literal, numeric_type, result_table};
 use crate::schema::SchemaIndex;

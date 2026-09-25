@@ -48,12 +48,12 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy -p rusdb-core -p rusdb-drivers -p rusdb-engine -p rusdb-assist -p rusdb-tunnel --all-targets -- -D warnings
+        run: cargo clippy -p tangul-core -p tangul-drivers -p tangul-engine -p tangul-assist -p tangul-tunnel --all-targets -- -D warnings
       - name: Tests (incl. live DB tests)
         env:
-          RUSDB_TEST_PG: postgres:@127.0.0.1:55432/postgres
-          RUSDB_TEST_MYSQL: root:@127.0.0.1:53306/app
-        run: cargo test -p rusdb-core -p rusdb-drivers -p rusdb-engine -p rusdb-assist -p rusdb-tunnel
+          TANGUL_TEST_PG: postgres:@127.0.0.1:55432/postgres
+          TANGUL_TEST_MYSQL: root:@127.0.0.1:53306/app
+        run: cargo test -p tangul-core -p tangul-drivers -p tangul-engine -p tangul-assist -p tangul-tunnel
 
   # Dependency checks: advisories, licenses, sources (deny.toml) and unused deps.
   deps:
@@ -80,6 +80,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build
-        run: cargo build -p rusdb
+        run: cargo build -p tangul
       - name: Unit tests
-        run: cargo test -p rusdb-core -p rusdb-drivers
+        run: cargo test -p tangul-core -p tangul-drivers

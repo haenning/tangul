@@ -1,7 +1,7 @@
 //! Entries of the command palette (⌘⇧P): app commands, bookmarks and history in one
 //! searchable list. The dialog itself is opened by the workspace.
 
-use rusdb_assist::suggest::one_line;
+use tangul_assist::suggest::one_line;
 
 use crate::local::{Bookmark, HistoryEntry};
 

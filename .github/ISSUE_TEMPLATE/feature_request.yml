@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        rusdb is a fast, focused database viewer: explore, query, understand.
+        tangul is a fast, focused database viewer: explore, query, understand.
         Out of scope: editing data in the grid, table designers and schema migrations
         (use a migration tool such as golang-migrate for those).
   - type: textarea
@@ -19,7 +19,7 @@ body:
     id: proposal
     attributes:
       label: Proposal
-      description: What should rusdb do?
+      description: What should tangul do?
     validations:
       required: true
   - type: dropdown
