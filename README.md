@@ -1,32 +1,18 @@
 # tangul
 
-**A light, fast window into your data.** A native macOS viewer for PostgreSQL and MySQL,
-for anyone who wants to look at their data, understand it and dig into it. It isn't a
-tool for administering a database.
+**Ever wanted to detangul your data?**
+tangul is a native macOS viewer for PostgreSQL and MySQL, for anyone who wants to look at their data, understand it and dig into it. 
 
 ![tangul](docs/screenshot.png)
 
 tangul starts instantly, stays out of your way and keeps your connections safe. It is
 written in Rust on [GPUI](https://www.gpui.rs), the UI framework behind the
-[Zed](https://zed.dev) editor, and is heavily inspired by Zed: the plain, dense look,
-the title bar that switches database and user the way Zed switches project and branch,
-the dock-style sidebar, the command palette, and the idea that a tool should feel
-immediate.
+[Zed](https://zed.dev) editor. 
+tangul is inspired by Zed, but not affiliated with, endorsed by, or sponsored by Zed Industries.
 
 **[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)**
 
-## A viewer, on purpose
 
-tangul shows you what is in your database. It does not design it.
-
-- **No table designers, no `CREATE TABLE` dialogs, no schema editing.** Your schema
-  belongs to your migration tool ([golang-migrate](https://github.com/golang-migrate/migrate),
-  Flyway, Alembic, …) and to version control, not to a GUI.
-- **No editing cells in the grid.** Changing data stays explicit SQL that you read before
-  it runs.
-
-These won't be added later. Leaving them out is what keeps tangul small, fast and safe
-to point at production.
 
 ## See your data
 
@@ -87,6 +73,19 @@ to point at production.
   tab until you commit or roll back, and the tab shows it.
 - **Sensible limits.** Results stream in batches and stop at 10,000 rows, so an
   accidental `SELECT *` on a huge table doesn't swamp your Mac.
+
+## Purpose built for explorers
+
+tangul shows you what is in your database. It does not design it.
+
+- **No table designers, create table buttons, no schema editing.** Your schema
+  belongs to your migration tool ([golang-migrate](https://github.com/golang-migrate/migrate),
+  Flyway, Alembic, …) and to version control, not to a GUI.
+- **No editing cells in the grid.** Changing data stays explicit SQL that you read before
+  it runs.
+
+These won't be added later. Leaving them out is what keeps tangul small, fast and safe
+to point at production.
 
 ## Keyboard
 
