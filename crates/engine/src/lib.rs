@@ -1,20 +1,29 @@
 //! Backend: owns a tokio runtime on its own thread and all database sessions.
-//! The UI talks to it only through `Command`s and receives `Event`s, so the UI
-//! thread never blocks on the network.
+//! Front ends talk to it only through `Command`s and receive `Event`s (or the whole
+//! result of [`EngineHandle::query`]), so a UI thread never blocks on the network.
+//! Every statement passes the [`gate`] first, which decides from the engine's own
+//! copy of `settings.json` whether and how it runs for the caller.
 
+pub mod gate;
 mod pool;
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
+pub use gate::{
+    Approval, Caller, Decision, Guard, Held, Pass, Run, SettingsSource, decide, user_run,
+};
+use gate::{Enforced, Gate};
 pub use pool::PoolStats;
 use pool::{Lease, Pool};
 use tangul_core::{
     ConnId, ConnectConfig, DriverKind, QueryId, ResultSet, SchemaInfo, SshTarget, TabId,
 };
+use tangul_data::local::{AuditEntry, Local};
 pub use tangul_drivers::ExecEvent;
 use tangul_drivers::{CancelHandle, SqlError, driver_for};
 use tangul_tunnel::{HostKeyError, Tunnel};
@@ -54,11 +63,12 @@ pub enum Command {
         tab: TabId,
         conn: ConnId,
         sql: String,
-        /// The server refuses writes for this statement (read-only mode).
-        read_only: bool,
-        /// Stop the statement after this long (the server, and the engine too).
-        timeout: Option<Duration>,
+        /// Who sent it; the gate decides read-only mode and the time limit.
+        caller: Caller,
+        approval: Approval,
     },
+    /// `settings.json` changed; read it again now instead of within the second.
+    ReloadSettings,
     /// Runs `sql` on a spare session (never a tab's) and answers on `reply` with the
     /// whole result instead of streaming events. See [`EngineHandle::query`].
     Query {
@@ -145,25 +155,26 @@ pub enum QueryEvent {
         /// The user cancelled the query. Not every cancel produces an error (MySQL's
         /// `SLEEP()` just returns 1), so this is reported separately.
         cancelled: bool,
+        /// Not run: a person has to approve it first.
+        held: Option<Held>,
     },
 }
 
-/// How a [`Command::Query`] runs.
+/// How a [`Command::Query`] runs. Read-only mode and the time limit are the gate's
+/// decision, not the caller's.
 #[derive(Debug, Clone)]
 pub struct QueryOptions {
-    /// The server refuses writes.
-    pub read_only: bool,
-    /// Stop the statement after this long (the server, and the engine too).
-    pub timeout: Option<Duration>,
+    pub caller: Caller,
+    pub approval: Approval,
     /// Rows kept per result set; the rest are dropped and `truncated` is set.
     pub row_limit: usize,
 }
 
-impl Default for QueryOptions {
-    fn default() -> Self {
+impl QueryOptions {
+    pub fn new(caller: Caller) -> Self {
         Self {
-            read_only: true,
-            timeout: None,
+            caller,
+            approval: Approval::None,
             row_limit: ROW_LIMIT,
         }
     }
@@ -186,6 +197,18 @@ pub struct QueryError {
     pub message: String,
     /// Byte offset of the error in the SQL, when the server said where.
     pub position: Option<usize>,
+    /// Not run: a person has to approve it first (the assistant's writes).
+    pub held: Option<Held>,
+}
+
+impl QueryError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            position: None,
+            held: None,
+        }
+    }
 }
 
 impl std::fmt::Display for QueryError {
@@ -226,18 +249,46 @@ impl EngineHandle {
             options,
             reply,
         });
-        answer.await.unwrap_or_else(|_| {
-            Err(QueryError {
-                message: "the engine stopped".into(),
-                position: None,
-            })
-        })
+        answer
+            .await
+            .unwrap_or_else(|_| Err(QueryError::new("the engine stopped")))
     }
 }
 
 /// Starts the engine thread. Events arrive on the returned receiver, which can be
 /// awaited from any executor (the UI uses GPUI's).
+/// Where the engine takes its settings from and writes its audit log.
+#[derive(Debug, Clone)]
+pub struct EngineConfig {
+    pub settings: SettingsSource,
+    /// Directory of the `local.db` that gets the audit log; `None` keeps none.
+    pub audit_dir: Option<PathBuf>,
+}
+
+impl EngineConfig {
+    /// The app's: `settings.json` and `local.db` in the config directory.
+    pub fn from_config_dir() -> Self {
+        Self {
+            settings: SettingsSource::File(tangul_data::settings::path()),
+            audit_dir: tangul_data::config::config_dir(),
+        }
+    }
+
+    /// Default settings, no audit log (tests).
+    pub fn isolated() -> Self {
+        Self {
+            settings: SettingsSource::Fixed(Box::default()),
+            audit_dir: None,
+        }
+    }
+}
+
+/// Starts the engine with the app's settings file and audit log.
 pub fn start() -> (EngineHandle, async_channel::Receiver<Event>) {
+    start_with(EngineConfig::from_config_dir())
+}
+
+pub fn start_with(config: EngineConfig) -> (EngineHandle, async_channel::Receiver<Event>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let (events_tx, events_rx) = async_channel::unbounded();
     std::thread::Builder::new()
@@ -248,7 +299,7 @@ pub fn start() -> (EngineHandle, async_channel::Receiver<Event>) {
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            rt.block_on(Engine::new(events_tx).run(rx));
+            rt.block_on(Engine::new(events_tx, config).run(rx));
         })
         .expect("engine thread");
     (EngineHandle { tx }, events_rx)
@@ -263,23 +314,102 @@ struct RunningQuery {
 
 type Running = Arc<Mutex<HashMap<QueryId, RunningQuery>>>;
 
+/// The audit log: what the assistant and schedules sent, and how it went.
+#[derive(Clone, Default)]
+struct Audit(Option<Arc<Mutex<Local>>>);
+
+impl Audit {
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &self,
+        caller: Caller,
+        target: &str,
+        sql: &str,
+        outcome: &str,
+        error: Option<String>,
+        duration: Option<Duration>,
+        rows: Option<u64>,
+    ) {
+        let Some(local) = &self.0 else { return };
+        if caller == Caller::User {
+            return;
+        }
+        let entry = AuditEntry {
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or_default(),
+            caller: gate::caller_name(caller).into(),
+            target: target.into(),
+            sql: sql.into(),
+            outcome: outcome.into(),
+            error,
+            duration_ms: duration.map(|d| d.as_millis() as i64),
+            rows: rows.map(|r| r as i64),
+        };
+        if let Err(e) = local.lock().unwrap().add_audit(&entry) {
+            eprintln!("could not write the audit log: {e:#}");
+        }
+    }
+}
+
+/// Who ran a statement, for the audit log.
+#[derive(Clone)]
+struct Trace {
+    audit: Audit,
+    caller: Caller,
+    target: String,
+}
+
+impl Trace {
+    fn record(
+        &self,
+        sql: &str,
+        outcome: &str,
+        error: Option<String>,
+        duration: Option<Duration>,
+        rows: Option<u64>,
+    ) {
+        self.audit.record(
+            self.caller,
+            &self.target,
+            sql,
+            outcome,
+            error,
+            duration,
+            rows,
+        );
+    }
+}
+
 struct Engine {
     events: Events,
     pools: HashMap<ConnId, Arc<Pool>>,
     running: Running,
+    gate: Gate,
+    audit: Audit,
 }
 
+/// How often the settings file is checked for changes.
+const SETTINGS_POLL: Duration = Duration::from_secs(1);
+
 impl Engine {
-    fn new(events: Events) -> Self {
+    fn new(events: Events, config: EngineConfig) -> Self {
+        let audit = config
+            .audit_dir
+            .map(|dir| Arc::new(Mutex::new(Local::open(Some(&dir)))));
         Self {
             events,
             pools: HashMap::new(),
             running: Arc::default(),
+            gate: Gate::new(config.settings),
+            audit: Audit(audit),
         }
     }
 
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Command>) {
         let mut reap = tokio::time::interval(Duration::from_secs(10));
+        let mut settings = tokio::time::interval(SETTINGS_POLL);
         loop {
             tokio::select! {
                 cmd = rx.recv() => match cmd {
@@ -287,6 +417,7 @@ impl Engine {
                     None => break, // UI gone
                 },
                 _ = reap.tick() => self.reap_idle(),
+                _ = settings.tick() => self.gate.reload(),
             }
         }
     }
@@ -374,13 +505,14 @@ impl Engine {
                     send_stats(&events, conn, &pool);
                 });
             }
+            Command::ReloadSettings => self.gate.reload_now(),
             Command::Execute {
                 query,
                 tab,
                 conn,
                 sql,
-                read_only,
-                timeout,
+                caller,
+                approval,
             } => {
                 let Some(pool) = self.pools.get(&conn).cloned() else {
                     finish(
@@ -393,6 +525,44 @@ impl Engine {
                     );
                     return;
                 };
+                let trace = Trace {
+                    audit: self.audit.clone(),
+                    caller,
+                    target: pool.target(),
+                };
+                let run = match self.gate.enforce(conn, pool.user(), &sql, caller, approval) {
+                    Enforced::Run(run) => run,
+                    Enforced::Held(held) => {
+                        trace.record(&sql, "held", None, None, None);
+                        send(
+                            &self.events,
+                            Event::Query {
+                                query,
+                                event: QueryEvent::Finished {
+                                    elapsed: Duration::ZERO,
+                                    error: Some("waiting for approval".into()),
+                                    error_position: None,
+                                    in_transaction: false,
+                                    cancelled: false,
+                                    held: Some(held),
+                                },
+                            },
+                        );
+                        return;
+                    }
+                    Enforced::Refused(reason) => {
+                        trace.record(&sql, "refused", Some(reason.clone()), None, None);
+                        finish(
+                            &self.events,
+                            query,
+                            Duration::ZERO,
+                            Some((reason, None)),
+                            false,
+                            false,
+                        );
+                        return;
+                    }
+                };
                 let events = self.events.clone();
                 let running = self.running.clone();
                 let job = Job {
@@ -400,8 +570,9 @@ impl Engine {
                     tab,
                     conn,
                     sql,
-                    read_only,
-                    timeout,
+                    read_only: run.read_only,
+                    timeout: run.timeout,
+                    trace,
                 };
                 tokio::spawn(execute(pool, events, running, job));
             }
@@ -413,15 +584,44 @@ impl Engine {
                 reply,
             } => {
                 let Some(pool) = self.pools.get(&conn).cloned() else {
-                    let _ = reply.send(Err(QueryError {
-                        message: "not connected".into(),
-                        position: None,
-                    }));
+                    let _ = reply.send(Err(QueryError::new("not connected")));
                     return;
+                };
+                let trace = Trace {
+                    audit: self.audit.clone(),
+                    caller: options.caller,
+                    target: pool.target(),
+                };
+                let run = match self.gate.enforce(
+                    conn,
+                    pool.user(),
+                    &sql,
+                    options.caller,
+                    options.approval,
+                ) {
+                    Enforced::Run(run) => run,
+                    Enforced::Held(held) => {
+                        trace.record(&sql, "held", None, None, None);
+                        let _ = reply.send(Err(QueryError {
+                            held: Some(held),
+                            ..QueryError::new("waiting for approval")
+                        }));
+                        return;
+                    }
+                    Enforced::Refused(reason) => {
+                        trace.record(&sql, "refused", Some(reason.clone()), None, None);
+                        let _ = reply.send(Err(QueryError::new(reason)));
+                        return;
+                    }
                 };
                 let (events, running) = (self.events.clone(), self.running.clone());
                 tokio::spawn(async move {
-                    let output = run_query(&pool, &running, query, &sql, &options).await;
+                    let output =
+                        run_query(&pool, &running, query, &sql, run, options.row_limit).await;
+                    match &output {
+                        Ok(out) => trace.record(&sql, "ran", None, Some(out.elapsed), out.rows),
+                        Err(e) => trace.record(&sql, "ran", Some(e.message.clone()), None, None),
+                    }
                     let _ = reply.send(output);
                     send_stats(&events, conn, &pool);
                 });
@@ -483,6 +683,7 @@ struct Job {
     sql: String,
     read_only: bool,
     timeout: Option<Duration>,
+    trace: Trace,
 }
 
 async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
@@ -493,6 +694,7 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
         sql,
         read_only,
         timeout,
+        trace,
     } = job;
     let started = Instant::now();
     let mut lease = match pool.acquire(Some(tab)).await {
@@ -553,14 +755,15 @@ async fn execute(pool: Arc<Pool>, events: Events, running: Running, job: Job) {
         .remove(&query)
         .is_some_and(|r| r.cancel_requested);
     let in_tx = lease.session.in_transaction();
-    finish(
-        &events,
-        query,
-        started.elapsed(),
-        result.err().map(|e| describe(&e)),
-        in_tx,
-        cancelled,
+    let error = result.err().map(|e| describe(&e));
+    trace.record(
+        &sql,
+        "ran",
+        error.as_ref().map(|e| e.0.clone()),
+        Some(started.elapsed()),
+        None,
     );
+    finish(&events, query, started.elapsed(), error, in_tx, cancelled);
     pool.release(Some(tab), lease);
     send_stats(&events, conn, &pool);
 }
@@ -610,16 +813,20 @@ async fn run_query(
     running: &Running,
     query: QueryId,
     sql: &str,
-    options: &QueryOptions,
+    run: Run,
+    row_limit: usize,
 ) -> Result<QueryOutput, QueryError> {
     let error = |e: &anyhow::Error| {
         let (message, position) = describe(e);
-        QueryError { message, position }
+        QueryError {
+            position,
+            ..QueryError::new(message)
+        }
     };
     let started = Instant::now();
     let mut lease = pool.acquire(None).await.map_err(|e| error(&e))?;
-    let synced = match sync_read_only(&mut lease, options.read_only).await {
-        Ok(()) => sync_timeout(&mut lease, options.timeout).await,
+    let synced = match sync_read_only(&mut lease, run.read_only).await {
+        Ok(()) => sync_timeout(&mut lease, run.timeout).await,
         Err(e) => Err(e),
     };
     if let Err(e) = synced {
@@ -644,14 +851,7 @@ async fn run_query(
         ExecEvent::StatementDone { rows } => output.rows = Some(rows),
         ExecEvent::Truncated => output.truncated = true,
     };
-    let result = execute_limited(
-        &mut lease,
-        sql,
-        options.row_limit,
-        options.timeout,
-        &mut sink,
-    )
-    .await;
+    let result = execute_limited(&mut lease, sql, row_limit, run.timeout, &mut sink).await;
     running.lock().unwrap().remove(&query);
     if lease.session.in_transaction() {
         close_all(vec![lease], None);
@@ -786,6 +986,7 @@ fn finish(
                 error: error.map(|e| e.0),
                 in_transaction,
                 cancelled,
+                held: None,
             },
         },
     );

@@ -57,6 +57,10 @@ pub struct Database {
     /// from the SSH server).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshConfig>,
+    /// The user (id) the AI assistant connects as, e.g. one that may only read;
+    /// `None` uses the user selected in the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_user: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

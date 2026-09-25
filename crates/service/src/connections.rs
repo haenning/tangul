@@ -88,6 +88,21 @@ impl Connections {
         Some(id)
     }
 
+    /// Connects the AI assistant for `user_id`'s database: as the database's assistant
+    /// user if one is set (and still saved), else as `user_id`.
+    pub fn connect_assistant(
+        &mut self,
+        engine: &EngineHandle,
+        profiles: &mut Profiles,
+        user_id: &str,
+    ) -> Option<ConnId> {
+        let as_user = assistant_user(profiles, user_id)?;
+        if let Some(conn) = self.get(Purpose::Assistant, &as_user) {
+            return Some(conn);
+        }
+        self.connect_user(engine, profiles, &as_user, Purpose::Assistant)
+    }
+
     /// The connection to a local SQLite file, opened read-only if it isn't yet.
     /// Returns its id and whether it was opened just now.
     pub fn open_file(&mut self, engine: &EngineHandle, path: &str) -> (ConnId, bool) {
@@ -119,12 +134,20 @@ impl Connections {
     }
 }
 
+/// The user (id) the assistant connects as for `user_id`'s database.
+pub fn assistant_user(profiles: &Profiles, user_id: &str) -> Option<String> {
+    let (db, _) = profiles.user(user_id)?;
+    let chosen = db
+        .assistant_user
+        .as_deref()
+        .filter(|id| db.users.iter().any(|u| u.id == *id));
+    Some(chosen.unwrap_or(user_id).to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use tangul_core::{Database, DbUser, QueryId};
-    use tangul_engine::QueryOptions;
+    use tangul_engine::{Caller, QueryOptions};
 
     use super::*;
 
@@ -134,6 +157,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         tangul_data::local::Local::open(Some(&dir));
         dir.join("local.db").to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn the_assistant_uses_the_chosen_user() {
+        let user = |id: &str| DbUser {
+            id: id.into(),
+            user: id.into(),
+        };
+        let db = |assistant: Option<&str>| Database {
+            id: "db".into(),
+            name: String::new(),
+            driver: DriverKind::Postgres,
+            host: String::new(),
+            port: 5432,
+            database: String::new(),
+            tls: TlsMode::Disable,
+            users: vec![user("admin"), user("reader")],
+            ssh: None,
+            assistant_user: assistant.map(Into::into),
+        };
+        let profiles = Profiles::in_memory(vec![db(Some("reader"))]);
+        assert_eq!(
+            assistant_user(&profiles, "admin").as_deref(),
+            Some("reader")
+        );
+        // Not set, or a user that no longer exists: the selected user.
+        let profiles = Profiles::in_memory(vec![db(None)]);
+        assert_eq!(assistant_user(&profiles, "admin").as_deref(), Some("admin"));
+        let profiles = Profiles::in_memory(vec![db(Some("gone"))]);
+        assert_eq!(assistant_user(&profiles, "admin").as_deref(), Some("admin"));
+        assert_eq!(assistant_user(&profiles, "nobody"), None);
     }
 
     #[test]
@@ -154,7 +208,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn connects_a_saved_user_and_a_local_file() {
         let path = local_db();
-        let (engine, _events) = tangul_engine::start();
+        let (engine, _events) = tangul_engine::start_with(tangul_engine::EngineConfig::isolated());
         let mut profiles = Profiles::in_memory(vec![Database {
             id: "db".into(),
             name: "local".into(),
@@ -168,19 +222,17 @@ mod tests {
                 user: String::new(),
             }],
             ssh: None,
+            assistant_user: None,
         }]);
         let mut c = Connections::default();
         assert_eq!(
             c.connect_user(&engine, &mut profiles, "nobody", Purpose::Tab),
             None
         );
-        let conn = c
-            .connect_user(&engine, &mut profiles, "u", Purpose::Assistant)
-            .unwrap();
-        let options = QueryOptions {
-            timeout: Some(Duration::from_secs(5)),
-            ..QueryOptions::default()
-        };
+        let conn = c.connect_assistant(&engine, &mut profiles, "u").unwrap();
+        assert_eq!(c.get(Purpose::Assistant, "u"), Some(conn));
+        assert_eq!(c.connect_assistant(&engine, &mut profiles, "u"), Some(conn));
+        let options = QueryOptions::new(Caller::Assistant);
         let out = engine
             .query(
                 QueryId(1),

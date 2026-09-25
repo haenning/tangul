@@ -287,9 +287,9 @@ impl Workspace {
                     return;
                 };
                 match self.decide_for_tab(conn.id, sql, cx) {
-                    Decision::Run(run) => self.execute(tab, sql, run, cx),
-                    Decision::Confirm { guard, then } => {
-                        self.hold_back(tab.clone(), sql.clone(), guard, then, window, cx)
+                    Decision::Run(_) => self.execute(tab, sql, Approval::None, cx),
+                    Decision::Confirm { guard, .. } => {
+                        self.hold_back(tab.clone(), sql.clone(), guard, window, cx)
                     }
                     Decision::Refuse(reason) => {
                         window.push_notification(Notification::error(reason), cx)
@@ -299,12 +299,13 @@ impl Workspace {
         }
     }
 
-    /// Sends `sql` to the engine on the tab's connection, as the policy decided.
+    /// Sends `sql` to the engine on the tab's connection, as the user; `approval` is
+    /// the dialog's go-ahead, if one was needed.
     pub(super) fn execute(
         &mut self,
         tab: &Entity<QueryTab>,
         sql: &str,
-        run: Run,
+        approval: Approval,
         cx: &mut Context<Self>,
     ) {
         let Some(conn) = tab.read(cx).conn.clone() else {
@@ -355,8 +356,9 @@ impl Workspace {
             tab: tab.read(cx).id,
             conn: conn.id,
             sql: sql.to_string(),
-            read_only: run.read_only,
-            timeout: run.timeout,
+            // The engine's gate decides read-only mode and the time limit.
+            caller: Caller::User,
+            approval,
         });
         tab.update(cx, |t, cx| t.started(query, sql, cx));
     }
@@ -388,15 +390,13 @@ impl Workspace {
                 derived: true,
             },
         );
-        let user = self.conn_user_name(conn.id);
-        let run = policy::user_run(settings::current(cx), user.as_deref());
         self.engine.send(Command::Execute {
             query,
             tab: tab.read(cx).id,
             conn: conn.id,
             sql: sql.to_string(),
-            read_only: run.read_only,
-            timeout: run.timeout,
+            caller: Caller::User,
+            approval: Approval::None,
         });
         tab.update(cx, |t, cx| t.started_derived(query, append, cx));
     }

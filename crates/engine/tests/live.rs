@@ -10,7 +10,10 @@ use tangul_core::{
     ConnId, ConnectConfig, DriverKind, QueryId, ResultSet, SshAuth, SshConfig, SshTarget, TabId,
     TlsMode,
 };
-use tangul_engine::{Command, EngineHandle, Event, ExecEvent, QueryEvent};
+use tangul_engine::{
+    Approval, Caller, Command, EngineConfig, EngineHandle, Event, ExecEvent, QueryEvent,
+    SettingsSource,
+};
 
 fn config(var: &str) -> Option<ConnectConfig> {
     let url = std::env::var(var).ok()?;
@@ -33,6 +36,11 @@ struct Harness {
     events: async_channel::Receiver<Event>,
     conn: ConnId,
     next_query: u64,
+    /// The engine's settings.json; read-only mode and the time limit are set there,
+    /// as in the app.
+    settings: std::path::PathBuf,
+    /// The database user the harness logs in as.
+    user: String,
 }
 
 struct Outcome {
@@ -46,7 +54,18 @@ struct Outcome {
 
 impl Harness {
     async fn connect(driver: DriverKind, cfg: ConnectConfig) -> Self {
-        let (engine, events) = tangul_engine::start();
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let settings = std::env::temp_dir().join(format!(
+            "tangul-live-settings-{}-{n}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&settings);
+        let (engine, events) = tangul_engine::start_with(EngineConfig {
+            settings: SettingsSource::File(Some(settings.clone())),
+            audit_dir: None,
+        });
+        let user = cfg.user.clone();
         let conn = ConnId(1);
         engine.send(Command::Connect {
             conn,
@@ -59,6 +78,8 @@ impl Harness {
             events,
             conn,
             next_query: 0,
+            settings,
+            user,
         };
         loop {
             match h.next().await {
@@ -77,6 +98,7 @@ impl Harness {
             .expect("engine gone")
     }
 
+    /// Starts `sql` as the user in a tab, dialogs confirmed.
     fn start(&mut self, tab: TabId, sql: &str) -> QueryId {
         self.next_query += 1;
         let query = QueryId(self.next_query);
@@ -85,39 +107,41 @@ impl Harness {
             tab,
             conn: self.conn,
             sql: sql.into(),
-            read_only: false,
-            timeout: None,
+            caller: Caller::User,
+            approval: Approval::Confirmed,
         });
         query
     }
 
-    /// Runs `sql` with the server refusing writes.
-    async fn run_read_only(&mut self, tab: TabId, sql: &str) -> Outcome {
-        self.next_query += 1;
-        let query = QueryId(self.next_query);
-        self.engine.send(Command::Execute {
-            query,
-            tab,
-            conn: self.conn,
-            sql: sql.into(),
-            read_only: true,
-            timeout: None,
+    /// Writes the engine's settings: read-only mode for the harness's user, and the
+    /// time limit in seconds (none without).
+    fn set(&self, read_only: bool, limit_secs: Option<u64>) {
+        let users = if read_only {
+            vec![self.user.clone()]
+        } else {
+            vec![]
+        };
+        let limit = limit_secs.map(|s| format!("{s}s"));
+        let json = serde_json::json!({
+            "safety": { "read_only_users": users, "max_query_time": limit }
         });
-        self.wait(query).await
+        std::fs::write(&self.settings, json.to_string()).unwrap();
+        self.engine.send(Command::ReloadSettings);
     }
 
-    /// Runs `sql` with a statement time limit.
-    async fn run_limited(&mut self, tab: TabId, sql: &str, limit: Option<Duration>) -> Outcome {
-        self.next_query += 1;
-        let query = QueryId(self.next_query);
-        self.engine.send(Command::Execute {
-            query,
-            tab,
-            conn: self.conn,
-            sql: sql.into(),
-            read_only: false,
-            timeout: limit,
-        });
+    /// Runs `sql` with the user in read-only mode (the server refuses writes).
+    async fn run_read_only(&mut self, tab: TabId, sql: &str) -> Outcome {
+        self.set(true, None);
+        let query = self.start(tab, sql);
+        let out = self.wait(query).await;
+        self.set(false, None);
+        out
+    }
+
+    /// Runs `sql` with a statement time limit in seconds.
+    async fn run_limited(&mut self, tab: TabId, sql: &str, limit_secs: Option<u64>) -> Outcome {
+        self.set(false, limit_secs);
+        let query = self.start(tab, sql);
         self.wait(query).await
     }
 
@@ -279,9 +303,7 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
 async fn time_limit_checks(h: &mut Harness, sleep_sql: &str, short_sleep_sql: &str) {
     let tab = TabId(7);
     let started = std::time::Instant::now();
-    let out = h
-        .run_limited(tab, sleep_sql, Some(Duration::from_secs(1)))
-        .await;
+    let out = h.run_limited(tab, sleep_sql, Some(1)).await;
     assert!(out.error.is_some(), "a statement over the limit must fail");
     assert!(
         started.elapsed() < Duration::from_secs(10),
@@ -499,7 +521,7 @@ async fn ssh_tunnel() {
         database: "postgres".into(),
         tls: TlsMode::Disable,
     };
-    let (engine, events) = tangul_engine::start();
+    let (engine, events) = tangul_engine::start_with(EngineConfig::isolated());
     let connect = |ssh: &SshTarget| Command::Connect {
         conn: ConnId(1),
         driver: DriverKind::Postgres,
@@ -546,8 +568,8 @@ async fn ssh_tunnel() {
         tab: TabId(1),
         conn: ConnId(1),
         sql: "SELECT 42".into(),
-        read_only: false,
-        timeout: None,
+        caller: Caller::User,
+        approval: Approval::None,
     });
     loop {
         if let Event::Query {

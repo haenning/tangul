@@ -3,6 +3,7 @@
 //! state, one file per topic.
 //! Falls back to an in-memory database if the file cannot be opened.
 
+mod audit;
 mod bookmarks;
 mod favorites;
 mod history;
@@ -98,6 +99,18 @@ const MIGRATIONS: &[&str] = &[
     );",
     "ALTER TABLE bookmarks ADD COLUMN view TEXT;
     ALTER TABLE bookmarks ADD COLUMN scheduled INTEGER NOT NULL DEFAULT 0;",
+    "CREATE TABLE audit (
+        id INTEGER PRIMARY KEY,
+        at INTEGER NOT NULL,
+        caller TEXT NOT NULL,
+        target TEXT NOT NULL,
+        sql TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        error TEXT,
+        duration_ms INTEGER,
+        rows INTEGER
+    );
+    CREATE INDEX audit_at ON audit (at DESC);",
 ];
 
 pub struct Local {
@@ -167,6 +180,7 @@ impl Local {
     }
 }
 
+pub use audit::AuditEntry;
 pub use bookmarks::bare_sql;
 
 #[cfg(test)]

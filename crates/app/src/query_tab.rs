@@ -609,6 +609,7 @@ impl QueryTab {
                 error_position,
                 in_transaction,
                 cancelled,
+                ..
             } => {
                 let derived = self.derived.take();
                 // Positions of a derived query are in the wrapped SQL, not the editor.

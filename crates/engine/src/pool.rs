@@ -77,6 +77,16 @@ impl Pool {
         }
     }
 
+    /// The database user sessions log in as (read-only mode goes by it).
+    pub fn user(&self) -> &str {
+        &self.cfg.user
+    }
+
+    /// `user@host/database`, for the audit log.
+    pub fn target(&self) -> String {
+        format!("{}@{}/{}", self.cfg.user, self.cfg.host, self.cfg.database)
+    }
+
     /// Returns the tab's pinned session, an idle one, or opens a new one. Waits if
     /// all slots are in use.
     pub async fn acquire(&self, tab: Option<TabId>) -> Result<Lease> {

@@ -64,6 +64,7 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
                 tls: p.tls,
                 users: vec![user],
                 ssh: None,
+                assistant_user: None,
             }),
         }
     }
