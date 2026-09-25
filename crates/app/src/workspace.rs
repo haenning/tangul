@@ -233,6 +233,9 @@ pub struct Workspace {
     sidebar_rows: Vec<SidebarRow>,
     /// Favorite tables and views of the active database as (schema, name).
     favorites: Vec<(String, String)>,
+    /// Pending returns to read-only mode (`safety.relock_after`) by database user
+    /// name; replaced to restart the wait, dropped to cancel it.
+    relock: HashMap<String, Task<()>>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -321,6 +324,7 @@ impl Workspace {
             validations: HashMap::new(),
             sidebar_rows: Vec::new(),
             favorites: Vec::new(),
+            relock: HashMap::new(),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
             _pump: pump,
@@ -685,9 +689,16 @@ impl Workspace {
             },
         );
         // The server refuses writes, too, so read-only mode can't be sidestepped.
-        let read_only = self
-            .conn_user_name(conn.id)
-            .is_some_and(|user| settings::current(cx).is_read_only(&user));
+        let user = self.conn_user_name(conn.id);
+        let read_only = user
+            .as_ref()
+            .is_some_and(|user| settings::current(cx).is_read_only(user));
+        // A write while read-only mode is lifted restarts the wait until it is back.
+        if let Some(user) = user.filter(|u| self.relock.contains_key(u))
+            && guard::check(sql).iter().any(|c| c.writes)
+        {
+            self.schedule_relock(&user, cx);
+        }
         self.engine.send(Command::Execute {
             query,
             tab: tab.read(cx).id,
@@ -759,11 +770,40 @@ impl Workspace {
             return;
         };
         let on = !settings::current(cx).is_read_only(&user);
-        if let Err(e) = settings::set_read_only(&user, on, cx) {
-            window.push_notification(
+        match settings::set_read_only(&user, on, cx) {
+            Ok(()) if on => {
+                self.relock.remove(&user);
+            }
+            Ok(()) => self.schedule_relock(&user, cx),
+            Err(e) => window.push_notification(
                 Notification::error(format!("Could not change read-only mode: {e}")),
                 cx,
-            );
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Turns read-only mode back on for `user` after `safety.relock_after`, if set.
+    fn schedule_relock(&mut self, user: &str, cx: &mut Context<Self>) {
+        let Some(after) = settings::current(cx).safety.relock_after else {
+            self.relock.remove(user);
+            return;
+        };
+        let name = user.to_string();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(after).await;
+            let _ = this.update(cx, |ws, cx| ws.relock(&name, cx));
+        });
+        self.relock.insert(user.to_string(), task);
+    }
+
+    fn relock(&mut self, user: &str, cx: &mut Context<Self>) {
+        self.relock.remove(user);
+        if settings::current(cx).is_read_only(user) {
+            return;
+        }
+        if let Err(e) = settings::set_read_only(user, true, cx) {
+            eprintln!("could not turn read-only mode back on for {user}: {e}");
         }
         cx.notify();
     }
@@ -861,12 +901,15 @@ impl Workspace {
                     match &read_only_user {
                         // Lifts read-only mode; running the statement is a second, deliberate step.
                         Some(user) => match settings::set_read_only(user, false, cx) {
-                            Ok(()) => window.push_notification(
-                                Notification::info(format!(
-                                    "Read-only mode is off for {user}. Run the statement again."
-                                )),
-                                cx,
-                            ),
+                            Ok(()) => {
+                                let _ = workspace.update(cx, |ws, cx| ws.schedule_relock(user, cx));
+                                window.push_notification(
+                                    Notification::info(format!(
+                                        "Read-only mode is off for {user}. Run the statement again."
+                                    )),
+                                    cx,
+                                )
+                            }
                             Err(e) => window.push_notification(
                                 Notification::error(format!(
                                     "Could not change read-only mode: {e}"

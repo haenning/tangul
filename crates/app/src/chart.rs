@@ -15,8 +15,10 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use rusdb_assist::chart::{ChartData, ChartStyle, format_value, ticks};
 
-/// Room left of the plot for the value labels.
+/// Room left of the plot for the value labels, at the default label size.
 const VALUE_GUTTER: f32 = 44.;
+/// Axis label size in pixels unless the settings give one.
+pub const LABEL_SIZE: f32 = 10.;
 /// Space above the highest value.
 const TOP_PAD: f32 = 8.;
 /// Space right of the last x position.
@@ -33,6 +35,8 @@ pub struct ResultChart {
     colors: Vec<Hsla>,
     /// Curves instead of straight segments between points (lines and areas).
     smooth: bool,
+    /// Axis labels, in pixels.
+    label_size: f32,
 }
 
 impl ResultChart {
@@ -42,6 +46,7 @@ impl ResultChart {
         style: ChartStyle,
         colors: Vec<Hsla>,
         smooth: bool,
+        label_size: f32,
     ) -> Self {
         Self {
             id: id.into(),
@@ -49,7 +54,12 @@ impl ResultChart {
             style,
             colors,
             smooth,
+            label_size,
         }
+    }
+
+    fn layout(&self, bounds: Bounds<Pixels>) -> Layout {
+        Layout::new(bounds, &self.data, self.style, self.label_size / LABEL_SIZE)
     }
 }
 
@@ -68,7 +78,8 @@ struct Layout {
 }
 
 impl Layout {
-    fn new(bounds: Bounds<Pixels>, data: &ChartData, style: ChartStyle) -> Self {
+    /// `scale`: label size relative to the default; the room for labels grows with it.
+    fn new(bounds: Bounds<Pixels>, data: &ChartData, style: ChartStyle, scale: f32) -> Self {
         let width = bounds.size.width.as_f32();
         let height = bounds.size.height.as_f32();
         let (min, max) = data.value_range(style);
@@ -76,11 +87,11 @@ impl Layout {
         let count = ((height / 40.) as usize).clamp(2, 8);
         let ticks = ticks(min, max, count);
         let rows = data.x.len().max(1) as f32;
-        let left = VALUE_GUTTER;
+        let left = VALUE_GUTTER * scale;
         Self {
             left,
             top: TOP_PAD,
-            bottom: (height - AXIS_GAP).max(TOP_PAD + 1.),
+            bottom: (height - AXIS_GAP * scale).max(TOP_PAD + 1.),
             step: (width - left - RIGHT_PAD).max(1.) / rows,
             lo: ticks.first().copied().unwrap_or(min),
             hi: ticks.last().copied().unwrap_or(max),
@@ -144,12 +155,15 @@ impl ResultChart {
         let rows = self.data.x.len();
         let every = ((80. / l.step).ceil() as usize).max(1);
         let x_labels = (0..rows).step_by(every).map(|row| {
-            AxisText::new(self.data.x[row].clone(), px(l.x(row)), muted).align(TextAlign::Center)
+            AxisText::new(self.data.x[row].clone(), px(l.x(row)), muted)
+                .align(TextAlign::Center)
+                .font_size(px(self.label_size))
         });
-        let y_labels = l
-            .ticks
-            .iter()
-            .map(|&t| AxisText::new(format_value(t), px(l.y(t)), muted).align(TextAlign::Right));
+        let y_labels = l.ticks.iter().map(|&t| {
+            AxisText::new(format_value(t), px(l.y(t)), muted)
+                .align(TextAlign::Right)
+                .font_size(px(self.label_size))
+        });
         PlotAxis::new()
             .stroke(theme.border)
             .x(px(l.y(0.0)))
@@ -266,7 +280,7 @@ impl ResultChart {
 
 impl Plot for ResultChart {
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let l = Layout::new(bounds, &self.data, self.style);
+        let l = self.layout(bounds);
         self.paint_axes(&l, &bounds, window, cx);
         if self.style.is_bars() {
             self.paint_bars(&l, &bounds, window, cx);
@@ -285,7 +299,7 @@ impl Plot for ResultChart {
         bounds: Bounds<Pixels>,
         _: &App,
     ) -> Option<TooltipState> {
-        let l = Layout::new(bounds, &self.data, self.style);
+        let l = self.layout(bounds);
         if position.y.as_f32() > l.bottom {
             return None;
         }
@@ -305,7 +319,7 @@ impl Plot for ResultChart {
         _: &mut Window,
         _: &mut App,
     ) -> Option<AnyElement> {
-        let l = Layout::new(bounds, &self.data, self.style);
+        let l = self.layout(bounds);
         let row = state.index;
         let mut cross = CrossLine::new(point(px(l.x(row)), px(l.top))).height(l.bottom - l.top);
         if self.style.is_bars() {

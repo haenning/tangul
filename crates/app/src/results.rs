@@ -33,6 +33,7 @@ use rusdb_core::{ColumnInfo, ResultSet};
 use crate::assets::Lucide;
 use crate::column_filter::FilterPanel;
 use crate::query_tab::{QueryTab, TabEvent};
+use crate::settings;
 
 /// Longer values are cut in the grid (full value view is a later feature).
 const MAX_CELL_CHARS: usize = 200;
@@ -704,7 +705,17 @@ impl TableDelegate for ResultsDelegate {
                 cx.notify();
             }))
             .children(key_icon)
-            .child(div().min_w_0().overflow_hidden().child(name))
+            .child({
+                let s = settings::current(cx);
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .when_some(s.table.family(), |d, family| {
+                        d.font_family(SharedString::from(family.to_string()))
+                    })
+                    .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
+                    .child(name)
+            })
             .children(filter_button)
             .children(stats_card)
     }
@@ -883,10 +894,16 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let s = settings::current(cx);
+        let family = s.table.family().map_or_else(
+            || cx.theme().mono_font_family.clone(),
+            |f| f.to_string().into(),
+        );
         let cell = div()
             .size_full()
-            .font_family(cx.theme().mono_font_family.clone())
+            .font_family(family)
             .text_xs()
+            .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
             .whitespace_nowrap()
             .overflow_hidden()
             .on_mouse_down(
