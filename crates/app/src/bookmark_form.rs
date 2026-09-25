@@ -13,6 +13,7 @@ use rusdb_assist::chart::ChartView;
 use rusdb_assist::guard;
 
 use crate::local::Bookmark;
+use crate::monitor;
 use crate::settings;
 use crate::store::new_id;
 
@@ -93,19 +94,6 @@ impl BookmarkForm {
     }
 }
 
-/// `"5 minutes"`, `"2 hours"`, `"1 day"`: the largest whole unit.
-fn human_duration(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    let (n, unit) = if secs.is_multiple_of(86_400) {
-        (secs / 86_400, "day")
-    } else if secs.is_multiple_of(3600) {
-        (secs / 3600, "hour")
-    } else {
-        (secs.div_ceil(60), "minute")
-    };
-    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
-}
-
 /// First line of the query, shortened, as a starting point for the name.
 fn suggest_name(sql: &str) -> String {
     let line = sql
@@ -156,7 +144,7 @@ impl Render for BookmarkForm {
                 );
                 let label = format!(
                     "Run about every {} to track time and rows",
-                    human_duration(interval)
+                    monitor::human_duration(interval)
                 );
                 let checkbox = Checkbox::new("scheduled")
                     .label(label)

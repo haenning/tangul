@@ -5,6 +5,8 @@ mod column_filter;
 mod completion;
 mod connection_form;
 mod local;
+mod metrics;
+mod monitor;
 mod palette;
 mod query_tab;
 mod results;

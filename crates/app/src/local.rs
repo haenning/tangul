@@ -181,6 +181,16 @@ impl Local {
         .pop()
     }
 
+    /// Bookmarks that run on a schedule (only ones for a single database).
+    pub fn scheduled_bookmarks(&self) -> Vec<Bookmark> {
+        self.query_bookmarks(
+            "SELECT id, name, sql, database_id, view, scheduled FROM bookmarks
+             WHERE scheduled AND database_id IS NOT NULL
+             ORDER BY lower(name)",
+            [],
+        )
+    }
+
     fn query_bookmarks(&self, sql: &str, params: impl rusqlite::Params) -> Vec<Bookmark> {
         let result = self.conn.prepare_cached(sql).and_then(|mut stmt| {
             stmt.query_map(params, |r| {
@@ -311,6 +321,19 @@ impl Local {
             eprintln!("history query failed: {e}");
             Vec::new()
         })
+    }
+
+    /// The user who last ran something on the database.
+    pub fn last_user(&self, db_id: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT user_id FROM history WHERE database_id = ?1
+                 ORDER BY started_at DESC LIMIT 1",
+                params![db_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()?
     }
 
     /// Successful runs of queries with this fingerprint.
@@ -578,6 +601,8 @@ mod tests {
             2
         );
         assert_eq!(l.history("db", "", 10)[0].error.as_deref(), Some("boom"));
+        assert_eq!(l.last_user("db").as_deref(), Some("u"));
+        assert_eq!(l.last_user("other"), None);
         assert_eq!(l.history("db", "%", 10).len(), 1);
     }
 
@@ -635,5 +660,10 @@ mod tests {
         b.scheduled = true;
         l.upsert_bookmark(&b).unwrap();
         assert_eq!(l.bookmark("1").unwrap(), b);
+        // Only bookmarks for one database run on a schedule.
+        assert!(l.scheduled_bookmarks().is_empty());
+        b.database_id = Some("pg".into());
+        l.upsert_bookmark(&b).unwrap();
+        assert_eq!(l.scheduled_bookmarks(), vec![b]);
     }
 }
