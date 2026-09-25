@@ -12,10 +12,10 @@ use std::{
 
 pub use pool::PoolStats;
 use pool::{Lease, Pool};
-use rusdb_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, SshTarget, TabId};
-pub use rusdb_drivers::ExecEvent;
-use rusdb_drivers::{CancelHandle, SqlError, driver_for};
-use rusdb_tunnel::{HostKeyError, Tunnel};
+use tangul_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, SshTarget, TabId};
+pub use tangul_drivers::ExecEvent;
+use tangul_drivers::{CancelHandle, SqlError, driver_for};
+use tangul_tunnel::{HostKeyError, Tunnel};
 use tokio::sync::mpsc;
 
 /// Max rows kept per result set. TODO(fetch-more): make configurable / page on demand.
@@ -156,7 +156,7 @@ pub fn start() -> (EngineHandle, async_channel::Receiver<Event>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let (events_tx, events_rx) = async_channel::unbounded();
     std::thread::Builder::new()
-        .name("rusdb-engine".into())
+        .name("tangul-engine".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -262,7 +262,7 @@ impl Engine {
             }
             Command::TrustHostKey { host, port, key } => {
                 // A small file append; done inline so a following Connect sees it.
-                if let Err(e) = rusdb_tunnel::trust_host_key(&host, port, &key) {
+                if let Err(e) = tangul_tunnel::trust_host_key(&host, port, &key) {
                     eprintln!("could not update known_hosts: {e:#}");
                 }
             }

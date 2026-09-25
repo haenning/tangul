@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use rusdb_assist::guard;
-use rusdb_core::{ConnId, QueryId};
+use tangul_assist::guard;
+use tangul_core::{ConnId, QueryId};
 
 use crate::local::Bookmark;
 

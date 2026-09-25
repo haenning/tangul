@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use mysql_async::{
     Conn, Opts, OptsBuilder, Row, SslOpts, Value, consts::StatusFlags, prelude::Queryable,
 };
-use rusdb_core::{
+use tangul_core::{
     ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
 };
 

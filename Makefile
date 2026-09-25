@@ -2,7 +2,7 @@
 
 PG_URL    ?= postgres:@127.0.0.1:55432/postgres
 MYSQL_URL ?= root:@127.0.0.1:53306/app
-SSH_URL   ?= rusdb:rusdb@127.0.0.1:52222
+SSH_URL   ?= tangul:tangul@127.0.0.1:52222
 DEV_CONFIG := target/dev-config
 
 .DEFAULT_GOAL := help
@@ -57,24 +57,24 @@ run-release: ## Run the app (release) with your normal profiles
 run-dev: db-up ## Start dev databases and run the app with dev profiles only
 	@mkdir -p $(DEV_CONFIG)
 	@[ -f $(DEV_CONFIG)/profiles.toml ] || cp dev/profiles.toml $(DEV_CONFIG)/profiles.toml
-	RUSDB_CONFIG_DIR=$(DEV_CONFIG) cargo run
+	TANGUL_CONFIG_DIR=$(DEV_CONFIG) cargo run
 
 test: ## Unit tests (no databases needed)
 	cargo test --workspace
 
 test-live: db-up ## Integration tests against the dev databases
-	RUSDB_TEST_PG=$(PG_URL) RUSDB_TEST_MYSQL=$(MYSQL_URL) RUSDB_TEST_SSH=$(SSH_URL) \
-		cargo test -p rusdb-engine
+	TANGUL_TEST_PG=$(PG_URL) TANGUL_TEST_MYSQL=$(MYSQL_URL) TANGUL_TEST_SSH=$(SSH_URL) \
+		cargo test -p tangul-engine
 
-app: ## Build target/bundle/rusdb.app and a DMG (UNIVERSAL=1 for Apple Silicon + Intel)
+app: ## Build target/bundle/tangul.app and a DMG (UNIVERSAL=1 for Apple Silicon + Intel)
 	scripts/bundle-macos.sh $(if $(UNIVERSAL),--universal)
 
 dmg: app ## Same as app (the DMG is built alongside)
 
 install: app ## Build the app and copy it to /Applications
-	rm -rf /Applications/rusdb.app
-	cp -R target/bundle/rusdb.app /Applications/
-	@echo "installed /Applications/rusdb.app"
+	rm -rf /Applications/tangul.app
+	cp -R target/bundle/tangul.app /Applications/
+	@echo "installed /Applications/tangul.app"
 
 fmt: ## Format code
 	cargo fmt --all

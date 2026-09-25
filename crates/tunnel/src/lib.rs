@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use rusdb_core::{SshAuth, SshTarget};
 use russh::client::{self, Handle};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::AgentClient;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
+use tangul_core::{SshAuth, SshTarget};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -66,9 +66,9 @@ impl std::fmt::Display for HostKeyError {
 
 impl std::error::Error for HostKeyError {}
 
-/// `~/.ssh/known_hosts`, or `RUSDB_KNOWN_HOSTS` (tests use a scratch file).
+/// `~/.ssh/known_hosts`, or `TANGUL_KNOWN_HOSTS` (tests use a scratch file).
 fn known_hosts_path() -> Option<PathBuf> {
-    std::env::var_os("RUSDB_KNOWN_HOSTS").map(PathBuf::from)
+    std::env::var_os("TANGUL_KNOWN_HOSTS").map(PathBuf::from)
 }
 
 /// Adds a host key the user confirmed to known_hosts.

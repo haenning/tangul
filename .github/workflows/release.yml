@@ -27,7 +27,7 @@ jobs:
       - name: Tag matches Cargo.toml version
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
-            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rusdb"))')
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "tangul"))')
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1
           fi
@@ -37,5 +37,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" target/bundle/rusdb-*-universal.dmg \
-            --title "rusdb $GITHUB_REF_NAME" --generate-notes
+          gh release create "$GITHUB_REF_NAME" target/bundle/tangul-*-universal.dmg \
+            --title "tangul $GITHUB_REF_NAME" --generate-notes

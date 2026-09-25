@@ -1,5 +1,5 @@
 [package]
-name = "rusdb-engine"
+name = "tangul-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,9 +7,9 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
-rusdb-core = { version = "0.1.0", path = "../core" }
-rusdb-drivers = { version = "0.1.0", path = "../drivers" }
-rusdb-tunnel = { version = "0.1.0", path = "../tunnel" }
+tangul-core = { version = "0.1.0", path = "../core" }
+tangul-drivers = { version = "0.1.0", path = "../drivers" }
+tangul-tunnel = { version = "0.1.0", path = "../tunnel" }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 
 [dev-dependencies]

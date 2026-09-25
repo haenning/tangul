@@ -29,7 +29,7 @@ id = "dev-mysql"
 user = "root"
 
 # The dev Postgres again, reached through the SSH bastion from docker-compose
-# (ssh password: rusdb — enter it once via "Edit database…"; it goes to the Keychain).
+# (ssh password: tangul — enter it once via "Edit database…"; it goes to the Keychain).
 [[databases]]
 id = "dev-postgres-ssh"
 name = "dev postgres via ssh"
@@ -42,7 +42,7 @@ tls = "disable"
 [databases.ssh]
 host = "127.0.0.1"
 port = 52222
-user = "rusdb"
+user = "tangul"
 auth = "password"
 
 [[databases.users]]

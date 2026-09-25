@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use rusdb_core::{
-    ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind,
-};
 use rusqlite::fallible_iterator::FallibleIterator as _;
 use rusqlite::{Connection, InterruptHandle, OpenFlags, types::ValueRef};
+use tangul_core::{
+    ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind,
+};
 
 use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError};
 
@@ -253,13 +253,13 @@ mod tests {
             user: String::new(),
             password: None,
             database: path.to_string_lossy().into_owned(),
-            tls: rusdb_core::TlsMode::Disable,
+            tls: tangul_core::TlsMode::Disable,
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reads_but_never_writes() {
-        let dir = std::env::temp_dir().join(format!("rusdb-sqlite-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tangul-sqlite-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("metrics.db");
         let _ = std::fs::remove_file(&path);

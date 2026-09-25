@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use rusdb_core::{ConnId, ConnectConfig, DriverKind, QueryId, TabId, TlsMode};
-use rusdb_engine::{Command, Event, QueryEvent};
+use tangul_core::{ConnId, ConnectConfig, DriverKind, QueryId, TabId, TlsMode};
+use tangul_engine::{Command, Event, QueryEvent};
 
 async fn next(events: &async_channel::Receiver<Event>) -> Event {
     tokio::time::timeout(Duration::from_secs(10), events.recv())
@@ -15,7 +15,7 @@ async fn next(events: &async_channel::Receiver<Event>) -> Event {
 
 /// Runs `sql` and returns its error, if any.
 async fn run(
-    engine: &rusdb_engine::EngineHandle,
+    engine: &tangul_engine::EngineHandle,
     events: &async_channel::Receiver<Event>,
     query: u64,
     sql: &str,
@@ -42,7 +42,7 @@ async fn run(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn local_file_is_read_only_and_time_limited() {
-    let dir = std::env::temp_dir().join(format!("rusdb-engine-local-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tangul-engine-local-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("metrics.db");
     let _ = std::fs::remove_file(&path);
@@ -51,7 +51,7 @@ async fn local_file_is_read_only_and_time_limited() {
         .execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);")
         .unwrap();
 
-    let (engine, events) = rusdb_engine::start();
+    let (engine, events) = tangul_engine::start();
     engine.send(Command::Connect {
         conn: ConnId(1),
         driver: DriverKind::Sqlite,

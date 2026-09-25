@@ -8,10 +8,10 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-rusdb-core = { path = "crates/core" }
-rusdb-drivers = { path = "crates/drivers" }
-rusdb-engine = { path = "crates/engine" }
-rusdb-assist = { path = "crates/assist" }
+tangul-core = { path = "crates/core" }
+tangul-drivers = { path = "crates/drivers" }
+tangul-engine = { path = "crates/engine" }
+tangul-assist = { path = "crates/assist" }
 
 anyhow = "1"
 async-trait = "0.1"

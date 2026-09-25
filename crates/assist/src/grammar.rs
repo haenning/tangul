@@ -6,7 +6,7 @@
 //! This is a state machine over clause keywords, not a parser: it only needs to be
 //! right about the position in front of the cursor, and must cope with unfinished SQL.
 
-use rusdb_core::DriverKind;
+use tangul_core::DriverKind;
 
 use crate::lexer::{Token, TokenKind};
 

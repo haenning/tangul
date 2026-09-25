@@ -4,7 +4,7 @@
 //! ```sql
 //! SELECT * FROM (
 //! <query>
-//! ) AS rusdb_q WHERE … ORDER BY … LIMIT … OFFSET …
+//! ) AS tangul_q WHERE … ORDER BY … LIMIT … OFFSET …
 //! ```
 //!
 //! which works for any single SELECT, however complex (joins, CTEs, GROUP BY,
@@ -12,14 +12,14 @@
 //! none (Postgres keeps the order of a subquery scan; MySQL passes a derived table's
 //! ORDER BY on to an outer query without one), so pages follow the original order.
 
-use rusdb_core::DriverKind;
+use tangul_core::DriverKind;
 
 use crate::analyze::statements;
 use crate::lexer::{TokenKind, tokenize};
 use crate::related::{literal, numeric_type};
 use crate::schema::quote_ident;
 
-const ALIAS: &str = "rusdb_q";
+const ALIAS: &str = "tangul_q";
 
 /// What a column holds, which decides the filters offered for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,11 +459,11 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "SELECT * FROM (\nselect id, \"Name\", note from t -- trailing comment\n) AS rusdb_q\n\
-             WHERE rusdb_q.id >= 10\n  \
-             AND CAST(rusdb_q.\"Name\" AS text) ILIKE '%50!%!_o''k%' ESCAPE '!'\n  \
-             AND rusdb_q.note IS NULL\n\
-             ORDER BY rusdb_q.\"Name\" DESC\nLIMIT 10001 OFFSET 10000"
+            "SELECT * FROM (\nselect id, \"Name\", note from t -- trailing comment\n) AS tangul_q\n\
+             WHERE tangul_q.id >= 10\n  \
+             AND CAST(tangul_q.\"Name\" AS text) ILIKE '%50!%!_o''k%' ESCAPE '!'\n  \
+             AND tangul_q.note IS NULL\n\
+             ORDER BY tangul_q.\"Name\" DESC\nLIMIT 10001 OFFSET 10000"
         );
     }
 
@@ -489,8 +489,8 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "SELECT * FROM (\nselect a.id, b.id from a, b\n) AS rusdb_q (id, id_2)\n\
-             WHERE rusdb_q.id_2 = 'a\\\\b'\nLIMIT 100"
+            "SELECT * FROM (\nselect a.id, b.id from a, b\n) AS tangul_q (id, id_2)\n\
+             WHERE tangul_q.id_2 = 'a\\\\b'\nLIMIT 100"
         );
         // A non-number for a numeric column stays a quoted string.
         let f = ColumnFilter {

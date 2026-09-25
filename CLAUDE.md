@@ -1,4 +1,4 @@
-# rusdb
+# tangul
 
 A light, fast database viewer (Postgres, MySQL) in Rust with GPUI (`gpui-kit`).
 Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PLAN.md),

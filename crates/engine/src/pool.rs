@@ -15,9 +15,9 @@ use std::{
 };
 
 use anyhow::Result;
-use rusdb_core::{ConnectConfig, TabId};
-use rusdb_drivers::{Driver, Session};
-use rusdb_tunnel::Tunnel;
+use tangul_core::{ConnectConfig, TabId};
+use tangul_drivers::{Driver, Session};
+use tangul_tunnel::Tunnel;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);

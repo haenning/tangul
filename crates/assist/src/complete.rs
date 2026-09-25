@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use rusdb_core::{ForeignKey, TableKind};
+use tangul_core::{ForeignKey, TableKind};
 
 use crate::analyze::{TableRef, analyze, significant, statements};
 use crate::grammar::{self, Clause, Expect, State};
@@ -669,18 +669,18 @@ mod tests {
                 .collect()
         };
         let sql = "select * from app.users where email |";
-        let pg = words(rusdb_core::DriverKind::Postgres, &sql.replace('|', "i|"));
-        let my = words(rusdb_core::DriverKind::Mysql, &sql.replace('|', "i|"));
+        let pg = words(tangul_core::DriverKind::Postgres, &sql.replace('|', "i|"));
+        let my = words(tangul_core::DriverKind::Mysql, &sql.replace('|', "i|"));
         assert!(pg.contains(&"ilike".to_string()) && !my.contains(&"ilike".to_string()));
-        let my = words(rusdb_core::DriverKind::Mysql, &sql.replace('|', "r|"));
+        let my = words(tangul_core::DriverKind::Mysql, &sql.replace('|', "r|"));
         assert_eq!(my, ["regexp"]);
         let pg = words(
-            rusdb_core::DriverKind::Postgres,
+            tangul_core::DriverKind::Postgres,
             "insert into app.users values (1) r|",
         );
         assert_eq!(pg, ["returning"]);
         let my = words(
-            rusdb_core::DriverKind::Mysql,
+            tangul_core::DriverKind::Mysql,
             "insert into app.users values (1) o|",
         );
         assert_eq!(my, ["on duplicate key update"]);
