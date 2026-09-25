@@ -55,7 +55,7 @@ impl Workspace {
         });
 
         let read_only = self.active_user_read_only(cx);
-        let dot = self.active_conn().map(|c| match c.status {
+        let dot = self.active_conn(cx).map(|c| match c.status {
             ConnStatus::Connected => theme.success,
             ConnStatus::Connecting => theme.warning,
             ConnStatus::Failed(_) => theme.danger,
@@ -120,7 +120,7 @@ impl Workspace {
                         .content(move |_, _, cx| {
                             let sections = weak
                                 .upgrade()
-                                .map(|ws| ws.read(cx).connection_details())
+                                .map(|ws| ws.read(cx).connection_details(cx))
                                 .unwrap_or_default();
                             render_details(sections, cx)
                         }),
@@ -201,8 +201,11 @@ impl Workspace {
 
     /// The status dot's hover card: live state only (status, pool, what the schema
     /// holds); connection settings are in the database dialog.
-    pub(super) fn connection_details(&self) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
-        let Some(state) = self.active_conn() else {
+    pub(super) fn connection_details(
+        &self,
+        cx: &App,
+    ) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
+        let Some(state) = self.active_conn(cx) else {
             return Vec::new();
         };
         let mut sections = Vec::new();

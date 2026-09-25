@@ -3,6 +3,7 @@ mod bookmark_form;
 mod chart;
 mod column_filter;
 mod completion;
+mod connection;
 mod connection_form;
 mod monitor;
 mod palette;

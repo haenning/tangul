@@ -66,7 +66,7 @@ impl Workspace {
             eprintln!("could not record history: {e:#}");
         }
         if succeeded {
-            if let Some(state) = self.conns.get(&run.user_id) {
+            if let Some(state) = self.conns.get(&run.user_id).map(|c| c.read(cx)) {
                 let learned = learn(&run.sql, &state.schema);
                 let now = now_ms() / 1000;
                 if let Err(e) = self.data.local.record_usage(&db_id, &learned, now) {
@@ -93,7 +93,7 @@ impl Workspace {
                     let facts = column_facts(&run.sql, &columns, &state.schema);
                     tab.update(cx, |t, cx| t.set_row_actions(links, edit, facts, cx));
                 }
-                self.sync_assist_for_db(&db_id);
+                self.sync_assist_for_db(&db_id, cx);
             }
             let runs = self.data.local.runs(&db_id, &fp);
             let hint = (runs >= BOOKMARK_HINT_RUNS && !self.data.local.is_bookmarked(&db_id, &fp))

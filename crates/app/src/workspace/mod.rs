@@ -77,10 +77,11 @@ use crate::{
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
+    connection::{ConnStatus, Connection},
     connection_form::{ConnectionForm, FormMode, FormOutput},
     monitor::{self, Monitor},
     palette::{self, PaletteAction, PaletteKind},
-    query_tab::{QueryTab, TabConn, TabEvent},
+    query_tab::{QueryTab, TabEvent},
     settings,
 };
 
@@ -155,21 +156,6 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-#[derive(Clone, PartialEq)]
-enum ConnStatus {
-    Connecting,
-    Connected,
-    Failed(SharedString),
-}
-
-struct ConnState {
-    id: ConnId,
-    status: ConnStatus,
-    /// Tables, columns and foreign keys (from the cache until the server answered).
-    schema: Arc<SchemaIndex>,
-    stats: PoolStats,
-}
-
 /// Flattened sidebar entry of the active connection (schema → tables/views), so the
 /// tree renders through a virtualized list.
 #[derive(Clone)]
@@ -223,8 +209,8 @@ pub struct Workspace {
     reveal: Option<(SharedString, Option<String>)>,
     /// The row last revealed, highlighted until the next search.
     revealed: Option<(SharedString, Option<String>)>,
-    /// Connection state by user id.
-    conns: HashMap<String, ConnState>,
+    /// The tabs' connections by user id; tabs point to the same entities.
+    conns: HashMap<String, Entity<Connection>>,
     /// Every open connection and what it is for (tabs, scheduled runs, files).
     connections: Connections,
     /// Selected database and user; the sidebar shows this connection.
@@ -394,31 +380,27 @@ impl Workspace {
         self.data.profiles.database(self.active_db.as_deref()?)
     }
 
-    fn active_conn(&self) -> Option<&ConnState> {
-        self.conns.get(self.active_user.as_deref()?)
+    fn active_conn<'a>(&self, cx: &'a App) -> Option<&'a Connection> {
+        Some(self.conns.get(self.active_user.as_deref()?)?.read(cx))
     }
 
     fn find_user(&self, user_id: &str) -> Option<(&Database, &DbUser)> {
         self.data.profiles.user(user_id)
     }
 
-    /// The tab connection for a user, if it is connected (or connecting).
-    fn tab_conn(&self, user_id: &str) -> Option<TabConn> {
-        let (db, user) = self.find_user(user_id)?;
-        let state = self.conns.get(user_id)?;
-        Some(TabConn {
-            id: state.id,
-            name: format!("{}@{}", user.user, db.display_name()).into(),
-            driver: db.driver,
-        })
+    /// The connection of a user, if it is connected (or connecting).
+    fn tab_conn(&self, user_id: &str) -> Option<Entity<Connection>> {
+        self.conns.get(user_id).cloned()
     }
 }
 
 impl Drop for Workspace {
     /// The window closed: close its connections (the app itself keeps running).
     fn drop(&mut self) {
-        for state in self.conns.values() {
-            self.engine.send(Command::Disconnect { conn: state.id });
+        for user_id in self.conns.keys() {
+            if let Some(conn) = self.connections.get(Purpose::Tab, user_id) {
+                self.engine.send(Command::Disconnect { conn });
+            }
         }
     }
 }

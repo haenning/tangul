@@ -46,11 +46,7 @@ impl CompletionProvider for SqlCompletion {
         cx: &mut App,
     ) -> Task<Result<CompletionResponse>> {
         let empty = || Task::ready(Ok(CompletionResponse::Array(Vec::new())));
-        let Some(conn) = self
-            .tab
-            .upgrade()
-            .and_then(|t| t.read(cx).conn.as_ref().map(|c| c.id))
-        else {
+        let Some(conn) = self.tab.upgrade().and_then(|t| t.read(cx).conn_id(cx)) else {
             return empty();
         };
         let Some(data) = self.data.borrow().get(&conn).cloned() else {

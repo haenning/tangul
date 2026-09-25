@@ -25,7 +25,7 @@ use tangul_assist::columns::ColumnFacts;
 use tangul_assist::lexer::tokenize;
 use tangul_assist::refine::{ColumnFilter, Refine, Sort, refinable, refined_sql};
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
-use tangul_core::{ConnId, DriverKind, QueryId, TabId};
+use tangul_core::{ConnId, QueryId, TabId};
 use tangul_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
 
 /// Pause in typing after which the editor is checked on the server.
@@ -43,17 +43,10 @@ use crate::{
     assets::Lucide,
     chart::{self, ResultChart},
     column_filter::FilterPanel,
+    connection::{ConnStatus, Connection},
     results::ResultsDelegate,
     settings,
 };
-
-/// Connection a tab runs against.
-#[derive(Clone)]
-pub struct TabConn {
-    pub id: ConnId,
-    pub name: SharedString,
-    pub driver: DriverKind,
-}
 
 #[derive(Clone)]
 pub enum TabEvent {
@@ -94,7 +87,10 @@ enum Status {
 pub struct QueryTab {
     pub id: TabId,
     pub title: SharedString,
-    pub conn: Option<TabConn>,
+    /// The connection it runs against, shared with the workspace and other tabs.
+    pub conn: Option<Entity<Connection>>,
+    /// Re-renders the tab when its connection changes (status, name).
+    _conn_changes: Option<Subscription>,
     /// Bookmark this tab was opened from or saved as; bookmarking again updates it.
     pub bookmark_id: Option<String>,
     /// Editor/results split. The editor is the first panel; height 0 means hidden.
@@ -162,7 +158,7 @@ impl EventEmitter<TabEvent> for QueryTab {}
 impl QueryTab {
     pub fn new(
         id: TabId,
-        conn: Option<TabConn>,
+        conn: Option<Entity<Connection>>,
         sql: &str,
         engine: EngineHandle,
         window: &mut Window,
@@ -194,6 +190,7 @@ impl QueryTab {
         Self {
             id,
             title: format!("Query {}", id.0).into(),
+            _conn_changes: conn.as_ref().map(|c| cx.observe(c, |_, _, cx| cx.notify())),
             conn,
             bookmark_id: None,
             split: cx.new(|_| ResizableState::default()),
@@ -380,27 +377,33 @@ impl QueryTab {
         self.running.is_some()
     }
 
+    /// The engine's id of the tab's connection.
+    pub fn conn_id(&self, cx: &App) -> Option<ConnId> {
+        Some(self.conn.as_ref()?.read(cx).id)
+    }
+
     pub fn in_transaction(&self) -> bool {
         self.in_transaction
     }
 
     /// Switching connection releases a pinned session (the engine rolls it back).
-    pub fn set_conn(&mut self, conn: TabConn, cx: &mut Context<Self>) {
+    pub fn set_conn(&mut self, conn: Entity<Connection>, cx: &mut Context<Self>) {
         if self.file.is_some() {
             return;
         }
         // The same SQL can be valid on one connection and not on another.
         self.schedule_validation(cx);
         if let Some(old) = &self.conn
-            && old.id != conn.id
+            && *old != conn
             && self.in_transaction
         {
             self.engine.send(Command::ReleaseTab {
                 tab: self.id,
-                conn: old.id,
+                conn: old.read(cx).id,
             });
             self.in_transaction = false;
         }
+        self._conn_changes = Some(cx.observe(&conn, |_, _, cx| cx.notify()));
         self.conn = Some(conn);
         cx.notify();
     }
@@ -558,7 +561,7 @@ impl QueryTab {
             return None;
         }
         let base = self.base_sql.as_ref()?;
-        let driver = self.conn.as_ref()?.driver;
+        let driver = self.conn.as_ref()?.read(cx).driver;
         let d = self.table.read(cx).delegate();
         let columns = d.column_names();
         let kinds: Vec<_> = (0..columns.len()).map(|c| d.kind(c)).collect();
@@ -765,8 +768,15 @@ impl QueryTab {
                 .on_click(cx.listener(|this, _, window, cx| this.run(&RunQuery, window, cx)))
                 .into_any_element()
         };
-        let conn_label: SharedString = match &self.conn {
-            Some(c) => format!("{} · {}", c.name, c.driver.label()).into(),
+        let conn_label: SharedString = match self.conn.as_ref().map(|c| c.read(cx)) {
+            Some(c) => {
+                let status = match &c.status {
+                    ConnStatus::Connected => String::new(),
+                    ConnStatus::Connecting => " · connecting…".into(),
+                    ConnStatus::Failed(_) => " · not connected".into(),
+                };
+                format!("{} · {}{status}", c.name, c.driver.label()).into()
+            }
             None => "No connection — pick one in the title bar".into(),
         };
 

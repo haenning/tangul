@@ -152,12 +152,9 @@ impl Workspace {
         }
         let tab = self.tabs.remove(ix);
         let tab = tab.read(cx);
-        if let Some(conn) = &tab.conn {
+        if let Some(conn) = tab.conn_id(cx) {
             // Drops a pinned session (open transaction is rolled back by the server).
-            self.engine.send(Command::ReleaseTab {
-                tab: tab.id,
-                conn: conn.id,
-            });
+            self.engine.send(Command::ReleaseTab { tab: tab.id, conn });
         }
         if self.tabs.is_empty() {
             // The empty state takes over.
@@ -223,7 +220,7 @@ impl Workspace {
                 generation,
                 statements,
             } => {
-                let Some(conn) = tab.read(cx).conn.clone() else {
+                let Some(conn) = tab.read(cx).conn_id(cx) else {
                     return;
                 };
                 let request = self.next_id();
@@ -231,7 +228,7 @@ impl Workspace {
                     .insert(request, (tab.downgrade(), *generation));
                 self.engine.send(Command::Validate {
                     request,
-                    conn: conn.id,
+                    conn,
                     statements: statements.clone(),
                 });
             }
@@ -264,15 +261,10 @@ impl Workspace {
             TabEvent::Refine { sql, append } => self.execute_derived(tab, sql, *append, cx),
             TabEvent::OpenTable { schema, table } => {
                 // On the tab's connection, like related rows.
-                let Some(state) = tab
-                    .read(cx)
-                    .conn
-                    .as_ref()
-                    .and_then(|c| self.connections.tab_user(c.id))
-                    .and_then(|user| self.conns.get(user))
-                else {
+                let Some(conn) = tab.read(cx).conn.clone() else {
                     return;
                 };
+                let state = conn.read(cx);
                 let Some(ix) = state.schema.resolve(Some(schema), table) else {
                     return;
                 };
@@ -283,10 +275,10 @@ impl Workspace {
                 self.on_tab_event(tab, &event, window, cx);
             }
             TabEvent::Run(sql) => {
-                let Some(conn) = tab.read(cx).conn.clone() else {
+                let Some(conn) = tab.read(cx).conn_id(cx) else {
                     return;
                 };
-                match self.decide_for_tab(conn.id, sql, cx) {
+                match self.decide_for_tab(conn, sql, cx) {
                     Decision::Run(_) => self.execute(tab, sql, Approval::None, cx),
                     Decision::Confirm { guard, .. } => {
                         self.hold_back(tab.clone(), sql.clone(), guard, window, cx)
@@ -308,13 +300,13 @@ impl Workspace {
         approval: Approval,
         cx: &mut Context<Self>,
     ) {
-        let Some(conn) = tab.read(cx).conn.clone() else {
+        let Some(conn) = tab.read(cx).conn_id(cx) else {
             return;
         };
         let query = QueryId(self.next_id());
         let user_id = self
             .connections
-            .tab_user(conn.id)
+            .tab_user(conn)
             .unwrap_or_default()
             .to_string();
         // Running a bookmarked query: the tab shows the bookmark's name, and its
@@ -344,7 +336,7 @@ impl Workspace {
             },
         );
         // The server refuses writes, too, so read-only mode can't be sidestepped.
-        let user = self.conn_user_name(conn.id);
+        let user = self.conn_user_name(conn);
         // A write while read-only mode is lifted restarts the wait until it is back.
         if let Some(user) = user.filter(|u| self.relock.contains_key(u))
             && guard::check(sql).iter().any(|c| c.writes)
@@ -354,7 +346,7 @@ impl Workspace {
         self.engine.send(Command::Execute {
             query,
             tab: tab.read(cx).id,
-            conn: conn.id,
+            conn,
             sql: sql.to_string(),
             // The engine's gate decides read-only mode and the time limit.
             caller: Caller::User,
@@ -372,7 +364,7 @@ impl Workspace {
         append: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(conn) = tab.read(cx).conn.clone() else {
+        let Some(conn) = tab.read(cx).conn_id(cx) else {
             return;
         };
         let query = QueryId(self.next_id());
@@ -383,7 +375,7 @@ impl Workspace {
                 sql: sql.to_string(),
                 user_id: self
                     .connections
-                    .tab_user(conn.id)
+                    .tab_user(conn)
                     .unwrap_or_default()
                     .to_string(),
                 started_at: now_ms(),
@@ -393,7 +385,7 @@ impl Workspace {
         self.engine.send(Command::Execute {
             query,
             tab: tab.read(cx).id,
-            conn: conn.id,
+            conn,
             sql: sql.to_string(),
             caller: Caller::User,
             approval: Approval::None,

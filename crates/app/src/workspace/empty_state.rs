@@ -32,9 +32,7 @@ impl Workspace {
             .child(div().absolute().top(px(-1.5)).left_0().child(word(shade)))
             .child(div().absolute().top(px(1.5)).left_0().child(word(light)))
             .child(word(fill));
-        let connected = self
-            .active_conn()
-            .is_some_and(|c| c.status == ConnStatus::Connected);
+        let connected = self.active_conn(cx).is_some_and(Connection::is_connected);
         let (hover, muted) = (theme.accent, theme.muted_foreground);
         let action = |id: &'static str, icon: Icon, label: &'static str, keys: &'static str| {
             h_flex()
