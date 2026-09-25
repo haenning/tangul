@@ -1,0 +1,202 @@
+//! Read-only mode, auto relock and the checks before a statement runs.
+
+use super::*;
+
+impl Workspace {
+    /// The database user name of a connection.
+    pub(super) fn conn_user_name(&self, conn: ConnId) -> Option<String> {
+        let user_id = self.conn_users.get(&conn)?;
+        Some(self.find_user(user_id)?.1.user.clone())
+    }
+
+    /// Whether the active user is in read-only mode.
+    pub(super) fn active_user_read_only(&self, cx: &App) -> Option<bool> {
+        let user = &self.find_user(self.active_user.as_deref()?)?.1.user;
+        Some(settings::current(cx).is_read_only(user))
+    }
+
+    /// Flips read-only mode for the active user (kept in `settings.json`).
+    pub(super) fn toggle_read_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(user) = self
+            .active_user
+            .as_deref()
+            .and_then(|id| self.find_user(id))
+            .map(|(_, u)| u.user.clone())
+        else {
+            return;
+        };
+        let on = !settings::current(cx).is_read_only(&user);
+        match settings::set_read_only(&user, on, cx) {
+            Ok(()) if on => {
+                self.relock.remove(&user);
+            }
+            Ok(()) => self.schedule_relock(&user, cx),
+            Err(e) => window.push_notification(
+                Notification::error(format!("Could not change read-only mode: {e}")),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Turns read-only mode back on for `user` after `safety.relock_after`, if set.
+    pub(super) fn schedule_relock(&mut self, user: &str, cx: &mut Context<Self>) {
+        let Some(after) = settings::current(cx).safety.relock_after else {
+            self.relock.remove(user);
+            return;
+        };
+        let name = user.to_string();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(after).await;
+            let _ = this.update(cx, |ws, cx| ws.relock(&name, cx));
+        });
+        self.relock.insert(user.to_string(), task);
+    }
+
+    pub(super) fn relock(&mut self, user: &str, cx: &mut Context<Self>) {
+        self.relock.remove(user);
+        if settings::current(cx).is_read_only(user) {
+            return;
+        }
+        if let Err(e) = settings::set_read_only(user, true, cx) {
+            eprintln!("could not turn read-only mode back on for {user}: {e}");
+        }
+        cx.notify();
+    }
+
+    /// Why `sql` shouldn't run on `conn` right away: it changes data in read-only mode
+    /// (which takes precedence), or it is an `UPDATE` / `DELETE` without a `WHERE`.
+    pub(super) fn run_guard(&self, conn: ConnId, sql: &str, cx: &App) -> Option<RunGuard> {
+        let settings = settings::current(cx);
+        let user = self
+            .conn_user_name(conn)
+            .filter(|user| settings.is_read_only(user));
+        let checks = guard::check(sql);
+        let described = |keep: &dyn Fn(&guard::Check) -> bool| -> Vec<(String, String)> {
+            checks
+                .iter()
+                .filter(|c| keep(c))
+                .map(|c| (c.keyword.clone(), one_line(&c.statement, 160)))
+                .collect()
+        };
+        if let Some(user) = user {
+            let statements = described(&|c| c.writes);
+            if !statements.is_empty() {
+                return Some(RunGuard::ReadOnly { user, statements });
+            }
+        }
+        if settings.safety.confirm_unfiltered_writes {
+            let statements = described(&|c| c.unfiltered);
+            if !statements.is_empty() {
+                return Some(RunGuard::Unfiltered { statements });
+            }
+        }
+        None
+    }
+
+    /// Explains why `sql` did not run. The red button lifts the guard: "Allow writes"
+    /// turns read-only mode off (the statement is not run; run it again), "Allow …"
+    /// for an unfiltered statement runs it once.
+    pub(super) fn hold_back(
+        &mut self,
+        tab: Entity<QueryTab>,
+        sql: String,
+        guard: RunGuard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = cx.entity().downgrade();
+        let (title, intro, statements, allow) = match &guard {
+            RunGuard::ReadOnly { user, statements } => (
+                "Read-only mode",
+                format!(
+                    "Read-only mode is on for {user}. Nothing was run; these statements change data:"
+                ),
+                statements.clone(),
+                "Allow writes".to_string(),
+            ),
+            RunGuard::Unfiltered { statements } => {
+                let has = |keyword: &str| statements.iter().any(|(k, _)| k == keyword);
+                let allow = match (has("DELETE"), has("UPDATE")) {
+                    (true, false) => "Allow deletes",
+                    (false, true) => "Allow updates",
+                    _ => "Allow updates and deletes",
+                };
+                (
+                    "No WHERE clause",
+                    "These statements have no WHERE and affect every row:".to_string(),
+                    statements.clone(),
+                    allow.to_string(),
+                )
+            }
+        };
+        let read_only_user = match &guard {
+            RunGuard::ReadOnly { user, .. } => Some(user.clone()),
+            RunGuard::Unfiltered { .. } => None,
+        };
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let theme = cx.theme();
+            let body = v_flex()
+                .gap_2()
+                .child(div().text_sm().child(intro.clone()))
+                .children(statements.iter().map(|(_, statement)| {
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded(theme.radius)
+                        .bg(theme.muted)
+                        .font_family(theme.mono_font_family.clone())
+                        .text_sm()
+                        .child(statement.clone())
+                }));
+            let allow_click = {
+                let (workspace, tab, sql) = (workspace.clone(), tab.clone(), sql.clone());
+                let read_only_user = read_only_user.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    window.close_dialog(cx);
+                    match &read_only_user {
+                        // Lifts read-only mode; running the statement is a second, deliberate step.
+                        Some(user) => match settings::set_read_only(user, false, cx) {
+                            Ok(()) => {
+                                let _ = workspace.update(cx, |ws, cx| ws.schedule_relock(user, cx));
+                                window.push_notification(
+                                    Notification::info(format!(
+                                        "Read-only mode is off for {user}. Run the statement again."
+                                    )),
+                                    cx,
+                                )
+                            }
+                            Err(e) => window.push_notification(
+                                Notification::error(format!(
+                                    "Could not change read-only mode: {e}"
+                                )),
+                                cx,
+                            ),
+                        },
+                        None => {
+                            let _ = workspace.update(cx, |ws, cx| ws.execute(&tab, &sql, cx));
+                        }
+                    }
+                }
+            };
+            dialog.title(title).w(px(520.)).child(body).footer(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel-run")
+                            .label("Cancel")
+                            .ghost()
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("allow-run")
+                            .label(allow.clone())
+                            .danger()
+                            .on_click(allow_click),
+                    ),
+            )
+        });
+    }
+}
