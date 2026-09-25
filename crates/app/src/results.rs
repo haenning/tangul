@@ -5,19 +5,32 @@
 //! click selects, ⇧-click extends, ⌘-click toggles. The right-click menu copies the
 //! selection, follows foreign keys to related rows and writes UPDATE / DELETE
 //! statements for the selected rows (opened in a new tab, not run).
+//!
+//! Column headers mark primary-key columns, show count / sum / avg / min / max of a
+//! numeric column on hover (over the selected rows, or all loaded ones), and open
+//! the column's filter and sort popover. Scrolling to the end loads the next page.
 
 use std::collections::BTreeSet;
 
 use gpui_kit::component::{
-    ActiveTheme as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     menu::{PopupMenu, PopupMenuItem},
+    popover::Popover,
     table::{Column, TableDelegate, TableState},
+    tooltip::Tooltip,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rusdb_assist::columns::ColumnFacts;
+use rusdb_assist::refine::{ColumnKind, Refine};
 use rusdb_assist::{edit::RowEdit, related::RelatedLink};
 use rusdb_core::{ColumnInfo, ResultSet};
 
+use crate::assets::Lucide;
+use crate::column_filter::FilterPanel;
 use crate::query_tab::{QueryTab, TabEvent};
 
 /// Longer values are cut in the grid (full value view is a later feature).
@@ -42,12 +55,29 @@ pub struct ResultsDelegate {
     pub edit: Option<RowEdit>,
     /// The owning tab, which opens related queries.
     tab: Option<WeakEntity<QueryTab>>,
+    /// Per result column, what the schema says about it (keys, type).
+    pub facts: Vec<Option<ColumnFacts>>,
+    /// Filters and sort applied to the result (shown in the headers).
+    pub refine: Refine,
+    /// The result can be filtered, sorted and paged (a single SELECT).
+    pub refinable: bool,
+    /// More rows than loaded: scrolling to the end loads the next page.
+    pub more: bool,
+    hovered: Option<usize>,
+    /// Column whose filter popover is open.
+    filter_open: Option<usize>,
+    filter_panel: Option<Entity<FilterPanel>>,
+    /// Bumped whenever the selection changes (invalidates `stats`).
+    selection_gen: u64,
+    /// Aggregates of the hovered column: (column, rows, selection_gen) → stats.
+    stats: Option<((usize, usize, u64), Option<ColumnStats>)>,
 }
 
 impl ResultsDelegate {
-    pub fn new(tab: WeakEntity<QueryTab>) -> Self {
+    pub fn new(tab: WeakEntity<QueryTab>, filter_panel: Entity<FilterPanel>) -> Self {
         Self {
             tab: Some(tab),
+            filter_panel: Some(filter_panel),
             ..Default::default()
         }
     }
@@ -68,6 +98,51 @@ impl ResultsDelegate {
         self.menu_col = None;
         self.related.clear();
         self.edit = None;
+        self.facts.clear();
+        self.more = false;
+        self.hovered = None;
+        self.filter_open = None;
+        self.selection_gen += 1;
+    }
+
+    /// Drops the rows but keeps the columns (and their widths, keys, filters): a
+    /// filtered or sorted version of the result is about to arrive.
+    pub fn clear_rows(&mut self) {
+        self.result = ResultSet::new(self.result.columns().to_vec());
+        self.selected.clear();
+        self.anchor = None;
+        self.more = false;
+        self.filter_open = None;
+        self.selection_gen += 1;
+    }
+
+    /// What the column holds: by its type when it is a known table column,
+    /// otherwise by its loaded values.
+    pub fn kind(&self, col: usize) -> ColumnKind {
+        match self.facts.get(col) {
+            Some(Some(f)) => ColumnKind::from_type(&f.data_type),
+            _ => ColumnKind::from_values(
+                (0..self.result.row_count()).map(|r| self.result.cell(r, col)),
+            ),
+        }
+    }
+
+    /// Aggregates of a numeric column over the selected rows, or all loaded rows.
+    fn stats(&mut self, col: usize) -> Option<&ColumnStats> {
+        let key = (col, self.result.row_count(), self.selection_gen);
+        if self.stats.as_ref().is_none_or(|(k, _)| *k != key) {
+            let known_other = matches!(self.facts.get(col),
+                Some(Some(f)) if ColumnKind::from_type(&f.data_type) != ColumnKind::Number);
+            let stats = if known_other {
+                None
+            } else if self.selected.is_empty() {
+                column_stats((0..self.result.row_count()).map(|r| self.result.cell(r, col)))
+            } else {
+                column_stats(self.selected.iter().map(|&r| self.result.cell(r, col)))
+            };
+            self.stats = Some((key, stats));
+        }
+        self.stats.as_ref().and_then(|(_, s)| s.as_ref())
     }
 
     pub fn clear(&mut self) {
@@ -83,6 +158,7 @@ impl ResultsDelegate {
     }
 
     fn click(&mut self, row: usize, modifiers: Modifiers) {
+        self.selection_gen += 1;
         match self.anchor {
             Some(anchor) if modifiers.shift => {
                 self.selected = (anchor.min(row)..=anchor.max(row)).collect();
@@ -173,6 +249,183 @@ impl ResultsDelegate {
     }
 }
 
+impl ResultsDelegate {
+    /// The filter popover of `col` opened or closed; opening fills the tab's panel
+    /// for the column.
+    fn filter_opened(
+        &mut self,
+        col: usize,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if !open {
+            if self.filter_open == Some(col) {
+                self.filter_open = None;
+            }
+            return;
+        }
+        self.filter_open = Some(col);
+        let Some(panel) = self.filter_panel.clone() else {
+            return;
+        };
+        let name: SharedString = self.columns[col].name.clone();
+        let kind = self.kind(col);
+        let filter = self.refine.filter(col).cloned();
+        let sort = self
+            .refine
+            .sort
+            .filter(|s| s.column == col)
+            .map(|s| s.descending);
+        panel.update(cx, |p, cx| {
+            p.show(col, name, kind, filter, sort, window, cx)
+        });
+    }
+
+    pub fn close_filter(&mut self) {
+        self.filter_open = None;
+    }
+}
+
+fn stats_card(scope: String, stats: &ColumnStats, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let row = |label: &'static str, value: SharedString| {
+        h_flex()
+            .gap_4()
+            .justify_between()
+            .child(div().text_color(theme.muted_foreground).child(label))
+            .child(
+                div()
+                    .font_family(theme.mono_font_family.clone())
+                    .child(value),
+            )
+    };
+    v_flex()
+        .min_w(px(160.))
+        .max_w(px(320.))
+        .p_2()
+        .gap_0p5()
+        .text_xs()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.popover)
+        .text_color(theme.popover_foreground)
+        .shadow_md()
+        .child(div().pb_1().text_color(theme.muted_foreground).child(scope))
+        .child(row("count", stats.count.to_string().into()))
+        .when(stats.nulls > 0, |this| {
+            this.child(row("nulls", stats.nulls.to_string().into()))
+        })
+        .when(stats.count > 0, |this| {
+            this.child(row("sum", stats.sum.clone().into()))
+                .child(row("avg", stats.avg.clone().into()))
+                .child(row("min", stats.min.clone().into()))
+                .child(row("max", stats.max.clone().into()))
+        })
+}
+
+/// Aggregates of a numeric column; values as the server wrote them.
+#[derive(Debug, Clone, PartialEq)]
+struct ColumnStats {
+    /// Non-NULL values.
+    count: usize,
+    nulls: usize,
+    sum: String,
+    avg: String,
+    min: String,
+    max: String,
+}
+
+/// Aggregates over `values`, or `None` if one of them is not a number. Plain
+/// decimals are summed exactly (no float rounding in a sum of prices); anything
+/// else (exponents, huge values) in floating point.
+fn column_stats<'a>(values: impl Iterator<Item = Option<&'a str>>) -> Option<ColumnStats> {
+    let mut count = 0;
+    let mut nulls = 0;
+    let mut float_sum = 0f64;
+    // Sum as an integer of `scale` decimal places, while every value fits.
+    let mut exact: Option<(i128, u32)> = Some((0, 0));
+    let mut min: Option<(f64, &str)> = None;
+    let mut max: Option<(f64, &str)> = None;
+    for value in values {
+        let Some(value) = value.map(str::trim) else {
+            nulls += 1;
+            continue;
+        };
+        let x: f64 = value.parse().ok()?;
+        count += 1;
+        float_sum += x;
+        exact = exact.and_then(|(sum, scale)| {
+            let (v, s) = decimal(value)?;
+            let target = scale.max(s);
+            let sum = sum.checked_mul(10i128.checked_pow(target - scale)?)?;
+            let v = v.checked_mul(10i128.checked_pow(target - s)?)?;
+            Some((sum.checked_add(v)?, target))
+        });
+        if min.is_none_or(|(m, _)| x < m) {
+            min = Some((x, value));
+        }
+        if max.is_none_or(|(m, _)| x > m) {
+            max = Some((x, value));
+        }
+    }
+    if count == 0 && nulls == 0 {
+        return None;
+    }
+    let (sum, avg) = match exact {
+        Some((sum, scale)) => {
+            let avg = sum as f64 / 10f64.powi(scale as i32) / count.max(1) as f64;
+            (format_decimal(sum, scale), format_float(avg, scale + 2))
+        }
+        None => (
+            format_float(float_sum, 6),
+            format_float(float_sum / count.max(1) as f64, 6),
+        ),
+    };
+    Some(ColumnStats {
+        count,
+        nulls,
+        sum,
+        avg,
+        min: min.map_or_else(String::new, |(_, v)| v.to_string()),
+        max: max.map_or_else(String::new, |(_, v)| v.to_string()),
+    })
+}
+
+/// `-12.345` → `(-12345, 3)`; `None` for exponents and the like.
+fn decimal(value: &str) -> Option<(i128, u32)> {
+    let (int, frac) = value.split_once('.').unwrap_or((value, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let unsigned = int.strip_prefix(['-', '+']).unwrap_or(int);
+    if !digits(unsigned) || !digits(frac) || frac.len() > 30 {
+        return None;
+    }
+    let v: i128 = format!("{int}{frac}").parse().ok()?;
+    Some((v, frac.len() as u32))
+}
+
+fn format_decimal(v: i128, scale: u32) -> String {
+    if scale == 0 {
+        return v.to_string();
+    }
+    let digits = v.unsigned_abs().to_string();
+    let digits = format!("{digits:0>width$}", width = scale as usize + 1);
+    let (int, frac) = digits.split_at(digits.len() - scale as usize);
+    let sign = if v < 0 { "-" } else { "" };
+    format!("{sign}{int}.{frac}")
+}
+
+/// At most `decimals` places, without trailing zeros.
+fn format_float(x: f64, decimals: u32) -> String {
+    let s = format!("{x:.*}", decimals.min(12) as usize);
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    }
+}
+
 /// A TSV field that pastes cleanly into spreadsheets: NULL is empty, values with
 /// tabs, line breaks or quotes are quoted.
 fn tsv_field(value: Option<&str>) -> String {
@@ -200,6 +453,155 @@ impl TableDelegate for ResultsDelegate {
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
         self.columns[col_ix].clone()
+    }
+
+    /// Key icon, name, and on hover the filter button (over the end of a long name)
+    /// and the aggregates below the cell.
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let name = self.columns[col_ix].name.clone();
+        let hovered = self.hovered == Some(col_ix);
+        let open = self.filter_open == Some(col_ix);
+        let filtered = self.refine.filter(col_ix).is_some();
+        let sorted = self.refine.sort.filter(|s| s.column == col_ix);
+        let active = filtered || sorted.is_some();
+
+        let key = self
+            .facts
+            .get(col_ix)
+            .and_then(Option::as_ref)
+            .and_then(|f| {
+                f.primary_key.then(|| match &f.references {
+                    // Part of the key that points to another table.
+                    Some(target) => (
+                        Lucide::Key,
+                        theme.info,
+                        SharedString::from(format!("Primary key, references {target}")),
+                    ),
+                    None => (Lucide::KeyRound, theme.warning, "Primary key".into()),
+                })
+            });
+        let key_icon = key.map(|(icon, color, tip)| {
+            div()
+                .id(("pk", col_ix))
+                .flex_none()
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .child(Icon::new(icon).size_3().text_color(color))
+        });
+
+        let table = cx.entity().downgrade();
+        let filter_button = (self.refinable && (hovered || open || active)).then(|| {
+            let icon = match sorted {
+                Some(s) if !filtered => Icon::new(if s.descending {
+                    IconName::SortDescending
+                } else {
+                    IconName::SortAscending
+                }),
+                _ => Icon::new(Lucide::Funnel),
+            };
+            let icon = if active {
+                icon.text_color(theme.primary)
+            } else {
+                icon
+            };
+            let panel = self.filter_panel.clone();
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .flex()
+                .items_center()
+                .pl_1()
+                .bg(theme.tokens.table_head)
+                .child(
+                    Popover::new(("col-filter", col_ix))
+                        .anchor(Anchor::TopRight)
+                        .trigger(
+                            Button::new(("col-filter-button", col_ix))
+                                .icon(icon)
+                                .xsmall()
+                                .ghost()
+                                .selected(open),
+                        )
+                        .open(open)
+                        .on_open_change(move |open, window, cx| {
+                            let _ = table.update(cx, |t, cx| {
+                                t.delegate_mut().filter_opened(col_ix, *open, window, cx);
+                                cx.notify();
+                            });
+                        })
+                        .content(move |_, _, _| {
+                            panel
+                                .clone()
+                                .map(|p| p.into_any_element())
+                                .unwrap_or_else(|| div().into_any_element())
+                        }),
+                )
+        });
+
+        let stats_card = (hovered && self.filter_open.is_none())
+            .then(|| self.stats(col_ix).cloned())
+            .flatten()
+            .map(|stats| {
+                let scope = if !self.selected.is_empty() {
+                    let n = self.selected.len();
+                    format!("{n} selected row{}", if n == 1 { "" } else { "s" })
+                } else if self.more {
+                    format!("{} loaded rows", self.result.row_count())
+                } else {
+                    format!("All {} rows", self.result.row_count())
+                };
+                div().absolute().top_full().left_1_2().child(deferred(
+                    anchored()
+                        .anchor(Anchor::TopCenter)
+                        .offset(point(px(0.), px(8.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(stats_card(scope, &stats, cx)),
+                ))
+            });
+
+        h_flex()
+            .id(("th", col_ix))
+            .relative()
+            .size_full()
+            .gap_1()
+            .items_center()
+            .on_hover(cx.listener(move |table, hovered: &bool, _, cx| {
+                let d = table.delegate_mut();
+                if *hovered {
+                    d.hovered = Some(col_ix);
+                } else if d.hovered == Some(col_ix) {
+                    d.hovered = None;
+                }
+                cx.notify();
+            }))
+            .children(key_icon)
+            .child(div().min_w_0().overflow_hidden().child(name))
+            .children(filter_button)
+            .children(stats_card)
+    }
+
+    fn has_more(&self, _: &App) -> bool {
+        self.more
+    }
+
+    fn load_more_threshold(&self) -> usize {
+        200
+    }
+
+    fn load_more(&mut self, _: &mut Window, cx: &mut Context<TableState<Self>>) {
+        // The table is being updated right now and the tab reads it: afterwards.
+        if let Some(tab) = self.tab.clone() {
+            cx.defer(move |cx| {
+                let _ = tab.update(cx, |tab, cx| tab.load_more(cx));
+            });
+        }
     }
 
     fn render_tr(
@@ -230,6 +632,7 @@ impl TableDelegate for ResultsDelegate {
                     if !d.selected.contains(&row_ix) {
                         d.selected = BTreeSet::from([row_ix]);
                         d.anchor = Some(row_ix);
+                        d.selection_gen += 1;
                     }
                     cx.notify();
                 }),
@@ -394,7 +797,7 @@ fn display_value(value: &str) -> SharedString {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's `test` attribute would shadow the standard one.
-    use super::ResultsDelegate;
+    use super::{ResultsDelegate, column_stats, format_decimal};
     use gpui_kit::Modifiers;
     use rusdb_core::{ColumnInfo, RowBatch};
 
@@ -422,6 +825,22 @@ mod tests {
         let d = delegate();
         assert_eq!(d.tsv(&[0, 1], true), "id\tnote\n1\t\"a\tb\"\n2\t");
         assert_eq!(d.tsv(&[2], false), "3\t\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn aggregates() {
+        let s =
+            column_stats([Some("0.1"), Some("0.2"), None, Some("-1.25"), Some("3")].into_iter())
+                .unwrap();
+        assert_eq!((s.count, s.nulls), (4, 1));
+        assert_eq!(s.sum, "2.05");
+        assert_eq!(s.avg, "0.5125");
+        assert_eq!((s.min.as_str(), s.max.as_str()), ("-1.25", "3"));
+        let s = column_stats([Some("1e3"), Some("2")].into_iter()).unwrap();
+        assert_eq!((s.sum.as_str(), s.avg.as_str()), ("1002", "501"));
+        assert!(column_stats([Some("1"), Some("abc")].into_iter()).is_none());
+        assert_eq!(format_decimal(-5, 2), "-0.05");
+        assert_eq!(format_decimal(1234, 0), "1234");
     }
 
     #[test]

@@ -29,6 +29,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rusdb_assist::{
     chart::{ChartData, ChartStyle, ChartView},
+    columns::column_facts,
     edit::row_edit,
     guard,
     lexer::fingerprint,
@@ -115,6 +116,9 @@ struct RunningQuery {
     user_id: String,
     /// Unix milliseconds.
     started_at: i64,
+    /// A filtered, sorted or further page of an earlier result: not a run of its
+    /// own (no history, usage or bookmark hint).
+    derived: bool,
 }
 
 fn now_ms() -> i64 {
@@ -558,6 +562,7 @@ impl Workspace {
                 let existing = tab.read(cx).bookmark_id.clone();
                 self.open_bookmark_dialog(existing, sql.clone(), Some(tab.clone()), window, cx);
             }
+            TabEvent::Refine { sql, append } => self.execute_derived(tab, sql, *append, cx),
             TabEvent::Run(sql) => {
                 let Some(conn) = tab.read(cx).conn.clone() else {
                     return;
@@ -600,6 +605,7 @@ impl Workspace {
                 sql: sql.to_string(),
                 user_id,
                 started_at: now_ms(),
+                derived: false,
             },
         );
         // The server refuses writes, too, so read-only mode can't be sidestepped.
@@ -614,6 +620,42 @@ impl Workspace {
             read_only,
         });
         tab.update(cx, |t, cx| t.started(query, sql, cx));
+    }
+
+    /// Runs a query derived from the tab's last result (filtered, sorted, next
+    /// page). It only reads, so it skips the safety checks of a user run.
+    fn execute_derived(
+        &mut self,
+        tab: &Entity<QueryTab>,
+        sql: &str,
+        append: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conn) = tab.read(cx).conn.clone() else {
+            return;
+        };
+        let query = QueryId(self.next_id());
+        self.queries.insert(
+            query,
+            RunningQuery {
+                tab: tab.downgrade(),
+                sql: sql.to_string(),
+                user_id: self.conn_users.get(&conn.id).cloned().unwrap_or_default(),
+                started_at: now_ms(),
+                derived: true,
+            },
+        );
+        let read_only = self
+            .conn_user_name(conn.id)
+            .is_some_and(|user| settings::current(cx).is_read_only(&user));
+        self.engine.send(Command::Execute {
+            query,
+            tab: tab.read(cx).id,
+            conn: conn.id,
+            sql: sql.to_string(),
+            read_only,
+        });
+        tab.update(cx, |t, cx| t.started_derived(query, append, cx));
     }
 
     // ---- safety ------------------------------------------------------------------
@@ -1029,7 +1071,8 @@ impl Workspace {
                         rank_links(&mut links, &usage, &bookmarked);
                     }
                     let edit = row_edit(&run.sql, &columns, &state.schema);
-                    tab.update(cx, |t, cx| t.set_row_actions(links, edit, cx));
+                    let facts = column_facts(&run.sql, &columns, &state.schema);
+                    tab.update(cx, |t, cx| t.set_row_actions(links, edit, facts, cx));
                 }
                 self.sync_assist_for_db(&db_id);
             }
@@ -1429,6 +1472,7 @@ impl Workspace {
                 }
                 if let Some((error, elapsed_ms)) = finished
                     && let Some(run) = self.queries.remove(&query)
+                    && !run.derived
                 {
                     self.record_run(run, error, elapsed_ms, cx);
                 }
@@ -1999,9 +2043,18 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .child(
+                h_flex()
+                    .h_9()
+                    .px_3()
+                    .items_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("HISTORY"),
+            )
+            .child(
                 div()
                     .px_2()
-                    .py_2()
+                    .pb_2()
                     .child(Input::new(&self.history_search).small()),
             )
             .children(empty.map(|text| {
