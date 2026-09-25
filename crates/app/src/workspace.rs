@@ -3,7 +3,7 @@
 //! Routes engine events to the tab that started the query.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -214,10 +214,11 @@ pub struct Workspace {
     /// Selected database and user; the sidebar shows this connection.
     active_db: Option<String>,
     active_user: Option<String>,
-    /// (user id, schema)
-    expanded_schemas: HashSet<(String, SharedString)>,
-    /// (user id, schema, kind). Groups start expanded.
-    collapsed_groups: HashSet<(String, SharedString, TableKind)>,
+    /// Schemas opened or closed by hand: (user id, schema) → open. Unset, the tree
+    /// opens until there is a choice: the only schema, a schema's only group.
+    schema_open: HashMap<(String, SharedString), bool>,
+    /// Groups opened or closed by hand: (user id, schema, kind) → open.
+    group_open: HashMap<(String, SharedString, TableKind), bool>,
     sidebar_view: SidebarView,
     sidebar_open: bool,
     /// Sidebar/content split; the sidebar is the first panel.
@@ -311,8 +312,8 @@ impl Workspace {
             conn_users: HashMap::new(),
             active_db: None,
             active_user: None,
-            expanded_schemas: HashSet::new(),
-            collapsed_groups: HashSet::new(),
+            schema_open: HashMap::new(),
+            group_open: HashMap::new(),
             sidebar_view: SidebarView::Schema,
             sidebar_open: true,
             layout: cx.new(|_| ResizableState::default()),
@@ -1818,11 +1819,19 @@ impl Workspace {
             rows.push(SidebarRow::Heading(title.into()));
         }
         // Drivers return tables ordered by schema, then name.
-        for tables in state.schema.tables().chunk_by(|a, b| a.schema == b.schema) {
+        let schemas: Vec<&[TableInfo]> = state
+            .schema
+            .tables()
+            .chunk_by(|a, b| a.schema == b.schema)
+            .collect();
+        let only_schema = schemas.len() == 1;
+        for tables in schemas {
             let schema: SharedString = tables[0].schema.clone().into();
             let expanded = self
-                .expanded_schemas
-                .contains(&(user_id.clone(), schema.clone()));
+                .schema_open
+                .get(&(user_id.clone(), schema.clone()))
+                .copied()
+                .unwrap_or(only_schema);
             rows.push(SidebarRow::Schema {
                 schema: schema.clone(),
                 expanded,
@@ -1830,15 +1839,17 @@ impl Workspace {
             if !expanded {
                 continue;
             }
+            let only_kind = tables.iter().all(|t| t.kind == tables[0].kind);
             for kind in [TableKind::Table, TableKind::View] {
                 let items: Vec<&TableInfo> = tables.iter().filter(|t| t.kind == kind).collect();
                 if items.is_empty() {
                     continue;
                 }
-                let expanded =
-                    !self
-                        .collapsed_groups
-                        .contains(&(user_id.clone(), schema.clone(), kind));
+                let expanded = self
+                    .group_open
+                    .get(&(user_id.clone(), schema.clone(), kind))
+                    .copied()
+                    .unwrap_or(only_kind);
                 rows.push(SidebarRow::Group {
                     schema: schema.clone(),
                     kind,
@@ -1936,11 +1947,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(user_id) = self.active_user.clone() {
-            self.expanded_schemas
-                .insert((user_id.clone(), schema.clone()));
+            self.schema_open
+                .insert((user_id.clone(), schema.clone()), true);
             if let Some(t) = table {
-                self.collapsed_groups
-                    .remove(&(user_id, schema.clone(), t.kind));
+                self.group_open
+                    .insert((user_id, schema.clone(), t.kind), true);
             }
         }
         let target = (schema, table.map(|t| t.name.clone()));
@@ -2064,9 +2075,7 @@ impl Workspace {
                     .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(schema))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.expanded_schemas.remove(&key) {
-                            this.expanded_schemas.insert(key.clone());
-                        }
+                        this.schema_open.insert(key.clone(), !expanded);
                         cx.notify();
                     }))
                     .into_any_element()
@@ -2092,9 +2101,7 @@ impl Workspace {
                             .child(count.to_string()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.collapsed_groups.remove(&key) {
-                            this.collapsed_groups.insert(key.clone());
-                        }
+                        this.group_open.insert(key.clone(), !expanded);
                         cx.notify();
                     }))
                     .into_any_element()
