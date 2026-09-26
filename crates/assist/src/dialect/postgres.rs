@@ -1,5 +1,7 @@
 use tangul_core::DriverKind;
 
+use crate::lexer::Lexing;
+
 use super::{Dialect, Namespace, Syntax, Upsert};
 
 pub(super) struct Postgres;
@@ -97,6 +99,13 @@ impl Dialect for Postgres {
             insert_set: false,
             update_from: true,
             delete_using: true,
+        }
+    }
+
+    fn lexing(&self) -> Lexing {
+        Lexing {
+            nested_comments: true,
+            ..Lexing::default()
         }
     }
 

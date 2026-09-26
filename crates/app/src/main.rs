@@ -21,6 +21,7 @@ actions!(
     tangul,
     [
         RunQuery,
+        RunAll,
         BookmarkQuery,
         SaveFile,
         NewTab,
@@ -58,6 +59,7 @@ fn main() {
             // Must win over the editor's own `secondary-enter` (newline), hence the
             // same depth ("Input") and registration after gpui_kit::init.
             KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
+            KeyBinding::new("secondary-shift-enter", RunAll, Some("QueryEditor > Input")),
             KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
             KeyBinding::new("secondary-s", SaveFile, Some("QueryEditor > Input")),
             KeyBinding::new("secondary-t", NewTab, Some("Workspace")),

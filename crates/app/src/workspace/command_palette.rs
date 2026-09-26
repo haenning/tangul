@@ -95,6 +95,11 @@ impl Workspace {
     ) {
         match action {
             PaletteAction::Settings => self.open_settings(window, cx),
+            PaletteAction::RunAll => {
+                if let Some(tab) = self.tabs.active_query().cloned() {
+                    tab.update(cx, |t, cx| t.run_all(&RunAll, window, cx));
+                }
+            }
             PaletteAction::Bookmark(id) => self.open_bookmark(&id, false, window, cx),
             PaletteAction::History(sql) => self.open_sql("History", &sql, window, cx),
         }

@@ -1,15 +1,21 @@
-//! The SQL editor: what a run takes (the selection or everything), the server's
-//! check of the statements while typing, and error underlines.
+//! The SQL editor: what a run takes (the selection, the statement under the cursor or
+//! everything), the server's check of the statements while typing, and error
+//! underlines.
 
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
+use gpui_kit::base::input::{
+    Diagnostic, DiagnosticSeverity, TextDecoration, TextDecorationCollection,
+};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{CompletionProvider, EditorState, InputEvent, RopeExt as _};
 use gpui_kit::*;
 use tangul_assist::analyze::statements;
+use tangul_assist::dialect::Dialect;
 use tangul_assist::lexer::tokenize;
+use tangul_assist::statement::statement_at;
 use tangul_engine::Problem;
 
 /// Pause in typing after which the SQL is checked on the server.
@@ -17,6 +23,18 @@ const VALIDATE_AFTER: Duration = Duration::from_secs(1);
 /// Limits per check; larger scripts are only checked in part.
 const MAX_VALIDATE_STATEMENTS: usize = 50;
 const MAX_VALIDATE_BYTES: usize = 100_000;
+/// How long the statement that ran flashes before it settles to a light background.
+const FLASH: Duration = Duration::from_millis(600);
+const FLASH_STEPS: u32 = 12;
+
+/// What a run takes from the editor.
+pub enum RunTake {
+    Sql(String),
+    /// No selection, and the cursor is between statements.
+    NoStatement,
+    /// Nothing to run.
+    Empty,
+}
 
 pub enum EditorEvent {
     /// Check these statements (byte offset in the editor, text) on the server
@@ -33,6 +51,12 @@ pub struct SqlEditor {
     /// reported relative to the executed text), and that text.
     pending_origin: Option<usize>,
     run_origin: Option<(usize, String)>,
+    /// What the next run takes (the statement under the cursor or the selection),
+    /// marked once it starts; `None` when it takes the whole editor.
+    pending_mark: Option<Range<usize>>,
+    /// Marks the text the current result came from, until the next run.
+    ran: Option<TextDecorationCollection>,
+    _flash: Task<()>,
     /// Bumped on every edit; check results for older text are dropped.
     edit_generation: u64,
     /// The statements sent for the current generation's check.
@@ -61,6 +85,9 @@ impl SqlEditor {
             state,
             pending_origin: None,
             run_origin: None,
+            pending_mark: None,
+            ran: None,
+            _flash: Task::ready(()),
             edit_generation: 0,
             validating: Vec::new(),
             _validation: Task::ready(()),
@@ -90,25 +117,44 @@ impl SqlEditor {
         state.update(cx, |e, _| e.lsp_mut().completion_provider = Some(provider));
     }
 
-    /// What a run takes: the selection if there is one, otherwise everything.
-    /// `None` when that is empty.
-    pub fn take_run(&mut self, cx: &App) -> Option<String> {
+    /// What ⌘↵ takes: the selection if there is one, otherwise the statement under
+    /// the cursor (see [`statement_at`]).
+    pub fn take_run(&mut self, dialect: &dyn Dialect, cx: &App) -> RunTake {
         let editor = self.state.read(cx);
-        let selected = editor.selected_value();
-        let (sql, origin) = if selected.trim().is_empty() {
-            (editor.value(), 0)
-        } else {
-            (selected, editor.selected_range().start)
-        };
-        if sql.trim().is_empty() {
-            return None;
+        if !editor.selected_value().trim().is_empty() {
+            return self.take_run_all(cx);
         }
-        self.pending_origin = Some(origin);
-        Some(sql.to_string())
+        let text = editor.value().to_string();
+        if text.trim().is_empty() {
+            return RunTake::Empty;
+        }
+        let Some(statement) = statement_at(&text, editor.cursor(), dialect) else {
+            return RunTake::NoStatement;
+        };
+        self.pending_origin = Some(statement.body.start);
+        self.pending_mark = Some(statement.range.clone());
+        RunTake::Sql(statement.text(&text).to_string())
     }
 
-    /// `sql` was sent: locates it in the editor (to put error underlines in place)
-    /// and clears the last run's underline.
+    /// What "Run all" takes: the selection if there is one, otherwise everything.
+    pub fn take_run_all(&mut self, cx: &App) -> RunTake {
+        let editor = self.state.read(cx);
+        let selected = editor.selected_value();
+        let (sql, mark) = if selected.trim().is_empty() {
+            (editor.value(), None)
+        } else {
+            (selected, Some(editor.selected_range()))
+        };
+        if sql.trim().is_empty() {
+            return RunTake::Empty;
+        }
+        self.pending_origin = Some(mark.as_ref().map_or(0, |m| m.start));
+        self.pending_mark = mark;
+        RunTake::Sql(sql.to_string())
+    }
+
+    /// `sql` was sent: locates it in the editor (to put error underlines in place),
+    /// clears the last run's underline and marks what ran.
     pub fn started(&mut self, sql: &str, cx: &mut Context<Self>) {
         let text = self.text(cx);
         let origin = self
@@ -118,6 +164,45 @@ impl SqlEditor {
             .or_else(|| text.find(sql));
         self.run_origin = origin.map(|o| (o, sql.to_string()));
         self.set_markers(Vec::new(), cx);
+        let mark = self.pending_mark.take();
+        self.mark_ran(mark, cx);
+    }
+
+    /// Marks `range` (what ran, terminator included) as the source of the result: it
+    /// flashes, then keeps a light background until the next run. The mark follows
+    /// edits. `None` clears the mark (a run of the whole editor needs none).
+    fn mark_ran(&mut self, range: Option<Range<usize>>, cx: &mut Context<Self>) {
+        let collection = match &self.ran {
+            Some(c) => c.clone(),
+            None => {
+                let c = self
+                    .state
+                    .update(cx, |e, cx| e.create_decorations_collection(Vec::new(), cx));
+                self.ran = Some(c.clone());
+                c
+            }
+        };
+        let Some(range) = range else {
+            self._flash = Task::ready(());
+            collection.clear(cx);
+            return;
+        };
+        let (flash, rest) = (cx.theme().selection, cx.theme().muted);
+        self._flash = cx.spawn(async move |_, cx| {
+            for step in 0..=FLASH_STEPS {
+                let fade = 1. - step as f32 / FLASH_STEPS as f32;
+                let style = HighlightStyle {
+                    background_color: Some(rest.blend(flash.opacity(fade))),
+                    ..Default::default()
+                };
+                let decoration = TextDecoration::new(range.clone(), style);
+                // A no-op once the editor is gone.
+                cx.update(|cx| collection.set(vec![decoration], cx));
+                if step < FLASH_STEPS {
+                    cx.background_executor().timer(FLASH / FLASH_STEPS).await;
+                }
+            }
+        });
     }
 
     /// Underlines the token at `position` (byte offset in the run's SQL) with the

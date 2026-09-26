@@ -13,5 +13,6 @@ pub mod lexer;
 pub mod refine;
 pub mod related;
 pub mod schema;
+pub mod statement;
 pub mod suggest;
 pub mod usage;

@@ -7,10 +7,11 @@ mod editor;
 use std::rc::Rc;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{CompletionProvider, Editor},
+    notification::Notification,
     resizable::{ResizableState, resizable_panel, v_resizable},
     v_flex,
 };
@@ -23,12 +24,12 @@ use tangul_core::{ConnId, QueryId, TabId};
 use tangul_engine::{Command, EngineHandle, Problem, QueryEvent};
 
 use crate::{
-    BookmarkQuery, RunQuery,
+    BookmarkQuery, RunAll, RunQuery,
     assets::Lucide,
     connection::{ConnStatus, Connection},
     result_view::{ResultEvent, ResultView},
 };
-use editor::{EditorEvent, SqlEditor};
+use editor::{EditorEvent, RunTake, SqlEditor};
 
 /// Editor height a new tab starts with.
 const EDITOR_HEIGHT: f32 = 240.;
@@ -253,12 +254,40 @@ impl QueryTab {
         cx.notify();
     }
 
-    fn run(&mut self, _: &RunQuery, _: &mut Window, cx: &mut Context<Self>) {
+    /// ⌘↵: the selection, or the statement under the cursor.
+    fn run(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_running(cx) {
             return;
         }
-        if let Some(sql) = self.editor.update(cx, |e, cx| e.take_run(cx)) {
-            cx.emit(TabEvent::Run(sql));
+        // Without a connection nothing runs; the workspace says so.
+        let dialect = self.conn.as_ref().map(|c| c.read(cx).schema.dialect());
+        let take = self.editor.update(cx, |e, cx| match dialect {
+            Some(d) => e.take_run(d, cx),
+            None => e.take_run_all(cx),
+        });
+        self.emit_run(take, window, cx);
+    }
+
+    /// ⌘⇧↵: the selection, or everything in the editor.
+    pub fn run_all(&mut self, _: &RunAll, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_running(cx) {
+            return;
+        }
+        let take = self.editor.update(cx, |e, cx| e.take_run_all(cx));
+        self.emit_run(take, window, cx);
+    }
+
+    fn emit_run(&mut self, take: RunTake, window: &mut Window, cx: &mut Context<Self>) {
+        match take {
+            RunTake::Sql(sql) => cx.emit(TabEvent::Run(sql)),
+            RunTake::NoStatement => window.push_notification(
+                Notification::info(
+                    "No statement at cursor. Put the cursor in one, select what to run, \
+                     or run all (⌘⇧↵).",
+                ),
+                cx,
+            ),
+            RunTake::Empty => {}
         }
     }
 
@@ -346,6 +375,7 @@ impl QueryTab {
                 .small()
                 .primary()
                 .disabled(self.conn.is_none())
+                .tooltip("Run the selection or the statement at the cursor (⌘↵); run all: ⌘⇧↵")
                 .on_click(cx.listener(|this, _, window, cx| this.run(&RunQuery, window, cx)))
                 .into_any_element()
         };
@@ -434,6 +464,7 @@ impl Render for QueryTab {
         v_flex()
             .size_full()
             .on_action(cx.listener(Self::run))
+            .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::bookmark))
             .child(self.render_toolbar(cx))
             .child(
