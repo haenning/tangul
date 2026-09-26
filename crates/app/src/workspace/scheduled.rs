@@ -11,7 +11,7 @@ impl Workspace {
         if self.monitor.stuck(settings.safety.max_query_time) {
             self.monitor_finish(Err("gave up waiting for the run".into()), cx);
         }
-        if self.monitor.pending.is_some() || !self.monitor.is_quiet() || !self.queries.is_empty() {
+        if self.monitor.pending.is_some() || !self.monitor.is_quiet() || !self.router.is_idle() {
             return;
         }
         let bookmarks = self.data.local.scheduled_bookmarks();

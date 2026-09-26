@@ -7,22 +7,23 @@ impl Workspace {
         if let Some(u) = self.usage.get(db_id) {
             return u.clone();
         }
-        let u = Arc::new(self.data.local.usage(db_id, now_ms() / 1000));
+        let u = Arc::new(Usage::from_stats(
+            now_ms() / 1000,
+            self.data.local.usage(db_id),
+        ));
         self.usage.insert(db_id.to_string(), u.clone());
         u
     }
 
     pub(super) fn schema_index(&self, user_id: &str, info: SchemaInfo) -> Arc<SchemaIndex> {
-        let (driver, default) = self
+        let (dialect, default) = self
             .find_user(user_id)
             .map(|(db, _)| {
-                (
-                    db.driver,
-                    SchemaIndex::default_schema_for(db.driver, &db.database),
-                )
+                let dialect = dialect_for(db.driver);
+                (dialect, dialect.default_schema(&db.database))
             })
-            .unwrap_or((DriverKind::Postgres, None));
-        Arc::new(SchemaIndex::new(info, driver, default))
+            .unwrap_or((dialect_for(DriverKind::Postgres), None));
+        Arc::new(SchemaIndex::new(info, dialect, default))
     }
 
     /// Publishes a connection's schema and usage to the completion providers.

@@ -8,13 +8,21 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
-mysql_async = { version = "0.37.1", default-features = false, features = ["minimal", "native-tls-tls"] }
-native-tls = "0.2.18"
-postgres-native-tls = "0.5.3"
+mysql_async = { version = "0.37.1", default-features = false, features = ["minimal", "native-tls-tls"], optional = true }
+native-tls = { version = "0.2.18", optional = true }
+postgres-native-tls = { version = "0.5.3", optional = true }
 tangul-core = { version = "0.1.0", path = "../core" }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 tokio = { workspace = true, features = ["rt", "net", "macros", "rt-multi-thread"] }
-tokio-postgres = "0.7.18"
+tokio-postgres = { version = "0.7.18", optional = true }
+
+# One feature per database, so a build can leave a client library out. All on by
+# default; tangul's own files (metrics) need `sqlite`.
+[features]
+default = ["postgres", "mysql", "sqlite"]
+postgres = ["dep:tokio-postgres", "dep:postgres-native-tls", "dep:native-tls"]
+mysql = ["dep:mysql_async"]
+sqlite = ["dep:rusqlite"]
 
 [lints]
 workspace = true

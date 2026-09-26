@@ -9,10 +9,7 @@ use tangul_core::{
 };
 use tokio_postgres::{CancelToken, Client, SimpleQueryMessage, config::SslMode};
 
-use crate::{
-    BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError, char_to_byte,
-    may_touch_transaction,
-};
+use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError};
 
 pub struct PgDriver;
 
@@ -360,5 +357,54 @@ impl CancelHandle for PgCancel {
             .cancel_query(self.tls.clone())
             .await
             .map_err(pg_error)
+    }
+}
+
+/// Byte offset of a 1-based character position (Postgres reports characters).
+fn char_to_byte(sql: &str, position: usize) -> Option<usize> {
+    let index = position.checked_sub(1)?;
+    sql.char_indices()
+        .nth(index)
+        .map(|(i, _)| i)
+        .or_else(|| (index == sql.chars().count()).then_some(sql.len()))
+}
+
+/// Cheap check whether `sql` may change transaction state. Used to avoid a
+/// transaction-status round-trip after ordinary statements.
+fn may_touch_transaction(sql: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "begin",
+        "start",
+        "commit",
+        "rollback",
+        "end",
+        "abort",
+        "savepoint",
+        "release",
+    ];
+    sql.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|w| KEYWORDS.iter().any(|k| w.eq_ignore_ascii_case(k)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{char_to_byte, may_touch_transaction};
+
+    #[test]
+    fn error_positions() {
+        assert_eq!(char_to_byte("select föo", 8), Some(7));
+        // `ö` is two bytes: the final `o` (character 10) starts at byte 10.
+        assert_eq!(char_to_byte("select föo", 10), Some(10));
+        assert_eq!(char_to_byte("select föo", 11), Some(11));
+        assert_eq!(char_to_byte("abc", 4), Some(3));
+        assert_eq!(char_to_byte("abc", 0), None);
+    }
+
+    #[test]
+    fn transaction_keywords() {
+        assert!(may_touch_transaction("BEGIN"));
+        assert!(may_touch_transaction("select 1; commit;"));
+        assert!(!may_touch_transaction("select begins_at from t"));
+        assert!(!may_touch_transaction("select * from users"));
     }
 }

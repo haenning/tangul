@@ -132,17 +132,17 @@ impl Workspace {
     /// tools; the active query's timing on the right.
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        // File tabs (settings) have no results to time or chart.
         let (query_text, running, chart) = self
             .tabs
-            .get(self.active_tab)
+            .active_query()
             .map(|tab| {
                 let t = tab.read(cx);
-                let chart = (t.chart(), t.chart_shown());
+                let chart = (t.chart(cx), t.chart_shown(cx));
                 (
                     t.status_text(cx),
-                    t.is_running(),
-                    // File tabs (settings) have no results to chart.
-                    t.file_path().is_none().then(|| (tab.clone(), chart)),
+                    t.is_running(cx),
+                    Some((tab.clone(), chart)),
                 )
             })
             .unwrap_or_default();
@@ -151,7 +151,7 @@ impl Workspace {
         });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
         let panels = SidebarView::ALL.map(|view| {
-            let active = self.sidebar_open && self.sidebar_view == view;
+            let active = self.sidebar.open && self.sidebar.view == view;
             Button::new(("panel", view as usize))
                 .icon(Icon::new(view.icon()))
                 .ghost()

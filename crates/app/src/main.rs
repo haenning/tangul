@@ -1,15 +1,17 @@
 mod assets;
 mod bookmark_form;
 mod chart;
-mod column_filter;
 mod completion;
 mod connection;
 mod connection_form;
+mod file_tab;
 mod monitor;
 mod palette;
+mod query_router;
 mod query_tab;
-mod results;
+mod result_view;
 mod settings;
+mod tabs;
 mod workspace;
 
 use gpui_kit::component::{Root, Theme, ThemeMode, TitleBar};

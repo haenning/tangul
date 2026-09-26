@@ -16,7 +16,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 use serde::Deserialize;
-use tangul_assist::chart::ChartView;
+use tangul_core::chart::ChartView;
 
 /// A named, saved query.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -155,6 +155,7 @@ impl Local {
     }
 
     /// Bookmarks used to live in `bookmarks.toml`; move them over and rename the file.
+    /// Their fingerprints are filled in by [`Local::fill_missing_fingerprints`].
     fn import_legacy_bookmarks(&self, dir: &Path) {
         #[derive(Deserialize)]
         struct File {
@@ -168,7 +169,7 @@ impl Local {
         match toml::from_str::<File>(&text) {
             Ok(file) => {
                 for b in &file.bookmarks {
-                    if let Err(e) = self.upsert_bookmark(b) {
+                    if let Err(e) = self.upsert_bookmark(b, "") {
                         eprintln!("bookmark import failed: {e:#}");
                         return;
                     }
@@ -186,8 +187,8 @@ pub use bookmarks::bare_sql;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tangul_assist::usage::UsageKind;
     use tangul_core::SchemaInfo;
+    use tangul_core::usage::{UsageKind, UsageStat};
 
     #[test]
     fn usage_and_schema_cache_roundtrip() {
@@ -196,8 +197,15 @@ mod tests {
         l.record_usage("db", &items, 10).unwrap();
         l.record_usage("db", &items, 20).unwrap();
         assert_eq!(
-            l.usage("db", 20).score(UsageKind::Table, "app\u{1f}users"),
-            2.0
+            l.usage("db"),
+            [(
+                UsageKind::Table,
+                "app\u{1f}users".to_string(),
+                UsageStat {
+                    count: 2,
+                    last_used: 20
+                }
+            )]
         );
         let schema = SchemaInfo::default();
         l.save_schema("u", &schema).unwrap();

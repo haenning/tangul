@@ -10,6 +10,8 @@ pub enum DriverKind {
 }
 
 impl DriverKind {
+    pub const ALL: [DriverKind; 3] = [DriverKind::Postgres, DriverKind::Mysql, DriverKind::Sqlite];
+
     pub fn default_port(self) -> u16 {
         match self {
             DriverKind::Postgres => 5432,

@@ -21,7 +21,7 @@ impl Workspace {
         };
         let db_id = self.active_db.clone();
         // From a tab: the bookmark shows its result the way the tab does now.
-        let view = tab.as_ref().map(|t| t.read(cx).chart_shown());
+        let view = tab.as_ref().map(|t| t.read(cx).chart_shown(cx));
         let form = cx.new(|cx| BookmarkForm::new(existing.as_ref(), sql, db_id, view, window, cx));
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
@@ -66,12 +66,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let title: SharedString = bookmark.name.clone().into();
-        for tab in &self.tabs {
+        for tab in self.tabs.queries() {
             if tab.read(cx).bookmark_id.as_deref() == Some(bookmark.id.as_str()) {
                 tab.update(cx, |t, _| t.title = title.clone());
             }
         }
-        if let Err(e) = self.data.local.upsert_bookmark(&bookmark) {
+        let fingerprint = fingerprint(&bookmark.sql);
+        if let Err(e) = self.data.local.upsert_bookmark(&bookmark, &fingerprint) {
             window.push_notification(
                 Notification::error(format!("Could not save bookmark: {e:#}")),
                 cx,
@@ -92,7 +93,7 @@ impl Workspace {
                 cx,
             );
         }
-        for tab in &self.tabs {
+        for tab in self.tabs.queries() {
             if tab.read(cx).bookmark_id.as_deref() == Some(id) {
                 tab.update(cx, |t, _| t.bookmark_id = None);
             }
@@ -124,7 +125,13 @@ impl Workspace {
 
     pub(super) fn render_bookmarks_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let search = self.bookmark_search.read(cx).value().trim().to_lowercase();
+        let search = self
+            .sidebar
+            .bookmark_search
+            .read(cx)
+            .value()
+            .trim()
+            .to_lowercase();
         let all: Vec<Bookmark> = self.data.local.bookmarks_for(self.active_db.as_deref());
         let total = all.len();
         let bookmarks: Vec<Bookmark> = all
@@ -155,10 +162,11 @@ impl Workspace {
             )
             .when(total > 0, |this| {
                 this.child(
-                    div()
-                        .px_2()
-                        .pb_2()
-                        .child(Input::new(&self.bookmark_search).small().cleanable(true)),
+                    div().px_2().pb_2().child(
+                        Input::new(&self.sidebar.bookmark_search)
+                            .small()
+                            .cleanable(true),
+                    ),
                 )
             })
             .children(empty.map(|text| {

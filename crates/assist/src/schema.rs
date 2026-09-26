@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use tangul_core::{ColumnMeta, DriverKind, ForeignKey, SchemaInfo, TableInfo};
+use tangul_core::{ColumnMeta, ForeignKey, SchemaInfo, TableInfo};
 
-use crate::analyze::is_reserved;
+use crate::dialect::{Dialect, quote_ident};
 
 pub struct SchemaIndex {
     info: SchemaInfo,
-    driver: DriverKind,
+    dialect: &'static dyn Dialect,
     /// Schema that unqualified names resolve to (`public`, or the MySQL database).
     default_schema: Option<String>,
     by_name: HashMap<(String, String), usize>,
@@ -17,7 +17,11 @@ pub struct SchemaIndex {
 }
 
 impl SchemaIndex {
-    pub fn new(info: SchemaInfo, driver: DriverKind, default_schema: Option<String>) -> Self {
+    pub fn new(
+        info: SchemaInfo,
+        dialect: &'static dyn Dialect,
+        default_schema: Option<String>,
+    ) -> Self {
         let by_name = info
             .tables
             .iter()
@@ -42,20 +46,10 @@ impl SchemaIndex {
         }
         Self {
             info,
-            driver,
+            dialect,
             default_schema,
             by_name,
             columns,
-        }
-    }
-
-    /// Default schema per driver: `public` for Postgres, the connection's database
-    /// for MySQL.
-    pub fn default_schema_for(driver: DriverKind, database: &str) -> Option<String> {
-        match driver {
-            DriverKind::Postgres => Some("public".into()),
-            DriverKind::Mysql => (!database.is_empty()).then(|| database.to_string()),
-            DriverKind::Sqlite => Some("main".into()),
         }
     }
 
@@ -63,8 +57,8 @@ impl SchemaIndex {
         &self.info
     }
 
-    pub fn driver(&self) -> DriverKind {
-        self.driver
+    pub fn dialect(&self) -> &'static dyn Dialect {
+        self.dialect
     }
 
     pub fn tables(&self) -> &[TableInfo] {
@@ -118,7 +112,7 @@ impl SchemaIndex {
     /// quoted where needed.
     pub fn sql_name(&self, table: usize) -> String {
         let t = &self.info.tables[table];
-        let name = quote_ident(self.driver, &t.name);
+        let name = quote_ident(self.dialect, &t.name);
         let is_default = self
             .default_schema
             .as_deref()
@@ -126,97 +120,20 @@ impl SchemaIndex {
         if is_default {
             name
         } else {
-            format!("{}.{name}", quote_ident(self.driver, &t.schema))
+            format!("{}.{name}", quote_ident(self.dialect, &t.schema))
         }
     }
 
     pub fn quote(&self, ident: &str) -> String {
-        quote_ident(self.driver, ident)
-    }
-}
-
-/// Reserved words (Postgres and MySQL) beyond the clause keywords the analysis knows;
-/// a table or column with such a name must be quoted.
-const QUOTE_RESERVED: &[&str] = &[
-    "analyse",
-    "analyze",
-    "array",
-    "asymmetric",
-    "both",
-    "cast",
-    "check",
-    "collate",
-    "column",
-    "constraint",
-    "create",
-    "current_catalog",
-    "current_date",
-    "current_role",
-    "current_time",
-    "current_timestamp",
-    "current_user",
-    "default",
-    "deferrable",
-    "do",
-    "false",
-    "foreign",
-    "grant",
-    "index",
-    "initially",
-    "key",
-    "keys",
-    "leading",
-    "localtime",
-    "localtimestamp",
-    "only",
-    "placing",
-    "primary",
-    "range",
-    "rank",
-    "references",
-    "row",
-    "rows",
-    "session_user",
-    "symmetric",
-    "trailing",
-    "true",
-    "unique",
-    "user",
-    "variadic",
-];
-
-/// Quotes an identifier if it would not survive unquoted (Postgres folds unquoted
-/// names to lowercase, so any uppercase letter needs quotes there).
-pub fn quote_ident(driver: DriverKind, ident: &str) -> String {
-    let plain = ident
-        .chars()
-        .next()
-        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-        && ident.chars().all(|c| {
-            c == '_'
-                || c.is_ascii_digit()
-                || match driver {
-                    DriverKind::Postgres => c.is_ascii_lowercase(),
-                    DriverKind::Mysql | DriverKind::Sqlite => c.is_ascii_alphabetic(),
-                }
-        })
-        && !is_reserved(ident)
-        && !QUOTE_RESERVED.iter().any(|k| ident.eq_ignore_ascii_case(k));
-    if plain {
-        return ident.to_string();
-    }
-    match driver {
-        DriverKind::Postgres | DriverKind::Sqlite => {
-            format!("\"{}\"", ident.replace('"', "\"\""))
-        }
-        DriverKind::Mysql => format!("`{}`", ident.replace('`', "``")),
+        quote_ident(self.dialect, ident)
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use tangul_core::TableKind;
+    use crate::dialect::dialect_for;
+    use tangul_core::{DriverKind, TableKind};
 
     /// `app.users(id pk, email, name)`, `app.orders(id pk, user_id → users.id, total)`,
     /// `public.Logs(id)`.
@@ -267,7 +184,7 @@ pub(crate) mod tests {
                 ref_columns: vec!["id".into()],
             }],
         };
-        SchemaIndex::new(info, driver, Some("public".into()))
+        SchemaIndex::new(info, dialect_for(driver), Some("public".into()))
     }
 
     #[test]
@@ -279,12 +196,21 @@ pub(crate) mod tests {
         assert_eq!(s.sql_name(users), "app.users");
         assert_eq!(s.sql_name(s.resolve(None, "logs").unwrap()), "\"Logs\"");
         assert_eq!(s.resolve(Some("public"), "orders"), None);
-        assert_eq!(quote_ident(DriverKind::Mysql, "order"), "`order`");
-        assert_eq!(quote_ident(DriverKind::Mysql, "Users"), "Users");
-        assert_eq!(quote_ident(DriverKind::Postgres, "user"), "\"user\"");
-        assert_eq!(quote_ident(DriverKind::Mysql, "key"), "`key`");
         assert_eq!(
-            quote_ident(DriverKind::Postgres, "spatial_ref_sys"),
+            quote_ident(dialect_for(DriverKind::Mysql), "order"),
+            "`order`"
+        );
+        assert_eq!(
+            quote_ident(dialect_for(DriverKind::Mysql), "Users"),
+            "Users"
+        );
+        assert_eq!(
+            quote_ident(dialect_for(DriverKind::Postgres), "user"),
+            "\"user\""
+        );
+        assert_eq!(quote_ident(dialect_for(DriverKind::Mysql), "key"), "`key`");
+        assert_eq!(
+            quote_ident(dialect_for(DriverKind::Postgres), "spatial_ref_sys"),
             "spatial_ref_sys"
         );
     }

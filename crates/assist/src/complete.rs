@@ -107,13 +107,13 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
         resolved: &resolved,
         lower_keywords: lower_keywords(stmt, &tokens, &prefix),
     };
-    let d = schema.driver();
+    let d = schema.dialect();
     let mut items = match target {
         Target::Nothing => Vec::new(),
         Target::ColumnsOf(i) => cx.columns(Some(i)),
         Target::TablesIn(s) => cx.tables(Some(&s)),
         Target::State(st) => match st.expect {
-            Expect::Statement => cx.keywords(grammar::statement_keywords(d)),
+            Expect::Statement => cx.keywords(d.statement_keywords()),
             Expect::Words(words) => cx.keywords(words),
             Expect::Name => Vec::new(),
             Expect::Table if st.clause == Clause::Join => {
@@ -126,11 +126,13 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
             // keywords once two letters make the intent clear.
             Expect::AfterTable { alias: false } if prefix.chars().count() < 2 => Vec::new(),
             Expect::AfterTable { alias } => {
-                cx.keywords(&grammar::after_table_keywords(d, st.clause, alias))
+                cx.keywords(&grammar::after_table_keywords(d.syntax(), st.clause, alias))
             }
-            Expect::AfterOperand { star } => {
-                cx.keywords(&grammar::after_operand_keywords(d, st.clause, star))
-            }
+            Expect::AfterOperand { star } => cx.keywords(&grammar::after_operand_keywords(
+                d.syntax(),
+                st.clause,
+                star,
+            )),
             Expect::Operand { first } => {
                 let mut items = Vec::new();
                 // Right after `JOIN t ON`: the join conditions first.
@@ -143,7 +145,7 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
                 }
                 if grammar::operand_takes_columns(st.clause) {
                     items.extend(cx.columns(None));
-                    items.extend(cx.functions(grammar::functions(d)));
+                    items.extend(cx.functions(d.functions()));
                 }
                 items.extend(cx.keywords(grammar::operand_keywords(st.clause, first)));
                 items

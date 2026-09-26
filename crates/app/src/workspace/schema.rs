@@ -5,11 +5,11 @@ use super::*;
 impl Workspace {
     /// `schema.table`, quoted only where needed.
     pub(super) fn qualified_name(&self, table: &TableInfo) -> Option<String> {
-        let driver = self.active_database()?.driver;
+        let dialect = dialect_for(self.active_database()?.driver);
         Some(format!(
             "{}.{}",
-            quote_ident(driver, &table.schema),
-            quote_ident(driver, &table.name)
+            quote_ident(dialect, &table.schema),
+            quote_ident(dialect, &table.name)
         ))
     }
 
@@ -29,15 +29,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = self.sql_name(table, cx) else {
+        let (Some(name), Some(db)) = (self.sql_name(table, cx), self.active_database()) else {
             return;
         };
-        self.run_in_new_tab(
-            &table.name,
-            format!("SELECT * FROM {name} LIMIT 100"),
-            window,
-            cx,
-        );
+        let sql = select_rows(dialect_for(db.driver), &name, OPEN_ROWS);
+        self.run_in_new_tab(&table.name, sql, window, cx);
     }
 
     pub(super) fn count_table(
@@ -85,6 +81,8 @@ impl Workspace {
         }
         let mut rows = Vec::new();
         let favorites: Vec<SidebarRow> = self
+            .sidebar
+            .schema
             .favorites
             .iter()
             .filter_map(|(schema, name)| {
@@ -97,9 +95,9 @@ impl Workspace {
         if !favorites.is_empty() {
             rows.push(SidebarRow::Heading("Favorites".into()));
             rows.extend(favorites);
-            let title = match self.active_database().map(|db| db.driver) {
-                Some(DriverKind::Mysql) => "Databases",
-                _ => "Schemas",
+            let title = match self.namespace() {
+                Namespace::Database => "Databases",
+                Namespace::Schema => "Schemas",
             };
             rows.push(SidebarRow::Heading(title.into()));
         }
@@ -113,7 +111,9 @@ impl Workspace {
         for tables in schemas {
             let schema: SharedString = tables[0].schema.clone().into();
             let expanded = self
-                .schema_open
+                .sidebar
+                .schema
+                .open_schemas
                 .get(&(user_id.clone(), schema.clone()))
                 .copied()
                 .unwrap_or(only_schema);
@@ -131,7 +131,9 @@ impl Workspace {
                     continue;
                 }
                 let expanded = self
-                    .group_open
+                    .sidebar
+                    .schema
+                    .open_groups
                     .get(&(user_id.clone(), schema.clone(), kind))
                     .copied()
                     .unwrap_or(only_kind);
@@ -193,9 +195,9 @@ impl Workspace {
 
         let mut rows = Vec::new();
         if !schemas.is_empty() || !tables.is_empty() {
-            let title = match self.active_database().map(|db| db.driver) {
-                Some(DriverKind::Mysql) => "Databases and tables",
-                _ => "Schemas and tables",
+            let title = match self.namespace() {
+                Namespace::Database => "Databases and tables",
+                Namespace::Schema => "Schemas and tables",
             };
             rows.push(SidebarRow::Heading(title.into()));
             rows.extend(
@@ -232,23 +234,31 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(user_id) = self.active_user.clone() {
-            self.schema_open
+            self.sidebar
+                .schema
+                .open_schemas
                 .insert((user_id.clone(), schema.clone()), true);
             if let Some(t) = table {
-                self.group_open
+                self.sidebar
+                    .schema
+                    .open_groups
                     .insert((user_id, schema.clone(), t.kind), true);
             }
         }
         let target = (schema, table.map(|t| t.name.clone()));
-        self.reveal = Some(target.clone());
-        self.schema_search
+        self.sidebar.schema.reveal = Some(target.clone());
+        self.sidebar
+            .schema
+            .search
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.revealed = Some(target);
+        self.sidebar.schema.revealed = Some(target);
         cx.notify();
     }
 
     pub(super) fn is_favorite(&self, table: &TableInfo) -> bool {
-        self.favorites
+        self.sidebar
+            .schema
+            .favorites
             .iter()
             .any(|(schema, name)| *schema == table.schema && *name == table.name)
     }
@@ -315,7 +325,7 @@ impl Workspace {
     pub(super) fn render_sidebar_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let user_id = self.active_user.clone().unwrap_or_default();
-        let driver = self.active_database().map(|db| db.driver);
+        let namespace = self.namespace();
         // Zed-style tree: indentation plus one thin guide line per ancestor level,
         // expansion shown by the folder icon instead of chevrons.
         let guide = theme.sidebar_border;
@@ -350,23 +360,25 @@ impl Workspace {
             })
         };
 
-        let row_kind = self.sidebar_rows[ix].clone();
+        let row_kind = self.sidebar.schema.rows[ix].clone();
         let in_favorites = matches!(row_kind, SidebarRow::Favorite { .. });
         match row_kind {
             SidebarRow::Schema { schema, expanded } => {
-                // A MySQL "schema" is a database.
-                let icon: Icon = match driver {
-                    Some(DriverKind::Mysql) => Icon::new(Lucide::Database),
-                    _ => folder(expanded),
+                let icon: Icon = match namespace {
+                    Namespace::Database => Icon::new(Lucide::Database),
+                    Namespace::Schema => folder(expanded),
                 };
                 let key = (user_id, schema.clone());
-                let revealed = self.revealed == Some((schema.clone(), None));
+                let revealed = self.sidebar.schema.revealed == Some((schema.clone(), None));
                 row(0)
                     .when(revealed, |r| r.bg(theme.sidebar_accent))
                     .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(schema))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.schema_open.insert(key.clone(), !expanded);
+                        this.sidebar
+                            .schema
+                            .open_schemas
+                            .insert(key.clone(), !expanded);
                         cx.notify();
                     }))
                     .into_any_element()
@@ -392,7 +404,10 @@ impl Workspace {
                             .child(count.to_string()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.group_open.insert(key.clone(), !expanded);
+                        this.sidebar
+                            .schema
+                            .open_groups
+                            .insert(key.clone(), !expanded);
                         cx.notify();
                     }))
                     .into_any_element()
@@ -419,7 +434,7 @@ impl Workspace {
                         suggestions_menu(menu, &menu_table.name, list, &weak)
                     });
                 let revealed = !in_favorites
-                    && self.revealed.as_ref().is_some_and(|(s, t)| {
+                    && self.sidebar.schema.revealed.as_ref().is_some_and(|(s, t)| {
                         *s == table.schema && t.as_ref() == Some(&table.name)
                     });
                 let favorite = self.favorite_button(ix, &table, group.clone(), cx);
@@ -473,9 +488,9 @@ impl Workspace {
                 .child(title)
                 .into_any_element(),
             SidebarRow::SchemaHit { schema } => {
-                let icon = match driver {
-                    Some(DriverKind::Mysql) => Icon::new(Lucide::Database),
-                    _ => folder(false),
+                let icon = match namespace {
+                    Namespace::Database => Icon::new(Lucide::Database),
+                    Namespace::Schema => folder(false),
                 };
                 let target = schema.clone();
                 row(0)
@@ -621,15 +636,22 @@ impl Workspace {
     }
 
     pub(super) fn render_schema_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let search = self.schema_search.read(cx).value().trim().to_string();
-        self.favorites = self
+        let search = self
+            .sidebar
+            .schema
+            .search
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        self.sidebar.schema.favorites = self
             .active_db
             .as_deref()
             .map(|db| self.data.local.favorites(db))
             .unwrap_or_default();
-        self.sidebar_rows = self.build_sidebar_rows(&search, cx);
-        if let Some((schema, table)) = self.reveal.take() {
-            let target = self.sidebar_rows.iter().position(|row| match row {
+        self.sidebar.schema.rows = self.build_sidebar_rows(&search, cx);
+        if let Some((schema, table)) = self.sidebar.schema.reveal.take() {
+            let target = self.sidebar.schema.rows.iter().position(|row| match row {
                 SidebarRow::Table { table: t } => {
                     table.as_ref() == Some(&t.name) && t.schema == schema.as_ref()
                 }
@@ -637,20 +659,22 @@ impl Workspace {
                 _ => false,
             });
             if let Some(ix) = target {
-                self.sidebar_scroll
+                self.sidebar
+                    .schema
+                    .scroll
                     .scroll_to_item(ix, ScrollStrategy::Center);
             }
         }
         let has_schema = self
             .active_conn(cx)
             .is_some_and(|c| !c.schema.tables().is_empty());
-        let no_hits = !search.is_empty() && self.sidebar_rows.is_empty();
+        let no_hits = !search.is_empty() && self.sidebar.schema.rows.is_empty();
         let empty = self.render_sidebar_empty(cx);
         let theme = cx.theme();
-        let count = self.sidebar_rows.len();
-        let heading = match self.active_database().map(|db| db.driver) {
-            Some(DriverKind::Mysql) => "DATABASES",
-            _ => "SCHEMAS",
+        let count = self.sidebar.schema.rows.len();
+        let heading = match self.namespace() {
+            Namespace::Database => "DATABASES",
+            Namespace::Schema => "SCHEMAS",
         };
         let refresh = self
             .active_conn(cx)
@@ -683,10 +707,11 @@ impl Workspace {
             )
             .when(has_schema, |this| {
                 this.child(
-                    div()
-                        .px_2()
-                        .pb_2()
-                        .child(Input::new(&self.schema_search).small().cleanable(true)),
+                    div().px_2().pb_2().child(
+                        Input::new(&self.sidebar.schema.search)
+                            .small()
+                            .cleanable(true),
+                    ),
                 )
             })
             .children(empty)
@@ -710,7 +735,7 @@ impl Workspace {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .track_scroll(&self.sidebar_scroll)
+                .track_scroll(&self.sidebar.schema.scroll)
                 .px_1()
                 .flex_1(),
             )

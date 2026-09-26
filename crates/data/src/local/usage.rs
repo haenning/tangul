@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use rusqlite::params;
-use tangul_assist::usage::{Usage, UsageKind, UsageStat};
+use tangul_core::usage::{UsageKind, UsageStat};
 
 use super::Local;
 
@@ -19,8 +19,9 @@ impl Local {
         Ok(())
     }
 
-    pub fn usage(&self, db_id: &str, now: i64) -> Usage {
-        let mut usage = Usage::new(now);
+    /// Everything learned for the database.
+    pub fn usage(&self, db_id: &str) -> Vec<(UsageKind, String, UsageStat)> {
+        let mut usage = Vec::new();
         let result = self
             .conn
             .prepare_cached("SELECT kind, key, count, last_used FROM usage WHERE database_id = ?1")
@@ -31,7 +32,7 @@ impl Local {
                 for row in rows {
                     let (kind, key, count, last_used) = row?;
                     if let Some(kind) = UsageKind::parse(&kind) {
-                        usage.insert(kind, key, UsageStat { count, last_used });
+                        usage.push((kind, key, UsageStat { count, last_used }));
                     }
                 }
                 Ok(())

@@ -9,10 +9,7 @@ use tangul_core::{
     ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
 };
 
-use crate::{
-    BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError, mysql_near,
-    quoted_name_position,
-};
+use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError};
 
 pub struct MysqlDriver;
 
@@ -331,5 +328,91 @@ fn with_position(e: anyhow::Error, sql: &str) -> anyhow::Error {
             anyhow::anyhow!(SqlError { message, position })
         }
         _ => e,
+    }
+}
+
+/// For errors without a position that name an object in quotes (MySQL's
+/// `Table 'app.x' doesn't exist`, `Unknown column 'u.nme' in 'field list'`): where
+/// the last part of the first quoted name appears in `sql`.
+fn quoted_name_position(message: &str, sql: &str) -> Option<usize> {
+    let start = message.find('\'')? + 1;
+    let end = start + message[start..].find('\'')?;
+    let name = message[start..end].rsplit('.').next()?;
+    if name.is_empty() {
+        return None;
+    }
+    let lower = sql.to_lowercase();
+    let needle = name.to_lowercase();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(&needle) {
+        let at = from + i;
+        let before = lower[..at].chars().next_back();
+        let after = lower[at + needle.len()..].chars().next();
+        let boundary = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        if boundary(before) && boundary(after) {
+            return Some(at);
+        }
+        from = at + needle.len();
+    }
+    None
+}
+
+/// Locates MySQL's `… near '<rest of statement>' at line N` in `sql`. The quoted part
+/// is the (possibly cut) remainder of the statement from the error on; empty means
+/// the statement ended unexpectedly.
+fn mysql_near(message: &str, sql: &str) -> Option<usize> {
+    let start = message.find("near '")? + "near '".len();
+    let end = start + message[start..].rfind("' at line ")?;
+    let near = &message[start..end];
+    let line: usize = message[end + "' at line ".len()..]
+        .trim()
+        .trim_end_matches(|c: char| !c.is_ascii_digit())
+        .parse()
+        .ok()?;
+    if near.is_empty() {
+        return Some(sql.trim_end().trim_end_matches(';').trim_end().len());
+    }
+    // The server cuts long snippets; a short prefix is enough to find the spot.
+    let probe: String = near.chars().take(24).collect();
+    let line_start = sql
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1))
+        .map(str::len)
+        .sum::<usize>();
+    sql.get(line_start..)
+        .and_then(|rest| rest.find(&probe))
+        .map(|i| line_start + i)
+        .or_else(|| sql.find(&probe))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mysql_near, quoted_name_position};
+
+    #[test]
+    fn error_positions() {
+        let msg = "ERROR 42000 (1064): You have an error in your SQL syntax; check the manual \
+                   that corresponds to your MySQL server version for the right syntax to use \
+                   near 'form users' at line 2";
+        let sql = "select 1;\nselect * form users";
+        assert_eq!(mysql_near(msg, sql), Some(sql.find("form").unwrap()));
+        let msg = "… to use near '' at line 1";
+        assert_eq!(mysql_near(msg, "select * from;"), Some(13));
+        assert_eq!(mysql_near("no position here", "x"), None);
+
+        let sql = "select nme from users u where u.idx = 1";
+        assert_eq!(
+            quoted_name_position("Unknown column 'u.idx' in 'where clause'", sql),
+            Some(sql.find("idx").unwrap())
+        );
+        assert_eq!(
+            quoted_name_position("Table 'app.users' doesn't exist", sql),
+            Some(sql.find("users").unwrap())
+        );
+        // Whole words only.
+        assert_eq!(
+            quoted_name_position("Unknown column 'u' in 'x'", "select users"),
+            None
+        );
     }
 }

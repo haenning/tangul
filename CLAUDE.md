@@ -6,19 +6,57 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 
 ## Layout
 
-- `crates/core`: shared types, no I/O
-- `crates/drivers`: Postgres / MySQL sessions (text protocol)
+- `crates/core`: shared types, no I/O (incl. chart settings and learned usage as stored)
+- `crates/drivers`: sessions per database (text protocol); a Cargo feature each
 - `crates/engine`: tokio backend thread; front ends talk to it only via `Command` / `Event`
   (streamed into tabs) or `EngineHandle::query` (the whole result, for everything else).
   Its gate (`gate.rs`) is the only safety gate; see **Safety rules** below.
-- `crates/assist`: SQL logic without UI (lexer, analysis, completion, filters); put
-  testable logic here
+- `crates/assist`: SQL logic without UI or I/O (lexer, dialects, analysis, completion,
+  filters); put testable logic here
 - `crates/tunnel`: SSH tunnels
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`,
   `metrics.db`, `settings.json`)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks
 - `crates/app`: the GPUI app
+  - `workspace/`: layout and wiring; `tabs.rs`: the kinds of tab (`TabItem`: query,
+    file; boards later) and the open ones
+  - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
+  - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
+    nothing about tabs, so boards and the assistant can reuse it
+  - `query_router.rs`: engine answers to the tab waiting for them;
+    `connection.rs`: open connections shared by tabs
+
+Crates depend only as far as they must; keep it that way:
+
+```
+core     ← nothing
+assist   ← core
+drivers  ← core
+tunnel   ← core
+data     ← core
+engine   ← core, assist, data, drivers, tunnel
+service  ← core, assist, data, engine
+app      ← core, assist, data, engine, service   (never drivers or tunnel)
+```
+
+## Databases
+
+Only four places name a concrete database; everything else asks the connection's
+dialect (`assist::dialect::Dialect`) or driver and never matches on `DriverKind`:
+
+- `core::DriverKind`: the list, label, default port
+- `crates/drivers/src/<db>.rs` + `driver_for`: connecting and running (I/O): read-only,
+  time limit, cancel, catalog queries, error positions
+- `crates/assist/src/dialect/<db>.rs` + `dialect_for`: the SQL text: quoting, literals,
+  `LIMIT`, text matching, date arithmetic, keywords, functions, extra syntax, functions
+  with side effects
+- `crates/app/src/connection_form.rs`: which databases are offered
+
+Adding one: a `DriverKind` variant, a driver (with its Cargo feature) and a dialect,
+each with tests, plus live tests in `crates/engine/tests/live.rs`. The compiler points
+to the rest. Check the **Safety rules** against it: the gate relies on a read-only
+transaction and a server-side time limit where the database has them.
 
 ## Safety rules (user and AI)
 
