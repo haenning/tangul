@@ -108,7 +108,7 @@ pub(super) fn palette_pills(workspace: &WeakEntity<Workspace>, cx: &App) -> AnyE
         return div().into_any_element();
     };
     let ws = ws.read(cx);
-    let (open, current) = (ws.sidebar_open, ws.sidebar_view);
+    let (open, current) = (ws.sidebar.open, ws.sidebar.view);
     let theme = cx.theme();
     h_flex()
         .px_3()

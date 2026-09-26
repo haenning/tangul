@@ -19,6 +19,13 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks
 - `crates/app`: the GPUI app
+  - `workspace/`: layout and wiring; `tabs.rs`: the kinds of tab (`TabItem`: query,
+    file; boards later) and the open ones
+  - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
+  - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
+    nothing about tabs, so boards and the assistant can reuse it
+  - `query_router.rs`: engine answers to the tab waiting for them;
+    `connection.rs`: open connections shared by tabs
 
 Crates depend only as far as they must; keep it that way:
 

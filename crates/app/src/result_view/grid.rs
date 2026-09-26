@@ -4,7 +4,7 @@
 //! Row selection is kept here rather than in the table (which knows a single row):
 //! click selects, ⇧-click extends, ⌘-click toggles. The right-click menu copies the
 //! selection, follows foreign keys to related rows and writes UPDATE / DELETE
-//! statements for the selected rows (opened in a new tab, not run).
+//! statements for the selected rows (to open elsewhere, not run).
 //!
 //! Column headers mark primary-key columns, show count / sum / avg / min / max of a
 //! numeric column on hover (over the selected rows, or all loaded ones), and open
@@ -30,9 +30,9 @@ use tangul_assist::refine::{ColumnKind, Refine};
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::{ColumnInfo, ResultSet};
 
+use super::filter::FilterPanel;
+use super::{ResultEvent, ResultView};
 use crate::assets::Lucide;
-use crate::column_filter::FilterPanel;
-use crate::query_tab::{QueryTab, TabEvent};
 use crate::settings;
 
 /// Longer values are cut in the grid (full value view is a later feature).
@@ -55,8 +55,8 @@ pub struct ResultsDelegate {
     pub related: Vec<RelatedLink>,
     /// UPDATE / DELETE statements for the rows, if the result is from one table.
     pub edit: Option<RowEdit>,
-    /// The owning tab, which opens related queries.
-    tab: Option<WeakEntity<QueryTab>>,
+    /// The view it belongs to, which passes on what the menus ask for.
+    view: Option<WeakEntity<ResultView>>,
     /// Per result column, what the schema says about it (keys, type).
     pub facts: Vec<Option<ColumnFacts>>,
     /// Filters and sort applied to the result (shown in the headers).
@@ -78,9 +78,9 @@ pub struct ResultsDelegate {
 }
 
 impl ResultsDelegate {
-    pub fn new(tab: WeakEntity<QueryTab>, filter_panel: Entity<FilterPanel>) -> Self {
+    pub fn new(view: WeakEntity<ResultView>, filter_panel: Entity<FilterPanel>) -> Self {
         Self {
-            tab: Some(tab),
+            view: Some(view),
             filter_panel: Some(filter_panel),
             ..Default::default()
         }
@@ -221,24 +221,24 @@ impl ResultsDelegate {
         let arrow = if link.incoming { "←" } else { "→" };
         self.open_item(
             format!("{arrow} {}", link.title),
-            link.query(&values).map(|sql| TabEvent::OpenRelated {
+            link.query(&values).map(|sql| ResultEvent::OpenRelated {
                 title: link.table.clone(),
                 sql,
             }),
         )
     }
 
-    /// A menu item that has the owning tab emit `event`; disabled without one.
-    fn open_item(&self, label: String, event: Option<TabEvent>) -> PopupMenuItem {
-        let tab = self.tab.clone();
+    /// A menu item that has the view emit `event`; disabled without one.
+    fn open_item(&self, label: String, event: Option<ResultEvent>) -> PopupMenuItem {
+        let view = self.view.clone();
         PopupMenuItem::new(label)
             .disabled(event.is_none())
             .on_click(move |_, _, cx| {
-                let (Some(tab), Some(event)) = (tab.as_ref().and_then(|t| t.upgrade()), &event)
+                let (Some(view), Some(event)) = (view.as_ref().and_then(|v| v.upgrade()), &event)
                 else {
                     return;
                 };
-                tab.update(cx, |_, cx| cx.emit(event.clone()));
+                view.update(cx, |_, cx| cx.emit(event.clone()));
             })
     }
 
@@ -265,7 +265,7 @@ impl ResultsDelegate {
 }
 
 impl ResultsDelegate {
-    /// The filter popover of `col` opened or closed; opening fills the tab's panel
+    /// The filter popover of `col` opened or closed; opening fills the view's panel
     /// for the column.
     fn filter_opened(
         &mut self,
@@ -331,7 +331,7 @@ impl ResultsDelegate {
             KeyMarker::Foreign => (Lucide::Link, theme.muted_foreground, "Foreign key"),
         };
         let target = facts.references.clone()?;
-        let tab = self.tab.clone();
+        let view = self.view.clone();
         let table = cx.entity().downgrade();
         Some(
             HoverCard::new(("fk", col_ix))
@@ -355,7 +355,7 @@ impl ResultsDelegate {
                 )
                 .content(move |_, _, cx| {
                     let theme = cx.theme();
-                    let tab = tab.clone();
+                    let view = view.clone();
                     let jump = target.clone();
                     v_flex()
                         .gap_1p5()
@@ -378,15 +378,15 @@ impl ResultsDelegate {
                                 .xsmall()
                                 .outline()
                                 .on_click(move |_, _, cx| {
-                                    let Some(tab) = tab.as_ref().and_then(WeakEntity::upgrade)
+                                    let Some(view) = view.as_ref().and_then(WeakEntity::upgrade)
                                     else {
                                         return;
                                     };
-                                    let event = TabEvent::OpenTable {
+                                    let event = ResultEvent::OpenTable {
                                         schema: jump.schema.clone(),
                                         table: jump.table.clone(),
                                     };
-                                    tab.update(cx, |_, cx| cx.emit(event));
+                                    view.update(cx, |_, cx| cx.emit(event));
                                 }),
                         )
                 })
@@ -729,10 +729,10 @@ impl TableDelegate for ResultsDelegate {
     }
 
     fn load_more(&mut self, _: &mut Window, cx: &mut Context<TableState<Self>>) {
-        // The table is being updated right now and the tab reads it: afterwards.
-        if let Some(tab) = self.tab.clone() {
+        // The table is being updated right now and the view reads it: afterwards.
+        if let Some(view) = self.view.clone() {
             cx.defer(move |cx| {
-                let _ = tab.update(cx, |tab, cx| tab.load_more(cx));
+                let _ = view.update(cx, |view, cx| view.load_more(cx));
             });
         }
     }
@@ -808,7 +808,7 @@ impl TableDelegate for ResultsDelegate {
             let title = |verb: &str| format!("{verb} {}", edit.table);
             menu = menu.separator();
             let open = |sql: Option<String>| {
-                sql.map(|sql| TabEvent::OpenSql {
+                sql.map(|sql| ResultEvent::OpenSql {
                     title: title("update"),
                     sql,
                 })
@@ -857,7 +857,7 @@ impl TableDelegate for ResultsDelegate {
             }
             menu = menu.item(self.open_item(
                 format!("DELETE {count}row{s}"),
-                edit.delete(&values).map(|sql| TabEvent::OpenSql {
+                edit.delete(&values).map(|sql| ResultEvent::OpenSql {
                     title: title("delete"),
                     sql,
                 }),
