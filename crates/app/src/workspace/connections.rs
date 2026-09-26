@@ -109,7 +109,7 @@ impl Workspace {
         let Some(conn) = self.tab_conn(user_id) else {
             return;
         };
-        if let Some(tab) = self.tabs.get(self.active_tab) {
+        if let Some(tab) = self.tabs.active_query().cloned() {
             if tab.read(cx).is_running(cx) {
                 return;
             }
@@ -274,20 +274,10 @@ impl Workspace {
         };
         match event {
             Event::Query { query, event } => {
-                let finished = match &event {
-                    QueryEvent::Finished { elapsed, error, .. } => {
-                        Some((error.clone(), elapsed.as_millis() as i64))
-                    }
-                    QueryEvent::Exec(_) => None,
-                };
-                if let Some(tab) = self.queries.get(&query).and_then(|q| q.tab.upgrade()) {
-                    tab.update(cx, |t, cx| t.on_query_event(event, cx));
-                }
-                if let Some((error, elapsed_ms)) = finished
-                    && let Some(run) = self.queries.remove(&query)
-                    && !run.derived
+                if let Some(done) = self.router.deliver(query, event, cx)
+                    && !done.run.derived
                 {
-                    self.record_run(run, error, elapsed_ms, cx);
+                    self.record_run(done.run, done.error, done.elapsed_ms, cx);
                 }
             }
             Event::Connected { conn } => {
@@ -296,7 +286,8 @@ impl Workspace {
                 if let Some(user_id) = self.connections.tab_user(conn).map(str::to_string)
                     && let Some(tc) = self.tab_conn(&user_id)
                 {
-                    for tab in &self.tabs {
+                    let tabs: Vec<_> = self.tabs.queries().cloned().collect();
+                    for tab in tabs {
                         if tab.read(cx).conn.is_none() {
                             tab.update(cx, |t, cx| t.set_conn(tc.clone(), cx));
                         }
@@ -329,11 +320,7 @@ impl Workspace {
                 Err(e) => window.push_notification(Notification::error(e), cx),
             },
             Event::Validated { request, problems } => {
-                if let Some((tab, generation)) = self.validations.remove(&request)
-                    && let Some(tab) = tab.upgrade()
-                {
-                    tab.update(cx, |t, cx| t.apply_validation(generation, problems, cx));
-                }
+                self.router.deliver_check(request, problems, cx)
             }
             Event::PoolStats { conn, stats } => {
                 // Only the title bar shows them: tabs aren't redrawn for every tick.

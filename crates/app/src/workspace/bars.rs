@@ -132,17 +132,17 @@ impl Workspace {
     /// tools; the active query's timing on the right.
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        // File tabs (settings) have no results to time or chart.
         let (query_text, running, chart) = self
             .tabs
-            .get(self.active_tab)
+            .active_query()
             .map(|tab| {
                 let t = tab.read(cx);
                 let chart = (t.chart(cx), t.chart_shown(cx));
                 (
                     t.status_text(cx),
                     t.is_running(cx),
-                    // File tabs (settings) have no results to chart.
-                    t.file_path().is_none().then(|| (tab.clone(), chart)),
+                    Some((tab.clone(), chart)),
                 )
             })
             .unwrap_or_default();

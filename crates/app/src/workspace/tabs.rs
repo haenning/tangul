@@ -18,10 +18,8 @@ impl Workspace {
             tab: tab.downgrade(),
         });
         tab.update(cx, |t, cx| t.set_completion(provider, cx));
-        self.tab_events
-            .insert(id, cx.subscribe_in(&tab, window, Self::on_tab_event));
-        self.tabs.push(tab.clone());
-        self.active_tab = self.tabs.len() - 1;
+        let events = cx.subscribe_in(&tab, window, Self::on_tab_event);
+        self.tabs.push(TabItem::Query(tab.clone()), Some(events));
         QueryTab::focus_editor(&tab, window, cx);
         cx.notify();
         tab
@@ -38,25 +36,19 @@ impl Workspace {
         };
         let open = self
             .tabs
-            .iter()
-            .position(|t| t.read(cx).file_path() == Some(path.as_path()));
-        let tab = match open {
-            Some(ix) => {
-                self.active_tab = ix;
-                self.tabs[ix].clone()
-            }
+            .items()
+            .position(|t| t.file().is_some_and(|f| f.read(cx).path() == path));
+        match open {
+            Some(ix) => self.tabs.set_active(ix),
             None => {
                 let id = TabId(self.next_id());
-                let engine = self.engine.clone();
-                let tab = cx.new(|cx| QueryTab::new_file(id, path, engine, window, cx));
-                self.tab_events
-                    .insert(id, cx.subscribe_in(&tab, window, Self::on_tab_event));
-                self.tabs.push(tab.clone());
-                self.active_tab = self.tabs.len() - 1;
-                tab
+                let tab = cx.new(|cx| FileTab::new(id, path, window, cx));
+                self.tabs.push(TabItem::File(tab), None);
             }
-        };
-        QueryTab::focus_editor(&tab, window, cx);
+        }
+        if let Some(tab) = self.tabs.active().cloned() {
+            tab.focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -70,15 +62,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_tab(self.active_tab, window, cx);
+        self.close_tab(self.tabs.active_index(), window, cx);
     }
 
     pub(super) fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix).cloned() else {
             return;
         };
-        if tab.read(cx).has_unsaved_changes(cx) {
-            self.ask_to_save(tab, window, cx);
+        if let Some(file) = tab.file().filter(|_| tab.has_unsaved_changes(cx)) {
+            self.ask_to_save(file.clone(), window, cx);
             return;
         }
         self.remove_tab(ix, window, cx);
@@ -87,7 +79,7 @@ impl Workspace {
     /// Closing a file tab with unsaved changes: save, discard or keep the tab.
     pub(super) fn ask_to_save(
         &mut self,
-        tab: Entity<QueryTab>,
+        tab: Entity<FileTab>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -99,7 +91,7 @@ impl Workspace {
             let (workspace, tab) = (workspace.clone(), tab.clone());
             move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                 window.close_dialog(cx);
-                if save && !tab.update(cx, |t, cx| t.save_file(window, cx)) {
+                if save && !tab.update(cx, |t, cx| t.save(window, cx)) {
                     return;
                 }
                 let _ = workspace.update(cx, |ws, cx| {
@@ -147,28 +139,25 @@ impl Workspace {
 
     /// Closes a tab without asking.
     pub(super) fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.tabs.len() {
+        let Some(tab) = self.tabs.remove(ix) else {
             return;
-        }
-        let tab = self.tabs.remove(ix);
-        let tab = tab.read(cx);
-        self.tab_events.remove(&tab.id);
-        if let Some(conn) = tab.conn_id(cx) {
+        };
+        if let Some(tab) = tab.query().map(|t| t.read(cx))
+            && let Some(conn) = tab.conn_id(cx)
+        {
             // Drops a pinned session (open transaction is rolled back by the server).
             self.engine.send(Command::ReleaseTab { tab: tab.id, conn });
         }
-        if self.tabs.is_empty() {
+        match self.tabs.active().cloned() {
+            Some(active) => active.focus(window, cx),
             // The empty state takes over.
-            self.active_tab = 0;
-            window.focus(&self.focus_handle, cx);
-        } else {
-            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+            None => window.focus(&self.focus_handle, cx),
         }
         cx.notify();
     }
 
     pub(super) fn tab_index(&self, id: TabId, cx: &App) -> Option<usize> {
-        self.tabs.iter().position(|t| t.read(cx).id == id)
+        self.tabs.index_of(id, cx)
     }
 
     pub(super) fn close_tab_by_id(
@@ -184,7 +173,7 @@ impl Workspace {
 
     pub(super) fn toggle_tab_pin(&mut self, id: TabId, cx: &mut Context<Self>) {
         if let Some(ix) = self.tab_index(id, cx) {
-            self.tabs[ix].update(cx, |t, _| t.toggle_pin());
+            self.tabs.toggle_pin(ix);
             cx.notify();
         }
     }
@@ -196,7 +185,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tab_index(id, cx).map(|ix| self.tabs[ix].clone()) else {
+        let Some(tab) = self
+            .tab_index(id, cx)
+            .and_then(|ix| self.tabs.get(ix)?.query().cloned())
+        else {
             return;
         };
         if let Some(bookmark) = tab.read(cx).bookmark_id.clone() {
@@ -225,12 +217,7 @@ impl Workspace {
                     return;
                 };
                 let request = self.next_id();
-                // The engine doesn't answer when no session was free: only the
-                // latest request per tab is kept, and none for closed tabs.
-                let weak = tab.downgrade();
-                self.validations
-                    .retain(|_, (t, _)| *t != weak && t.upgrade().is_some());
-                self.validations.insert(request, (weak, *generation));
+                self.router.checking(request, tab.downgrade(), *generation);
                 self.engine.send(Command::Validate {
                     request,
                     conn,
@@ -334,7 +321,7 @@ impl Workspace {
                 t.bookmark_id = Some(bookmark.id);
             });
         }
-        self.queries.insert(
+        self.router.started(
             query,
             RunningQuery {
                 tab: tab.downgrade(),
@@ -376,7 +363,7 @@ impl Workspace {
             return;
         };
         let query = QueryId(self.next_id());
-        self.queries.insert(
+        self.router.started(
             query,
             RunningQuery {
                 tab: tab.downgrade(),
@@ -414,21 +401,13 @@ impl Workspace {
 
     pub(super) fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
-        let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
-            let (id, pinned, bookmarked, has_sql, title, in_transaction) = {
-                let t = tab.read(cx);
-                (
-                    t.id,
-                    t.pinned,
-                    t.bookmark_id.is_some(),
-                    // A file tab (settings) holds no query to bookmark.
-                    t.file_path().is_none() && !t.sql(cx).trim().is_empty(),
-                    t.title.clone(),
-                    t.in_transaction(),
-                )
-            };
-            let unsaved = tab.read(cx).has_unsaved_changes(cx);
-            let label: SharedString = if in_transaction || unsaved {
+        let tabs = self.tabs.items().enumerate().map(|(ix, tab)| {
+            let (id, pinned, title) = (tab.id(cx), self.tabs.is_pinned(ix), tab.title(cx));
+            // A file tab (settings) holds no query to bookmark.
+            let query = tab.query().map(|t| t.read(cx));
+            let bookmarked = query.is_some_and(|t| t.bookmark_id.is_some());
+            let has_sql = query.is_some_and(|t| !t.sql(cx).trim().is_empty());
+            let label: SharedString = if tab.is_dirty(cx) {
                 format!("{title} •").into()
             } else {
                 title
@@ -463,12 +442,12 @@ impl Workspace {
                 // Like browsers: closes when released on the tab it was pressed on.
                 .on_mouse_down(
                     MouseButton::Middle,
-                    cx.listener(move |this, _, _, _| this.middle_press = Some(id)),
+                    cx.listener(move |this, _, _, _| this.tabs.middle_pressed(id)),
                 )
                 .on_mouse_up(
                     MouseButton::Middle,
                     cx.listener(move |this, _, window, cx| {
-                        if this.middle_press.take() == Some(id) && !pinned {
+                        if this.tabs.middle_released(id) && !pinned {
                             this.close_tab_by_id(id, window, cx);
                         }
                     }),
@@ -476,11 +455,11 @@ impl Workspace {
         });
         TabBar::new("tabs")
             .children(tabs)
-            .selected_index(self.active_tab)
+            .selected_index(self.tabs.active_index())
             .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                this.active_tab = *ix;
-                if let Some(tab) = this.tabs.get(*ix).cloned() {
-                    QueryTab::focus_editor(&tab, window, cx);
+                this.tabs.set_active(*ix);
+                if let Some(tab) = this.tabs.active().cloned() {
+                    tab.focus(window, cx);
                 }
                 cx.notify();
             }))

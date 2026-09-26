@@ -66,7 +66,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let title: SharedString = bookmark.name.clone().into();
-        for tab in &self.tabs {
+        for tab in self.tabs.queries() {
             if tab.read(cx).bookmark_id.as_deref() == Some(bookmark.id.as_str()) {
                 tab.update(cx, |t, _| t.title = title.clone());
             }
@@ -93,7 +93,7 @@ impl Workspace {
                 cx,
             );
         }
-        for tab in &self.tabs {
+        for tab in self.tabs.queries() {
             if tab.read(cx).bookmark_id.as_deref() == Some(id) {
                 tab.update(cx, |t, _| t.bookmark_id = None);
             }

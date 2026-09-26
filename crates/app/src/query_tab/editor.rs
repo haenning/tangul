@@ -1,6 +1,5 @@
 //! The SQL editor: what a run takes (the selection or everything), the server's
-//! check of the statements while typing, and error underlines. Also edits plain
-//! files (JSON), without the checks.
+//! check of the statements while typing, and error underlines.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -45,7 +44,7 @@ pub struct SqlEditor {
 impl EventEmitter<EditorEvent> for SqlEditor {}
 
 impl SqlEditor {
-    pub fn sql(text: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(text: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("sql")
@@ -58,26 +57,6 @@ impl SqlEditor {
                 this.revalidate(cx);
             }
         });
-        Self::with(state, changes)
-    }
-
-    /// A JSON file: no checks, no runs.
-    pub fn json(text: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let state = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("json")
-                .line_number(true)
-                .default_value(text.to_string())
-        });
-        let changes = cx.subscribe(&state, |_: &mut Self, _, ev: &InputEvent, cx| {
-            if matches!(ev, InputEvent::Change) {
-                cx.notify();
-            }
-        });
-        Self::with(state, changes)
-    }
-
-    fn with(state: Entity<EditorState>, changes: Subscription) -> Self {
         Self {
             state,
             pending_origin: None,

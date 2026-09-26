@@ -67,8 +67,8 @@ use tangul_data::Data;
 use tangul_data::local::{Bookmark, HistoryEntry, NewHistory, bare_sql};
 use tangul_data::metrics;
 use tangul_engine::{
-    Approval, Caller, Command, Decision, EngineHandle, Event, Guard, PoolStats, QueryEvent,
-    QueryOptions, QueryOutput,
+    Approval, Caller, Command, Decision, EngineHandle, Event, Guard, PoolStats, QueryOptions,
+    QueryOutput,
 };
 use tangul_service::connections::{Connections, Purpose};
 use tangul_service::schedule;
@@ -80,10 +80,13 @@ use crate::{
     completion::{AssistData, SharedAssist, SqlCompletion},
     connection::{ConnStatus, Connection},
     connection_form::{ConnectionForm, FormMode, FormOutput},
+    file_tab::FileTab,
     monitor::{self, Monitor},
     palette::{self, PaletteAction, PaletteKind},
+    query_router::{QueryRouter, RunningQuery},
     query_tab::{QueryTab, TabEvent},
     settings,
+    tabs::{TabItem, Tabs},
 };
 
 const SIDEBAR_WIDTH: f32 = 260.;
@@ -139,18 +142,6 @@ impl SidebarView {
             SidebarView::History => "History",
         }
     }
-}
-
-/// A query sent to the engine, kept until it finishes to record it in history.
-struct RunningQuery {
-    tab: WeakEntity<QueryTab>,
-    sql: String,
-    user_id: String,
-    /// Unix milliseconds.
-    started_at: i64,
-    /// A filtered, sorted or further page of an earlier result: not a run of its
-    /// own (no history, usage or bookmark hint).
-    derived: bool,
 }
 
 fn now_ms() -> i64 {
@@ -229,13 +220,10 @@ pub struct Workspace {
     /// Sidebar/content split; the sidebar is the first panel.
     layout: Entity<ResizableState>,
     sidebar_width: f32,
-    tabs: Vec<Entity<QueryTab>>,
-    active_tab: usize,
-    /// Tab a middle-button press started on; it closes if released on the same tab.
-    middle_press: Option<TabId>,
-    queries: HashMap<QueryId, RunningQuery>,
-    /// Pending editor checks: request → (tab, edit generation).
-    validations: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
+    /// The main area's tabs.
+    tabs: Tabs,
+    /// Where the engine's answers to queries and checks go.
+    router: QueryRouter,
     sidebar_rows: Vec<SidebarRow>,
     /// Favorite tables and views of the active database as (schema, name).
     favorites: Vec<(String, String)>,
@@ -247,8 +235,6 @@ pub struct Workspace {
     _monitor_tick: Task<()>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
-    /// Each open tab's events; dropped with the tab.
-    tab_events: HashMap<TabId, Subscription>,
     _pump: Task<()>,
 }
 
@@ -340,11 +326,8 @@ impl Workspace {
             sidebar_open: true,
             layout: cx.new(|_| ResizableState::default()),
             sidebar_width,
-            tabs: Vec::new(),
-            active_tab: 0,
-            middle_press: None,
-            queries: HashMap::new(),
-            validations: HashMap::new(),
+            tabs: Tabs::default(),
+            router: QueryRouter::default(),
             sidebar_rows: Vec::new(),
             favorites: Vec::new(),
             relock: HashMap::new(),
@@ -352,7 +335,6 @@ impl Workspace {
             _monitor_tick: monitor_tick,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
-            tab_events: HashMap::new(),
             _pump: pump,
         };
         // Reopen the connection used last (else the first one) right away.
@@ -422,7 +404,7 @@ impl Drop for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.tabs.get(self.active_tab).cloned();
+        let active = self.tabs.active().map(TabItem::view);
         v_flex()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
