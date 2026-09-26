@@ -275,7 +275,11 @@ impl Workspace {
                 };
                 let event = TabEvent::OpenRelated {
                     title: table.clone(),
-                    sql: format!("SELECT * FROM {} LIMIT 100", state.schema.sql_name(ix)),
+                    sql: select_rows(
+                        state.schema.dialect(),
+                        &state.schema.sql_name(ix),
+                        OPEN_ROWS,
+                    ),
                 };
                 self.on_tab_event(tab, &event, window, cx);
             }

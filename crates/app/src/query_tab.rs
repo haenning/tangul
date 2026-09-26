@@ -561,7 +561,7 @@ impl QueryTab {
             return None;
         }
         let base = self.base_sql.as_ref()?;
-        let driver = self.conn.as_ref()?.read(cx).driver;
+        let dialect = self.conn.as_ref()?.read(cx).schema.dialect();
         let d = self.table.read(cx).delegate();
         let columns = d.column_names();
         let kinds: Vec<_> = (0..columns.len()).map(|c| d.kind(c)).collect();
@@ -570,7 +570,7 @@ impl QueryTab {
             &columns,
             &kinds,
             &d.refine,
-            driver,
+            dialect,
             offset,
             tangul_engine::ROW_LIMIT + 1,
         ))

@@ -5,6 +5,7 @@ pub mod analyze;
 pub mod chart;
 pub mod columns;
 pub mod complete;
+pub mod dialect;
 pub mod edit;
 pub mod grammar;
 pub mod guard;

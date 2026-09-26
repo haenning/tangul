@@ -50,11 +50,12 @@ use gpui_kit::*;
 use tangul_assist::{
     chart::{ChartData, ChartStyle, ChartView},
     columns::column_facts,
+    dialect::{Namespace, dialect_for, quote_ident, select_rows},
     edit::row_edit,
     guard,
     lexer::fingerprint,
     related::{rank_links, related_links},
-    schema::{SchemaIndex, quote_ident},
+    schema::SchemaIndex,
     suggest::{QuerySuggestion, one_line, suggest_for_table},
     usage::{Usage, learn},
 };
@@ -95,6 +96,8 @@ const TREE_INDENT: f32 = 18.;
 const TREE_ICON: f32 = 14.;
 const BOOKMARK_ROW_HEIGHT: f32 = 40.;
 const HISTORY_LIMIT: usize = 300;
+/// Rows shown when a table is opened.
+const OPEN_ROWS: usize = 100;
 /// Successful runs after which the toolbar suggests bookmarking a query.
 const BOOKMARK_HINT_RUNS: u32 = 3;
 /// local.db setting: the user id connected last, reopened at startup.
@@ -381,6 +384,12 @@ impl Workspace {
 
     fn active_database(&self) -> Option<&Database> {
         self.data.profiles.database(self.active_db.as_deref()?)
+    }
+
+    /// What the active database calls the level above tables.
+    fn namespace(&self) -> Namespace {
+        self.active_database()
+            .map_or(Namespace::Schema, |db| dialect_for(db.driver).namespace())
     }
 
     fn active_conn<'a>(&self, cx: &'a App) -> Option<&'a Connection> {

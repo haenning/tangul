@@ -12,12 +12,10 @@
 //! none (Postgres keeps the order of a subquery scan; MySQL passes a derived table's
 //! ORDER BY on to an outer query without one), so pages follow the original order.
 
-use tangul_core::DriverKind;
-
 use crate::analyze::statements;
+use crate::dialect::{Dialect, literal, quote_ident};
 use crate::lexer::{TokenKind, tokenize};
-use crate::related::{literal, numeric_type};
-use crate::schema::quote_ident;
+use crate::related::numeric_type;
 
 const ALIAS: &str = "tangul_q";
 
@@ -264,7 +262,7 @@ pub fn refined_sql(
     columns: &[String],
     kinds: &[ColumnKind],
     refine: &Refine,
-    driver: DriverKind,
+    dialect: &dyn Dialect,
     offset: usize,
     limit: usize,
 ) -> String {
@@ -275,12 +273,12 @@ pub fn refined_sql(
     let col = |i: usize| {
         format!(
             "{ALIAS}.{}",
-            quote_ident(driver, names.get(i).map_or("", String::as_str))
+            quote_ident(dialect, names.get(i).map_or("", String::as_str))
         )
     };
     let mut sql = format!("SELECT * FROM (\n{base}\n) AS {ALIAS}");
     if renamed {
-        let list: Vec<String> = names.iter().map(|n| quote_ident(driver, n)).collect();
+        let list: Vec<String> = names.iter().map(|n| quote_ident(dialect, n)).collect();
         sql.push_str(&format!(" ({})", list.join(", ")));
     }
     let conditions: Vec<String> = refine
@@ -292,7 +290,7 @@ pub fn refined_sql(
                 &col(f.column),
                 f,
                 kinds.get(f.column).copied().unwrap_or(ColumnKind::Text),
-                driver,
+                dialect,
             )
         })
         .collect();
@@ -303,16 +301,13 @@ pub fn refined_sql(
         let dir = if sort.descending { "DESC" } else { "ASC" };
         sql.push_str(&format!("\nORDER BY {} {dir}", col(sort.column)));
     }
-    sql.push_str(&format!("\nLIMIT {limit}"));
-    if offset > 0 {
-        sql.push_str(&format!(" OFFSET {offset}"));
-    }
+    sql.push_str(&format!("\n{}", dialect.limit(limit, offset)));
     sql
 }
 
-fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, driver: DriverKind) -> String {
+fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, dialect: &dyn Dialect) -> String {
     let numeric = kind == ColumnKind::Number;
-    let compare = |op: &str| format!("{col} {op} {}", literal(&f.value, numeric, driver));
+    let compare = |op: &str| format!("{col} {op} {}", literal(dialect, &f.value, numeric));
     // LIKE on the text of any type, case-insensitive (MySQL's usual collations
     // already are). `!` escapes wildcards: no backslash rules to get wrong.
     let like = |not: bool, prefix: &str, suffix: &str| {
@@ -323,16 +318,11 @@ fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, driver: DriverKind) 
                 .replace('%', "!%")
                 .replace('_', "!_")
         );
-        let (text, op) = match driver {
-            DriverKind::Postgres => (format!("CAST({col} AS text)"), "ILIKE"),
-            DriverKind::Mysql => (format!("CAST({col} AS CHAR)"), "LIKE"),
-            // SQLite's LIKE ignores ASCII case already.
-            DriverKind::Sqlite => (format!("CAST({col} AS TEXT)"), "LIKE"),
-        };
+        let (text, op) = dialect.text_match(col);
         let not = if not { "NOT " } else { "" };
         format!(
             "{text} {not}{op} {} ESCAPE '!'",
-            literal(&pattern, false, driver)
+            literal(dialect, &pattern, false)
         )
     };
     match f.op {
@@ -355,17 +345,13 @@ fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, driver: DriverKind) 
             let from = f.value.trim();
             let to = f.to.trim();
             if !from.is_empty() {
-                parts.push(format!("{col} >= {}", literal(from, numeric, driver)));
+                parts.push(format!("{col} >= {}", literal(dialect, from, numeric)));
             }
             if !to.is_empty() {
-                let lit = literal(to, numeric, driver);
+                let lit = literal(dialect, to, numeric);
                 // A day as the end of a timestamp range means the whole day.
                 parts.push(if kind == ColumnKind::DateTime && to.len() == 10 {
-                    match driver {
-                        DriverKind::Postgres => format!("{col} < CAST({lit} AS date) + 1"),
-                        DriverKind::Mysql => format!("{col} < {lit} + INTERVAL 1 DAY"),
-                        DriverKind::Sqlite => format!("{col} < date({lit}, '+1 day')"),
-                    }
+                    dialect.before_next_day(col, &lit)
                 } else {
                     format!("{col} <= {lit}")
                 });
@@ -398,6 +384,8 @@ fn unique_names(columns: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dialect::dialect_for;
+    use tangul_core::DriverKind;
 
     fn cols(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -453,7 +441,7 @@ mod tests {
             &cols(&["id", "Name", "note"]),
             &[ColumnKind::Number, ColumnKind::Text, ColumnKind::Text],
             &refine,
-            DriverKind::Postgres,
+            dialect_for(DriverKind::Postgres),
             10_000,
             10_001,
         );
@@ -483,7 +471,7 @@ mod tests {
             &cols(&["id", "id"]),
             &[ColumnKind::Number, ColumnKind::Text],
             &refine,
-            DriverKind::Mysql,
+            dialect_for(DriverKind::Mysql),
             0,
             100,
         );
@@ -500,7 +488,12 @@ mod tests {
             to: String::new(),
         };
         assert_eq!(
-            condition("c", &f, ColumnKind::Number, DriverKind::Postgres),
+            condition(
+                "c",
+                &f,
+                ColumnKind::Number,
+                dialect_for(DriverKind::Postgres)
+            ),
             "c < '1; drop'"
         );
         assert_eq!(unique_names(&cols(&["a", "a", "a_2"])), ["a", "a_3", "a_2"]);
@@ -538,7 +531,7 @@ mod tests {
                 "c",
                 &f("2024-01-01", "2024-01-31"),
                 ColumnKind::DateTime,
-                DriverKind::Postgres
+                dialect_for(DriverKind::Postgres)
             ),
             "c >= '2024-01-01' AND c < CAST('2024-01-31' AS date) + 1"
         );
@@ -547,7 +540,7 @@ mod tests {
                 "c",
                 &f("", "2024-01-31"),
                 ColumnKind::DateTime,
-                DriverKind::Mysql
+                dialect_for(DriverKind::Mysql)
             ),
             "c < '2024-01-31' + INTERVAL 1 DAY"
         );
@@ -556,12 +549,17 @@ mod tests {
                 "c",
                 &f("2024-01-01", "2024-01-31"),
                 ColumnKind::Date,
-                DriverKind::Postgres
+                dialect_for(DriverKind::Postgres)
             ),
             "c >= '2024-01-01' AND c <= '2024-01-31'"
         );
         assert_eq!(
-            condition("c", &f("5", ""), ColumnKind::Number, DriverKind::Mysql),
+            condition(
+                "c",
+                &f("5", ""),
+                ColumnKind::Number,
+                dialect_for(DriverKind::Mysql)
+            ),
             "c >= 5"
         );
         assert_eq!(f("", "").describe("d"), "d (any)");

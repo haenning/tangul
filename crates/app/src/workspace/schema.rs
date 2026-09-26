@@ -5,11 +5,11 @@ use super::*;
 impl Workspace {
     /// `schema.table`, quoted only where needed.
     pub(super) fn qualified_name(&self, table: &TableInfo) -> Option<String> {
-        let driver = self.active_database()?.driver;
+        let dialect = dialect_for(self.active_database()?.driver);
         Some(format!(
             "{}.{}",
-            quote_ident(driver, &table.schema),
-            quote_ident(driver, &table.name)
+            quote_ident(dialect, &table.schema),
+            quote_ident(dialect, &table.name)
         ))
     }
 
@@ -29,15 +29,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = self.sql_name(table, cx) else {
+        let (Some(name), Some(db)) = (self.sql_name(table, cx), self.active_database()) else {
             return;
         };
-        self.run_in_new_tab(
-            &table.name,
-            format!("SELECT * FROM {name} LIMIT 100"),
-            window,
-            cx,
-        );
+        let sql = select_rows(dialect_for(db.driver), &name, OPEN_ROWS);
+        self.run_in_new_tab(&table.name, sql, window, cx);
     }
 
     pub(super) fn count_table(
@@ -97,9 +93,9 @@ impl Workspace {
         if !favorites.is_empty() {
             rows.push(SidebarRow::Heading("Favorites".into()));
             rows.extend(favorites);
-            let title = match self.active_database().map(|db| db.driver) {
-                Some(DriverKind::Mysql) => "Databases",
-                _ => "Schemas",
+            let title = match self.namespace() {
+                Namespace::Database => "Databases",
+                Namespace::Schema => "Schemas",
             };
             rows.push(SidebarRow::Heading(title.into()));
         }
@@ -193,9 +189,9 @@ impl Workspace {
 
         let mut rows = Vec::new();
         if !schemas.is_empty() || !tables.is_empty() {
-            let title = match self.active_database().map(|db| db.driver) {
-                Some(DriverKind::Mysql) => "Databases and tables",
-                _ => "Schemas and tables",
+            let title = match self.namespace() {
+                Namespace::Database => "Databases and tables",
+                Namespace::Schema => "Schemas and tables",
             };
             rows.push(SidebarRow::Heading(title.into()));
             rows.extend(
@@ -315,7 +311,7 @@ impl Workspace {
     pub(super) fn render_sidebar_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let user_id = self.active_user.clone().unwrap_or_default();
-        let driver = self.active_database().map(|db| db.driver);
+        let namespace = self.namespace();
         // Zed-style tree: indentation plus one thin guide line per ancestor level,
         // expansion shown by the folder icon instead of chevrons.
         let guide = theme.sidebar_border;
@@ -354,10 +350,9 @@ impl Workspace {
         let in_favorites = matches!(row_kind, SidebarRow::Favorite { .. });
         match row_kind {
             SidebarRow::Schema { schema, expanded } => {
-                // A MySQL "schema" is a database.
-                let icon: Icon = match driver {
-                    Some(DriverKind::Mysql) => Icon::new(Lucide::Database),
-                    _ => folder(expanded),
+                let icon: Icon = match namespace {
+                    Namespace::Database => Icon::new(Lucide::Database),
+                    Namespace::Schema => folder(expanded),
                 };
                 let key = (user_id, schema.clone());
                 let revealed = self.revealed == Some((schema.clone(), None));
@@ -473,9 +468,9 @@ impl Workspace {
                 .child(title)
                 .into_any_element(),
             SidebarRow::SchemaHit { schema } => {
-                let icon = match driver {
-                    Some(DriverKind::Mysql) => Icon::new(Lucide::Database),
-                    _ => folder(false),
+                let icon = match namespace {
+                    Namespace::Database => Icon::new(Lucide::Database),
+                    Namespace::Schema => folder(false),
                 };
                 let target = schema.clone();
                 row(0)
@@ -648,9 +643,9 @@ impl Workspace {
         let empty = self.render_sidebar_empty(cx);
         let theme = cx.theme();
         let count = self.sidebar_rows.len();
-        let heading = match self.active_database().map(|db| db.driver) {
-            Some(DriverKind::Mysql) => "DATABASES",
-            _ => "SCHEMAS",
+        let heading = match self.namespace() {
+            Namespace::Database => "DATABASES",
+            Namespace::Schema => "SCHEMAS",
         };
         let refresh = self
             .active_conn(cx)

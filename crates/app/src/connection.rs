@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use gpui_kit::SharedString;
+use tangul_assist::dialect::dialect_for;
 use tangul_assist::schema::SchemaIndex;
 use tangul_core::{ConnId, DriverKind, SchemaInfo};
 use tangul_engine::PoolStats;
@@ -36,7 +37,7 @@ impl Connection {
             status: ConnStatus::Connected,
             schema: Arc::new(SchemaIndex::new(
                 SchemaInfo::default(),
-                DriverKind::Sqlite,
+                dialect_for(DriverKind::Sqlite),
                 None,
             )),
             stats: PoolStats::default(),
