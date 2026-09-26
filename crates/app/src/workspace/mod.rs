@@ -17,8 +17,10 @@ mod scheduled;
 mod schema;
 mod sidebar;
 mod tabs;
+#[cfg(test)]
+mod ui_tests;
 
-use sidebar::{HistoryList, SchemaTree, Sidebar, SidebarRow, SidebarView};
+use sidebar::{HistoryList, Panel, Panels, SchemaTree, Side, Sidebar, SidebarRow};
 
 // Shared by the status bar and the bookmarks panel.
 use bars::style_icon;
@@ -66,7 +68,7 @@ use tangul_core::{
     TableKind,
 };
 use tangul_data::Data;
-use tangul_data::local::{Bookmark, HistoryEntry, NewHistory, bare_sql};
+use tangul_data::local::{Bookmark, HistoryEntry, Local, NewHistory, bare_sql};
 use tangul_data::metrics;
 use tangul_engine::{
     Approval, Caller, Command, Decision, EngineHandle, Event, Guard, PoolStats, QueryOptions,
@@ -109,6 +111,7 @@ const BOOKMARK_HINT_RUNS: u32 = 3;
 /// local.db setting: the user id connected last, reopened at startup.
 const LAST_USER_SETTING: &str = "last_user";
 const SIDEBAR_WIDTH_SETTING: &str = "sidebar_width";
+const RIGHT_SIDEBAR_WIDTH_SETTING: &str = "right_sidebar_width";
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -124,8 +127,14 @@ pub struct Workspace {
     assist: SharedAssist,
     /// Learned usage by database id.
     usage: HashMap<String, Arc<Usage>>,
-    /// The left dock: its panels and their state.
-    sidebar: Sidebar,
+    /// The sidebars left and right of the content, and their panels' state.
+    left: Sidebar,
+    right: Sidebar,
+    panels: Panels,
+    /// Sidebar/content splits: the left sidebar is the first panel of `left_split`,
+    /// the right one the last of `right_split` (inside it).
+    left_split: Entity<ResizableState>,
+    right_split: Entity<ResizableState>,
     /// The tabs' connections by user id; tabs point to the same entities.
     conns: HashMap<String, Entity<Connection>>,
     /// Every open connection and what it is for (tabs, scheduled runs, files).
@@ -151,6 +160,7 @@ impl Workspace {
     pub fn new(
         engine: EngineHandle,
         events: async_channel::Receiver<Event>,
+        data: Data,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -173,7 +183,6 @@ impl Workspace {
             }
         });
 
-        let data = Data::open();
         if let Err(e) = data.local.fill_missing_fingerprints(fingerprint) {
             eprintln!("could not fingerprint bookmarks: {e:#}");
         }
@@ -201,28 +210,22 @@ impl Workspace {
         let schema_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let redraw = |this: &mut Self, _, ev: &InputEvent, cx: &mut Context<Self>| {
             if matches!(ev, InputEvent::Change) {
-                this.sidebar.schema.revealed = None;
+                this.panels.schema.revealed = None;
                 cx.notify();
             }
         };
         let bookmark_sub = cx.subscribe(&bookmark_search, redraw);
         let schema_sub = cx.subscribe(&schema_search, redraw);
-        let sidebar_width = data
-            .local
-            .setting(SIDEBAR_WIDTH_SETTING)
-            .and_then(|w| w.parse::<f32>().ok())
-            .unwrap_or(SIDEBAR_WIDTH)
-            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        let left = Sidebar::new(Panel::LEFT, SIDEBAR_WIDTH_SETTING, &data.local);
+        let right = Sidebar::new(Panel::RIGHT, RIGHT_SIDEBAR_WIDTH_SETTING, &data.local);
         let mut this = Self {
             engine,
             data,
             assist: Rc::new(RefCell::new(HashMap::new())),
             usage: HashMap::new(),
-            sidebar: Sidebar {
-                open: true,
-                view: SidebarView::Schema,
-                width: sidebar_width,
-                layout: cx.new(|_| ResizableState::default()),
+            left,
+            right,
+            panels: Panels {
                 schema: SchemaTree::new(schema_search),
                 bookmark_search,
                 history: HistoryList {
@@ -230,6 +233,8 @@ impl Workspace {
                     entries: Vec::new(),
                 },
             },
+            left_split: cx.new(|_| ResizableState::default()),
+            right_split: cx.new(|_| ResizableState::default()),
             conns: HashMap::new(),
             connections: Connections::default(),
             active_db: None,
@@ -307,6 +312,53 @@ impl Drop for Workspace {
     }
 }
 
+impl Workspace {
+    /// `content` with the open sidebars beside it, each resizable. The right split
+    /// sits inside the left one, so each keeps its width when the other opens or closes.
+    fn render_sidebars(&mut self, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let sidebar = |this: &mut Self, side: Side, cx: &mut Context<Self>| {
+            resizable_panel()
+                .size(px(this.sidebar(side).width))
+                .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
+                .flex_none()
+                .child(this.render_sidebar(side, cx))
+        };
+        let on_resize = |side: Side, cx: &mut Context<Self>| {
+            let this = cx.entity().downgrade();
+            move |state: &Entity<ResizableState>, _: &mut Window, cx: &mut App| {
+                let sizes = state.read(cx).sizes();
+                let width = match side {
+                    Side::Left => sizes.first(),
+                    Side::Right => sizes.last(),
+                };
+                if let Some(width) = width.copied() {
+                    let _ = this.update(cx, |ws, _| ws.save_sidebar_width(side, width.as_f32()));
+                }
+            }
+        };
+        let inner = if self.right.open {
+            h_resizable("right-split")
+                .with_state(&self.right_split)
+                .on_resize(on_resize(Side::Right, cx))
+                .child(resizable_panel().child(content))
+                .child(sidebar(self, Side::Right, cx))
+                .into_any_element()
+        } else {
+            content
+        };
+        if self.left.open {
+            h_resizable("layout")
+                .with_state(&self.left_split)
+                .on_resize(on_resize(Side::Left, cx))
+                .child(sidebar(self, Side::Left, cx))
+                .child(resizable_panel().child(inner))
+                .into_any_element()
+        } else {
+            inner
+        }
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.tabs.active().map(TabItem::view);
@@ -341,32 +393,7 @@ impl Render for Workspace {
                         Some(tab) => div().flex_1().min_h_0().child(tab).into_any_element(),
                         None => self.render_empty_state(cx),
                     });
-                let body = if self.sidebar.open {
-                    let this = cx.entity().downgrade();
-                    h_resizable("layout")
-                        .with_state(&self.sidebar.layout)
-                        .on_resize(move |state, _, cx| {
-                            let width = state.read(cx).sizes().first().copied();
-                            let _ = this.update(cx, |ws, _| {
-                                if let Some(width) = width {
-                                    ws.save_sidebar_width(width.as_f32());
-                                }
-                            });
-                        })
-                        .child(
-                            resizable_panel()
-                                .size(px(self.sidebar.width))
-                                .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
-                                .flex_none()
-                                .child(self.render_sidebar(cx)),
-                        )
-                        .child(resizable_panel().child(content))
-                        // The right dock comes after the content, sized the same way:
-                        // the assistant panel (#37).
-                        .into_any_element()
-                } else {
-                    content.into_any_element()
-                };
+                let body = self.render_sidebars(content.into_any_element(), cx);
                 div().flex_1().min_h_0().child(body)
             })
             .child(self.render_status_bar(cx))

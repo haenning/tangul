@@ -19,7 +19,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks
 - `crates/app`: the GPUI app
-  - `workspace/`: layout and wiring; `tabs.rs`: the kinds of tab (`TabItem`: query,
+  - `workspace/`: layout and wiring; `sidebar.rs`: the sidebars left and right of the
+    content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state; `tabs.rs`: the kinds of tab (`TabItem`: query,
     file; boards later) and the open ones
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
@@ -101,6 +102,10 @@ explicit OK, and keep them covered by tests.
 
 - `make run-dev`: dev databases (Docker) plus the app with dev-only profiles
 - `make test`, `make test-live` (against the dev databases)
+- UI tests (`crates/app/src/workspace/ui_tests.rs`): the real workspace in a headless
+  window, driven by clicks and keys via gpui-kit's harness (`test-support`), with
+  `Data::in_memory()` and `tangul_engine::detached()`. Give elements you want to find
+  an id and `.test_support()` (a no-op outside tests)
 - `make lint` before committing: rustfmt, clippy with warnings as errors, cargo-deny,
   cargo-machete
 

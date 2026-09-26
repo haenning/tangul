@@ -113,21 +113,20 @@ pub(super) fn palette_pills(workspace: &WeakEntity<Workspace>, cx: &App) -> AnyE
         return div().into_any_element();
     };
     let ws = ws.read(cx);
-    let (open, current) = (ws.sidebar.open, ws.sidebar.view);
     let theme = cx.theme();
     h_flex()
         .px_3()
         .pt_2()
         .gap_1()
         .items_center()
-        .children(SidebarView::ALL.map(|view| {
+        .children(ws.left.panels.iter().map(|&view| {
             let workspace = workspace.clone();
             Button::new(("palette-panel", view as usize))
                 .icon(Icon::new(view.icon()))
                 .label(view.label())
                 .xsmall()
                 .ghost()
-                .selected(open && view == current)
+                .selected(ws.left.shows(view))
                 .on_click(move |_, window, cx| {
                     let _ = workspace.update(cx, |ws, cx| ws.show_panel(view, cx));
                     window.refresh();

@@ -131,6 +131,22 @@ impl Workspace {
     /// Zed-style bottom bar: sidebar panels, then (planned) AI and schema-graph
     /// tools; the active query's timing on the right.
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let buttons = |sidebar: &Sidebar, cx: &mut Context<Self>| {
+            sidebar
+                .panels
+                .iter()
+                .map(|&panel| {
+                    Button::new(("panel", panel as usize))
+                        .icon(Icon::new(panel.icon()))
+                        .ghost()
+                        .xsmall()
+                        .selected(sidebar.shows(panel))
+                        .tooltip(panel.label())
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(panel, cx)))
+                })
+                .collect::<Vec<_>>()
+        };
+        let (left, right) = (buttons(&self.left, cx), buttons(&self.right, cx));
         let theme = cx.theme();
         // File tabs (settings) have no results to time or chart.
         let (query_text, running, chart) = self
@@ -150,16 +166,7 @@ impl Workspace {
             chart_button(tab, data, shown, theme.chart_1, theme.muted_foreground)
         });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
-        let panels = SidebarView::ALL.map(|view| {
-            let active = self.sidebar.open && self.sidebar.view == view;
-            Button::new(("panel", view as usize))
-                .icon(Icon::new(view.icon()))
-                .ghost()
-                .xsmall()
-                .selected(active)
-                .tooltip(view.label())
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(view, cx)))
-        });
+
         let planned = |id: &'static str, icon: Lucide, tooltip: &'static str| {
             Button::new(id)
                 .icon(Icon::new(icon))
@@ -178,7 +185,7 @@ impl Workspace {
             .bg(theme.title_bar)
             .text_xs()
             .text_color(theme.muted_foreground)
-            .children(panels)
+            .children(left)
             .child(separator())
             .child(planned("ai-agent", Lucide::Bot, "Agent via ACP — planned"))
             .child(planned(
@@ -196,6 +203,7 @@ impl Workspace {
             .when(running, |this| this.child(Spinner::new().xsmall()))
             .child(div().pr_1().child(query_text))
             .children(chart_button)
+            .children(right)
             .child(div().w_1())
     }
 

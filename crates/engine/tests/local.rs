@@ -228,3 +228,11 @@ async fn assistant_writes_wait_for_approval_and_are_audited() {
     assert!(audit[1].error.as_deref().unwrap().contains("readonly"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_detached_handle_drops_commands_and_sends_no_events() {
+    let (engine, events) = tangul_engine::detached();
+    engine.send(Command::Cancel { query: QueryId(1) });
+    assert!(events.is_closed());
+    assert!(events.try_recv().is_err());
+}
