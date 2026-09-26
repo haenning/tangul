@@ -429,8 +429,21 @@ impl Engine {
                 cfg,
                 ssh,
             } => {
+                let Some(driver) = driver_for(driver) else {
+                    send(
+                        &self.events,
+                        Event::ConnectFailed {
+                            conn,
+                            error: format!(
+                                "this build of tangul has no {} support",
+                                driver.label()
+                            ),
+                        },
+                    );
+                    return;
+                };
                 let tunnel = ssh.map(|ssh| Tunnel::new(ssh, cfg.host.clone(), cfg.port));
-                let pool = Arc::new(Pool::new(driver_for(driver), cfg, tunnel, MAX_CONNECTIONS));
+                let pool = Arc::new(Pool::new(driver, cfg, tunnel, MAX_CONNECTIONS));
                 if let Some(old) = self.pools.insert(conn, pool.clone()) {
                     close_all(old.take_all(), None);
                 }
