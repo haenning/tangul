@@ -71,7 +71,8 @@ impl Workspace {
                 tab.update(cx, |t, _| t.title = title.clone());
             }
         }
-        if let Err(e) = self.data.local.upsert_bookmark(&bookmark) {
+        let fingerprint = fingerprint(&bookmark.sql);
+        if let Err(e) = self.data.local.upsert_bookmark(&bookmark, &fingerprint) {
             window.push_notification(
                 Notification::error(format!("Could not save bookmark: {e:#}")),
                 cx,

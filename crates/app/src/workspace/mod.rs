@@ -279,6 +279,9 @@ impl Workspace {
         });
 
         let data = Data::open();
+        if let Err(e) = data.local.fill_missing_fingerprints(fingerprint) {
+            eprintln!("could not fingerprint bookmarks: {e:#}");
+        }
         data.metrics
             .prune(&settings::current(cx).monitoring, now_ms());
         let monitor_tick = cx.spawn(async move |this, cx| {

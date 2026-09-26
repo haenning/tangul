@@ -7,7 +7,10 @@ impl Workspace {
         if let Some(u) = self.usage.get(db_id) {
             return u.clone();
         }
-        let u = Arc::new(self.data.local.usage(db_id, now_ms() / 1000));
+        let u = Arc::new(Usage::from_stats(
+            now_ms() / 1000,
+            self.data.local.usage(db_id),
+        ));
         self.usage.insert(db_id.to_string(), u.clone());
         u
     }

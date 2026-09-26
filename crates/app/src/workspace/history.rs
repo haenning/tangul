@@ -72,7 +72,7 @@ impl Workspace {
                 if let Err(e) = self.data.local.record_usage(&db_id, &learned, now) {
                     eprintln!("could not record usage: {e:#}");
                 }
-                let usage = Arc::new(self.data.local.usage(&db_id, now));
+                let usage = Arc::new(Usage::from_stats(now, self.data.local.usage(&db_id)));
                 self.usage.insert(db_id.clone(), usage.clone());
                 // Related rows (foreign keys, most used first) and UPDATE / DELETE
                 // statements in the result's context menu.

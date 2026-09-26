@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension as _, params};
-use tangul_assist::suggest::HistoryPattern;
+use tangul_core::usage::HistoryPattern;
 
 use super::{HistoryEntry, Local, NewHistory};
 
@@ -120,13 +120,15 @@ impl Local {
 mod tests {
     use super::*;
 
-    fn run(local: &Local, sql: &str, at: i64, error: Option<&str>) {
+    /// `fingerprint` stands in for the real one (the same for queries that differ
+    /// only in values).
+    fn run(local: &Local, sql: &str, fingerprint: &str, at: i64, error: Option<&str>) {
         local
             .add_history(&NewHistory {
                 database_id: "db",
                 user_id: "u",
                 sql,
-                fingerprint: &tangul_assist::lexer::fingerprint(sql),
+                fingerprint,
                 entry: HistoryEntry {
                     sql: sql.into(),
                     started_at: at,
@@ -141,23 +143,17 @@ mod tests {
     #[test]
     fn history_patterns_and_search() {
         let l = Local::in_memory();
-        run(&l, "select * from t where id = 1", 1, None);
-        run(&l, "select * from t where id = 2", 2, None);
-        run(&l, "select 100%", 3, None);
-        run(&l, "select broken", 4, Some("boom"));
+        run(&l, "select * from t where id = 1", "t by id", 1, None);
+        run(&l, "select * from t where id = 2", "t by id", 2, None);
+        run(&l, "select 100%", "percent", 3, None);
+        run(&l, "select broken", "broken", 4, Some("boom"));
         let p = l.patterns("db", 10);
         assert_eq!(
             (p[0].sql.as_str(), p[0].runs),
             ("select * from t where id = 2", 2)
         );
         assert_eq!(p.len(), 2);
-        assert_eq!(
-            l.runs(
-                "db",
-                &tangul_assist::lexer::fingerprint("select * from t where id = 9")
-            ),
-            2
-        );
+        assert_eq!(l.runs("db", "t by id"), 2);
         assert_eq!(l.history("db", "", 10)[0].error.as_deref(), Some("boom"));
         assert_eq!(l.last_user("db").as_deref(), Some("u"));
         assert_eq!(l.last_user("other"), None);

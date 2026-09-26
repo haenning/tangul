@@ -12,13 +12,7 @@ pub struct QuerySuggestion {
     pub learned: bool,
 }
 
-/// A distinct query (by fingerprint) from history.
-#[derive(Debug, Clone)]
-pub struct HistoryPattern {
-    /// The most recent run of it.
-    pub sql: String,
-    pub runs: u32,
-}
+pub use tangul_core::usage::HistoryPattern;
 
 const MAX_LEARNED: usize = 5;
 
