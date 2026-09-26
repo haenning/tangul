@@ -5,14 +5,14 @@ use super::*;
 impl Workspace {
     pub(super) fn refresh_history(&mut self, cx: &mut Context<Self>) {
         let search = self
-            .sidebar
+            .panels
             .history
             .search
             .read(cx)
             .value()
             .trim()
             .to_string();
-        self.sidebar.history.entries = match &self.active_db {
+        self.panels.history.entries = match &self.active_db {
             Some(db) => self.data.local.history(db, &search, HISTORY_LIMIT),
             None => Vec::new(),
         };
@@ -119,13 +119,13 @@ impl Workspace {
 
     pub(super) fn render_history_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let entries = self.sidebar.history.entries.clone();
+        let entries = self.panels.history.entries.clone();
         let count = entries.len();
         let empty: Option<&str> = if self.active_db.is_none() {
             Some("Select a database to see its history.")
         } else if count == 0
             && self
-                .sidebar
+                .panels
                 .history
                 .search
                 .read(cx)
@@ -155,7 +155,7 @@ impl Workspace {
                 div()
                     .px_2()
                     .pb_2()
-                    .child(Input::new(&self.sidebar.history.search).small()),
+                    .child(Input::new(&self.panels.history.search).small()),
             )
             .children(empty.map(|text| {
                 div()

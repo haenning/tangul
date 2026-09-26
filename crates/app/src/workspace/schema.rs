@@ -81,7 +81,7 @@ impl Workspace {
         }
         let mut rows = Vec::new();
         let favorites: Vec<SidebarRow> = self
-            .sidebar
+            .panels
             .schema
             .favorites
             .iter()
@@ -111,7 +111,7 @@ impl Workspace {
         for tables in schemas {
             let schema: SharedString = tables[0].schema.clone().into();
             let expanded = self
-                .sidebar
+                .panels
                 .schema
                 .open_schemas
                 .get(&(user_id.clone(), schema.clone()))
@@ -131,7 +131,7 @@ impl Workspace {
                     continue;
                 }
                 let expanded = self
-                    .sidebar
+                    .panels
                     .schema
                     .open_groups
                     .get(&(user_id.clone(), schema.clone(), kind))
@@ -234,29 +234,29 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(user_id) = self.active_user.clone() {
-            self.sidebar
+            self.panels
                 .schema
                 .open_schemas
                 .insert((user_id.clone(), schema.clone()), true);
             if let Some(t) = table {
-                self.sidebar
+                self.panels
                     .schema
                     .open_groups
                     .insert((user_id, schema.clone(), t.kind), true);
             }
         }
         let target = (schema, table.map(|t| t.name.clone()));
-        self.sidebar.schema.reveal = Some(target.clone());
-        self.sidebar
+        self.panels.schema.reveal = Some(target.clone());
+        self.panels
             .schema
             .search
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.sidebar.schema.revealed = Some(target);
+        self.panels.schema.revealed = Some(target);
         cx.notify();
     }
 
     pub(super) fn is_favorite(&self, table: &TableInfo) -> bool {
-        self.sidebar
+        self.panels
             .schema
             .favorites
             .iter()
@@ -360,7 +360,7 @@ impl Workspace {
             })
         };
 
-        let row_kind = self.sidebar.schema.rows[ix].clone();
+        let row_kind = self.panels.schema.rows[ix].clone();
         let in_favorites = matches!(row_kind, SidebarRow::Favorite { .. });
         match row_kind {
             SidebarRow::Schema { schema, expanded } => {
@@ -369,13 +369,13 @@ impl Workspace {
                     Namespace::Schema => folder(expanded),
                 };
                 let key = (user_id, schema.clone());
-                let revealed = self.sidebar.schema.revealed == Some((schema.clone(), None));
+                let revealed = self.panels.schema.revealed == Some((schema.clone(), None));
                 row(0)
                     .when(revealed, |r| r.bg(theme.sidebar_accent))
                     .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(schema))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.sidebar
+                        this.panels
                             .schema
                             .open_schemas
                             .insert(key.clone(), !expanded);
@@ -404,7 +404,7 @@ impl Workspace {
                             .child(count.to_string()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.sidebar
+                        this.panels
                             .schema
                             .open_groups
                             .insert(key.clone(), !expanded);
@@ -434,7 +434,7 @@ impl Workspace {
                         suggestions_menu(menu, &menu_table.name, list, &weak)
                     });
                 let revealed = !in_favorites
-                    && self.sidebar.schema.revealed.as_ref().is_some_and(|(s, t)| {
+                    && self.panels.schema.revealed.as_ref().is_some_and(|(s, t)| {
                         *s == table.schema && t.as_ref() == Some(&table.name)
                     });
                 let favorite = self.favorite_button(ix, &table, group.clone(), cx);
@@ -637,21 +637,21 @@ impl Workspace {
 
     pub(super) fn render_schema_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let search = self
-            .sidebar
+            .panels
             .schema
             .search
             .read(cx)
             .value()
             .trim()
             .to_string();
-        self.sidebar.schema.favorites = self
+        self.panels.schema.favorites = self
             .active_db
             .as_deref()
             .map(|db| self.data.local.favorites(db))
             .unwrap_or_default();
-        self.sidebar.schema.rows = self.build_sidebar_rows(&search, cx);
-        if let Some((schema, table)) = self.sidebar.schema.reveal.take() {
-            let target = self.sidebar.schema.rows.iter().position(|row| match row {
+        self.panels.schema.rows = self.build_sidebar_rows(&search, cx);
+        if let Some((schema, table)) = self.panels.schema.reveal.take() {
+            let target = self.panels.schema.rows.iter().position(|row| match row {
                 SidebarRow::Table { table: t } => {
                     table.as_ref() == Some(&t.name) && t.schema == schema.as_ref()
                 }
@@ -659,7 +659,7 @@ impl Workspace {
                 _ => false,
             });
             if let Some(ix) = target {
-                self.sidebar
+                self.panels
                     .schema
                     .scroll
                     .scroll_to_item(ix, ScrollStrategy::Center);
@@ -668,10 +668,10 @@ impl Workspace {
         let has_schema = self
             .active_conn(cx)
             .is_some_and(|c| !c.schema.tables().is_empty());
-        let no_hits = !search.is_empty() && self.sidebar.schema.rows.is_empty();
+        let no_hits = !search.is_empty() && self.panels.schema.rows.is_empty();
         let empty = self.render_sidebar_empty(cx);
         let theme = cx.theme();
-        let count = self.sidebar.schema.rows.len();
+        let count = self.panels.schema.rows.len();
         let heading = match self.namespace() {
             Namespace::Database => "DATABASES",
             Namespace::Schema => "SCHEMAS",
@@ -708,7 +708,7 @@ impl Workspace {
             .when(has_schema, |this| {
                 this.child(
                     div().px_2().pb_2().child(
-                        Input::new(&self.sidebar.schema.search)
+                        Input::new(&self.panels.schema.search)
                             .small()
                             .cleanable(true),
                     ),
@@ -735,7 +735,7 @@ impl Workspace {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .track_scroll(&self.sidebar.schema.scroll)
+                .track_scroll(&self.panels.schema.scroll)
                 .px_1()
                 .flex_1(),
             )

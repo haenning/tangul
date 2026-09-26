@@ -96,6 +96,14 @@ pub fn start() -> (EngineHandle, async_channel::Receiver<Event>) {
     start_with(EngineConfig::from_config_dir())
 }
 
+/// A handle to no engine: commands are dropped and no event ever arrives. For UI
+/// tests, whose deterministic scheduler must not be woken from another thread.
+pub fn detached() -> (EngineHandle, async_channel::Receiver<Event>) {
+    let (tx, _) = mpsc::unbounded_channel();
+    let (_, events_rx) = async_channel::unbounded();
+    (EngineHandle { tx }, events_rx)
+}
+
 /// Starts the engine thread. Events arrive on the returned receiver, which can be
 /// awaited from any executor (the UI uses GPUI's).
 pub fn start_with(config: EngineConfig) -> (EngineHandle, async_channel::Receiver<Event>) {

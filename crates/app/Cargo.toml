@@ -16,5 +16,9 @@ tangul-data = { version = "0.1.0", path = "../data" }
 tangul-engine = { version = "0.1.0", path = "../engine" }
 tangul-service = { version = "0.1.0", path = "../service" }
 
+[dev-dependencies]
+# UI tests: headless windows driven by clicks and keys (see workspace/ui_tests.rs).
+gpui-kit = { version = "=0.6.6", features = ["tree-sitter-sql", "test-support"] }
+
 [lints]
 workspace = true

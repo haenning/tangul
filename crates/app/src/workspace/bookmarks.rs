@@ -126,7 +126,7 @@ impl Workspace {
     pub(super) fn render_bookmarks_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let search = self
-            .sidebar
+            .panels
             .bookmark_search
             .read(cx)
             .value()
@@ -163,7 +163,7 @@ impl Workspace {
             .when(total > 0, |this| {
                 this.child(
                     div().px_2().pb_2().child(
-                        Input::new(&self.sidebar.bookmark_search)
+                        Input::new(&self.panels.bookmark_search)
                             .small()
                             .cleanable(true),
                     ),

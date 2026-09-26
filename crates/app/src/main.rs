@@ -55,28 +55,33 @@ fn main() {
         Theme::change(ThemeMode::Dark, None, cx);
         settings::init(cx);
 
-        cx.bind_keys([
-            // Must win over the editor's own `secondary-enter` (newline), hence the
-            // same depth ("Input") and registration after gpui_kit::init.
-            KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
-            KeyBinding::new("secondary-shift-enter", RunAll, Some("QueryEditor > Input")),
-            KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
-            KeyBinding::new("secondary-s", SaveFile, Some("QueryEditor > Input")),
-            KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
-            KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
-            KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
-            KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
-            KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
-            // In the command palette: switch the sidebar panel.
-            KeyBinding::new("tab", NextSidebarPanel, Some("Palette")),
-            KeyBinding::new("shift-tab", PrevSidebarPanel, Some("Palette")),
-            KeyBinding::new("secondary-q", Quit, None),
-        ]);
+        bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
         open_main_window(engine, events, cx);
         cx.activate(true);
     });
+}
+
+/// The app's key bindings (also used by the UI tests).
+fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        // Must win over the editor's own `secondary-enter` (newline), hence the
+        // same depth ("Input") and registration after gpui_kit::init.
+        KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
+        KeyBinding::new("secondary-shift-enter", RunAll, Some("QueryEditor > Input")),
+        KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
+        KeyBinding::new("secondary-s", SaveFile, Some("QueryEditor > Input")),
+        KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
+        KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
+        KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
+        KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
+        KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
+        // In the command palette: switch the sidebar panel.
+        KeyBinding::new("tab", NextSidebarPanel, Some("Palette")),
+        KeyBinding::new("shift-tab", PrevSidebarPanel, Some("Palette")),
+        KeyBinding::new("secondary-q", Quit, None),
+    ]);
 }
 
 /// Opens the workspace window. Only one exists at a time: the engine's event stream
@@ -102,7 +107,9 @@ fn open_main_window(
     };
     cx.spawn(async move |cx| {
         cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| workspace::Workspace::new(engine, events, window, cx));
+            let view = cx.new(|cx| {
+                workspace::Workspace::new(engine, events, tangul_data::Data::open(), window, cx)
+            });
             cx.new(|cx| Root::new(view, window, cx))
         })
         .expect("failed to open window");
