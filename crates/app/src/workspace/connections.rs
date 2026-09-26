@@ -110,7 +110,7 @@ impl Workspace {
             return;
         };
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            if tab.read(cx).is_running() {
+            if tab.read(cx).is_running(cx) {
                 return;
             }
             tab.update(cx, |t, cx| t.set_conn(conn, cx));

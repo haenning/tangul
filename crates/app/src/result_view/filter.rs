@@ -1,5 +1,5 @@
 //! The filter and sort popover of a result column (the funnel in its header). One
-//! panel per tab, filled for the column it is opened on. What it offers depends on
+//! panel per result, filled for the column it is opened on. What it offers depends on
 //! the column's kind: comparisons and ranges for numbers, text matching for text,
 //! true / false for booleans, and a from / to range with a calendar for dates.
 
@@ -16,10 +16,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_assist::refine::{ColumnFilter, ColumnKind, FilterOp, Sort};
 
-use crate::query_tab::QueryTab;
+use super::ResultView;
 
 pub struct FilterPanel {
-    tab: WeakEntity<QueryTab>,
+    view: WeakEntity<ResultView>,
     column: usize,
     name: SharedString,
     kind: ColumnKind,
@@ -40,7 +40,7 @@ pub struct FilterPanel {
 }
 
 impl FilterPanel {
-    pub fn new(tab: WeakEntity<QueryTab>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(view: WeakEntity<ResultView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let value = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
         let to = cx.new(|cx| InputState::new(window, cx).placeholder("To"));
         let calendar = cx.new(|cx| CalendarState::new(window, cx));
@@ -65,7 +65,7 @@ impl FilterPanel {
             }),
         ];
         Self {
-            tab,
+            view,
             column: 0,
             name: SharedString::default(),
             kind: ColumnKind::Text,
@@ -133,15 +133,15 @@ impl FilterPanel {
             })
         };
         let _ = self
-            .tab
-            .update(cx, |tab, cx| tab.set_filter(column, filter, cx));
+            .view
+            .update(cx, |view, cx| view.set_filter(column, filter, cx));
     }
 
     fn clear(&mut self, cx: &mut Context<Self>) {
         let column = self.column;
         let _ = self
-            .tab
-            .update(cx, |tab, cx| tab.set_filter(column, None, cx));
+            .view
+            .update(cx, |view, cx| view.set_filter(column, None, cx));
     }
 
     /// Sorts by this column; picking the current direction again removes the sort.
@@ -150,7 +150,7 @@ impl FilterPanel {
             column: self.column,
             descending,
         });
-        let _ = self.tab.update(cx, |tab, cx| tab.set_sort(sort, cx));
+        let _ = self.view.update(cx, |view, cx| view.set_sort(sort, cx));
     }
 
     fn op_button(&self, op: FilterOp, cx: &mut Context<Self>) -> Button {

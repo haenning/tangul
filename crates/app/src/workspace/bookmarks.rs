@@ -21,7 +21,7 @@ impl Workspace {
         };
         let db_id = self.active_db.clone();
         // From a tab: the bookmark shows its result the way the tab does now.
-        let view = tab.as_ref().map(|t| t.read(cx).chart_shown());
+        let view = tab.as_ref().map(|t| t.read(cx).chart_shown(cx));
         let form = cx.new(|cx| BookmarkForm::new(existing.as_ref(), sql, db_id, view, window, cx));
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {

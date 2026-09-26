@@ -137,10 +137,10 @@ impl Workspace {
             .get(self.active_tab)
             .map(|tab| {
                 let t = tab.read(cx);
-                let chart = (t.chart(), t.chart_shown());
+                let chart = (t.chart(cx), t.chart_shown(cx));
                 (
                     t.status_text(cx),
-                    t.is_running(),
+                    t.is_running(cx),
                     // File tabs (settings) have no results to chart.
                     t.file_path().is_none().then(|| (tab.clone(), chart)),
                 )
