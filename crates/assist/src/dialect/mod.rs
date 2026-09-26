@@ -12,6 +12,8 @@ mod sqlite;
 
 use tangul_core::DriverKind;
 
+use crate::lexer::Lexing;
+
 /// The dialect of a database.
 pub fn dialect_for(kind: DriverKind) -> &'static dyn Dialect {
     match kind {
@@ -68,6 +70,12 @@ pub trait Dialect: Sync {
 
     /// Clauses and operators the editor offers beyond standard SQL.
     fn syntax(&self) -> Syntax;
+
+    /// Comments, quoting and terminators the database's lexer knows beyond the
+    /// common ones.
+    fn lexing(&self) -> Lexing {
+        Lexing::default()
+    }
 
     /// Functions a `SELECT` can call that change something (sessions, files,
     /// sequences, settings, other servers) or read files. Lower case; the guard

@@ -1,5 +1,7 @@
 use tangul_core::DriverKind;
 
+use crate::lexer::Lexing;
+
 use super::{Dialect, Namespace, Syntax, Upsert};
 
 pub(super) struct Mysql;
@@ -100,6 +102,17 @@ impl Dialect for Mysql {
             insert_set: true,
             update_from: false,
             delete_using: false,
+        }
+    }
+
+    /// `DELIMITER` is a client command (the `mysql` shell's), used in scripts that
+    /// create procedures and triggers.
+    fn lexing(&self) -> Lexing {
+        Lexing {
+            hash_comments: true,
+            nested_comments: false,
+            dollar_quotes: false,
+            delimiter_command: true,
         }
     }
 
