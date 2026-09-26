@@ -151,7 +151,7 @@ impl Workspace {
         });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
         let panels = SidebarView::ALL.map(|view| {
-            let active = self.sidebar_open && self.sidebar_view == view;
+            let active = self.sidebar.open && self.sidebar.view == view;
             Button::new(("panel", view as usize))
                 .icon(Icon::new(view.icon()))
                 .ghost()

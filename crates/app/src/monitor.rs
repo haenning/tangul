@@ -36,18 +36,20 @@ impl Pending {
 pub struct Monitor {
     pub pending: Option<Pending>,
     last_input: Instant,
-}
-
-impl Default for Monitor {
-    fn default() -> Self {
-        Self {
-            pending: None,
-            last_input: Instant::now(),
-        }
-    }
+    /// Checks every [`TICK`] for a due bookmark; dropped with the monitor.
+    _tick: Task<()>,
 }
 
 impl Monitor {
+    /// `tick` is the task that checks for due bookmarks every [`TICK`].
+    pub fn new(tick: Task<()>) -> Self {
+        Self {
+            pending: None,
+            last_input: Instant::now(),
+            _tick: tick,
+        }
+    }
+
     /// The user did something; scheduled runs wait until it's quiet again.
     pub fn touch(&mut self) {
         self.last_input = Instant::now();
@@ -82,7 +84,7 @@ mod tests {
 
     #[test]
     fn not_quiet_right_after_start() {
-        let m = Monitor::default();
+        let m = Monitor::new(Task::ready(()));
         assert!(!m.is_quiet());
         assert!(!m.stuck(None));
     }

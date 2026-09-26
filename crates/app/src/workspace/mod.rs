@@ -18,6 +18,8 @@ mod schema;
 mod sidebar;
 mod tabs;
 
+use sidebar::{HistoryList, SchemaTree, Sidebar, SidebarRow, SidebarView};
+
 // Shared by the status bar and the bookmarks panel.
 use bars::style_icon;
 
@@ -107,83 +109,10 @@ const BOOKMARK_HINT_RUNS: u32 = 3;
 const LAST_USER_SETTING: &str = "last_user";
 const SIDEBAR_WIDTH_SETTING: &str = "sidebar_width";
 
-#[derive(Clone, Copy, PartialEq)]
-enum SidebarView {
-    Schema,
-    Bookmarks,
-    History,
-}
-
-impl SidebarView {
-    const ALL: [SidebarView; 3] = [
-        SidebarView::Schema,
-        SidebarView::Bookmarks,
-        SidebarView::History,
-    ];
-
-    /// The panel `step` places after this one, wrapping around.
-    fn cycle(self, step: isize) -> Self {
-        let n = Self::ALL.len() as isize;
-        Self::ALL[(self as isize + step).rem_euclid(n) as usize]
-    }
-
-    fn icon(self) -> Lucide {
-        match self {
-            SidebarView::Schema => Lucide::ListTree,
-            SidebarView::Bookmarks => Lucide::Bookmark,
-            SidebarView::History => Lucide::RotateCcwClock,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            SidebarView::Schema => "Schema",
-            SidebarView::Bookmarks => "Bookmarks",
-            SidebarView::History => "History",
-        }
-    }
-}
-
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
-}
-
-/// Flattened sidebar entry of the active connection (schema → tables/views), so the
-/// tree renders through a virtualized list.
-#[derive(Clone)]
-enum SidebarRow {
-    Schema {
-        schema: SharedString,
-        expanded: bool,
-    },
-    Group {
-        schema: SharedString,
-        kind: TableKind,
-        count: usize,
-        expanded: bool,
-    },
-    Table {
-        table: TableInfo,
-    },
-    /// Above the tree: a favorite table or view.
-    Favorite {
-        table: TableInfo,
-    },
-    /// While searching: a group title, then the hits.
-    Heading(SharedString),
-    SchemaHit {
-        schema: SharedString,
-    },
-    TableHit {
-        table: TableInfo,
-    },
-    ColumnHit {
-        table: TableInfo,
-        column: SharedString,
-        data_type: SharedString,
-    },
 }
 
 pub struct Workspace {
@@ -194,15 +123,8 @@ pub struct Workspace {
     assist: SharedAssist,
     /// Learned usage by database id.
     usage: HashMap<String, Arc<Usage>>,
-    history: Vec<HistoryEntry>,
-    history_search: Entity<InputState>,
-    bookmark_search: Entity<InputState>,
-    schema_search: Entity<InputState>,
-    sidebar_scroll: UniformListScrollHandle,
-    /// A search hit to show in the tree on the next render: schema, table.
-    reveal: Option<(SharedString, Option<String>)>,
-    /// The row last revealed, highlighted until the next search.
-    revealed: Option<(SharedString, Option<String>)>,
+    /// The left dock: its panels and their state.
+    sidebar: Sidebar,
     /// The tabs' connections by user id; tabs point to the same entities.
     conns: HashMap<String, Entity<Connection>>,
     /// Every open connection and what it is for (tabs, scheduled runs, files).
@@ -210,29 +132,15 @@ pub struct Workspace {
     /// Selected database and user; the sidebar shows this connection.
     active_db: Option<String>,
     active_user: Option<String>,
-    /// Schemas opened or closed by hand: (user id, schema) → open. Unset, the tree
-    /// opens until there is a choice: the only schema, a schema's only group.
-    schema_open: HashMap<(String, SharedString), bool>,
-    /// Groups opened or closed by hand: (user id, schema, kind) → open.
-    group_open: HashMap<(String, SharedString, TableKind), bool>,
-    sidebar_view: SidebarView,
-    sidebar_open: bool,
-    /// Sidebar/content split; the sidebar is the first panel.
-    layout: Entity<ResizableState>,
-    sidebar_width: f32,
     /// The main area's tabs.
     tabs: Tabs,
     /// Where the engine's answers to queries and checks go.
     router: QueryRouter,
-    sidebar_rows: Vec<SidebarRow>,
-    /// Favorite tables and views of the active database as (schema, name).
-    favorites: Vec<(String, String)>,
     /// Pending returns to read-only mode (`safety.relock_after`) by database user
     /// name; replaced to restart the wait, dropped to cancel it.
     relock: HashMap<String, Task<()>>,
     /// Scheduled bookmark runs on hidden connections.
     monitor: Monitor,
-    _monitor_tick: Task<()>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -292,7 +200,7 @@ impl Workspace {
         let schema_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let redraw = |this: &mut Self, _, ev: &InputEvent, cx: &mut Context<Self>| {
             if matches!(ev, InputEvent::Change) {
-                this.revealed = None;
+                this.sidebar.schema.revealed = None;
                 cx.notify();
             }
         };
@@ -309,30 +217,26 @@ impl Workspace {
             data,
             assist: Rc::new(RefCell::new(HashMap::new())),
             usage: HashMap::new(),
-            history: Vec::new(),
-            history_search,
-            bookmark_search,
-            schema_search,
-            sidebar_scroll: UniformListScrollHandle::new(),
-            reveal: None,
-            revealed: None,
+            sidebar: Sidebar {
+                open: true,
+                view: SidebarView::Schema,
+                width: sidebar_width,
+                layout: cx.new(|_| ResizableState::default()),
+                schema: SchemaTree::new(schema_search),
+                bookmark_search,
+                history: HistoryList {
+                    search: history_search,
+                    entries: Vec::new(),
+                },
+            },
             conns: HashMap::new(),
             connections: Connections::default(),
             active_db: None,
             active_user: None,
-            schema_open: HashMap::new(),
-            group_open: HashMap::new(),
-            sidebar_view: SidebarView::Schema,
-            sidebar_open: true,
-            layout: cx.new(|_| ResizableState::default()),
-            sidebar_width,
             tabs: Tabs::default(),
             router: QueryRouter::default(),
-            sidebar_rows: Vec::new(),
-            favorites: Vec::new(),
             relock: HashMap::new(),
-            monitor: Monitor::default(),
-            _monitor_tick: monitor_tick,
+            monitor: Monitor::new(monitor_tick),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
             _pump: pump,
@@ -436,10 +340,10 @@ impl Render for Workspace {
                         Some(tab) => div().flex_1().min_h_0().child(tab).into_any_element(),
                         None => self.render_empty_state(cx),
                     });
-                let body = if self.sidebar_open {
+                let body = if self.sidebar.open {
                     let this = cx.entity().downgrade();
                     h_resizable("layout")
-                        .with_state(&self.layout)
+                        .with_state(&self.sidebar.layout)
                         .on_resize(move |state, _, cx| {
                             let width = state.read(cx).sizes().first().copied();
                             let _ = this.update(cx, |ws, _| {
@@ -450,12 +354,14 @@ impl Render for Workspace {
                         })
                         .child(
                             resizable_panel()
-                                .size(px(self.sidebar_width))
+                                .size(px(self.sidebar.width))
                                 .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
                                 .flex_none()
                                 .child(self.render_sidebar(cx)),
                         )
                         .child(resizable_panel().child(content))
+                        // The right dock comes after the content, sized the same way:
+                        // the assistant panel (#37).
                         .into_any_element()
                 } else {
                     content.into_any_element()
