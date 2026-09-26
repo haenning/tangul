@@ -56,7 +56,8 @@ Run `make` to list all of them. The common ones:
 | `make test` | Unit tests |
 | `make test-live` | Integration tests against the dev databases |
 | `make lint` | rustfmt check, clippy (warnings as errors), cargo-deny, cargo-machete |
-| `make tools` | Installs cargo-deny and cargo-machete |
+| `make license` | Checks licenses (own crates AGPL-3.0-only, dependencies allowed by `deny.toml`) and regenerates `THIRD_PARTY_LICENSES.md`; commit it when it changes |
+| `make tools` | Installs cargo-deny, cargo-machete and cargo-about |
 | `make install` / `make dmg` | Build the macOS app (and DMG), see [INSTALL.md](INSTALL.md) |
 | `make ci` | Everything CI runs |
 
@@ -72,7 +73,8 @@ Work happens on `dev`; every push to `dev` opens (or updates) a pull request int
 (`.github/workflows/dev-pr.yml`, using a personal access token from the repository
 secret `DEV_PR_TOKEN`). CI (`.github/workflows/ci.yml`: lint, backend with live database
 tests on Linux, app build on macOS) is paused during heavy development and only runs
-when started by hand (Actions → CI → Run workflow).
+when started by hand (Actions → CI → Run workflow). Pull requests into `main` and
+releases run `make license-check` (`.github/workflows/licenses.yml`).
 
 ## Releases
 

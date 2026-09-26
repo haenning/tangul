@@ -3,6 +3,7 @@ name = "tangul-assist"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 tangul-core = { version = "0.1.0", path = "../core" }

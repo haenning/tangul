@@ -7,7 +7,7 @@ DEV_CONFIG := target/dev-config
 
 .DEFAULT_GOAL := help
 .PHONY: help setup tools docker-up db-up db-down db-reset db-logs psql mysql run run-release run-dev \
-        test test-live fmt lint ci app dmg install
+        test test-live fmt lint license license-check ci app dmg install
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -79,8 +79,9 @@ install: app ## Build the app and copy it to /Applications
 fmt: ## Format code
 	cargo fmt --all
 
-tools: ## Install the lint tools (cargo-deny, cargo-machete)
+tools: ## Install the lint and license tools (cargo-deny, cargo-machete, cargo-about)
 	cargo install --locked cargo-deny cargo-machete
+	cargo install --locked cargo-about --features cli
 
 lint: ## Format check, clippy (warnings are errors), cargo-deny, unused deps
 	cargo fmt --all --check
@@ -90,4 +91,19 @@ lint: ## Format check, clippy (warnings are errors), cargo-deny, unused deps
 	@command -v cargo-machete >/dev/null || { echo "missing cargo-machete: make tools"; exit 1; }
 	cargo machete
 
-ci: lint test test-live ## Everything CI runs
+license: ## Check licenses (own crates AGPL, deps allowed) and regenerate THIRD_PARTY_LICENSES.md
+	@head -n 1 LICENSE | grep -q 'GNU AFFERO GENERAL PUBLIC LICENSE' || { echo "LICENSE is not the AGPL-3.0 text"; exit 1; }
+	@cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; \
+		bad = [p["name"] for p in json.load(sys.stdin)["packages"] if p["license"] != "AGPL-3.0-only" or p["publish"] != []]; \
+		sys.exit("not AGPL-3.0-only with publish = false: " + ", ".join(bad) if bad else 0)'
+	@command -v cargo-deny >/dev/null || { echo "missing cargo-deny: make tools"; exit 1; }
+	cargo deny check licenses
+	@command -v cargo-about >/dev/null || { echo "missing cargo-about: make tools"; exit 1; }
+	cargo about generate -c packaging/licenses/about.toml packaging/licenses/about.hbs \
+		-o THIRD_PARTY_LICENSES.md
+
+license-check: license ## Same as license, fails if THIRD_PARTY_LICENSES.md was out of date (CI)
+	@git diff --quiet -- THIRD_PARTY_LICENSES.md && git ls-files --error-unmatch THIRD_PARTY_LICENSES.md >/dev/null 2>&1 || \
+		{ echo "THIRD_PARTY_LICENSES.md is out of date: run make license and commit it"; exit 1; }
+
+ci: lint license-check test test-live ## Everything CI runs
