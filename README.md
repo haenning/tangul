@@ -1,18 +1,16 @@
 # tangul
 
 **Ever wanted to detangul your data?**
-tangul is a native macOS viewer for PostgreSQL and MySQL, for anyone who wants to look at their data, understand it and dig into it. 
+
+Look at your data, understand it and find answers, on your own or with an AI that
+can't break anything. Safe to point at production.
+
+tangul is a native macOS app for PostgreSQL and MySQL. It starts instantly and stays
+out of your way.
 
 ![tangul](docs/screenshot.png)
 
-tangul starts instantly, stays out of your way and keeps your connections safe. It is
-written in Rust on [GPUI](https://www.gpui.rs), the UI framework behind the
-[Zed](https://zed.dev) editor. 
-tangul is inspired by Zed, but not affiliated with, endorsed by, or sponsored by Zed Industries.
-
 **[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)**
-
-
 
 ## See your data
 
@@ -30,8 +28,10 @@ tangul is inspired by Zed, but not affiliated with, endorsed by, or sponsored by
   with headers; the format pastes cleanly into spreadsheets.
 - **Schema at a glance.** Browse tables and views in the sidebar, click one to query it,
   and get query suggestions for it based on what you ran before.
+- **Favorites.** Star the tables and views you use most; they stay on top of the
+  sidebar for that database.
 
-## Ask better questions
+## Find answers faster
 
 - **An editor that knows your schema.** Completion for tables, columns in scope and join
   conditions (from foreign keys and from joins you wrote before), ranked by what you
@@ -41,16 +41,38 @@ tangul is inspired by Zed, but not affiliated with, endorsed by, or sponsored by
 - **History and bookmarks.** Every run is kept locally and searchable. Queries you
   repeat get a hint to bookmark them, and a bookmarked query shows its name when it
   runs.
+- **Watch a query over time.** Schedule a bookmarked query (every 5 minutes up to once
+  a day) and tangul runs it quietly in the background, read-only, and charts how long
+  it took and how many rows it returned.
 - **Command palette** (⌘⇧P) for bookmarks, history and settings.
 
-## Safe by default
+## Investigate with AI (in development)
+
+Not built yet; follow along in [#37](https://github.com/haenning/tangul/issues/37).
+
+- **Ask in plain language.** The AI writes the SQL, runs it, follows your foreign keys
+  and explains what it finds.
+- **It can only read.** Its queries run in a read-only transaction that is always
+  rolled back, so nothing it runs can change your data.
+- **You approve every change.** Anything that would change data stops and waits for
+  your click, exactly as written. The AI can't approve itself.
+- **Coming soon: its own database account** that can only read
+  ([#95](https://github.com/haenning/tangul/issues/95)).
+- **You can see what it ran.** Every AI query is logged locally.
+
+## Safe on production
 
 - **Read-only mode per user.** Mark a login as read-only and the server session itself
   refuses writes, so a stray `UPDATE` can't get through even if the app's own checks
   miss it.
-- **A second look before damage.** In read-only mode, statements that change data or
-  schema stop and ask first. An `UPDATE` or `DELETE` without a `WHERE` asks too (on by
-  default, in the settings).
+- **A second look before damage.** In read-only mode, a statement that changes data or
+  schema never runs. tangul stops, shows it, and lets you switch read-only mode off;
+  you then run it again as a separate step. An `UPDATE` or `DELETE` without a `WHERE`
+  asks first too (on by default, in the settings).
+- **Back to safe on its own.** Read-only mode can switch itself back on a while after
+  your last change (`relock_after`, e.g. `"5m"`).
+- **A time limit for every query.** Every statement stops after 60 seconds by default
+  (`max_query_time`), enforced by the server and by tangul.
 - **Nothing runs behind your back.** UPDATE and DELETE statements generated from
   selected rows open in a new tab, keyed by primary key, and wait for you to run them.
   Without a primary key the statement says so in a comment at the top.
@@ -60,8 +82,9 @@ tangul is inspired by Zed, but not affiliated with, endorsed by, or sponsored by
   password. Unknown host keys show their fingerprint and ask; a changed key is refused.
 - **TLS** for connections that need it (`prefer` / `require`). Certificate verification
   is on the roadmap.
-- **Local and private.** No account and no telemetry. Profiles, history and bookmarks
-  stay on your Mac. tangul only talks to your databases.
+- **Local and private.** No account, no telemetry. Profiles, history and bookmarks stay
+  on your Mac. AI is opt-in, and it only sends what you ask about to the model you
+  choose.
 
 ## Light and fast
 
@@ -74,7 +97,7 @@ tangul is inspired by Zed, but not affiliated with, endorsed by, or sponsored by
 - **Sensible limits.** Results stream in batches and stop at 10,000 rows, so an
   accidental `SELECT *` on a huge table doesn't swamp your Mac.
 
-## Purpose built for explorers
+## An explorer, not an admin tool
 
 tangul shows you what is in your database. It does not design it.
 
@@ -101,9 +124,15 @@ to point at production.
 ## Status
 
 tangul is young and under active development. It runs on macOS (Apple Silicon and
-Intel) and supports PostgreSQL and MySQL. Plans and ideas are in the
-[roadmap](ROADMAP.md); requests are welcome as
-[issues](https://github.com/haenning/rusdb/issues).
+Intel) and supports PostgreSQL and MySQL. AI investigation is being built. Plans and
+ideas are in the [roadmap](ROADMAP.md); requests are welcome as
+[issues](https://github.com/haenning/tangul/issues).
+
+## Built with
+
+tangul is written in Rust on [GPUI](https://www.gpui.rs), the UI framework behind the
+[Zed](https://zed.dev) editor. It is inspired by Zed, but not affiliated with, endorsed
+by, or sponsored by Zed Industries.
 
 ## License
 

@@ -32,7 +32,8 @@ explicit OK, and keep them covered by tests.
   `settings.json` itself.
 - **User (tabs).** In write mode the user writes freely; the "UPDATE/DELETE without
   WHERE" dialog stays (`Approval::Confirmed`). Read-only mode of a database user is lifted
-  only in the settings, never by a dialog. Tabs (`Command::Execute`) are the user's only.
+  only by changing the settings (the read-only dialog's "Allow writes" does that, and
+  the statement then has to be run again); a go-ahead never runs a write past it. Tabs (`Command::Execute`) are the user's only.
 - **Schedules.** Only statements on the read allow-list (`assist::guard::not_reads`);
   anything else is refused. Reads run like the assistant's.
 - **Assistant reads.** Only allow-listed reads run without approval, through
