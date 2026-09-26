@@ -14,6 +14,17 @@ things will not be added, so please don't open pull requests for them:
 
 Feature requests are welcome through the issue template.
 
+## License and CLA
+
+tangul is licensed under [AGPL-3.0-only](LICENSE). Before your first pull request can be
+merged, you agree to the [Contributor License Agreement](CLA.md) by adding this line to
+the pull request description (the template has it):
+
+> I have read the CLA (CLA.md) and agree to it for this and all my future contributions.
+
+The CLA lets the maintainer also distribute tangul under other terms, for example in the
+Mac App Store, whose terms don't fit the AGPL. You keep the copyright in your work.
+
 ## Requirements
 
 - rustup (Rust 1.98.1 is installed automatically from `rust-toolchain.toml`, same as
