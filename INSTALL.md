@@ -28,6 +28,19 @@ make install
 This builds the app and copies it to `/Applications`. `make dmg` only builds
 `target/bundle/tangul.app` and the DMG (`UNIVERSAL=1` for Apple Silicon + Intel).
 
+**Keychain prompts after every build:** a self-built app is ad-hoc signed, and that
+signature changes with each build. macOS then treats each install as a new app and
+asks again for access to the saved passwords. Sign your builds with a stable local
+certificate instead, once per Mac:
+
+```sh
+make signing-cert                                            # asks for your login password
+echo 'TANGUL_SIGN_IDENTITY=tangul local signing' >> .env     # make reads .env, no quotes
+make install
+```
+
+The first start after that asks once more; "Always Allow" then sticks across builds.
+
 ## Where your data lives
 
 Everything stays on your Mac:

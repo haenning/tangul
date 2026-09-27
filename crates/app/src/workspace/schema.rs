@@ -286,13 +286,13 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Star toggling `table` as a favorite: filled and always shown for a favorite,
-    /// else only while `group` is hovered.
+    /// Star toggling `table` as a favorite (filled for a favorite). `id` tells the
+    /// always shown star of a favorite from the one among the hover actions.
     pub(super) fn favorite_button(
         &self,
         ix: usize,
         table: &TableInfo,
-        group: SharedString,
+        id: &'static str,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let favorite = self.is_favorite(table);
@@ -303,14 +303,11 @@ impl Workspace {
         };
         let table = table.clone();
         div()
-            .when(!favorite, |d| {
-                d.invisible().group_hover(group, |s| s.visible())
-            })
-            .id(("table-favorite-wrap", ix))
+            .id((id, ix))
             // Keep the click from also opening the table.
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
-                Button::new(("table-favorite", ix))
+                Button::new("star")
                     .icon(Icon::new(icon))
                     .ghost()
                     .xsmall()
@@ -320,6 +317,22 @@ impl Workspace {
                         this.toggle_favorite(&table, window, cx)
                     })),
             )
+    }
+
+    /// A favorite's star, always shown at the row's right end; while the row is
+    /// hovered the same star among the hover actions takes its place.
+    fn fixed_star(
+        &self,
+        ix: usize,
+        table: &TableInfo,
+        group: SharedString,
+        cx: &Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        self.is_favorite(table).then(|| {
+            div()
+                .group_hover(group, |s| s.invisible())
+                .child(self.favorite_button(ix, table, "table-favorite", cx))
+        })
     }
 
     pub(super) fn render_sidebar_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -437,7 +450,8 @@ impl Workspace {
                     && self.panels.schema.revealed.as_ref().is_some_and(|(s, t)| {
                         *s == table.schema && t.as_ref() == Some(&table.name)
                     });
-                let favorite = self.favorite_button(ix, &table, group.clone(), cx);
+                let star = self.favorite_button(ix, &table, "table-favorite-hover", cx);
+                let fixed_star = self.fixed_star(ix, &table, group.clone(), cx);
                 row(if in_favorites { 0 } else { 2 })
                     .when(revealed, |r| r.bg(theme.sidebar_accent))
                     .group(group.clone())
@@ -457,17 +471,19 @@ impl Workspace {
                             r.child(div().flex_1().min_w_0().truncate().child(name))
                         }
                     })
-                    .child(
-                        div()
-                            .invisible()
-                            .group_hover(group, |s| s.visible())
-                            .id(("table-suggest-wrap", ix))
-                            // Keep the click from also opening the table.
-                            .on_click(|_, _, cx| cx.stop_propagation())
-                            .child(suggestions),
-                    )
                     // Rightmost, so a favorite's star lines up at the edge.
-                    .child(favorite)
+                    .children(fixed_star)
+                    .child(
+                        hover_actions(group, theme.sidebar_accent)
+                            .child(
+                                div()
+                                    .id(("table-suggest-wrap", ix))
+                                    // Keep the click from also opening the table.
+                                    .on_click(|_, _, cx| cx.stop_propagation())
+                                    .child(suggestions),
+                            )
+                            .child(star),
+                    )
                     .on_click({
                         let table = table.clone();
                         cx.listener(move |this, _, window, cx| this.open_table(&table, window, cx))
@@ -507,9 +523,10 @@ impl Workspace {
                     TableKind::View => Icon::new(IconName::Eye),
                 };
                 let group: SharedString = format!("table-hit-{ix}").into();
-                let favorite = self.favorite_button(ix, &table, group.clone(), cx);
+                let star = self.favorite_button(ix, &table, "table-favorite-hover", cx);
+                let fixed_star = self.fixed_star(ix, &table, group.clone(), cx);
                 row(0)
-                    .group(group)
+                    .group(group.clone())
                     .child(icon.small().text_color(theme.muted_foreground))
                     .child(div().min_w_0().truncate().child(table.name.clone()))
                     .child(
@@ -521,7 +538,8 @@ impl Workspace {
                             .text_color(theme.muted_foreground)
                             .child(table.schema.clone()),
                     )
-                    .child(favorite)
+                    .children(fixed_star)
+                    .child(hover_actions(group, theme.sidebar_accent).child(star))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.reveal(table.schema.clone().into(), Some(&table), window, cx)
                     }))
@@ -791,4 +809,22 @@ pub(super) fn table_menu(
         .separator()
         .item(copy("Copy name", table.name.clone()))
         .item(copy("Copy qualified name", name))
+}
+
+/// Buttons over the right end of a row, shown while `group` is hovered: they take
+/// no room from the name the rest of the time. `bg` is the hovered row's
+/// background, so they cover the name's end cleanly.
+fn hover_actions(group: SharedString, bg: Hsla) -> Div {
+    h_flex()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        // The row's right padding (`pr_2`): a favorite's star stays in place.
+        .right(px(8.))
+        .pl_1()
+        .gap_0p5()
+        .items_center()
+        .bg(bg)
+        .invisible()
+        .group_hover(group, |s| s.visible())
 }

@@ -8,7 +8,9 @@
 # Xcode 26's actool for the icon when available.
 # The app is ad-hoc signed: fine on your own Macs, but a downloaded copy has to be
 # allowed once in System Settings → Privacy & Security (see INSTALL.md). Real signing + notarization needs
-# an Apple Developer ID.
+# an Apple Developer ID. With TANGUL_SIGN_IDENTITY set (e.g. in .env, see
+# `make signing-cert`) it is signed with that certificate instead: the Keychain then
+# keeps "Always Allow" across builds.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -62,8 +64,14 @@ else
 fi
 rm -f "$out/icon-info.plist"
 
-# Ad-hoc signature (required on Apple Silicon; no developer account needed).
-codesign --force --sign - --timestamp=none "$app"
+# Ad-hoc signature (required on Apple Silicon; no developer account needed), or the
+# local certificate from TANGUL_SIGN_IDENTITY.
+identity="${TANGUL_SIGN_IDENTITY:--}"
+# make passes .env values as written: spaces (e.g. before a comment) and quotes
+# around the name would be part of it.
+identity=$(printf '%s' "$identity" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/')
+codesign --force --sign "$identity" --timestamp=none "$app"
+[[ "$identity" == "-" ]] || echo "signed with \"$identity\""
 
 # DMG with the app and an Applications shortcut to drag it onto.
 dmg="$out/tangul-$version-$arch.dmg"
