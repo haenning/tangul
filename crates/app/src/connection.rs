@@ -1,12 +1,10 @@
 //! An open connection as an entity of its own: the tabs using it and the workspace
-//! point to the same one, so its status, schema and pool stats are never copies.
-
-use std::sync::Arc;
+//! point to the same one, so its status and pool stats are never copies. What is
+//! known about its database (schema, usage) is in `tangul_service::knowledge`.
 
 use gpui_kit::SharedString;
-use tangul_assist::dialect::dialect_for;
-use tangul_assist::schema::SchemaIndex;
-use tangul_core::{ConnId, DriverKind, SchemaInfo};
+use tangul_assist::dialect::{Dialect, dialect_for};
+use tangul_core::{ConnId, DriverKind};
 use tangul_engine::PoolStats;
 
 #[derive(Clone, PartialEq)]
@@ -22,8 +20,6 @@ pub struct Connection {
     pub name: SharedString,
     pub driver: DriverKind,
     pub status: ConnStatus,
-    /// Tables, columns and foreign keys (from the cache until the server answered).
-    pub schema: Arc<SchemaIndex>,
     pub stats: PoolStats,
 }
 
@@ -35,13 +31,13 @@ impl Connection {
             name: name.into(),
             driver: DriverKind::Sqlite,
             status: ConnStatus::Connected,
-            schema: Arc::new(SchemaIndex::new(
-                SchemaInfo::default(),
-                dialect_for(DriverKind::Sqlite),
-                None,
-            )),
             stats: PoolStats::default(),
         }
+    }
+
+    /// How its database spells SQL.
+    pub fn dialect(&self) -> &'static dyn Dialect {
+        dialect_for(self.driver)
     }
 
     pub fn is_connected(&self) -> bool {

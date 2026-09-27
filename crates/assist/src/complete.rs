@@ -300,10 +300,11 @@ impl Ctx<'_> {
                 let usage = self
                     .usage
                     .score(UsageKind::Table, &table_key(&t.schema, &t.name));
-                let (kind, noun) = match t.kind {
-                    TableKind::Table => (SuggestionKind::Table, "table"),
-                    TableKind::View => (SuggestionKind::View, "view"),
+                let kind = match t.kind.group() {
+                    TableKind::View => SuggestionKind::View,
+                    _ => SuggestionKind::Table,
                 };
+                let noun = t.kind.label();
                 Some(Suggestion {
                     label: insert.clone(),
                     insert,

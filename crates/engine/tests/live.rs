@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tangul_core::{
     ConnId, ConnectConfig, DriverKind, QueryId, ResultSet, SshAuth, SshConfig, SshTarget, TabId,
-    TlsMode,
+    TableKind, TlsMode,
 };
 use tangul_engine::{
     Approval, Caller, Command, EngineConfig, EngineHandle, Event, ExecEvent, QueryEvent,
@@ -81,9 +81,11 @@ impl Harness {
             settings,
             user,
         };
+        // Connected, and the whole catalog loaded (it holds a session meanwhile), so
+        // the pool is idle when a test starts.
         loop {
             match h.next().await {
-                Event::Connected { .. } => break,
+                Event::Schema { complete: true, .. } => break,
                 Event::ConnectFailed { error, .. } => panic!("connect failed: {error}"),
                 _ => {}
             }
@@ -325,17 +327,58 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
     };
     let mut h = Harness::connect(driver, cfg).await;
     let tab = TabId(1);
-    let setup = format!(
-        "{drop}; CREATE SCHEMA tangul_fk_test; \
-         CREATE TABLE tangul_fk_test.parent (id INT PRIMARY KEY); \
-         CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, parent_id INT NOT NULL, \
-           FOREIGN KEY (parent_id) REFERENCES tangul_fk_test.parent (id))"
-    );
+    // The same objects on both: comments, an identity column, an enum, a default, a
+    // check, a generated column, a composite index, a view and a function. Postgres
+    // adds a partial index and a materialized view.
+    let objects = match driver {
+        DriverKind::Postgres => {
+            "CREATE TABLE tangul_fk_test.parent (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY); \
+             COMMENT ON TABLE tangul_fk_test.parent IS 'Parents'; \
+             CREATE TYPE tangul_fk_test.mood AS ENUM ('sad', 'ok', 'happy'); \
+             CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, parent_id INT NOT NULL \
+               REFERENCES tangul_fk_test.parent (id), \
+               mood tangul_fk_test.mood NOT NULL DEFAULT 'ok', \
+               amount numeric CHECK (amount >= 0), \
+               doubled numeric GENERATED ALWAYS AS (amount * 2) STORED); \
+             COMMENT ON COLUMN tangul_fk_test.child.parent_id IS 'Who it belongs to'; \
+             CREATE INDEX child_mood ON tangul_fk_test.child (parent_id, mood); \
+             CREATE INDEX child_happy ON tangul_fk_test.child (parent_id) WHERE mood = 'happy'; \
+             CREATE VIEW tangul_fk_test.happy AS \
+               SELECT id FROM tangul_fk_test.child WHERE mood = 'happy'; \
+             CREATE MATERIALIZED VIEW tangul_fk_test.counts AS \
+               SELECT parent_id, count(*) AS n FROM tangul_fk_test.child GROUP BY parent_id; \
+             CREATE FUNCTION tangul_fk_test.twice(x int) RETURNS int LANGUAGE sql \
+               AS 'SELECT x * 2'; \
+             COMMENT ON FUNCTION tangul_fk_test.twice(int) IS 'Doubles'"
+        }
+        DriverKind::Mysql => {
+            "CREATE TABLE tangul_fk_test.parent (id INT PRIMARY KEY AUTO_INCREMENT) \
+               COMMENT = 'Parents'; \
+             CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, \
+               parent_id INT NOT NULL COMMENT 'Who it belongs to', \
+               mood ENUM('sad', 'ok', 'happy') NOT NULL DEFAULT 'ok', \
+               amount DECIMAL(10, 2) CHECK (amount >= 0), \
+               doubled DECIMAL(12, 2) GENERATED ALWAYS AS (amount * 2) STORED, \
+               FOREIGN KEY (parent_id) REFERENCES tangul_fk_test.parent (id), \
+               INDEX child_mood (parent_id, mood)); \
+             CREATE VIEW tangul_fk_test.happy AS \
+               SELECT id FROM tangul_fk_test.child WHERE mood = 'happy'; \
+             CREATE FUNCTION tangul_fk_test.twice(x INT) RETURNS INT DETERMINISTIC \
+               COMMENT 'Doubles' RETURN x * 2"
+        }
+        DriverKind::Sqlite => unreachable!(),
+    };
+    let setup = format!("{drop}; CREATE SCHEMA tangul_fk_test; {objects}");
     assert_eq!(h.run(tab, &setup).await.error, None);
 
     h.engine.send(Command::RefreshSchema { conn: h.conn });
     let info = loop {
-        if let Event::Schema { result, .. } = h.next().await {
+        if let Event::Schema {
+            result,
+            complete: true,
+            ..
+        } = h.next().await
+        {
             let info = result.expect("schema failed");
             // Skip a schema load that started before the tables existed.
             if info.tables.iter().any(|t| t.schema == "tangul_fk_test") {
@@ -367,7 +410,140 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
         ("tangul_fk_test", "parent", &["id".to_string()][..])
     );
 
+    // What the rich catalog (#112) adds.
+    let table = |name: &str| {
+        info.tables
+            .iter()
+            .find(|t| t.schema == "tangul_fk_test" && t.name == name)
+            .unwrap_or_else(|| panic!("table {name}"))
+    };
+    assert_eq!(table("parent").comment.as_deref(), Some("Parents"));
+    assert!(table("child").size_bytes.is_some());
+    assert_eq!(table("happy").kind, TableKind::View);
+    assert_eq!(
+        col("child", "parent_id").comment.as_deref(),
+        Some("Who it belongs to")
+    );
+    assert!(col("parent", "id").identity);
+    assert!(!col("child", "id").identity);
+    assert!(col("child", "mood").enum_type.is_some());
+    assert!(
+        col("child", "mood")
+            .default
+            .as_deref()
+            .unwrap()
+            .contains("ok")
+    );
+    assert!(
+        col("child", "doubled")
+            .generated
+            .as_deref()
+            .unwrap()
+            .contains("amount")
+    );
+    let index = |name: &str| {
+        info.indexes
+            .iter()
+            .find(|i| i.schema == "tangul_fk_test" && i.name == name)
+            .unwrap_or_else(|| panic!("index {name}"))
+    };
+    assert_eq!(index("child_mood").columns, ["parent_id", "mood"]);
+    assert!(!index("child_mood").unique);
+    assert!(
+        info.indexes
+            .iter()
+            .any(|i| i.table == "parent" && i.primary && i.unique)
+    );
+    let check = info
+        .checks
+        .iter()
+        .find(|c| c.schema == "tangul_fk_test" && c.table == "child")
+        .expect("check constraint");
+    assert!(check.expression.contains("amount"), "{}", check.expression);
+    let mood = info
+        .enums
+        .iter()
+        .find(|e| e.schema == "tangul_fk_test")
+        .expect("enum");
+    assert_eq!(mood.values, ["sad", "ok", "happy"]);
+    let view = info
+        .views
+        .iter()
+        .find(|v| v.schema == "tangul_fk_test" && v.name == "happy")
+        .expect("view definition");
+    assert!(view.definition.contains("happy"), "{}", view.definition);
+    let twice = info
+        .routines
+        .iter()
+        .find(|r| r.schema == "tangul_fk_test" && r.name == "twice")
+        .expect("function");
+    assert_eq!(
+        (twice.kind.as_str(), twice.comment.as_deref()),
+        ("function", Some("Doubles"))
+    );
+    assert!(twice.arguments.contains('x'), "{}", twice.arguments);
+    if driver == DriverKind::Postgres {
+        assert_eq!(table("counts").kind, TableKind::MaterializedView);
+        assert_eq!(
+            index("child_happy").predicate.as_deref(),
+            Some("mood = 'happy'::tangul_fk_test.mood")
+        );
+        assert_eq!(mood.name, "mood");
+        assert_eq!(
+            col("child", "mood").enum_type.as_deref(),
+            Some("tangul_fk_test.mood")
+        );
+    } else {
+        assert_eq!(mood.name, "child.mood");
+    }
+
     assert_eq!(h.run(tab, drop).await.error, None);
+}
+
+/// The dialect's count of tables the connected user may change or drop: all of
+/// them for the admin, none for a user with SELECT only.
+async fn writable_checks(driver: DriverKind, cfg: ConnectConfig) {
+    let sql = tangul_assist::dialect::dialect_for(driver)
+        .writable_tables_sql()
+        .expect("a count for this database");
+    let mut admin = Harness::connect(driver, cfg.clone()).await;
+    assert!(writable_count(&mut admin, sql).await > 0);
+    let (create, drop) = match driver {
+        DriverKind::Postgres => (
+            "DROP ROLE IF EXISTS tangul_ro_live; CREATE ROLE tangul_ro_live LOGIN PASSWORD 'ro'; \
+             GRANT SELECT ON ALL TABLES IN SCHEMA public TO tangul_ro_live",
+            "DROP OWNED BY tangul_ro_live; DROP ROLE tangul_ro_live",
+        ),
+        DriverKind::Mysql => (
+            "DROP USER IF EXISTS 'tangul_ro_live'@'%'; \
+             CREATE USER 'tangul_ro_live'@'%' IDENTIFIED BY 'ro'; \
+             GRANT SELECT ON *.* TO 'tangul_ro_live'@'%'",
+            "DROP USER 'tangul_ro_live'@'%'",
+        ),
+        DriverKind::Sqlite => unreachable!(),
+    };
+    assert_eq!(admin.run(TabId(1), create).await.error, None);
+    let reader = ConnectConfig {
+        user: "tangul_ro_live".into(),
+        password: Some("ro".into()),
+        ..cfg
+    };
+    let mut ro = Harness::connect(driver, reader).await;
+    assert_eq!(writable_count(&mut ro, sql).await, 0);
+    drop_harness(ro).await;
+    assert_eq!(admin.run(TabId(1), drop).await.error, None);
+}
+
+async fn writable_count(h: &mut Harness, sql: &str) -> u64 {
+    let out = h.run(TabId(1), sql).await;
+    assert_eq!(out.error, None, "{sql}");
+    out.result.unwrap().cell(0, 0).unwrap().parse().unwrap()
+}
+
+/// Closes a harness's connection (so its user can be dropped).
+async fn drop_harness(h: Harness) {
+    h.engine.send(Command::Disconnect { conn: h.conn });
+    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 /// Read-only mode is enforced by the server: writes fail, reads work, and a script
@@ -478,6 +654,7 @@ async fn postgres() {
     };
     common_checks(DriverKind::Postgres, cfg.clone(), "SELECT pg_sleep(30)").await;
     schema_checks(DriverKind::Postgres, cfg.clone()).await;
+    writable_checks(DriverKind::Postgres, cfg.clone()).await;
 
     let mut h = Harness::connect(DriverKind::Postgres, cfg).await;
     let out = h
@@ -517,6 +694,7 @@ async fn mysql() {
     };
     common_checks(DriverKind::Mysql, cfg.clone(), "SELECT SLEEP(30)").await;
     schema_checks(DriverKind::Mysql, cfg.clone()).await;
+    writable_checks(DriverKind::Mysql, cfg.clone()).await;
 
     let mut h = Harness::connect(DriverKind::Mysql, cfg).await;
     let out = h

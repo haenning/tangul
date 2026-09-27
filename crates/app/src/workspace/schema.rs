@@ -15,8 +15,8 @@ impl Workspace {
 
     /// The table's name for generated SQL: without the default schema (`public`, or
     /// the MySQL connection's database) and quoted only where needed.
-    pub(super) fn sql_name(&self, table: &TableInfo, cx: &App) -> Option<String> {
-        let schema = &self.active_conn(cx)?.schema;
+    pub(super) fn sql_name(&self, table: &TableInfo) -> Option<String> {
+        let schema = self.active_schema()?;
         match schema.resolve(Some(&table.schema), &table.name) {
             Some(ix) => Some(schema.sql_name(ix)),
             None => self.qualified_name(table),
@@ -29,7 +29,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (Some(name), Some(db)) = (self.sql_name(table, cx), self.active_database()) else {
+        let (Some(name), Some(db)) = (self.sql_name(table), self.active_database()) else {
             return;
         };
         let sql = select_rows(dialect_for(db.driver), &name, OPEN_ROWS);
@@ -42,7 +42,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = self.sql_name(table, cx) else {
+        let Some(name) = self.sql_name(table) else {
             return;
         };
         self.run_in_new_tab(
@@ -68,16 +68,17 @@ impl Workspace {
         });
     }
 
-    pub(super) fn build_sidebar_rows(&self, search: &str, cx: &App) -> Vec<SidebarRow> {
-        let Some((user_id, state)) = self
+    pub(super) fn build_sidebar_rows(&self, search: &str) -> Vec<SidebarRow> {
+        let Some(user_id) = self
             .active_user
             .as_ref()
-            .and_then(|id| Some((id, self.conns.get(id)?.read(cx))))
+            .filter(|id| self.conns.contains_key(id.as_str()))
         else {
             return Vec::new();
         };
+        let schema_ix = self.schema_of(user_id);
         if !search.is_empty() {
-            return self.search_rows(&state.schema, search);
+            return self.search_rows(&schema_ix, search);
         }
         let mut rows = Vec::new();
         let favorites: Vec<SidebarRow> = self
@@ -86,9 +87,9 @@ impl Workspace {
             .favorites
             .iter()
             .filter_map(|(schema, name)| {
-                let ix = state.schema.resolve(Some(schema), name)?;
+                let ix = schema_ix.resolve(Some(schema), name)?;
                 Some(SidebarRow::Favorite {
-                    table: state.schema.table(ix).clone(),
+                    table: schema_ix.table(ix).clone(),
                 })
             })
             .collect();
@@ -102,8 +103,7 @@ impl Workspace {
             rows.push(SidebarRow::Heading(title.into()));
         }
         // Drivers return tables ordered by schema, then name.
-        let schemas: Vec<&[TableInfo]> = state
-            .schema
+        let schemas: Vec<&[TableInfo]> = schema_ix
             .tables()
             .chunk_by(|a, b| a.schema == b.schema)
             .collect();
@@ -124,9 +124,12 @@ impl Workspace {
             if !expanded {
                 continue;
             }
-            let only_kind = tables.iter().all(|t| t.kind == tables[0].kind);
+            let only_kind = tables
+                .iter()
+                .all(|t| t.kind.group() == tables[0].kind.group());
             for kind in [TableKind::Table, TableKind::View] {
-                let items: Vec<&TableInfo> = tables.iter().filter(|t| t.kind == kind).collect();
+                let items: Vec<&TableInfo> =
+                    tables.iter().filter(|t| t.kind.group() == kind).collect();
                 if items.is_empty() {
                     continue;
                 }
@@ -402,10 +405,7 @@ impl Workspace {
                 count,
                 expanded,
             } => {
-                let label = match kind {
-                    TableKind::Table => "Tables",
-                    TableKind::View => "Views",
-                };
+                let label = if kind.is_view() { "Views" } else { "Tables" };
                 let key = (user_id, schema, kind);
                 row(1)
                     .child(folder(expanded).small().text_color(theme.muted_foreground))
@@ -426,10 +426,9 @@ impl Workspace {
                     .into_any_element()
             }
             SidebarRow::Table { table } | SidebarRow::Favorite { table } => {
-                let icon = match table.kind {
-                    TableKind::Table => Icon::new(Lucide::Table),
-                    TableKind::View => Icon::new(IconName::Eye),
-                };
+                let icon = kind_icon(table.kind);
+                let info = table_info(&table);
+                let estimate = table.row_estimate.map(short_count);
                 let name = table.name.clone();
                 let group: SharedString = format!("table-row-{ix}").into();
                 let weak = cx.entity().downgrade();
@@ -443,7 +442,7 @@ impl Workspace {
                         let Some(ws) = weak.upgrade() else {
                             return menu;
                         };
-                        let list = ws.read(cx).table_suggestions(&menu_table, cx);
+                        let list = ws.read(cx).table_suggestions(&menu_table);
                         suggestions_menu(menu, &menu_table.name, list, &weak)
                     });
                 let revealed = !in_favorites
@@ -470,6 +469,18 @@ impl Workspace {
                         } else {
                             r.child(div().flex_1().min_w_0().truncate().child(name))
                         }
+                    })
+                    .when_some(estimate, |r, estimate| {
+                        r.child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(estimate),
+                        )
+                    })
+                    .when_some(info, |r, info| {
+                        r.tooltip(move |window, cx| Tooltip::new(info.clone()).build(window, cx))
                     })
                     // Rightmost, so a favorite's star lines up at the edge.
                     .children(fixed_star)
@@ -518,10 +529,7 @@ impl Workspace {
                     .into_any_element()
             }
             SidebarRow::TableHit { table } => {
-                let icon = match table.kind {
-                    TableKind::Table => Icon::new(Lucide::Table),
-                    TableKind::View => Icon::new(IconName::Eye),
-                };
+                let icon = kind_icon(table.kind);
                 let group: SharedString = format!("table-hit-{ix}").into();
                 let star = self.favorite_button(ix, &table, "table-favorite-hover", cx);
                 let fixed_star = self.fixed_star(ix, &table, group.clone(), cx);
@@ -628,10 +636,8 @@ impl Workspace {
                     this.assign_active_tab(&user_id, window, cx);
                 }))
         };
-        match self
-            .active_conn(cx)
-            .map(|c| (&c.status, c.schema.tables().is_empty()))
-        {
+        let no_tables = self.active_schema().is_none_or(|s| s.tables().is_empty());
+        match self.active_conn(cx).map(|c| (&c.status, no_tables)) {
             None => Some(
                 body.child(message("Not connected.".into()))
                     .child(connect("Connect"))
@@ -667,7 +673,7 @@ impl Workspace {
             .as_deref()
             .map(|db| self.data.local.favorites(db))
             .unwrap_or_default();
-        self.panels.schema.rows = self.build_sidebar_rows(&search, cx);
+        self.panels.schema.rows = self.build_sidebar_rows(&search);
         if let Some((schema, table)) = self.panels.schema.reveal.take() {
             let target = self.panels.schema.rows.iter().position(|row| match row {
                 SidebarRow::Table { table: t } => {
@@ -683,9 +689,8 @@ impl Workspace {
                     .scroll_to_item(ix, ScrollStrategy::Center);
             }
         }
-        let has_schema = self
-            .active_conn(cx)
-            .is_some_and(|c| !c.schema.tables().is_empty());
+        let has_schema = self.active_conn(cx).is_some()
+            && self.active_schema().is_some_and(|s| !s.tables().is_empty());
         let no_hits = !search.is_empty() && self.panels.schema.rows.is_empty();
         let empty = self.render_sidebar_empty(cx);
         let theme = cx.theme();
@@ -827,4 +832,82 @@ fn hover_actions(group: SharedString, bg: Hsla) -> Div {
         .bg(bg)
         .invisible()
         .group_hover(group, |s| s.visible())
+}
+
+fn kind_icon(kind: TableKind) -> Icon {
+    if kind.is_view() {
+        Icon::new(IconName::Eye)
+    } else {
+        Icon::new(Lucide::Table)
+    }
+}
+
+/// What the row's tooltip says: the kind unless it's a plain table or view, the
+/// row estimate and the server's comment. `None` when there is nothing to add.
+fn table_info(table: &TableInfo) -> Option<SharedString> {
+    let mut head = Vec::new();
+    if !matches!(table.kind, TableKind::Table | TableKind::View) {
+        head.push(table.kind.label().to_string());
+    }
+    if let Some(n) = table.row_estimate {
+        head.push(format!(
+            "about {} rows",
+            short_count(n).trim_start_matches('~')
+        ));
+    }
+    let lines: Vec<String> = [
+        (!head.is_empty()).then(|| head.join(" · ")),
+        table.comment.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!lines.is_empty()).then(|| lines.join("\n").into())
+}
+
+/// `~950`, `~12k`, `~1.2M`: a row estimate at a glance.
+fn short_count(n: u64) -> String {
+    match n {
+        0..1_000 => format!("~{n}"),
+        1_000..10_000 => format!("~{:.1}k", n as f64 / 1e3).replace(".0k", "k"),
+        10_000..1_000_000 => format!("~{}k", n / 1_000),
+        1_000_000..10_000_000 => format!("~{:.1}M", n as f64 / 1e6).replace(".0M", "M"),
+        _ => format!("~{}M", n / 1_000_000),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{short_count, table_info};
+    use tangul_core::{TableInfo, TableKind};
+
+    #[test]
+    fn row_estimates_at_a_glance() {
+        assert_eq!(short_count(0), "~0");
+        assert_eq!(short_count(950), "~950");
+        assert_eq!(short_count(1_000), "~1k");
+        assert_eq!(short_count(1_250), "~1.2k");
+        assert_eq!(short_count(300_000), "~300k");
+        assert_eq!(short_count(1_500_000), "~1.5M");
+        assert_eq!(short_count(42_000_000), "~42M");
+    }
+
+    #[test]
+    fn tooltips_only_say_something_new() {
+        let t = |kind, comment: Option<&str>, rows| TableInfo {
+            kind,
+            comment: comment.map(str::to_string),
+            row_estimate: rows,
+            ..Default::default()
+        };
+        assert_eq!(table_info(&t(TableKind::Table, None, None)), None);
+        assert_eq!(
+            table_info(&t(TableKind::Table, Some("Customer orders"), Some(300_000))).as_deref(),
+            Some("about 300k rows\nCustomer orders")
+        );
+        assert_eq!(
+            table_info(&t(TableKind::MaterializedView, None, None)).as_deref(),
+            Some("materialized view")
+        );
+    }
 }

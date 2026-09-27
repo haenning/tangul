@@ -300,6 +300,7 @@ mod tests {
             schema: "public".into(),
             name: name.into(),
             kind: TableKind::Table,
+            ..Default::default()
         };
         let col = |table: &str, name: &str| ColumnMeta {
             schema: "public".into(),
@@ -308,6 +309,7 @@ mod tests {
             data_type: "integer".into(),
             nullable: false,
             primary_key: name == "id",
+            ..Default::default()
         };
         let fk = |table: &str| ForeignKey {
             name: format!("{table}_fk"),
@@ -330,6 +332,7 @@ mod tests {
                     )
                     .collect(),
                 foreign_keys: names[1..].iter().map(|t| fk(t)).collect(),
+                ..Default::default()
             },
             crate::dialect::dialect_for(tangul_core::DriverKind::Postgres),
             Some("public".into()),

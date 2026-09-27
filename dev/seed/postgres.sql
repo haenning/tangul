@@ -18,11 +18,14 @@ SELECT 'user' || g || '@example.com',
        jsonb_build_object('plan', CASE WHEN g % 3 = 0 THEN 'pro' ELSE 'free' END, 'n', g)
 FROM generate_series(1, 100000) g;
 
+CREATE TYPE app.order_status AS ENUM ('open', 'paid', 'shipped', 'cancelled');
+COMMENT ON TYPE app.order_status IS 'Where an order is: open until paid, then shipped';
+
 CREATE TABLE app.orders (
     id       bigserial PRIMARY KEY,
     user_id  int NOT NULL REFERENCES app.users (id),
-    total    numeric(10, 2) NOT NULL,
-    status   text NOT NULL,
+    total    numeric(10, 2) NOT NULL CHECK (total >= 0),
+    status   app.order_status NOT NULL,
     note     text,
     ordered  date NOT NULL
 );
@@ -30,7 +33,7 @@ CREATE TABLE app.orders (
 INSERT INTO app.orders (user_id, total, status, note, ordered)
 SELECT (g % 100000) + 1,
        round((random() * 500)::numeric, 2),
-       (ARRAY['open', 'paid', 'shipped', 'cancelled'])[1 + g % 4],
+       ((ARRAY['open', 'paid', 'shipped', 'cancelled'])[1 + g % 4])::app.order_status,
        CASE WHEN g % 11 = 0 THEN 'multi' || chr(10) || 'line note' END,
        date '2024-01-01' + (g % 700)
 FROM generate_series(1, 300000) g;
@@ -87,3 +90,34 @@ CREATE TABLE public.types_showcase (
 INSERT INTO public.types_showcase VALUES
     (1, gen_random_uuid(), '{1,2,3}', '[1,10)', '\xdeadbeef', now(), repeat('long ', 200)),
     (2, NULL, NULL, NULL, NULL, NULL, 'Ümlaut ✓ emoji 🚀');
+
+-- Catalog metadata for the schema tree and the assistant (comments, indexes, a
+-- materialized view, a function). Stable names, so tests can rely on them.
+COMMENT ON TABLE app.users IS 'Registered customers';
+COMMENT ON COLUMN app.users.email IS 'Login; unique';
+COMMENT ON COLUMN app.users.active IS 'False once the account is closed';
+COMMENT ON COLUMN app.users.meta IS 'Settings as JSON: plan (free or pro) and n';
+COMMENT ON TABLE app.orders IS 'Customer orders; totals in EUR';
+COMMENT ON COLUMN app.orders.ordered IS 'Day the order was placed';
+COMMENT ON COLUMN app.orders.note IS 'Free text from the customer, often empty';
+COMMENT ON TABLE app.addresses IS 'Delivery addresses of users';
+COMMENT ON TABLE app.sessions IS 'Logins to the web shop';
+COMMENT ON TABLE app.tickets IS 'Support tickets';
+COMMENT ON TABLE app.audit_log IS 'Login and logout events';
+COMMENT ON VIEW app.revenue_by_status IS 'Orders and revenue per status';
+
+CREATE INDEX orders_user_ordered ON app.orders (user_id, ordered);
+CREATE INDEX orders_open ON app.orders (user_id) WHERE status = 'open';
+
+CREATE MATERIALIZED VIEW app.daily_revenue AS
+SELECT ordered, count(*) AS orders, sum(total) AS revenue
+FROM app.orders
+GROUP BY ordered;
+COMMENT ON MATERIALIZED VIEW app.daily_revenue IS 'Revenue per day (refresh to update)';
+
+CREATE FUNCTION app.order_count(uid int) RETURNS bigint
+LANGUAGE sql STABLE AS 'SELECT count(*) FROM app.orders WHERE user_id = uid';
+COMMENT ON FUNCTION app.order_count(int) IS 'Number of orders of a user';
+
+-- Row estimates come from statistics.
+ANALYZE;

@@ -63,6 +63,10 @@ pub struct Database {
     /// `None` uses the user selected in the app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_user: Option<String>,
+    /// The assistant may read column values (samples for value profiles) of this
+    /// database. Off unless the user turns it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ai_values: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -12,7 +12,7 @@ import sys
 from collections import defaultdict
 
 TARGET = 95.0
-EDGE = {"core", "drivers", "engine", "assist", "tunnel", "data", "service"}
+EDGE = {"core", "drivers", "engine", "assist", "tunnel", "data", "service", "ai"}
 
 
 def pct(covered, count):

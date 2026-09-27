@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use tangul_core::{ColumnMeta, ForeignKey, SchemaInfo, TableInfo};
+use tangul_core::{ColumnMeta, EnumInfo, ForeignKey, SchemaInfo, TableInfo};
 
 use crate::dialect::{Dialect, quote_ident};
 
@@ -77,6 +77,15 @@ impl SchemaIndex {
         &self.info.foreign_keys
     }
 
+    /// The enum type `column` has, with its values. Postgres names the type
+    /// `schema.type`; MySQL's enums are per column, named `table.column`.
+    pub fn enum_of(&self, column: &ColumnMeta) -> Option<&EnumInfo> {
+        let ty = column.enum_type.as_deref()?;
+        self.info.enums.iter().find(|e| {
+            ty == format!("{}.{}", e.schema, e.name) || (e.schema == column.schema && e.name == ty)
+        })
+    }
+
     pub fn has_schema(&self, name: &str) -> bool {
         self.info
             .tables
@@ -146,6 +155,7 @@ pub(crate) mod tests {
             schema: schema.into(),
             name: name.into(),
             kind: TableKind::Table,
+            ..Default::default()
         };
         let col = |schema: &str, table: &str, name: &str, pk: bool| ColumnMeta {
             schema: schema.into(),
@@ -158,6 +168,7 @@ pub(crate) mod tests {
             },
             nullable: !pk,
             primary_key: pk,
+            ..Default::default()
         };
         let info = SchemaInfo {
             tables: vec![
@@ -183,6 +194,7 @@ pub(crate) mod tests {
                 ref_table: "users".into(),
                 ref_columns: vec!["id".into()],
             }],
+            ..Default::default()
         };
         SchemaIndex::new(info, dialect_for(driver), Some("public".into()))
     }

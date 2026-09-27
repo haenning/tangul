@@ -102,6 +102,19 @@ impl Dialect for Postgres {
         }
     }
 
+    /// Tables it may write to, or drop: owned by it or a role it belongs to
+    /// (superusers pass every check).
+    fn writable_tables_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('r', 'p') \
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' \
+               AND (has_table_privilege(c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') \
+                    OR pg_has_role(c.relowner, 'MEMBER'))",
+        )
+    }
+
     fn lexing(&self) -> Lexing {
         Lexing {
             nested_comments: true,

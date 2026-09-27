@@ -105,6 +105,28 @@ impl Dialect for Mysql {
         }
     }
 
+    /// Tables it may write to, alter or drop: by a global, schema or table grant
+    /// of the current account (`'user'@'host'` in the privilege tables).
+    fn writable_tables_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT count(*) FROM information_schema.tables t \
+             JOIN (SELECT CONCAT(QUOTE(SUBSTRING_INDEX(CURRENT_USER(), '@', 1)), '@', \
+                                 QUOTE(SUBSTRING_INDEX(CURRENT_USER(), '@', -1))) AS me) a \
+             WHERE t.table_type = 'BASE TABLE' \
+               AND t.table_schema NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys') \
+               AND (EXISTS (SELECT 1 FROM information_schema.user_privileges p \
+                            WHERE p.grantee = a.me \
+                              AND p.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER')) \
+                 OR EXISTS (SELECT 1 FROM information_schema.schema_privileges p \
+                            WHERE p.grantee = a.me AND p.table_schema = t.table_schema \
+                              AND p.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER')) \
+                 OR EXISTS (SELECT 1 FROM information_schema.table_privileges p \
+                            WHERE p.grantee = a.me AND p.table_schema = t.table_schema \
+                              AND p.table_name = t.table_name \
+                              AND p.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER')))",
+        )
+    }
+
     /// `DELIMITER` is a client command (the `mysql` shell's), used in scripts that
     /// create procedures and triggers.
     fn lexing(&self) -> Lexing {
