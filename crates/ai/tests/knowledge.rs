@@ -200,6 +200,7 @@ async fn every_tool_has_a_schema_and_a_description() {
             "describe_table",
             "find_join_path",
             "schema_slice",
+            "column_profile",
             "list_enums",
             "view_definition",
             "run_readonly"
@@ -475,5 +476,23 @@ app.users (~100000 rows) — Registered customers
         .await,
         "No table matches \"weather in Berlin\"; try other words with search_schema, or list \
          the tables with a query."
+    );
+}
+
+#[tokio::test]
+async fn column_values_only_with_the_users_consent() {
+    let ctx = ctx(false);
+    assert_eq!(
+        error(
+            &ctx,
+            "column_profile",
+            json!({"table": "orders", "column": "status"})
+        )
+        .await,
+        ToolError::NotAllowed(
+            "reading column values is off for this database; the user can allow it in the \
+             AI menu of the title bar"
+                .into()
+        )
     );
 }

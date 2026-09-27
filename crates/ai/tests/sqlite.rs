@@ -25,6 +25,7 @@ const SHOP: &str = "
     );
     CREATE INDEX orders_open ON orders (user_id) WHERE status = 'open';
     CREATE VIEW paid AS SELECT * FROM orders WHERE status = 'paid';
+    CREATE TABLE accounts (id INTEGER PRIMARY KEY, password_hash TEXT);
     INSERT INTO users (email) VALUES ('ann@example.com'), ('bob@example.com');
     INSERT INTO orders (user_id, status, total) VALUES
         (1, 'open', 10), (1, 'paid', 25.5), (2, 'paid', 7), (2, 'cancelled', 0);
@@ -39,6 +40,11 @@ async fn next(events: &async_channel::Receiver<Event>) -> Event {
 
 /// The shop in a fresh file, connected, its schema in the pool, exposed as `shop`.
 async fn shop(name: &str) -> (PathBuf, Ctx) {
+    shop_with(name, false).await
+}
+
+/// [`shop`], where the assistant may read column values if `values` is set.
+async fn shop_with(name: &str, values: bool) -> (PathBuf, Ctx) {
     let dir = std::env::temp_dir().join(format!("tangul-ai-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -79,7 +85,7 @@ async fn shop(name: &str) -> (PathBuf, Ctx) {
         name: "shop".into(),
         user: "u1".into(),
         driver: DriverKind::Sqlite,
-        values_allowed: false,
+        values_allowed: values,
     };
     (dir, Ctx::new(knowledge, Some(engine), vec![exposed]))
 }
@@ -234,5 +240,90 @@ async fn writes_are_never_run() {
         panic!("a failure");
     };
     assert!(message.contains("nope"), "{message}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn profiles_a_column_from_a_sample() {
+    let (dir, ctx) = shop_with("profile", true).await;
+    assert_eq!(
+        call(
+            &ctx,
+            "column_profile",
+            json!({"table": "orders", "column": "status"})
+        )
+        .await
+        .unwrap(),
+        "orders.status: 4 rows · NULL 0 (0%) · 3 distinct · values: paid (2), cancelled (1), open (1)"
+    );
+    assert_eq!(
+        call(
+            &ctx,
+            "column_profile",
+            json!({"table": "orders", "column": "total"})
+        )
+        .await
+        .unwrap(),
+        "orders.total: 4 rows · NULL 0 (0%) · 4 distinct · range 0 – 25.5 · values: 0 (1), 7 (1), 10 (1), 25.5 (1)"
+    );
+    // A sampled value now finds its column, like an enum value.
+    assert_eq!(
+        call(&ctx, "search_schema", json!({"query": "cancelled"}))
+            .await
+            .unwrap(),
+        "orders.status — value 'cancelled'"
+    );
+    // Secrets are never read, whatever the consent.
+    assert_eq!(
+        call(
+            &ctx,
+            "column_profile",
+            json!({"table": "accounts", "column": "password_hash"})
+        )
+        .await,
+        Err(ToolError::NotAllowed(
+            "accounts.password_hash looks like a secret; its values are never read".into()
+        ))
+    );
+    assert_eq!(
+        call(
+            &ctx,
+            "column_profile",
+            json!({"table": "orders", "column": "colour"})
+        )
+        .await,
+        Err(ToolError::NotFound(
+            "column colour; describe_table lists them".into()
+        ))
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_profile_is_sampled_once() {
+    let (dir, ctx) = shop_with("profile-cache", true).await;
+    let first = call(
+        &ctx,
+        "column_profile",
+        json!({"table": "users", "column": "email"}),
+    )
+    .await
+    .unwrap();
+    // Another user of the file adds a row; within the hour the pool's profile is used.
+    rusqlite::Connection::open(dir.join("shop.db"))
+        .unwrap()
+        .execute("INSERT INTO users (email) VALUES ('cat@example.com')", [])
+        .unwrap();
+    assert_eq!(
+        call(
+            &ctx,
+            "column_profile",
+            json!({"table": "users", "column": "email"})
+        )
+        .await
+        .unwrap(),
+        first
+    );
+    assert!(first.starts_with("users.email: 2 rows"), "{first}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -224,3 +224,18 @@ impl SchemaInfo {
         self
     }
 }
+
+/// What a sample of a column's values shows (the assistant's value profile).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ColumnProfile {
+    /// Rows looked at (the sample; at most the sample size).
+    pub rows: u64,
+    pub nulls: u64,
+    /// Distinct non-NULL values in the sample.
+    pub distinct: u64,
+    /// Smallest and largest value, for types with an order (numbers, dates, text).
+    pub min: Option<String>,
+    pub max: Option<String>,
+    /// The most frequent values in the sample with how often they occur.
+    pub top: Vec<(String, u64)>,
+}

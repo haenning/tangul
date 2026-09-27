@@ -12,6 +12,7 @@ pub mod grammar;
 pub mod guard;
 pub mod join_graph;
 pub mod lexer;
+pub mod profile;
 pub mod refine;
 pub mod related;
 pub mod schema;

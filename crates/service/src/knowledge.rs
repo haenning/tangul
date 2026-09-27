@@ -8,10 +8,17 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 use tangul_assist::schema::SchemaIndex;
 use tangul_assist::usage::Usage;
-use tangul_core::ConnId;
+use tangul_core::{ColumnProfile, ConnId};
+
+/// How long a value profile is used before it is sampled again.
+pub const PROFILE_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// A column: (schema, table, column), as the catalog spells them.
+pub type ColumnRef = (String, String, String);
 
 /// Handle to the pool.
 #[derive(Clone, Default)]
@@ -23,6 +30,9 @@ struct Pool {
     users: HashMap<String, UserKnowledge>,
     /// Learned usage by database id (shared by the database's users).
     usage: HashMap<String, Arc<Usage>>,
+    /// Value profiles by database user and column, with when they were taken. Only
+    /// filled where the user allowed the assistant to read values.
+    profiles: HashMap<(String, ColumnRef), (ColumnProfile, Instant)>,
 }
 
 /// What is known for one database user.
@@ -68,7 +78,41 @@ impl Knowledge {
     }
 
     pub fn forget_user(&self, user: &str) {
-        self.write(|p| p.users.remove(user));
+        self.write(|p| {
+            p.users.remove(user);
+            p.profiles.retain(|(u, _), _| u != user);
+        });
+    }
+
+    /// `user`'s profile of `column`, unless it is older than [`PROFILE_TTL`].
+    pub fn profile(&self, user: &str, column: &ColumnRef) -> Option<ColumnProfile> {
+        self.read(|p| {
+            let (profile, at) = p.profiles.get(&(user.to_string(), column.clone()))?;
+            (at.elapsed() < PROFILE_TTL).then(|| profile.clone())
+        })
+    }
+
+    pub fn set_profile(&self, user: &str, column: ColumnRef, profile: ColumnProfile) {
+        self.write(|p| {
+            p.profiles
+                .insert((user.to_string(), column), (profile, Instant::now()))
+        });
+    }
+
+    /// The most frequent values of `user`'s columns with a fresh profile.
+    pub fn known_values(&self, user: &str) -> HashMap<ColumnRef, Vec<String>> {
+        self.read(|p| {
+            p.profiles
+                .iter()
+                .filter(|((u, _), (_, at))| u == user && at.elapsed() < PROFILE_TTL)
+                .map(|((_, c), (profile, _))| {
+                    (
+                        c.clone(),
+                        profile.top.iter().map(|(v, _)| v.clone()).collect(),
+                    )
+                })
+                .collect()
+        })
     }
 
     pub fn user(&self, user: &str) -> Option<UserKnowledge> {
@@ -164,6 +208,28 @@ mod tests {
         assert_eq!(k.users().len(), 1);
         k.forget_user("u1");
         assert!(k.users().is_empty());
+    }
+
+    #[test]
+    fn profiles_per_user_until_they_expire() {
+        let k = Knowledge::default();
+        let col = (
+            "app".to_string(),
+            "orders".to_string(),
+            "status".to_string(),
+        );
+        let profile = ColumnProfile {
+            rows: 4,
+            top: vec![("paid".into(), 2), ("open".into(), 1)],
+            ..Default::default()
+        };
+        k.set_profile("u1", col.clone(), profile.clone());
+        assert_eq!(k.profile("u1", &col), Some(profile));
+        assert_eq!(k.profile("u2", &col), None);
+        assert_eq!(k.known_values("u1")[&col], ["paid", "open"]);
+        assert!(k.known_values("u2").is_empty());
+        k.forget_user("u1");
+        assert_eq!(k.profile("u1", &col), None);
     }
 
     #[test]

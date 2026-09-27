@@ -4,6 +4,7 @@ mod catalog;
 mod connections;
 mod describe;
 mod joins;
+mod profile;
 mod query;
 mod search;
 mod slice;
@@ -20,6 +21,7 @@ pub(crate) fn all() -> Vec<Box<dyn Tool>> {
         Box::new(describe::DescribeTable),
         Box::new(joins::FindJoinPath),
         Box::new(slice::SchemaSlice),
+        Box::new(profile::ColumnProfileTool),
         Box::new(catalog::ListEnums),
         Box::new(catalog::ViewDefinition),
         Box::new(query::RunReadonly),

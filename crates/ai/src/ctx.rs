@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use tangul_assist::schema::SchemaIndex;
+use tangul_assist::slice::KnownValues;
 use tangul_assist::usage::Usage;
 use tangul_core::{ConnId, DriverKind};
 use tangul_engine::EngineHandle;
@@ -36,6 +37,11 @@ pub(crate) struct Conn {
     pub schema: Arc<SchemaIndex>,
     /// What the user's queries on this database used (learned joins, …).
     pub usage: Arc<Usage>,
+    /// Sampled values of its columns; empty unless the user allows reading values.
+    pub known_values: KnownValues,
+    /// The database user in the knowledge pool, and whether values may be read.
+    pub user: String,
+    pub values_allowed: bool,
 }
 
 impl Ctx {
@@ -92,8 +98,16 @@ impl Ctx {
             .knowledge
             .user(&exposed.user)
             .ok_or_else(|| ToolError::Failed(format!("{} is not connected yet", exposed.name)))?;
+        let known_values = if exposed.values_allowed {
+            self.knowledge.known_values(&exposed.user)
+        } else {
+            KnownValues::new()
+        };
         Ok(Conn {
             conn: known.conn,
+            known_values,
+            user: exposed.user.clone(),
+            values_allowed: exposed.values_allowed,
             usage: self.knowledge.usage(&known.database).unwrap_or_default(),
             schema: known.schema,
         })

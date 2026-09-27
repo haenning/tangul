@@ -2,6 +2,8 @@
 //! comments or enum values match its words, plus their direct neighbours in the join
 //! graph. What an assistant needs to write the query, instead of the whole schema.
 
+use std::collections::HashMap;
+
 use crate::join_graph::JoinGraph;
 use crate::schema::SchemaIndex;
 use crate::usage::{Usage, UsageKind, table_key};
@@ -16,6 +18,10 @@ pub struct Match {
     pub why: String,
     pub score: u32,
 }
+
+/// Values seen in columns (sampled, where the user allows it), by (schema, table,
+/// column) as the catalog spells them.
+pub type KnownValues = HashMap<(String, String, String), Vec<String>>;
 
 /// Words that say nothing about where data is.
 const STOP_WORDS: &[&str] = &[
@@ -84,8 +90,8 @@ fn comment_score(comment: Option<&str>, term: &str) -> u32 {
 }
 
 /// Tables and columns matching the words of `query`, best first (a table before its
-/// columns on a tie).
-pub fn matches(schema: &SchemaIndex, query: &str) -> Vec<Match> {
+/// columns on a tie). Enum values count, and `known` sampled values.
+pub fn matches(schema: &SchemaIndex, query: &str, known: &KnownValues) -> Vec<Match> {
     let terms = words(query);
     let mut out = Vec::new();
     for (ix, table) in schema.tables().iter().enumerate() {
@@ -113,7 +119,15 @@ pub fn matches(schema: &SchemaIndex, query: &str) -> Vec<Match> {
             });
         }
         for (cix, column) in schema.columns(ix).iter().enumerate() {
-            let values = schema.enum_of(column).map(|e| &e.values);
+            let key = (
+                column.schema.clone(),
+                column.table.clone(),
+                column.name.clone(),
+            );
+            let values = schema
+                .enum_of(column)
+                .map(|e| &e.values)
+                .or_else(|| known.get(&key));
             let (mut score, mut why) = (0, Vec::new());
             for t in &terms {
                 let value = values
@@ -167,9 +181,15 @@ pub struct SliceTable {
 /// The tables a question is about: the best matching ones (up to `max`), then their
 /// direct neighbours in the join graph (up to half as many again), so the joins
 /// between them are known. Learned usage breaks ties.
-pub fn slice(schema: &SchemaIndex, usage: &Usage, question: &str, max: usize) -> Vec<SliceTable> {
+pub fn slice(
+    schema: &SchemaIndex,
+    usage: &Usage,
+    known: &KnownValues,
+    question: &str,
+    max: usize,
+) -> Vec<SliceTable> {
     let terms = terms(question);
-    let found = matches(schema, &terms.join(" "));
+    let found = matches(schema, &terms.join(" "), known);
     // Per table: its score (own + best columns) and the reasons.
     let mut tables: Vec<(usize, u32, Vec<String>)> = Vec::new();
     for m in &found {
@@ -311,6 +331,7 @@ mod tests {
         let got = slice(
             &s,
             &Usage::default(),
+            &KnownValues::new(),
             "How many cancelled orders per customer?",
             2,
         );
@@ -326,22 +347,55 @@ mod tests {
     #[test]
     fn comments_count_and_stop_words_dont() {
         let s = schema();
-        let got = slice(&s, &Usage::default(), "Show me all the bills", 3);
+        let got = slice(
+            &s,
+            &Usage::default(),
+            &KnownValues::new(),
+            "Show me all the bills",
+            3,
+        );
         assert_eq!(names(&s, &got), ["invoices", "orders"]);
         assert_eq!(got[0].why, ["comment: \"Bills sent to customers\""]);
-        assert!(slice(&s, &Usage::default(), "show me all of the", 5).is_empty());
+        assert!(
+            slice(
+                &s,
+                &Usage::default(),
+                &KnownValues::new(),
+                "show me all of the",
+                5
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn sampled_values_count_like_enum_values() {
+        let s = schema();
+        let none = KnownValues::new();
+        assert!(slice(&s, &Usage::default(), &none, "stock in Berlin", 3).is_empty());
+        let known = KnownValues::from([(
+            (
+                "app".to_string(),
+                "warehouses".to_string(),
+                "city".to_string(),
+            ),
+            vec!["Berlin".to_string(), "Hamburg".to_string()],
+        )]);
+        let got = slice(&s, &Usage::default(), &known, "stock in Berlin", 3);
+        assert_eq!(names(&s, &got), ["warehouses"]);
+        assert_eq!(got[0].why, ["city: value 'Berlin'"]);
     }
 
     #[test]
     fn usage_breaks_ties() {
         let s = schema();
         // One column each: a tie, in schema order …
-        let got = slice(&s, &Usage::default(), "email city", 2);
+        let got = slice(&s, &Usage::default(), &KnownValues::new(), "email city", 2);
         assert_eq!(names(&s, &got)[..2], ["customers", "warehouses"]);
         // … unless the user works with one of them.
         let mut usage = Usage::default();
         usage.record(UsageKind::Table, table_key("app", "warehouses"));
-        let got = slice(&s, &usage, "email city", 2);
+        let got = slice(&s, &usage, &KnownValues::new(), "email city", 2);
         assert_eq!(names(&s, &got)[..2], ["warehouses", "customers"]);
     }
 }

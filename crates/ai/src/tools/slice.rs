@@ -57,14 +57,20 @@ impl Tool for SchemaSlice {
         } = input(value)?;
         let conn = ctx.conn(connection.as_deref())?;
         let max = max_tables.unwrap_or(MAX_TABLES).clamp(1, 30);
-        let tables: Vec<Table> = slice(&conn.schema, &conn.usage, &question, max)
-            .into_iter()
-            .map(|t| Table {
-                name: conn.schema.sql_name(t.table),
-                digest: digest(&conn.schema, t.table),
-                why: t.why,
-            })
-            .collect();
+        let tables: Vec<Table> = slice(
+            &conn.schema,
+            &conn.usage,
+            &conn.known_values,
+            &question,
+            max,
+        )
+        .into_iter()
+        .map(|t| Table {
+            name: conn.schema.sql_name(t.table),
+            digest: digest(&conn.schema, t.table),
+            why: t.why,
+        })
+        .collect();
         let text = if tables.is_empty() {
             format!(
                 "No table matches \"{question}\"; try other words with search_schema, or \

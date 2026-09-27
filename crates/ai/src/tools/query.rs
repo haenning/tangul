@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tangul_core::QueryId;
-use tangul_engine::{Caller, QueryOptions};
+use tangul_core::{ConnId, QueryId};
+use tangul_engine::{Caller, QueryOptions, QueryOutput};
 
 use crate::ctx::Ctx;
 use crate::tool::{Tool, ToolError, ToolOutput, input, schema_of};
@@ -36,6 +36,33 @@ pub(crate) struct Rows {
     pub rows: Vec<Vec<Option<String>>>,
     /// There were more rows than `limit`.
     pub truncated: bool,
+}
+
+/// Runs `sql` on `conn` through the engine's gate as the assistant, keeping at most
+/// `limit` rows. A write comes back refused: it was held, and the pass that would
+/// run it stays with the user (the model never sees it).
+pub(crate) async fn read(
+    ctx: &Ctx,
+    conn: ConnId,
+    sql: String,
+    limit: usize,
+) -> Result<QueryOutput, ToolError> {
+    let options = QueryOptions {
+        row_limit: limit,
+        ..QueryOptions::new(Caller::Assistant)
+    };
+    ctx.engine()?
+        .query(next_query(), conn, sql, options)
+        .await
+        .map_err(|e| {
+            if e.held.is_some() {
+                ToolError::NotAllowed(
+                    "this statement writes and was not run; propose it to the user instead".into(),
+                )
+            } else {
+                ToolError::Failed(e.message)
+            }
+        })
 }
 
 /// Query ids of the assistant's reads: far from the app's, which count up from 1.
@@ -92,26 +119,8 @@ impl Tool for RunReadonly {
             return Err(ToolError::BadInput("sql is empty".into()));
         }
         let conn = ctx.conn(connection.as_deref())?;
-        let engine = ctx.engine()?;
-        let options = QueryOptions {
-            row_limit: limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS),
-            ..QueryOptions::new(Caller::Assistant)
-        };
-        let out = engine
-            .query(next_query(), conn.conn, sql, options)
-            .await
-            .map_err(|e| {
-                if e.held.is_some() {
-                    // The pass that would run it stays with the user; the model never
-                    // sees it.
-                    ToolError::NotAllowed(
-                        "this statement writes and was not run; propose it to the user instead"
-                            .into(),
-                    )
-                } else {
-                    ToolError::Failed(e.message)
-                }
-            })?;
+        let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
+        let out = read(ctx, conn.conn, sql, limit).await?;
         let rows = match out.results.last() {
             Some(set) => Rows {
                 columns: set.columns().iter().map(|c| c.name.clone()).collect(),

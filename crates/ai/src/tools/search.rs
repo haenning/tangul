@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tangul_assist::schema::SchemaIndex;
-use tangul_assist::slice::matches;
+use tangul_assist::slice::{KnownValues, matches};
 
 use crate::ctx::Ctx;
 use crate::tool::{Tool, ToolError, ToolOutput, input, schema_of};
@@ -35,8 +35,13 @@ pub(crate) struct Hit {
     pub score: u32,
 }
 
-pub(crate) fn search(schema: &SchemaIndex, query: &str, limit: usize) -> Vec<Hit> {
-    matches(schema, query)
+pub(crate) fn search(
+    schema: &SchemaIndex,
+    known: &KnownValues,
+    query: &str,
+    limit: usize,
+) -> Vec<Hit> {
+    matches(schema, query, known)
         .into_iter()
         .take(limit)
         .map(|m| Hit {
@@ -73,7 +78,12 @@ impl Tool for SearchSchema {
             return Err(ToolError::BadInput("query is empty".into()));
         }
         let conn = ctx.conn(connection.as_deref())?;
-        let hits = search(&conn.schema, &query, limit.unwrap_or(LIMIT).clamp(1, 100));
+        let hits = search(
+            &conn.schema,
+            &conn.known_values,
+            &query,
+            limit.unwrap_or(LIMIT).clamp(1, 100),
+        );
         let text = if hits.is_empty() {
             format!("Nothing matches \"{query}\".")
         } else {
