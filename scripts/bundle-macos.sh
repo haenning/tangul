@@ -67,6 +67,9 @@ rm -f "$out/icon-info.plist"
 # Ad-hoc signature (required on Apple Silicon; no developer account needed), or the
 # local certificate from TANGUL_SIGN_IDENTITY.
 identity="${TANGUL_SIGN_IDENTITY:--}"
+# make passes .env values as written: spaces (e.g. before a comment) and quotes
+# around the name would be part of it.
+identity=$(printf '%s' "$identity" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/')
 codesign --force --sign "$identity" --timestamp=none "$app"
 [[ "$identity" == "-" ]] || echo "signed with \"$identity\""
 

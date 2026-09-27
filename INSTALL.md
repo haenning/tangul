@@ -35,7 +35,7 @@ certificate instead, once per Mac:
 
 ```sh
 make signing-cert                                            # asks for your login password
-echo 'TANGUL_SIGN_IDENTITY="tangul local signing"' >> .env   # make reads .env
+echo 'TANGUL_SIGN_IDENTITY=tangul local signing' >> .env     # make reads .env, no quotes
 make install
 ```
 

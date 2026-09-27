@@ -42,5 +42,6 @@ EOF
 fi
 
 echo
-echo "Put this line into .env (next to the Makefile):"
-echo "TANGUL_SIGN_IDENTITY=\"$name\""
+echo "Put this line into .env (next to the Makefile), without quotes: make reads"
+echo "the file as it is."
+echo "TANGUL_SIGN_IDENTITY=$name"
