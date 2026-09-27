@@ -89,7 +89,10 @@ impl JoinGraph {
             // The same condition as a foreign key: it only counts as used.
             let same = |e: &Edge| {
                 (e.a == a && e.b == b && e.a_cols == [ac.clone()] && e.b_cols == [bc.clone()])
-                    || (e.a == b && e.b == a && e.a_cols == [bc.clone()] && e.b_cols == [ac.clone()])
+                    || (e.a == b
+                        && e.b == a
+                        && e.a_cols == [bc.clone()]
+                        && e.b_cols == [ac.clone()])
             };
             match edges.iter_mut().find(|e| same(e)) {
                 Some(e) => e.used += score,
@@ -280,7 +283,11 @@ mod tests {
             ],
             ..Default::default()
         };
-        SchemaIndex::new(info, dialect_for(DriverKind::Postgres), Some("public".into()))
+        SchemaIndex::new(
+            info,
+            dialect_for(DriverKind::Postgres),
+            Some("public".into()),
+        )
     }
 
     fn ix(s: &SchemaIndex, name: &str) -> usize {
@@ -289,7 +296,10 @@ mod tests {
 
     fn joined(usage: &mut Usage, a: (&str, &str), b: (&str, &str), times: usize) {
         for _ in 0..times {
-            usage.record(UsageKind::Join, join_key(("app", a.0, a.1), ("app", b.0, b.1)));
+            usage.record(
+                UsageKind::Join,
+                join_key(("app", a.0, a.1), ("app", b.0, b.1)),
+            );
         }
     }
 
@@ -353,6 +363,9 @@ mod tests {
         assert_eq!(path[0].source, JoinSource::Learned);
         // Without it, the keys.
         let g = JoinGraph::new(&s, &Usage::default());
-        assert_eq!(g.path(ix(&s, "tickets"), ix(&s, "orders")).unwrap().len(), 2);
+        assert_eq!(
+            g.path(ix(&s, "tickets"), ix(&s, "orders")).unwrap().len(),
+            2
+        );
     }
 }
