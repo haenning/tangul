@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tangul_assist::schema::SchemaIndex;
 use tangul_assist::slice::KnownValues;
 use tangul_assist::usage::Usage;
-use tangul_core::{ConnId, DriverKind};
+use tangul_core::{ConnId, DriverKind, ValueAccess};
 use tangul_engine::EngineHandle;
 use tangul_service::knowledge::Knowledge;
 
@@ -18,8 +18,8 @@ pub struct Exposed {
     /// The database user id in the knowledge pool.
     pub user: String,
     pub driver: DriverKind,
-    /// The assistant may read column values (samples, value profiles).
-    pub values_allowed: bool,
+    /// What the assistant may read from the rows (value profiles).
+    pub values: ValueAccess,
 }
 
 /// The context of every tool call: the knowledge pool, the engine for queries, and
@@ -39,9 +39,9 @@ pub(crate) struct Conn {
     pub usage: Arc<Usage>,
     /// Sampled values of its columns; empty unless the user allows reading values.
     pub known_values: KnownValues,
-    /// The database user in the knowledge pool, and whether values may be read.
+    /// The database user in the knowledge pool, and what may be read from rows.
     pub user: String,
-    pub values_allowed: bool,
+    pub values: ValueAccess,
 }
 
 impl Ctx {
@@ -98,7 +98,7 @@ impl Ctx {
             .knowledge
             .user(&exposed.user)
             .ok_or_else(|| ToolError::Failed(format!("{} is not connected yet", exposed.name)))?;
-        let known_values = if exposed.values_allowed {
+        let known_values = if exposed.values.values() {
             self.knowledge.known_values(&exposed.user)
         } else {
             KnownValues::new()
@@ -107,7 +107,7 @@ impl Ctx {
             conn: known.conn,
             known_values,
             user: exposed.user.clone(),
-            values_allowed: exposed.values_allowed,
+            values: exposed.values,
             usage: self.knowledge.usage(&known.database).unwrap_or_default(),
             schema: known.schema,
         })

@@ -84,13 +84,15 @@ impl Tool for ColumnProfileTool {
             connection,
         } = input(value)?;
         let conn = ctx.conn(connection.as_deref())?;
-        if !conn.values_allowed {
+        if !conn.values.statistics() {
             return Err(ToolError::NotAllowed(
-                "reading column values is off for this database; the user can allow it \
-                 in the AI menu of the title bar"
+                "reading from the rows is off for this database; the user can allow \
+                 statistics or values in the AI menu of the title bar"
                     .into(),
             ));
         }
+        // Statistics only: counts, no values (no range, no top values).
+        let read_values = conn.values.values();
         let ix = resolve_table(&conn.schema, &table)?;
         let meta = conn
             .schema
@@ -107,15 +109,28 @@ impl Tool for ColumnProfileTool {
             )));
         }
         let key = (meta.schema.clone(), meta.table.clone(), meta.name.clone());
-        let profile = match ctx.knowledge().profile(&conn.user, &key) {
-            Some(p) => p,
+        // A cached profile of counts only doesn't do where values may be read.
+        let cached = ctx
+            .knowledge()
+            .profile(&conn.user, &key)
+            .filter(|p| p.values || !read_values);
+        let profile = match cached {
+            Some(p) if read_values => p,
+            Some(p) => ColumnProfile {
+                min: None,
+                max: None,
+                top: Vec::new(),
+                values: false,
+                ..p
+            },
             None => {
                 let d = conn.schema.dialect();
                 let table_sql = conn.schema.sql_name(ix);
-                let range = matches!(
-                    ColumnKind::from_type(&meta.data_type),
-                    ColumnKind::Number | ColumnKind::Date | ColumnKind::DateTime
-                );
+                let range = read_values
+                    && matches!(
+                        ColumnKind::from_type(&meta.data_type),
+                        ColumnKind::Number | ColumnKind::Date | ColumnKind::DateTime
+                    );
                 let counts = read(
                     ctx,
                     conn.conn,
@@ -129,26 +144,33 @@ impl Tool for ColumnProfileTool {
                     .ok_or_else(|| ToolError::Failed("no result".into()))?;
                 let (rows, non_null) = (number(set.cell(0, 0)), number(set.cell(0, 1)));
                 // Types without equality or order (json, …) have no top values.
-                let top = match read(
-                    ctx,
-                    conn.conn,
-                    top_values_sql(d, &table_sql, &meta.name),
-                    TOP_VALUES,
-                )
-                .await
-                {
-                    Ok(out) => out
-                        .results
-                        .last()
-                        .map(|t| {
-                            (0..t.row_count())
-                                .map(|r| {
-                                    (clip(t.cell(r, 0).unwrap_or_default()), number(t.cell(r, 1)))
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    Err(_) => Vec::new(),
+                let top = if !read_values {
+                    Vec::new()
+                } else {
+                    match read(
+                        ctx,
+                        conn.conn,
+                        top_values_sql(d, &table_sql, &meta.name),
+                        TOP_VALUES,
+                    )
+                    .await
+                    {
+                        Ok(out) => out
+                            .results
+                            .last()
+                            .map(|t| {
+                                (0..t.row_count())
+                                    .map(|r| {
+                                        (
+                                            clip(t.cell(r, 0).unwrap_or_default()),
+                                            number(t.cell(r, 1)),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        Err(_) => Vec::new(),
+                    }
                 };
                 let profile = ColumnProfile {
                     rows,
@@ -157,6 +179,7 @@ impl Tool for ColumnProfileTool {
                     min: range.then(|| set.cell(0, 3).map(clip)).flatten(),
                     max: range.then(|| set.cell(0, 4).map(clip)).flatten(),
                     top,
+                    values: read_values,
                 };
                 ctx.knowledge()
                     .set_profile(&conn.user, key, profile.clone());

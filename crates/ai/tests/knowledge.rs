@@ -10,7 +10,7 @@ use tangul_assist::schema::SchemaIndex;
 use tangul_assist::usage::{Usage, UsageKind, join_key};
 use tangul_core::{
     CheckInfo, ColumnMeta, ConnId, DriverKind, EnumInfo, ForeignKey, IndexInfo, SchemaInfo,
-    TableInfo, TableKind, ViewDef,
+    TableInfo, TableKind, ValueAccess, ViewDef,
 };
 use tangul_service::knowledge::Knowledge;
 
@@ -148,7 +148,7 @@ fn exposed(name: &str, user: &str) -> Exposed {
         name: name.into(),
         user: user.into(),
         driver: DriverKind::Postgres,
-        values_allowed: false,
+        values: ValueAccess::None,
     }
 }
 
@@ -490,8 +490,8 @@ async fn column_values_only_with_the_users_consent() {
         )
         .await,
         ToolError::NotAllowed(
-            "reading column values is off for this database; the user can allow it in the \
-             AI menu of the title bar"
+            "reading from the rows is off for this database; the user can allow \
+             statistics or values in the AI menu of the title bar"
                 .into()
         )
     );

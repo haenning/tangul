@@ -66,7 +66,7 @@ use tangul_assist::{
 };
 use tangul_core::{
     ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo,
-    TableKind,
+    TableKind, ValueAccess,
 };
 use tangul_data::Data;
 use tangul_data::local::{Bookmark, HistoryEntry, Local, NewHistory, bare_sql};
@@ -95,6 +95,7 @@ use crate::{
     result_view::CellValue,
     settings,
     tabs::{TabItem, Tabs},
+    ui::{TEXT_WIDTH, TextCard, wrapped_tooltip},
 };
 
 const SIDEBAR_WIDTH: f32 = 260.;

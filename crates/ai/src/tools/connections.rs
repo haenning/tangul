@@ -21,7 +21,8 @@ struct Connection {
     database: &'static str,
     connected: bool,
     tables: usize,
-    values_allowed: bool,
+    /// `none`, `statistics` or `values`: what may be read from the rows.
+    values: tangul_core::ValueAccess,
 }
 
 #[async_trait]
@@ -51,7 +52,7 @@ impl Tool for ListConnections {
                     database: e.driver.label(),
                     connected: known.is_some(),
                     tables: known.map_or(0, |k| k.schema.tables().len()),
-                    values_allowed: e.values_allowed,
+                    values: e.values,
                 }
             })
             .collect();
@@ -65,10 +66,10 @@ impl Tool for ListConnections {
                     } else {
                         "not connected".into()
                     };
-                    let values = if c.values_allowed {
-                        ", column values readable"
-                    } else {
-                        ""
+                    let values = match c.values {
+                        tangul_core::ValueAccess::None => "",
+                        tangul_core::ValueAccess::Statistics => ", column statistics readable",
+                        tangul_core::ValueAccess::Values => ", column values readable",
                     };
                     format!("{} ({}, {state}{values})", c.name, c.database)
                 })

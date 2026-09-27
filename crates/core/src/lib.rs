@@ -238,4 +238,7 @@ pub struct ColumnProfile {
     pub max: Option<String>,
     /// The most frequent values in the sample with how often they occur.
     pub top: Vec<(String, u64)>,
+    /// Values were read (the range and top values); `false` for statistics only.
+    #[serde(default)]
+    pub values: bool,
 }

@@ -10,7 +10,7 @@ use serde_json::json;
 use tangul_ai::{Ctx, Exposed, Registry, ToolError};
 use tangul_assist::dialect::dialect_for;
 use tangul_assist::schema::SchemaIndex;
-use tangul_core::{ConnId, ConnectConfig, DriverKind, TlsMode};
+use tangul_core::{ConnId, ConnectConfig, DriverKind, TlsMode, ValueAccess};
 use tangul_engine::{Command, EngineConfig, Event};
 use tangul_service::knowledge::Knowledge;
 
@@ -40,11 +40,11 @@ async fn next(events: &async_channel::Receiver<Event>) -> Event {
 
 /// The shop in a fresh file, connected, its schema in the pool, exposed as `shop`.
 async fn shop(name: &str) -> (PathBuf, Ctx) {
-    shop_with(name, false).await
+    shop_with(name, ValueAccess::None).await
 }
 
-/// [`shop`], where the assistant may read column values if `values` is set.
-async fn shop_with(name: &str, values: bool) -> (PathBuf, Ctx) {
+/// [`shop`], where the assistant may read `values` from the rows.
+async fn shop_with(name: &str, values: ValueAccess) -> (PathBuf, Ctx) {
     let dir = std::env::temp_dir().join(format!("tangul-ai-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -89,7 +89,7 @@ async fn shop_with(name: &str, values: bool) -> (PathBuf, Ctx) {
         name: "shop".into(),
         user: "u1".into(),
         driver: DriverKind::Sqlite,
-        values_allowed: values,
+        values,
     };
     (dir, Ctx::new(knowledge, Some(engine), vec![exposed]))
 }
@@ -249,7 +249,7 @@ async fn writes_are_never_run() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn profiles_a_column_from_a_sample() {
-    let (dir, ctx) = shop_with("profile", true).await;
+    let (dir, ctx) = shop_with("profile", ValueAccess::Values).await;
     assert_eq!(
         call(
             &ctx,
@@ -305,7 +305,7 @@ async fn profiles_a_column_from_a_sample() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_profile_is_sampled_once() {
-    let (dir, ctx) = shop_with("profile-cache", true).await;
+    let (dir, ctx) = shop_with("profile-cache", ValueAccess::Values).await;
     let first = call(
         &ctx,
         "column_profile",
@@ -329,5 +329,39 @@ async fn a_profile_is_sampled_once() {
         first
     );
     assert!(first.starts_with("users.email: 2 rows"), "{first}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn statistics_only_read_no_values() {
+    let (dir, ctx) = shop_with("profile-stats", ValueAccess::Statistics).await;
+    // Counts, but no range and no values …
+    assert_eq!(
+        call(
+            &ctx,
+            "column_profile",
+            json!({"table": "orders", "column": "total"})
+        )
+        .await
+        .unwrap(),
+        "orders.total: 4 rows · NULL 0 (0%) · 4 distinct"
+    );
+    assert_eq!(
+        call(
+            &ctx,
+            "column_profile",
+            json!({"table": "orders", "column": "status"})
+        )
+        .await
+        .unwrap(),
+        "orders.status: 4 rows · NULL 0 (0%) · 3 distinct"
+    );
+    // … so no search by values either.
+    assert_eq!(
+        call(&ctx, "search_schema", json!({"query": "cancelled"}))
+            .await
+            .unwrap(),
+        "Nothing matches \"cancelled\"."
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }

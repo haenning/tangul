@@ -65,7 +65,7 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
                 users: vec![user],
                 ssh: None,
                 assistant_user: None,
-                ai_values: false,
+                ai_values: Default::default(),
             }),
         }
     }
@@ -243,6 +243,35 @@ pub fn new_id() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn what_the_ai_may_read_loads_old_and_new_files() {
+        use tangul_core::{Database, ValueAccess};
+        let db = |extra: &str| -> Database {
+            toml::from_str(&format!(
+                "id = \"d\"\nname = \"n\"\ndriver = \"postgres\"\nhost = \"h\"\nport = 5432\n{extra}"
+            ))
+            .unwrap()
+        };
+        assert_eq!(db("").ai_values, ValueAccess::None);
+        // Saved before there were levels.
+        assert_eq!(db("ai_values = true").ai_values, ValueAccess::Values);
+        assert_eq!(db("ai_values = false").ai_values, ValueAccess::None);
+        assert_eq!(
+            db("ai_values = \"statistics\"").ai_values,
+            ValueAccess::Statistics
+        );
+        assert_eq!(db("ai_values = \"values\"").ai_values, ValueAccess::Values);
+        // Only written when something is allowed.
+        let mut d = db("");
+        assert!(!toml::to_string(&d).unwrap().contains("ai_values"));
+        d.ai_values = ValueAccess::Statistics;
+        assert!(
+            toml::to_string(&d)
+                .unwrap()
+                .contains("ai_values = \"statistics\"")
+        );
+    }
     use super::*;
 
     #[test]

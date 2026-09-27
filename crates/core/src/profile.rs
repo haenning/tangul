@@ -63,10 +63,10 @@ pub struct Database {
     /// `None` uses the user selected in the app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_user: Option<String>,
-    /// The assistant may read column values (samples for value profiles) of this
-    /// database. Off unless the user turns it on.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub ai_values: bool,
+    /// What the assistant may read from the rows (value profiles). Nothing unless
+    /// the user allows it.
+    #[serde(default, skip_serializing_if = "ValueAccess::is_none")]
+    pub ai_values: ValueAccess,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -170,5 +170,70 @@ impl ConnectConfig {
             database: db.database.clone(),
             tls: db.tls,
         }
+    }
+}
+
+/// What the assistant may read from a database's rows, for value profiles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ValueAccess {
+    /// Nothing from the rows.
+    #[default]
+    None,
+    /// Counts only: rows looked at, NULLs, distinct values. No values.
+    Statistics,
+    /// Also values: the range (smallest, largest) and the most frequent values.
+    Values,
+}
+
+impl ValueAccess {
+    pub const ALL: [ValueAccess; 3] = [
+        ValueAccess::None,
+        ValueAccess::Statistics,
+        ValueAccess::Values,
+    ];
+
+    pub fn is_none(&self) -> bool {
+        *self == ValueAccess::None
+    }
+
+    /// Counts may be read.
+    pub fn statistics(self) -> bool {
+        self != ValueAccess::None
+    }
+
+    /// Values themselves may be read.
+    pub fn values(self) -> bool {
+        self == ValueAccess::Values
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ValueAccess::None => "Nothing from the rows",
+            ValueAccess::Statistics => "Statistics: NULL share, distinct count",
+            ValueAccess::Values => "Values: range and most frequent values",
+        }
+    }
+}
+
+/// Reads the name, or `true` / `false` as saved before there were levels
+/// (`true` allowed values).
+impl<'de> Deserialize<'de> for ValueAccess {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Saved {
+            Bool(bool),
+            Name(String),
+        }
+        Ok(match Saved::deserialize(d)? {
+            Saved::Bool(true) => ValueAccess::Values,
+            Saved::Bool(false) => ValueAccess::None,
+            Saved::Name(n) => match n.as_str() {
+                "statistics" => ValueAccess::Statistics,
+                "values" => ValueAccess::Values,
+                _ => ValueAccess::None,
+            },
+        })
     }
 }

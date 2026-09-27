@@ -12,6 +12,7 @@ mod query_tab;
 mod result_view;
 mod settings;
 mod tabs;
+mod ui;
 mod workspace;
 
 use gpui_kit::component::{Root, Theme, ThemeMode, TitleBar};

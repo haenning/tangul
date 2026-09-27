@@ -10,7 +10,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode};
+use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode, ValueAccess};
 
 use tangul_data::profiles::new_id;
 
@@ -64,8 +64,8 @@ pub struct ConnectionForm {
     ssh_secret: Entity<InputState>,
     /// The user the AI assistant connects as; `None` uses the selected one.
     assistant_user: Option<String>,
-    /// The assistant may read column values of this database.
-    ai_values: bool,
+    /// What the assistant may read from the rows of this database.
+    ai_values: ValueAccess,
     error: Option<SharedString>,
 }
 
@@ -172,7 +172,7 @@ impl ConnectionForm {
                     })
             }),
             assistant_user: db.and_then(|d| d.assistant_user.clone()),
-            ai_values: db.is_some_and(|d| d.ai_values),
+            ai_values: db.map(|d| d.ai_values).unwrap_or_default(),
             error: None,
         }
     }
@@ -433,13 +433,36 @@ impl Render for ConnectionForm {
                             ),
                     )
                     .child(
-                        Checkbox::new("ai-values")
-                            .label("Let the AI read column values (samples of a few thousand rows)")
-                            .checked(self.ai_values)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.ai_values = *checked;
-                                cx.notify();
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_wrap()
+                            .child(div().text_xs().child("AI reads"))
+                            .children(ValueAccess::ALL.map(|access| {
+                                let b = Button::new(SharedString::from(format!(
+                                    "ai-values-{access:?}"
+                                )))
+                                .label(access.label())
+                                .xsmall();
+                                let b = if self.ai_values == access {
+                                    b.primary()
+                                } else {
+                                    b.ghost()
+                                };
+                                b.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ai_values = access;
+                                    cx.notify();
+                                }))
                             })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                "From a sample of up to 10,000 rows per column. Columns that \
+                                 look like passwords, tokens or keys are never read.",
+                            ),
                     ),
             )
         });
