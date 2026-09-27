@@ -362,6 +362,32 @@ impl ValuePanel {
             })
     }
 
+    /// Where B goes before there is one: a faint "B" and how to pick it.
+    fn render_b_hint(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .id("value-b-hint")
+            .test_support()
+            .px_2()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(
+                div()
+                    .px_1p5()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.warning.opacity(0.35))
+                    .text_color(theme.warning.opacity(0.5))
+                    .child("B"),
+            )
+            .child("⌥ + click another cell to compare it with A")
+    }
+
     /// A and B are from columns of different names: usually a misclick.
     fn render_column_warning(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (a, b) = (self.a.as_ref()?, self.b.as_ref()?);
@@ -595,6 +621,9 @@ impl Render for ValuePanel {
             .test_support()
             .size_full()
             .child(self.render_header(a_label, &first, cx))
+            .when(self.a.is_some() && self.b.is_none(), |this| {
+                this.child(self.render_b_hint(cx))
+            })
             .when_some(second.filter(|_| comparing), |this, b| {
                 this.children(self.render_column_warning(cx))
                     .child(self.render_header("B", &b, cx))

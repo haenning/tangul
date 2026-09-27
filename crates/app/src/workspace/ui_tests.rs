@@ -253,6 +253,8 @@ fn space_shows_the_clicked_cell(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| {
         assert!(window.find(RIGHT).visible());
         assert!(window.find("value-panel").visible());
+        // With only A, the B row says how to pick one.
+        assert!(window.find("value-b-hint").visible());
         // The arrow keys move A.
         window.press("down", cx);
     });
@@ -290,6 +292,7 @@ fn alt_click_compares_and_the_x_stops_it(cx: &mut TestAppContext) {
         assert!(window.find(RIGHT).visible());
         assert!(window.find("compare-changes").visible());
         assert!(window.try_find("compare-columns-warning").is_none());
+        assert!(window.try_find("value-b-hint").is_none());
         // Same JSON in another key order: identical while key order is ignored …
         assert_eq!(changes(&workspace, cx), 0);
         window.click("compare-normalize", cx);
@@ -356,3 +359,9 @@ fn comparing_different_columns_warns(cx: &mut TestAppContext) {
         assert!(window.find("compare-columns-warning").visible());
     });
 }
+
+// Not tested here: the row menu on right click (the table in cell mode stops the
+// click; see `render_td`). gpui-component's context menu keeps each opened menu
+// alive through its own subscription, which GPUI's leak check at the end of a
+// test reports. Checked once by hand-running such a test: the menu opens with the
+// fix and not without it.
