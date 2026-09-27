@@ -26,6 +26,7 @@ pub(super) struct Sidebar {
 impl Sidebar {
     pub(super) fn new(
         panels: &'static [Panel],
+        open: bool,
         width_setting: &'static str,
         local: &Local,
     ) -> Self {
@@ -36,7 +37,7 @@ impl Sidebar {
             .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         Self {
             panels,
-            open: !panels.is_empty(),
+            open: open && !panels.is_empty(),
             active: panels.first().copied(),
             width,
             width_setting,
@@ -97,6 +98,7 @@ impl Sidebar {
 
 /// The panels' own state, whichever sidebar shows them.
 pub(super) struct Panels {
+    pub(super) value: Entity<ValuePanel>,
     pub(super) schema: SchemaTree,
     pub(super) bookmark_search: Entity<InputState>,
     pub(super) history: HistoryList,
@@ -148,19 +150,21 @@ pub(super) enum Panel {
     Schema,
     Bookmarks,
     History,
+    Value,
 }
 
 impl Panel {
     /// The left sidebar's panels.
     pub(super) const LEFT: &'static [Panel] = &[Panel::Schema, Panel::Bookmarks, Panel::History];
-    /// The right sidebar's panels: the value viewer (#34) and the agent (#37) go here.
-    pub(super) const RIGHT: &'static [Panel] = &[];
+    /// The right sidebar's panels (the agent, #37, goes here too).
+    pub(super) const RIGHT: &'static [Panel] = &[Panel::Value];
 
     pub(super) fn icon(self) -> Lucide {
         match self {
             Panel::Schema => Lucide::ListTree,
             Panel::Bookmarks => Lucide::Bookmark,
             Panel::History => Lucide::RotateCcwClock,
+            Panel::Value => Lucide::Braces,
         }
     }
 
@@ -169,6 +173,7 @@ impl Panel {
             Panel::Schema => "Schema",
             Panel::Bookmarks => "Bookmarks",
             Panel::History => "History",
+            Panel::Value => "Value viewer",
         }
     }
 }
@@ -244,6 +249,7 @@ impl Workspace {
             Some(Panel::Schema) => self.render_schema_panel(cx).into_any_element(),
             Some(Panel::Bookmarks) => self.render_bookmarks_panel(cx).into_any_element(),
             Some(Panel::History) => self.render_history_panel(cx).into_any_element(),
+            Some(Panel::Value) => self.panels.value.clone().into_any_element(),
             None => div().into_any_element(),
         };
         let theme = cx.theme();
@@ -297,6 +303,16 @@ impl Workspace {
         self.left.toggle_open();
         cx.notify();
     }
+
+    pub(super) fn toggle_right_sidebar(
+        &mut self,
+        _: &ToggleRightSidebar,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.right.toggle_open();
+        cx.notify();
+    }
 }
 
 #[cfg(test)]
@@ -342,7 +358,7 @@ mod tests {
     #[test]
     fn a_sidebar_without_panels_stays_closed() {
         let mut s = Sidebar {
-            panels: Panel::RIGHT,
+            panels: &[],
             open: false,
             active: None,
             width: 260.,
