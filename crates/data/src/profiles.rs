@@ -273,6 +273,25 @@ mod tests {
                 .contains("ai_values = \"statistics\"")
         );
     }
+
+    #[test]
+    fn ai_tools_are_on_unless_turned_off() {
+        use tangul_core::Database;
+        let db = |extra: &str| -> Database {
+            toml::from_str(&format!(
+                "id = \"d\"\nname = \"n\"\ndriver = \"postgres\"\nhost = \"h\"\nport = 5432\n{extra}"
+            ))
+            .unwrap()
+        };
+        // Saved before the setting existed: on.
+        assert!(db("").ai_tools);
+        assert!(!db("ai_tools = false").ai_tools);
+        // Only written when off.
+        let mut d = db("");
+        assert!(!toml::to_string(&d).unwrap().contains("ai_tools"));
+        d.ai_tools = false;
+        assert!(toml::to_string(&d).unwrap().contains("ai_tools = false"));
+    }
     use super::*;
 
     #[test]
