@@ -2,7 +2,7 @@ use tangul_core::DriverKind;
 
 use crate::lexer::Lexing;
 
-use super::{Dialect, Namespace, Syntax, Upsert};
+use super::{Dialect, Namespace, Syntax, Upsert, quote_ident};
 
 pub(super) struct Mysql;
 
@@ -125,6 +125,28 @@ impl Dialect for Mysql {
                               AND p.table_name = t.table_name \
                               AND p.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER')))",
         )
+    }
+
+    /// Schemas are databases here: `SELECT` (and `SHOW VIEW`) on each.
+    fn readonly_account_sql(
+        &self,
+        user: &str,
+        password: &str,
+        _database: &str,
+        schemas: &[String],
+    ) -> Option<Vec<String>> {
+        let account = format!("{}@'%'", self.string(user));
+        let mut sql = vec![format!(
+            "CREATE USER {account} IDENTIFIED BY {}",
+            self.string(password)
+        )];
+        for schema in schemas {
+            sql.push(format!(
+                "GRANT SELECT, SHOW VIEW ON {}.* TO {account}",
+                quote_ident(self, schema)
+            ));
+        }
+        Some(sql)
     }
 
     /// `DELIMITER` is a client command (the `mysql` shell's), used in scripts that

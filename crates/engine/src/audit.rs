@@ -34,7 +34,8 @@ impl Audit {
                 .unwrap_or_default(),
             caller: gate::caller_name(caller).into(),
             target: target.into(),
-            sql: sql.into(),
+            // Passwords (`CREATE ROLE … PASSWORD '…'`) are never kept.
+            sql: tangul_assist::redact::redact(sql).into_owned(),
             outcome: outcome.into(),
             error,
             duration_ms: duration.map(|d| d.as_millis() as i64),

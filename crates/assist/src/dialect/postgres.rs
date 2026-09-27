@@ -2,7 +2,7 @@ use tangul_core::DriverKind;
 
 use crate::lexer::Lexing;
 
-use super::{Dialect, Namespace, Syntax, Upsert};
+use super::{Dialect, Namespace, Syntax, Upsert, quote_ident};
 
 pub(super) struct Postgres;
 
@@ -113,6 +113,39 @@ impl Dialect for Postgres {
                AND (has_table_privilege(c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') \
                     OR pg_has_role(c.relowner, 'MEMBER'))",
         )
+    }
+
+    /// Read-only by grants, and by default for its sessions as a second line.
+    fn readonly_account_sql(
+        &self,
+        user: &str,
+        password: &str,
+        database: &str,
+        schemas: &[String],
+    ) -> Option<Vec<String>> {
+        let role = quote_ident(self, user);
+        let mut sql = vec![
+            format!(
+                "CREATE ROLE {role} LOGIN PASSWORD {}",
+                self.string(password)
+            ),
+            format!("ALTER ROLE {role} SET default_transaction_read_only = on"),
+            format!(
+                "GRANT CONNECT ON DATABASE {} TO {role}",
+                quote_ident(self, database)
+            ),
+        ];
+        for schema in schemas {
+            let schema = quote_ident(self, schema);
+            sql.push(format!("GRANT USAGE ON SCHEMA {schema} TO {role}"));
+            sql.push(format!(
+                "GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {role}"
+            ));
+            sql.push(format!(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} GRANT SELECT ON TABLES TO {role}"
+            ));
+        }
+        Some(sql)
     }
 
     fn lexing(&self) -> Lexing {

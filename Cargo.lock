@@ -8223,6 +8223,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
+ "getrandom 0.3.4",
  "keyring",
  "rusqlite",
  "serde",

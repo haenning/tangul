@@ -501,35 +501,53 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
 }
 
 /// The dialect's count of tables the connected user may change or drop: all of
-/// them for the admin, none for a user with SELECT only.
+/// them for the admin, none for the read-only account the dialect sets up (which
+/// can still read).
 async fn writable_checks(driver: DriverKind, cfg: ConnectConfig) {
-    let sql = tangul_assist::dialect::dialect_for(driver)
+    let dialect = tangul_assist::dialect::dialect_for(driver);
+    let sql = dialect
         .writable_tables_sql()
         .expect("a count for this database");
     let mut admin = Harness::connect(driver, cfg.clone()).await;
     assert!(writable_count(&mut admin, sql).await > 0);
-    let (create, drop) = match driver {
+    let (clear, schema, drop) = match driver {
         DriverKind::Postgres => (
-            "DROP ROLE IF EXISTS tangul_ro_live; CREATE ROLE tangul_ro_live LOGIN PASSWORD 'ro'; \
-             GRANT SELECT ON ALL TABLES IN SCHEMA public TO tangul_ro_live",
+            "DROP OWNED BY tangul_ro_live; DROP ROLE tangul_ro_live",
+            "public".to_string(),
             "DROP OWNED BY tangul_ro_live; DROP ROLE tangul_ro_live",
         ),
         DriverKind::Mysql => (
-            "DROP USER IF EXISTS 'tangul_ro_live'@'%'; \
-             CREATE USER 'tangul_ro_live'@'%' IDENTIFIED BY 'ro'; \
-             GRANT SELECT ON *.* TO 'tangul_ro_live'@'%'",
+            "DROP USER IF EXISTS 'tangul_ro_live'@'%'",
+            cfg.database.clone(),
             "DROP USER 'tangul_ro_live'@'%'",
         ),
         DriverKind::Sqlite => unreachable!(),
     };
-    assert_eq!(admin.run(TabId(1), create).await.error, None);
+    // Left over from an aborted run (fails harmlessly if there is none).
+    admin.run(TabId(1), clear).await;
+    let create = dialect
+        .readonly_account_sql("tangul_ro_live", "ro-pw", &cfg.database, &[schema])
+        .expect("account statements")
+        .join(";\n");
+    assert_eq!(admin.run(TabId(1), &create).await.error, None, "{create}");
     let reader = ConnectConfig {
         user: "tangul_ro_live".into(),
-        password: Some("ro".into()),
+        password: Some("ro-pw".into()),
         ..cfg
     };
     let mut ro = Harness::connect(driver, reader).await;
     assert_eq!(writable_count(&mut ro, sql).await, 0);
+    let tables = match driver {
+        DriverKind::Postgres => {
+            "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' \
+             AND has_table_privilege(format('%I.%I', schemaname, tablename), 'SELECT')"
+        }
+        _ => "SELECT count(*) FROM information_schema.tables WHERE table_schema = DATABASE()",
+    };
+    assert!(
+        writable_count(&mut ro, tables).await > 0,
+        "it can see the tables"
+    );
     drop_harness(ro).await;
     assert_eq!(admin.run(TabId(1), drop).await.error, None);
 }

@@ -61,10 +61,12 @@ impl Workspace {
 
     pub(super) fn save_bookmark(
         &mut self,
-        bookmark: Bookmark,
+        mut bookmark: Bookmark,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Passwords (`CREATE ROLE … PASSWORD '…'`) are never kept.
+        bookmark.sql = tangul_assist::redact::redact(&bookmark.sql).into_owned();
         let title: SharedString = bookmark.name.clone().into();
         for tab in self.tabs.queries() {
             if tab.read(cx).bookmark_id.as_deref() == Some(bookmark.id.as_str()) {

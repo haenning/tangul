@@ -78,9 +78,9 @@ pub struct Profiles {
     /// Session cache so the Keychain is hit once per profile, and so passwords work
     /// on platforms where only the mock keyring store is available.
     passwords: HashMap<String, String>,
-    /// Off for [`Self::in_memory`]: secrets stay in the session cache, so tests never
-    /// read or overwrite the real Keychain.
-    keychain: bool,
+    /// [`Self::in_memory`]: never saved, and secrets stay in the session cache, so
+    /// tests never read or overwrite the real Keychain.
+    in_memory: bool,
 }
 
 impl Profiles {
@@ -104,7 +104,7 @@ impl Profiles {
             path,
             databases,
             passwords: HashMap::new(),
-            keychain: true,
+            in_memory: false,
         };
         if migrated && let Err(e) = store.save() {
             eprintln!("could not write migrated profiles file: {e:#}");
@@ -122,7 +122,7 @@ impl Profiles {
             path: None,
             databases,
             passwords: HashMap::new(),
-            keychain: false,
+            in_memory: true,
         }
     }
 
@@ -134,6 +134,9 @@ impl Profiles {
     }
 
     pub fn save(&self) -> Result<()> {
+        if self.in_memory {
+            return Ok(());
+        }
         let path = self.path.as_ref().context("no config directory")?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -214,7 +217,7 @@ impl Profiles {
         if let Some(pw) = self.passwords.get(account) {
             return Some(pw.clone());
         }
-        if !self.keychain {
+        if self.in_memory {
             return None;
         }
         let pw = match keychain(account).ok()?.get_password() {
@@ -240,7 +243,7 @@ fn keychain(account: &str) -> Result<keyring::Entry> {
 
 impl Profiles {
     fn store_secret(&mut self, account: &str, secret: String) {
-        if self.keychain
+        if !self.in_memory
             && let Err(e) = keychain(account).and_then(|k| Ok(k.set_password(&secret)?))
         {
             eprintln!("keychain write failed: {e:#}");
@@ -258,8 +261,29 @@ pub fn new_id() -> String {
     format!("p{nanos:x}")
 }
 
+/// A random password of 24 letters and digits (about 143 bits), safe in any SQL
+/// string literal or connection string.
+pub fn new_password() -> String {
+    const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let mut bytes = [0u8; 24];
+    getrandom::fill(&mut bytes).expect("system randomness");
+    // 256 is not a multiple of the alphabet's size; the bias is negligible here.
+    bytes
+        .iter()
+        .map(|b| CHARS[usize::from(*b) % CHARS.len()] as char)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn passwords_are_new_each_time() {
+        let (a, b) = (new_password(), new_password());
+        assert_eq!(a.len(), 24);
+        assert_ne!(a, b);
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
 
     #[test]
     fn what_the_ai_may_read_loads_old_and_new_files() {

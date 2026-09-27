@@ -12,7 +12,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode, ValueAccess};
 
-use tangul_data::profiles::new_id;
+use tangul_assist::dialect::dialect_for;
+use tangul_data::profiles::{new_id, new_password};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum FormMode {
@@ -40,7 +41,14 @@ pub struct FormOutput {
     pub user: Option<(DbUser, Option<String>)>,
     /// New SSH password or key passphrase (`None` keeps the stored one).
     pub ssh_secret: Option<String>,
+    /// A read-only AI user to set up: already among the database's users and chosen
+    /// as the AI's; its password goes to the Keychain and the statements creating it
+    /// to a tab.
+    pub ai_account: Option<(DbUser, String)>,
 }
+
+/// Name of the read-only user tangul sets up for the AI.
+const AI_ACCOUNT: &str = "tangul_ai";
 
 pub struct ConnectionForm {
     mode: FormMode,
@@ -68,6 +76,8 @@ pub struct ConnectionForm {
     ai_values: ValueAccess,
     /// AI tools (MCP clients, the assistant) may use this database.
     ai_tools: bool,
+    /// Set up by "Set up a read-only AI user…", saved with the form.
+    ai_account: Option<(DbUser, String)>,
     error: Option<SharedString>,
 }
 
@@ -177,6 +187,7 @@ impl ConnectionForm {
             ai_values: db.map(|d| d.ai_values).unwrap_or_default(),
             // On for a new database too: the user turns it off.
             ai_tools: db.is_none_or(|d| d.ai_tools),
+            ai_account: None,
             error: None,
         }
     }
@@ -190,6 +201,30 @@ impl ConnectionForm {
             });
         }
         self.driver = driver;
+        cx.notify();
+    }
+
+    /// Adds a new user for the AI (a free name, a random password) and makes it the
+    /// AI's; it is created on the server by the statements opened after saving.
+    fn set_up_ai_account(&mut self, cx: &mut Context<Self>) {
+        let Some(base) = self.base.as_mut() else {
+            return;
+        };
+        let taken = |name: &str| base.users.iter().any(|u| u.user == name);
+        let name = (1..)
+            .map(|n| match n {
+                1 => AI_ACCOUNT.to_string(),
+                n => format!("{AI_ACCOUNT}_{n}"),
+            })
+            .find(|name| !taken(name))
+            .unwrap_or_default();
+        let user = DbUser {
+            id: new_id(),
+            user: name,
+        };
+        base.users.push(user.clone());
+        self.assistant_user = Some(user.id.clone());
+        self.ai_account = Some((user, new_password()));
         cx.notify();
     }
 
@@ -265,6 +300,7 @@ impl ConnectionForm {
             database,
             user,
             ssh_secret,
+            ai_account: self.ai_account.clone(),
         })
     }
 }
@@ -422,6 +458,11 @@ impl Render for ConnectionForm {
                     cx.notify();
                 })),
         );
+        let can_set_up = self.mode == FormMode::EditDatabase
+            && self.ai_account.is_none()
+            && dialect_for(self.driver)
+                .readonly_account_sql("", "", "", &[])
+                .is_some();
         let db_fields = db_fields.when(!users.is_empty(), |this| {
             let current = self.assistant_user.clone();
             this.child(
@@ -447,6 +488,36 @@ impl Render for ConnectionForm {
                                  data, whatever it asks for.",
                             ),
                     )
+                    .when(can_set_up, |this| {
+                        this.child(
+                            h_flex().child(
+                                Button::new("set-up-ai-account")
+                                    .label("Set up a read-only AI user…")
+                                    .xsmall()
+                                    .outline()
+                                    .tooltip(
+                                        "Adds a user that may only read, with a new password \
+                                         (Keychain), as the AI's. Saving opens the statements \
+                                         that create it; run them as an admin.",
+                                    )
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.set_up_ai_account(cx)),
+                                    ),
+                            ),
+                        )
+                    })
+                    .when_some(self.ai_account.as_ref(), |this, (user, _)| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().success)
+                                .child(format!(
+                                    "{} will be added as the AI's user. Save, then run the \
+                                 statements in the new tab as an admin.",
+                                    user.user
+                                )),
+                        )
+                    })
                     .child(
                         h_flex()
                             .gap_2()

@@ -35,7 +35,11 @@ impl Workspace {
             .as_ref()
             .and_then(|t| t.read(cx).row_count(cx))
             .map(|n| n as i64);
-        let fp = fingerprint(&run.sql);
+        // Passwords (`CREATE ROLE … PASSWORD '…'`) are never kept.
+        let sql = tangul_assist::redact::redact(&run.sql);
+        // It created or changed a user: maybe the AI's, whose rights are shown.
+        let accounts_changed = matches!(sql, std::borrow::Cow::Owned(_));
+        let fp = fingerprint(&sql);
         let succeeded = error.is_none();
         // A run of the tab's bookmark (the whole of it) counts for its metrics.
         let bookmark = tab
@@ -59,10 +63,10 @@ impl Workspace {
         let entry = NewHistory {
             database_id: &db_id,
             user_id: &run.user_id,
-            sql: &run.sql,
+            sql: &sql,
             fingerprint: &fp,
             entry: HistoryEntry {
-                sql: run.sql.clone(),
+                sql: sql.to_string(),
                 started_at: run.started_at,
                 duration_ms: elapsed_ms,
                 rows,
@@ -71,6 +75,9 @@ impl Workspace {
         };
         if let Err(e) = self.data.local.add_history(&entry) {
             eprintln!("could not record history: {e:#}");
+        }
+        if succeeded && accounts_changed {
+            self.check_ai_user(cx);
         }
         if succeeded {
             if self.conns.contains_key(&run.user_id) {
