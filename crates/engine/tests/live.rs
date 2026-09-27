@@ -500,6 +500,52 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
     assert_eq!(h.run(tab, drop).await.error, None);
 }
 
+/// The dialect's count of tables the connected user may change or drop: all of
+/// them for the admin, none for a user with SELECT only.
+async fn writable_checks(driver: DriverKind, cfg: ConnectConfig) {
+    let sql = tangul_assist::dialect::dialect_for(driver)
+        .writable_tables_sql()
+        .expect("a count for this database");
+    let mut admin = Harness::connect(driver, cfg.clone()).await;
+    assert!(writable_count(&mut admin, sql).await > 0);
+    let (create, drop) = match driver {
+        DriverKind::Postgres => (
+            "DROP ROLE IF EXISTS tangul_ro_live; CREATE ROLE tangul_ro_live LOGIN PASSWORD 'ro'; \
+             GRANT SELECT ON ALL TABLES IN SCHEMA public TO tangul_ro_live",
+            "DROP OWNED BY tangul_ro_live; DROP ROLE tangul_ro_live",
+        ),
+        DriverKind::Mysql => (
+            "DROP USER IF EXISTS 'tangul_ro_live'@'%'; \
+             CREATE USER 'tangul_ro_live'@'%' IDENTIFIED BY 'ro'; \
+             GRANT SELECT ON *.* TO 'tangul_ro_live'@'%'",
+            "DROP USER 'tangul_ro_live'@'%'",
+        ),
+        DriverKind::Sqlite => unreachable!(),
+    };
+    assert_eq!(admin.run(TabId(1), create).await.error, None);
+    let reader = ConnectConfig {
+        user: "tangul_ro_live".into(),
+        password: Some("ro".into()),
+        ..cfg
+    };
+    let mut ro = Harness::connect(driver, reader).await;
+    assert_eq!(writable_count(&mut ro, sql).await, 0);
+    drop_harness(ro).await;
+    assert_eq!(admin.run(TabId(1), drop).await.error, None);
+}
+
+async fn writable_count(h: &mut Harness, sql: &str) -> u64 {
+    let out = h.run(TabId(1), sql).await;
+    assert_eq!(out.error, None, "{sql}");
+    out.result.unwrap().cell(0, 0).unwrap().parse().unwrap()
+}
+
+/// Closes a harness's connection (so its user can be dropped).
+async fn drop_harness(h: Harness) {
+    h.engine.send(Command::Disconnect { conn: h.conn });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
 /// Read-only mode is enforced by the server: writes fail, reads work, and a script
 /// that switches the session back to read-write does not get around it.
 async fn read_only_checks(h: &mut Harness, switch_to_read_write: &str) {
@@ -608,6 +654,7 @@ async fn postgres() {
     };
     common_checks(DriverKind::Postgres, cfg.clone(), "SELECT pg_sleep(30)").await;
     schema_checks(DriverKind::Postgres, cfg.clone()).await;
+    writable_checks(DriverKind::Postgres, cfg.clone()).await;
 
     let mut h = Harness::connect(DriverKind::Postgres, cfg).await;
     let out = h
@@ -647,6 +694,7 @@ async fn mysql() {
     };
     common_checks(DriverKind::Mysql, cfg.clone(), "SELECT SLEEP(30)").await;
     schema_checks(DriverKind::Mysql, cfg.clone()).await;
+    writable_checks(DriverKind::Mysql, cfg.clone()).await;
 
     let mut h = Harness::connect(DriverKind::Mysql, cfg).await;
     let out = h

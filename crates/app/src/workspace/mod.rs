@@ -153,6 +153,10 @@ pub struct Workspace {
     relock: HashMap<String, Task<()>>,
     /// Scheduled bookmark runs on hidden connections.
     monitor: Monitor,
+    /// The check of what the AI's database user may do (see `check_ai_user`), and a
+    /// counter that restarts the title bar's warning pulse for each new result.
+    ai_check: Task<()>,
+    ai_warning_pulse: u64,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -252,6 +256,8 @@ impl Workspace {
             router: QueryRouter::default(),
             relock: HashMap::new(),
             monitor: Monitor::new(monitor_tick),
+            ai_check: Task::ready(()),
+            ai_warning_pulse: 0,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![search_sub, bookmark_sub, schema_sub, value_sub],
             _pump: pump,
@@ -273,6 +279,7 @@ impl Workspace {
                 this.active_user = Some(user_id);
             }
             this.refresh_history(cx);
+            this.check_ai_user(cx);
         }
         // Starts on the empty state; keys like ⌘T need a focused element.
         window.focus(&this.focus_handle, cx);

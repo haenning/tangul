@@ -33,6 +33,9 @@ struct Pool {
     /// Value profiles by database user and column, with when they were taken. Only
     /// filled where the user allowed the assistant to read values.
     profiles: HashMap<(String, ColumnRef), (ColumnProfile, Instant)>,
+    /// By database id: how many tables the AI's database user may change or drop
+    /// (as the server answered); unknown until checked.
+    ai_writable: HashMap<String, u64>,
 }
 
 /// What is known for one database user.
@@ -82,6 +85,15 @@ impl Knowledge {
             p.users.remove(user);
             p.profiles.retain(|(u, _), _| u != user);
         });
+    }
+
+    /// How many tables the AI's user of `database` may change or drop, if checked.
+    pub fn ai_writable(&self, database: &str) -> Option<u64> {
+        self.read(|p| p.ai_writable.get(database).copied())
+    }
+
+    pub fn set_ai_writable(&self, database: &str, tables: u64) {
+        self.write(|p| p.ai_writable.insert(database.to_string(), tables));
     }
 
     /// `user`'s profile of `column`, unless it is older than [`PROFILE_TTL`].

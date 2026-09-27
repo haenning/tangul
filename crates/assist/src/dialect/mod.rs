@@ -77,6 +77,13 @@ pub trait Dialect: Sync {
         Lexing::default()
     }
 
+    /// A query answering with one number: how many tables the connected user may
+    /// change (insert, update, delete, truncate) or drop. `None` where the database
+    /// has no users to ask about (SQLite).
+    fn writable_tables_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Functions a `SELECT` can call that change something (sessions, files,
     /// sequences, settings, other servers) or read files. Lower case; the guard
     /// matches them as substrings.

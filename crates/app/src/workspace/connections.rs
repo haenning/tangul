@@ -33,6 +33,60 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.update_ai(db_id, |db| db.assistant_user = user, window, cx);
+        self.check_ai_user(cx);
+    }
+
+    /// Asks the server how many tables the AI's database user (of the active
+    /// database) may change or drop; the title bar warns when it may any. Runs as
+    /// the assistant, through the gate, on the assistant's own connection.
+    pub(super) fn check_ai_user(&mut self, cx: &mut Context<Self>) {
+        let (Some(db_id), Some(user_id)) = (self.active_db.clone(), self.active_user.clone())
+        else {
+            return;
+        };
+        let Some(sql) = self
+            .data
+            .profiles
+            .database(&db_id)
+            .and_then(|db| dialect_for(db.driver).writable_tables_sql())
+        else {
+            return;
+        };
+        let Some(conn) =
+            self.connections
+                .connect_assistant(&self.engine, &mut self.data.profiles, &user_id)
+        else {
+            return;
+        };
+        let (engine, query) = (self.engine.clone(), QueryId(self.next_id()));
+        let options = QueryOptions {
+            row_limit: 1,
+            ..QueryOptions::new(Caller::Assistant)
+        };
+        self.ai_check = cx.spawn(async move |this, cx| {
+            let result = engine.query(query, conn, sql, options).await;
+            let _ = this.update(cx, |ws, cx| match result {
+                Ok(out) => {
+                    let tables = out
+                        .results
+                        .last()
+                        .and_then(|r| r.cell(0, 0))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    ws.set_ai_writable(&db_id, tables, cx);
+                }
+                Err(e) => eprintln!("could not check the AI user's rights: {}", e.message),
+            });
+        });
+    }
+
+    /// The AI's user of `db_id` may change or drop `tables` tables.
+    pub(super) fn set_ai_writable(&mut self, db_id: &str, tables: u64, cx: &mut Context<Self>) {
+        self.knowledge.set_ai_writable(db_id, tables);
+        if tables > 0 {
+            self.ai_warning_pulse += 1;
+        }
+        cx.notify();
     }
 
     /// Whether the AI may read column values of the database.
@@ -105,6 +159,7 @@ impl Workspace {
         self.data.local.set_setting(LAST_USER_SETTING, &user_id);
         self.assign_active_tab(&user_id, window, cx);
         self.refresh_history(cx);
+        self.check_ai_user(cx);
         cx.notify();
     }
 

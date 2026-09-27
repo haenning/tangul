@@ -44,16 +44,46 @@ impl Workspace {
                 .and_then(|id| db.user(id))
                 .map_or("No user".into(), |u| u.user.clone());
             let (db_id, values, weak) = (db.id.clone(), db.ai_values, weak.clone());
-            Button::new("ai-user-switcher")
+            let writable = self.knowledge.ai_writable(&db.id).filter(|n| *n > 0);
+            let warning = writable.map(ai_user_warning);
+            let (color, tooltip): (Hsla, SharedString) = match &warning {
+                Some(w) => (theme.danger, w.clone().into()),
+                None => (
+                    theme.muted_foreground,
+                    "The database user the AI connects as".into(),
+                ),
+            };
+            let button = Button::new("ai-user-switcher")
                 .label(label)
-                .icon(Icon::new(Lucide::Bot))
+                .icon(Icon::new(Lucide::Bot).text_color(color))
                 .ghost()
                 .small()
-                .text_color(theme.muted_foreground)
-                .tooltip("The database user the AI connects as")
+                .text_color(color)
+                .tooltip(tooltip)
                 .dropdown_menu(move |menu, _, _| {
-                    ai_menu(menu, &db_id, &users, ai_user.as_deref(), values, &weak)
-                })
+                    ai_menu(
+                        menu,
+                        &db_id,
+                        &users,
+                        ai_user.as_deref(),
+                        values,
+                        warning.as_deref(),
+                        &weak,
+                    )
+                });
+            match writable {
+                // Pulses three times when the answer comes, then stays red.
+                Some(_) => div()
+                    .id("ai-user-warning")
+                    .test_support()
+                    .child(div().child(button).with_animation(
+                        ("ai-user-pulse", self.ai_warning_pulse as usize),
+                        Animation::new(Duration::from_millis(1800)),
+                        |el, t| el.opacity(pulse(t)),
+                    ))
+                    .into_any_element(),
+                None => button.into_any_element(),
+            }
         });
 
         let user_menu = db.map(|db| {
@@ -481,8 +511,18 @@ pub(super) fn ai_menu(
     users: &[(String, String)],
     current: Option<&str>,
     values: bool,
+    warning: Option<&str>,
     workspace: &WeakEntity<Workspace>,
 ) -> PopupMenu {
+    if let Some(warning) = warning {
+        menu = menu
+            .item(
+                PopupMenuItem::new(warning.to_string())
+                    .icon(IconName::TriangleAlert)
+                    .disabled(true),
+            )
+            .separator();
+    }
     menu = menu.label("The AI connects as");
     let choices = std::iter::once((None, "Same as your user".to_string())).chain(
         users
@@ -509,6 +549,20 @@ pub(super) fn ai_menu(
                 let _ = ws.update(cx, |ws, cx| ws.set_ai_values(&db_id, !values, window, cx));
             }),
     )
+}
+
+/// What the title bar says when the AI's user may change or drop tables.
+fn ai_user_warning(tables: u64) -> String {
+    let noun = if tables == 1 { "table" } else { "tables" };
+    format!(
+        "Your current AI user can change or drop {tables} {noun}. It is strongly \
+         recommended to use a user that is read-only on the server."
+    )
+}
+
+/// Opacity over the warning's animation (0 to 1): three dips, ending fully visible.
+fn pulse(t: f32) -> f32 {
+    0.35 + 0.65 * (0.5 + 0.5 * (t * 3.0 * std::f32::consts::TAU).cos())
 }
 
 pub(super) fn user_menu(
@@ -564,4 +618,22 @@ pub(super) fn user_menu(
                 });
             }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ai_user_warning, pulse};
+
+    #[test]
+    fn the_warning_and_its_pulse() {
+        assert_eq!(
+            ai_user_warning(1),
+            "Your current AI user can change or drop 1 table. It is strongly recommended \
+             to use a user that is read-only on the server."
+        );
+        assert!(ai_user_warning(3).contains("3 tables"));
+        // Starts and ends fully visible, dims in between.
+        assert!((pulse(0.0) - 1.0).abs() < 1e-5 && (pulse(1.0) - 1.0).abs() < 1e-5);
+        assert!(pulse(1.0 / 6.0) < 0.4);
+    }
 }

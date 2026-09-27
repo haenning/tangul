@@ -431,3 +431,44 @@ fn the_title_bar_shows_the_ai_user_before_yours(cx: &mut TestAppContext) {
         assert_eq!(db.users.len(), 2);
     });
 }
+
+#[gpui_kit::test]
+fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles.databases.push(Database {
+                id: "db".into(),
+                name: "shop".into(),
+                driver: DriverKind::Postgres,
+                host: "localhost".into(),
+                port: 5432,
+                database: "shop".into(),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: "app".into(),
+                    user: "app".into(),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: false,
+            });
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            cx.notify();
+        })
+    });
+    // Not checked yet, or read-only on the server: no warning.
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("ai-user-warning").is_none());
+        workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 3, cx));
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("ai-user-warning").visible());
+        workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 0, cx));
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("ai-user-warning").is_none())
+    });
+}
