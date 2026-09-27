@@ -66,6 +66,8 @@ pub struct ConnectionForm {
     assistant_user: Option<String>,
     /// What the assistant may read from the rows of this database.
     ai_values: ValueAccess,
+    /// AI tools (MCP clients, the assistant) may use this database.
+    ai_tools: bool,
     error: Option<SharedString>,
 }
 
@@ -173,6 +175,8 @@ impl ConnectionForm {
             }),
             assistant_user: db.and_then(|d| d.assistant_user.clone()),
             ai_values: db.map(|d| d.ai_values).unwrap_or_default(),
+            // On for a new database too: the user turns it off.
+            ai_tools: db.is_none_or(|d| d.ai_tools),
             error: None,
         }
     }
@@ -233,6 +237,7 @@ impl ConnectionForm {
                 users: base.as_ref().map(|b| b.users.clone()).unwrap_or_default(),
                 assistant_user: self.assistant_user.clone(),
                 ai_values: self.ai_values,
+                ai_tools: self.ai_tools,
                 ssh: ssh.then(|| SshConfig {
                     host: value(&self.ssh_host),
                     port: ssh_port.clone().unwrap_or(22),
@@ -407,6 +412,16 @@ impl Render for ConnectionForm {
                 cx.notify();
             }))
         };
+        // Also when setting up a new connection, before it has users.
+        let db_fields = db_fields.child(
+            Checkbox::new("ai-tools")
+                .label("Available to AI tools (MCP clients, the assistant)")
+                .checked(self.ai_tools)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                    this.ai_tools = *checked;
+                    cx.notify();
+                })),
+        );
         let db_fields = db_fields.when(!users.is_empty(), |this| {
             let current = self.assistant_user.clone();
             this.child(

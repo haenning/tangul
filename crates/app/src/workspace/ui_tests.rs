@@ -402,6 +402,7 @@ fn the_title_bar_shows_the_ai_user_before_yours(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_tools: true,
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
@@ -453,6 +454,7 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_tools: true,
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
