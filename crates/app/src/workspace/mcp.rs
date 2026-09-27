@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Mutex, PoisonError, RwLock};
 
 use tangul_ai::mcp::{CtxSource, McpServer, new_token};
-use tangul_ai::{AuditSink, Ctx, Exposed, ToolCall};
+use tangul_ai::{AuditSink, Ctx, Exposed, ProposalSink, SqlProposal, ToolCall};
 use tangul_data::local::AuditEntry;
 
 use super::*;
@@ -15,8 +15,12 @@ use super::*;
 /// Keychain account of the server's token.
 const TOKEN_ACCOUNT: &str = "mcp-token";
 
+/// Fields drop in order: the proposal task goes before the server, so the server
+/// closing its end never wakes the task from the server's thread.
 #[derive(Default)]
 pub(super) struct Mcp {
+    /// Opens the statements clients propose (`propose_sql`) in tabs.
+    proposals: Option<Task<()>>,
     server: Option<McpServer>,
     /// The port it could not start on, and why.
     failed: Option<(u16, String)>,
@@ -34,7 +38,7 @@ impl Workspace {
             if running.is_none() && self.mcp.failed.is_none() {
                 return;
             }
-            self.mcp.server = None;
+            self.stop_mcp();
             self.mcp.failed = None;
         } else if running == Some(want.port)
             || self
@@ -45,16 +49,23 @@ impl Workspace {
         {
             return;
         } else {
-            self.mcp.server = None;
-            self.start_mcp(want.port);
+            self.stop_mcp();
+            self.start_mcp(want.port, cx);
         }
         cx.notify();
     }
 
-    fn start_mcp(&mut self, port: u16) {
+    /// Stops the server, and the task opening its proposals first.
+    fn stop_mcp(&mut self) {
+        self.mcp.proposals = None;
+        self.mcp.server = None;
+    }
+
+    fn start_mcp(&mut self, port: u16, cx: &mut Context<Self>) {
         let token = self.mcp_token();
         let (knowledge, engine) = (self.knowledge.clone(), self.engine.clone());
         let (exposed, sink) = (self.mcp.exposed.clone(), self.mcp_audit());
+        let proposals = self.mcp_proposals(cx);
         let source: CtxSource = Arc::new(move || {
             let exposed = exposed
                 .read()
@@ -62,6 +73,7 @@ impl Workspace {
                 .clone();
             Ctx::new(knowledge.clone(), Some(engine.clone()), exposed)
                 .with_audit("mcp", sink.clone())
+                .with_proposals(proposals.clone())
         });
         match McpServer::start(port, token, source) {
             Ok(server) => {
@@ -71,6 +83,50 @@ impl Workspace {
             }
             Err(e) => self.mcp.failed = Some((port, e.to_string())),
         }
+    }
+
+    /// Where clients' proposals go: to this window, which opens each in a tab.
+    pub(super) fn mcp_proposals(&mut self, cx: &mut Context<Self>) -> ProposalSink {
+        let (tx, rx) = async_channel::unbounded::<SqlProposal>();
+        self.mcp.proposals = Some(cx.spawn(async move |this, cx| {
+            while let Ok(proposal) = rx.recv().await {
+                // The workspace's window (there is one at a time).
+                let opened = cx.update(|cx| {
+                    let window = cx.windows().first().copied()?;
+                    window
+                        .update(cx, |_, window, cx| {
+                            this.update(cx, |ws, cx| ws.open_proposal(proposal, window, cx))
+                                .ok()
+                        })
+                        .ok()
+                        .flatten()
+                });
+                if opened.is_none() {
+                    break;
+                }
+            }
+        }));
+        Arc::new(move |proposal| {
+            let _ = tx.try_send(proposal);
+        })
+    }
+
+    /// Opens a proposal in a new tab, not run, on your connection to its database.
+    pub(super) fn open_proposal(
+        &mut self,
+        proposal: SqlProposal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = format!("Proposed · {}", proposal.connection);
+        self.open_sql(&title, &proposal.sql, window, cx);
+        if let (Some(conn), Some(tab)) = (
+            self.tab_conn(&proposal.user),
+            self.tabs.active_query().cloned(),
+        ) {
+            tab.update(cx, |t, cx| t.set_conn(conn, cx));
+        }
+        cx.notify();
     }
 
     /// The server's token; made (and saved) the first time.
@@ -86,10 +142,9 @@ impl Workspace {
     /// A new token: clients set up with the old one are locked out.
     fn new_mcp_token(&mut self, cx: &mut Context<Self>) {
         self.data.profiles.set_secret(TOKEN_ACCOUNT, new_token());
-        if let Some(server) = self.mcp.server.take() {
-            let port = server.addr().port();
-            server.stop();
-            self.start_mcp(port);
+        if let Some(port) = self.mcp.server.as_ref().map(|s| s.addr().port()) {
+            self.stop_mcp();
+            self.start_mcp(port, cx);
         }
         cx.notify();
     }

@@ -36,7 +36,23 @@ pub struct Ctx {
     exposed: Vec<Exposed>,
     /// Who calls (`mcp`, `assistant`) and where its calls are recorded.
     audit: Option<(&'static str, AuditSink)>,
+    /// Where `propose_sql` sends statements for the user; none: it can't.
+    proposals: Option<ProposalSink>,
 }
+
+/// Statements the assistant proposes: the app opens them in a new tab, unrun, on
+/// the user's connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlProposal {
+    /// The exposed connection's name.
+    pub connection: String,
+    /// The database user whose tab connection gets it (see [`Exposed::user`]).
+    pub user: String,
+    pub sql: String,
+}
+
+/// Where proposals go.
+pub type ProposalSink = Arc<dyn Fn(SqlProposal) + Send + Sync>;
 
 /// A connection resolved for a call.
 pub(crate) struct Conn {
@@ -59,6 +75,7 @@ impl Ctx {
             engine,
             exposed,
             audit: None,
+            proposals: None,
         }
     }
 
@@ -70,6 +87,16 @@ impl Ctx {
 
     pub(crate) fn audit(&self) -> Option<&(&'static str, AuditSink)> {
         self.audit.as_ref()
+    }
+
+    /// Sends what `propose_sql` proposes to `sink`.
+    pub fn with_proposals(mut self, sink: ProposalSink) -> Self {
+        self.proposals = Some(sink);
+        self
+    }
+
+    pub(crate) fn proposals(&self) -> Option<&ProposalSink> {
+        self.proposals.as_ref()
     }
 
     pub fn exposed(&self) -> &[Exposed] {

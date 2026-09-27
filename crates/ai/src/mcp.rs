@@ -38,7 +38,8 @@ use crate::tool::Registry;
 /// What the server tells clients when they connect.
 const INSTRUCTIONS: &str = "tangul's databases, read-only. Start with list_connections, then \
     schema_slice for a question, describe_table and find_join_path for details, and \
-    run_readonly to query (keep results small). Writes are never run.";
+    run_readonly to query (keep results small). Nothing that changes data is run: \
+    propose_sql opens such statements in tangul for the user to review and run.";
 
 /// Builds the [`Ctx`] for a call: the databases exposed right now, the knowledge
 /// pool, the engine and the audit sink.

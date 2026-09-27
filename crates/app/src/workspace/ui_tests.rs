@@ -620,3 +620,51 @@ fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext)
         assert_eq!(ws.data.profiles.password(&ai).map(|p| p.len()), Some(24));
     });
 }
+
+#[gpui_kit::test]
+fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    let (handle, workspace) = open(cx);
+    let sql =
+        "-- Proposed by the assistant: fix the total\nUPDATE orders SET total = 0 WHERE id = 1";
+    let sink = step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles.databases.push(Database {
+                id: "db".into(),
+                name: "shop".into(),
+                driver: DriverKind::Postgres,
+                host: "localhost".into(),
+                port: 5432,
+                database: "shop".into(),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: "app".into(),
+                    user: "app".into(),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: Default::default(),
+                ai_tools: true,
+            });
+            ws.connect("app", cx);
+            ws.mcp_proposals(cx)
+        })
+    });
+    // As the MCP server does (from its thread in the app; the test scheduler wants
+    // this one).
+    sink(tangul_ai::SqlProposal {
+        connection: "shop".into(),
+        user: "app".into(),
+        sql: sql.into(),
+    });
+    cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.active_query().expect("opened").read(cx);
+        assert_eq!(tab.title.as_ref(), "Proposed · shop");
+        assert_eq!(tab.sql(cx), sql);
+        assert!(!tab.is_running(cx), "not run");
+        let conn = tab.conn.as_ref().expect("on a connection");
+        assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
+    });
+}

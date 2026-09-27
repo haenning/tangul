@@ -28,6 +28,9 @@ pub(crate) struct Engine {
 }
 
 /// How often the settings file is checked for changes.
+/// Why the assistant's statement that isn't a read did not run.
+const PROPOSED: &str = "not run: the assistant only reads; statements that change something \
+                        are proposals the user opens and runs themselves";
 const SETTINGS_POLL: Duration = Duration::from_secs(1);
 
 impl Engine {
@@ -221,13 +224,13 @@ impl Engine {
             caller,
             target: pool.target(),
         };
-        let run = match self.gate.enforce(conn, pool.user(), &sql, caller, approval) {
+        let run = match self.gate.enforce(pool.user(), &sql, caller, approval) {
             Enforced::Run(run) => run,
             refused => {
-                // Only the assistant's statements are held, never the user's.
+                // Only the assistant's statements are proposed, never the user's.
                 let reason = match refused {
                     Enforced::Refused(reason) => reason,
-                    _ => "waiting for approval".to_string(),
+                    _ => PROPOSED.to_string(),
                 };
                 trace.record(&sql, "refused", Some(reason.clone()), None, None);
                 finish(
@@ -275,14 +278,14 @@ impl Engine {
         };
         let run = match self
             .gate
-            .enforce(conn, pool.user(), &sql, options.caller, options.approval)
+            .enforce(pool.user(), &sql, options.caller, options.approval)
         {
             Enforced::Run(run) => run,
-            Enforced::Held(held) => {
-                trace.record(&sql, "held", None, None, None);
+            Enforced::Proposed(proposal) => {
+                trace.record(&sql, "proposed", None, None, None);
                 let _ = reply.send(Err(QueryError {
-                    held: Some(held),
-                    ..QueryError::new("waiting for approval")
+                    proposal: Some(proposal),
+                    ..QueryError::new(PROPOSED)
                 }));
                 return;
             }

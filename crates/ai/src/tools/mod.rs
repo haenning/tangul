@@ -5,6 +5,7 @@ mod connections;
 mod describe;
 mod joins;
 mod profile;
+mod propose;
 mod query;
 mod search;
 mod slice;
@@ -25,6 +26,7 @@ pub(crate) fn all() -> Vec<Box<dyn Tool>> {
         Box::new(catalog::ListEnums),
         Box::new(catalog::ViewDefinition),
         Box::new(query::RunReadonly),
+        Box::new(propose::ProposeSql),
     ]
 }
 

@@ -204,7 +204,8 @@ async fn every_tool_has_a_schema_and_a_description() {
             "column_profile",
             "list_enums",
             "view_definition",
-            "run_readonly"
+            "run_readonly",
+            "propose_sql"
         ]
     );
     for s in &specs {

@@ -263,7 +263,8 @@ async fn a_client_lists_and_calls_the_tools() {
                 "column_profile",
                 "list_enums",
                 "view_definition",
-                "run_readonly"
+                "run_readonly",
+                "propose_sql"
             ]
         );
         let describe = tools

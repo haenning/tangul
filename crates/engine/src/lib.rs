@@ -17,7 +17,7 @@ use std::path::PathBuf;
 pub use api::{Command, Event, Problem, QueryError, QueryEvent, QueryOptions, QueryOutput};
 use engine::Engine;
 pub use gate::{
-    Approval, Caller, Decision, Guard, Held, Mode, Pass, Run, SettingsSource, decide, user_run,
+    Approval, Caller, Decision, Guard, Mode, Proposal, Run, SettingsSource, decide, user_run,
 };
 pub use pool::PoolStats;
 use tangul_core::{ConnId, QueryId};
