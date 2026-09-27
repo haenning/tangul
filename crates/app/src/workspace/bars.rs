@@ -236,7 +236,7 @@ impl Workspace {
             return sections;
         };
         let tables = schema.tables();
-        let views = tables.iter().filter(|t| t.kind == TableKind::View).count();
+        let views = tables.iter().filter(|t| t.kind.is_view()).count();
         sections.push((
             "Schema",
             vec![

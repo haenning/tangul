@@ -13,7 +13,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use tangul_core::{
-    ColumnInfo, ColumnMeta, ConnectConfig, DriverKind, ForeignKey, RowBatch, TableInfo,
+    CatalogExtras, ColumnInfo, ColumnMeta, ConnectConfig, DriverKind, ForeignKey, RowBatch,
+    TableInfo,
 };
 
 /// Rows are forwarded to the UI in chunks of this size.
@@ -97,10 +98,25 @@ pub trait Session: Send {
 
     async fn list_foreign_keys(&mut self) -> Result<Vec<ForeignKey>>;
 
+    /// Indexes, check constraints, enums, view definitions and routines. A part the
+    /// server can't answer (an older version, missing rights) stays empty.
+    async fn catalog_extras(&mut self) -> Result<CatalogExtras> {
+        Ok(CatalogExtras::default())
+    }
+
     /// False once the server connection is gone; broken sessions are not reused.
     fn is_alive(&self) -> bool;
 
     async fn close(self: Box<Self>);
+}
+
+/// A part of [`Session::catalog_extras`]: empty (and logged) if the server couldn't
+/// answer, so one missing part doesn't cost the others.
+pub(crate) fn catalog_part<T>(what: &str, result: Result<Vec<T>>) -> Vec<T> {
+    result.unwrap_or_else(|e| {
+        eprintln!("could not read {what}: {e:#}");
+        Vec::new()
+    })
 }
 
 #[async_trait]

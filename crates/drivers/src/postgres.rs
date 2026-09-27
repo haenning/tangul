@@ -5,11 +5,12 @@ use async_trait::async_trait;
 use futures::{TryStreamExt, pin_mut};
 use postgres_native_tls::MakeTlsConnector;
 use tangul_core::{
-    ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
+    CatalogExtras, CheckInfo, ColumnInfo, ColumnMeta, ConnectConfig, EnumInfo, ForeignKey,
+    IndexInfo, RoutineInfo, RowBatch, TableInfo, TableKind, TlsMode, ViewDef,
 };
-use tokio_postgres::{CancelToken, Client, SimpleQueryMessage, config::SslMode};
+use tokio_postgres::{CancelToken, Client, SimpleQueryMessage, SimpleQueryRow, config::SslMode};
 
-use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError};
+use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError, catalog_part};
 
 pub struct PgDriver;
 
@@ -142,56 +143,73 @@ impl Session for PgSession {
     }
 
     async fn list_tables(&mut self) -> Result<Vec<TableInfo>> {
-        const SQL: &str = "SELECT n.nspname, c.relname, c.relkind \
-            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-            WHERE c.relkind IN ('r','p','v','m','f') \
-              AND n.nspname NOT IN ('pg_catalog','information_schema') \
-              AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' \
-            ORDER BY 1, 2";
-        let msgs = self.client.simple_query(SQL).await.map_err(pg_error)?;
-        Ok(msgs
+        // `reltuples` is -1 for a table never analyzed: no estimate.
+        let sql = format!(
+            "SELECT n.nspname, c.relname, c.relkind, obj_description(c.oid, 'pg_class'), \
+               CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END, \
+               CASE WHEN c.relkind IN ('r','m','p') THEN pg_total_relation_size(c.oid) END \
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('r','p','v','m','f') AND {USER_SCHEMAS} \
+             ORDER BY 1, 2"
+        );
+        Ok(self
+            .rows(&sql)
+            .await?
             .iter()
-            .filter_map(|m| match m {
-                SimpleQueryMessage::Row(r) => Some(TableInfo {
-                    schema: r.get(0).unwrap_or_default().to_string(),
-                    name: r.get(1).unwrap_or_default().to_string(),
-                    kind: match r.get(2) {
-                        Some("v") | Some("m") => TableKind::View,
-                        _ => TableKind::Table,
-                    },
-                }),
-                _ => None,
+            .map(|r| TableInfo {
+                schema: text(r, 0),
+                name: text(r, 1),
+                kind: match r.get(2) {
+                    Some("v") => TableKind::View,
+                    Some("m") => TableKind::MaterializedView,
+                    Some("p") => TableKind::Partitioned,
+                    Some("f") => TableKind::Foreign,
+                    _ => TableKind::Table,
+                },
+                comment: opt(r, 3),
+                row_estimate: number(r, 4),
+                size_bytes: number(r, 5),
             })
             .collect())
     }
 
     async fn list_columns(&mut self) -> Result<Vec<ColumnMeta>> {
-        const SQL: &str = "SELECT n.nspname, c.relname, a.attname, \
-              format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, \
-              EXISTS (SELECT 1 FROM pg_index i \
-                      WHERE i.indrelid = c.oid AND i.indisprimary AND a.attnum = ANY(i.indkey)) \
-            FROM pg_attribute a \
-            JOIN pg_class c ON c.oid = a.attrelid \
-            JOIN pg_namespace n ON n.oid = c.relnamespace \
-            WHERE a.attnum > 0 AND NOT a.attisdropped \
-              AND c.relkind IN ('r','p','v','m','f') \
-              AND n.nspname NOT IN ('pg_catalog','information_schema') \
-              AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' \
-            ORDER BY 1, 2, a.attnum";
-        let msgs = self.client.simple_query(SQL).await.map_err(pg_error)?;
-        let text = |r: &tokio_postgres::SimpleQueryRow, i| r.get(i).unwrap_or_default().to_string();
-        Ok(msgs
+        let sql = format!(
+            "SELECT n.nspname, c.relname, a.attname, \
+               format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, \
+               EXISTS (SELECT 1 FROM pg_index i \
+                       WHERE i.indrelid = c.oid AND i.indisprimary AND a.attnum = ANY(i.indkey)), \
+               col_description(c.oid, a.attnum), \
+               CASE WHEN a.attgenerated = '' THEN pg_get_expr(d.adbin, d.adrelid) END, \
+               CASE WHEN a.attgenerated <> '' THEN pg_get_expr(d.adbin, d.adrelid) END, \
+               a.attidentity <> '' OR coalesce(pg_get_expr(d.adbin, d.adrelid), '') LIKE 'nextval(%', \
+               CASE WHEN t.typtype = 'e' THEN tn.nspname || '.' || t.typname END \
+             FROM pg_attribute a \
+             JOIN pg_class c ON c.oid = a.attrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_type t ON t.oid = a.atttypid \
+             JOIN pg_namespace tn ON tn.oid = t.typnamespace \
+             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE a.attnum > 0 AND NOT a.attisdropped \
+               AND c.relkind IN ('r','p','v','m','f') AND {USER_SCHEMAS} \
+             ORDER BY 1, 2, a.attnum"
+        );
+        Ok(self
+            .rows(&sql)
+            .await?
             .iter()
-            .filter_map(|m| match m {
-                SimpleQueryMessage::Row(r) => Some(ColumnMeta {
-                    schema: text(r, 0),
-                    table: text(r, 1),
-                    name: text(r, 2),
-                    data_type: text(r, 3),
-                    nullable: r.get(4) == Some("t"),
-                    primary_key: r.get(5) == Some("t"),
-                }),
-                _ => None,
+            .map(|r| ColumnMeta {
+                schema: text(r, 0),
+                table: text(r, 1),
+                name: text(r, 2),
+                data_type: text(r, 3),
+                nullable: r.get(4) == Some("t"),
+                primary_key: r.get(5) == Some("t"),
+                comment: opt(r, 6),
+                default: opt(r, 7),
+                generated: opt(r, 8),
+                identity: r.get(9) == Some("t"),
+                enum_type: opt(r, 10),
             })
             .collect())
     }
@@ -213,30 +231,30 @@ impl Session for PgSession {
             WHERE con.contype = 'f' \
               AND n.nspname NOT IN ('pg_catalog','information_schema') \
             ORDER BY 2, 3, 1";
-        let msgs = self.client.simple_query(SQL).await.map_err(pg_error)?;
-        let text = |r: &tokio_postgres::SimpleQueryRow, i| r.get(i).unwrap_or_default().to_string();
-        let list = |r: &tokio_postgres::SimpleQueryRow, i| {
-            r.get(i)
-                .unwrap_or_default()
-                .split('\u{1f}')
-                .map(String::from)
-                .collect()
-        };
-        Ok(msgs
+        Ok(self
+            .rows(SQL)
+            .await?
             .iter()
-            .filter_map(|m| match m {
-                SimpleQueryMessage::Row(r) => Some(ForeignKey {
-                    name: text(r, 0),
-                    schema: text(r, 1),
-                    table: text(r, 2),
-                    ref_schema: text(r, 3),
-                    ref_table: text(r, 4),
-                    columns: list(r, 5),
-                    ref_columns: list(r, 6),
-                }),
-                _ => None,
+            .map(|r| ForeignKey {
+                name: text(r, 0),
+                schema: text(r, 1),
+                table: text(r, 2),
+                ref_schema: text(r, 3),
+                ref_table: text(r, 4),
+                columns: list(r, 5),
+                ref_columns: list(r, 6),
             })
             .collect())
+    }
+
+    async fn catalog_extras(&mut self) -> Result<CatalogExtras> {
+        Ok(CatalogExtras {
+            indexes: catalog_part("indexes", self.indexes().await),
+            checks: catalog_part("check constraints", self.checks().await),
+            enums: catalog_part("enums", self.enums().await),
+            views: catalog_part("view definitions", self.views().await),
+            routines: catalog_part("routines", self.routines().await),
+        })
     }
 
     fn is_alive(&self) -> bool {
@@ -245,6 +263,199 @@ impl Session for PgSession {
 
     async fn close(self: Box<Self>) {
         // Dropping the client terminates the connection task.
+    }
+}
+
+/// Schemas of the user's objects: not the system's, TOAST or temporary ones.
+const USER_SCHEMAS: &str = "n.nspname NOT IN ('pg_catalog','information_schema') \
+     AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'";
+
+fn text(r: &SimpleQueryRow, i: usize) -> String {
+    r.get(i).unwrap_or_default().to_string()
+}
+
+fn opt(r: &SimpleQueryRow, i: usize) -> Option<String> {
+    r.get(i).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+fn number(r: &SimpleQueryRow, i: usize) -> Option<u64> {
+    r.get(i)?.parse().ok()
+}
+
+/// A list joined with the unit separator (no sane name contains it).
+fn list(r: &SimpleQueryRow, i: usize) -> Vec<String> {
+    r.get(i)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split('\u{1f}').map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// `CHECK ((total >= (0)::numeric))` → `total >= (0)::numeric`.
+fn check_expression(def: &str) -> String {
+    let inner = def.strip_prefix("CHECK ").unwrap_or(def);
+    unwrap_parens(unwrap_parens(inner)).to_string()
+}
+
+/// `(a AND (b))` → `a AND (b)`: one pair of parentheses around the whole, if the
+/// first one closes at the end.
+fn unwrap_parens(s: &str) -> &str {
+    let s = s.trim();
+    let Some(inner) = s.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return s;
+    };
+    let mut depth = 0i32;
+    for c in inner.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            // `(a) AND (b)`: the first one closes early.
+            return s;
+        }
+    }
+    inner.trim()
+}
+
+impl PgSession {
+    async fn rows(&self, sql: &str) -> Result<Vec<SimpleQueryRow>> {
+        let msgs = self.client.simple_query(sql).await.map_err(pg_error)?;
+        Ok(msgs
+            .into_iter()
+            .filter_map(|m| match m {
+                SimpleQueryMessage::Row(r) => Some(r),
+                _ => None,
+            })
+            .collect())
+    }
+
+    async fn indexes(&self) -> Result<Vec<IndexInfo>> {
+        // Key columns (or expressions) one by one, in index order.
+        let sql = format!(
+            "SELECT n.nspname, c.relname, ic.relname, i.indisunique, i.indisprimary, \
+               pg_get_expr(i.indpred, i.indrelid), am.amname, \
+               (SELECT string_agg(pg_get_indexdef(i.indexrelid, k, true), chr(31) ORDER BY k) \
+                  FROM generate_series(1, i.indnkeyatts) k) \
+             FROM pg_index i \
+             JOIN pg_class ic ON ic.oid = i.indexrelid \
+             JOIN pg_class c ON c.oid = i.indrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_am am ON am.oid = ic.relam \
+             WHERE {USER_SCHEMAS} \
+             ORDER BY 1, 2, 3"
+        );
+        Ok(self
+            .rows(&sql)
+            .await?
+            .iter()
+            .map(|r| IndexInfo {
+                schema: text(r, 0),
+                table: text(r, 1),
+                name: text(r, 2),
+                unique: r.get(3) == Some("t"),
+                primary: r.get(4) == Some("t"),
+                predicate: opt(r, 5).map(|p| unwrap_parens(&p).to_string()),
+                method: opt(r, 6),
+                columns: list(r, 7),
+            })
+            .collect())
+    }
+
+    async fn checks(&self) -> Result<Vec<CheckInfo>> {
+        let sql = format!(
+            "SELECT n.nspname, c.relname, con.conname, pg_get_constraintdef(con.oid, true) \
+             FROM pg_constraint con \
+             JOIN pg_class c ON c.oid = con.conrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE con.contype = 'c' AND {USER_SCHEMAS} \
+             ORDER BY 1, 2, 3"
+        );
+        Ok(self
+            .rows(&sql)
+            .await?
+            .iter()
+            .map(|r| CheckInfo {
+                schema: text(r, 0),
+                table: text(r, 1),
+                name: text(r, 2),
+                expression: check_expression(&text(r, 3)),
+            })
+            .collect())
+    }
+
+    async fn enums(&self) -> Result<Vec<EnumInfo>> {
+        let sql = format!(
+            "SELECT n.nspname, t.typname, \
+               string_agg(e.enumlabel, chr(31) ORDER BY e.enumsortorder), \
+               obj_description(t.oid, 'pg_type') \
+             FROM pg_type t \
+             JOIN pg_enum e ON e.enumtypid = t.oid \
+             JOIN pg_namespace n ON n.oid = t.typnamespace \
+             WHERE {USER_SCHEMAS} \
+             GROUP BY n.nspname, t.typname, t.oid \
+             ORDER BY 1, 2"
+        );
+        Ok(self
+            .rows(&sql)
+            .await?
+            .iter()
+            .map(|r| EnumInfo {
+                schema: text(r, 0),
+                name: text(r, 1),
+                values: list(r, 2),
+                comment: opt(r, 3),
+            })
+            .collect())
+    }
+
+    async fn views(&self) -> Result<Vec<ViewDef>> {
+        let sql = format!(
+            "SELECT n.nspname, c.relname, pg_get_viewdef(c.oid, true) \
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('v','m') AND {USER_SCHEMAS} \
+             ORDER BY 1, 2"
+        );
+        Ok(self
+            .rows(&sql)
+            .await?
+            .iter()
+            .map(|r| ViewDef {
+                schema: text(r, 0),
+                name: text(r, 1),
+                definition: text(r, 2).trim().to_string(),
+            })
+            .collect())
+    }
+
+    async fn routines(&self) -> Result<Vec<RoutineInfo>> {
+        // Not those of extensions (pgcrypto's dozens of functions, …).
+        let sql = format!(
+            "SELECT n.nspname, p.proname, \
+               CASE p.prokind WHEN 'p' THEN 'procedure' WHEN 'a' THEN 'aggregate' \
+                 WHEN 'w' THEN 'window' ELSE 'function' END, \
+               pg_get_function_arguments(p.oid), \
+               CASE WHEN p.prokind <> 'p' THEN pg_get_function_result(p.oid) END, \
+               obj_description(p.oid, 'pg_proc') \
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE {USER_SCHEMAS} \
+               AND NOT EXISTS (SELECT 1 FROM pg_depend d \
+                               WHERE d.objid = p.oid AND d.deptype = 'e') \
+             ORDER BY 1, 2, 4"
+        );
+        Ok(self
+            .rows(&sql)
+            .await?
+            .iter()
+            .map(|r| RoutineInfo {
+                schema: text(r, 0),
+                name: text(r, 1),
+                kind: text(r, 2),
+                arguments: text(r, 3),
+                returns: opt(r, 4),
+                comment: opt(r, 5),
+            })
+            .collect())
     }
 }
 
@@ -388,6 +599,19 @@ fn may_touch_transaction(sql: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn expressions_without_extra_parentheses() {
+        use super::{check_expression, unwrap_parens};
+        assert_eq!(
+            check_expression("CHECK ((total >= (0)::numeric))"),
+            "total >= (0)::numeric"
+        );
+        assert_eq!(check_expression("CHECK (a > 0)"), "a > 0");
+        assert_eq!(unwrap_parens("(mood = 'happy')"), "mood = 'happy'");
+        assert_eq!(unwrap_parens("(a) AND (b)"), "(a) AND (b)");
+        assert_eq!(unwrap_parens("a > 1"), "a > 1");
+    }
+
     use super::{char_to_byte, may_touch_transaction};
 
     #[test]

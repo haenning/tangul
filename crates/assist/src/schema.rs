@@ -146,6 +146,7 @@ pub(crate) mod tests {
             schema: schema.into(),
             name: name.into(),
             kind: TableKind::Table,
+            ..Default::default()
         };
         let col = |schema: &str, table: &str, name: &str, pk: bool| ColumnMeta {
             schema: schema.into(),
@@ -158,6 +159,7 @@ pub(crate) mod tests {
             },
             nullable: !pk,
             primary_key: pk,
+            ..Default::default()
         };
         let info = SchemaInfo {
             tables: vec![
@@ -183,6 +185,7 @@ pub(crate) mod tests {
                 ref_table: "users".into(),
                 ref_columns: vec!["id".into()],
             }],
+            ..Default::default()
         };
         SchemaIndex::new(info, dialect_for(driver), Some("public".into()))
     }

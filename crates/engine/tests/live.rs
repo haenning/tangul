@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tangul_core::{
     ConnId, ConnectConfig, DriverKind, QueryId, ResultSet, SshAuth, SshConfig, SshTarget, TabId,
-    TlsMode,
+    TableKind, TlsMode,
 };
 use tangul_engine::{
     Approval, Caller, Command, EngineConfig, EngineHandle, Event, ExecEvent, QueryEvent,
@@ -325,12 +325,48 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
     };
     let mut h = Harness::connect(driver, cfg).await;
     let tab = TabId(1);
-    let setup = format!(
-        "{drop}; CREATE SCHEMA tangul_fk_test; \
-         CREATE TABLE tangul_fk_test.parent (id INT PRIMARY KEY); \
-         CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, parent_id INT NOT NULL, \
-           FOREIGN KEY (parent_id) REFERENCES tangul_fk_test.parent (id))"
-    );
+    // The same objects on both: comments, an identity column, an enum, a default, a
+    // check, a generated column, a composite index, a view and a function. Postgres
+    // adds a partial index and a materialized view.
+    let objects = match driver {
+        DriverKind::Postgres => {
+            "CREATE TABLE tangul_fk_test.parent (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY); \
+             COMMENT ON TABLE tangul_fk_test.parent IS 'Parents'; \
+             CREATE TYPE tangul_fk_test.mood AS ENUM ('sad', 'ok', 'happy'); \
+             CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, parent_id INT NOT NULL \
+               REFERENCES tangul_fk_test.parent (id), \
+               mood tangul_fk_test.mood NOT NULL DEFAULT 'ok', \
+               amount numeric CHECK (amount >= 0), \
+               doubled numeric GENERATED ALWAYS AS (amount * 2) STORED); \
+             COMMENT ON COLUMN tangul_fk_test.child.parent_id IS 'Who it belongs to'; \
+             CREATE INDEX child_mood ON tangul_fk_test.child (parent_id, mood); \
+             CREATE INDEX child_happy ON tangul_fk_test.child (parent_id) WHERE mood = 'happy'; \
+             CREATE VIEW tangul_fk_test.happy AS \
+               SELECT id FROM tangul_fk_test.child WHERE mood = 'happy'; \
+             CREATE MATERIALIZED VIEW tangul_fk_test.counts AS \
+               SELECT parent_id, count(*) AS n FROM tangul_fk_test.child GROUP BY parent_id; \
+             CREATE FUNCTION tangul_fk_test.twice(x int) RETURNS int LANGUAGE sql \
+               AS 'SELECT x * 2'; \
+             COMMENT ON FUNCTION tangul_fk_test.twice(int) IS 'Doubles'"
+        }
+        DriverKind::Mysql => {
+            "CREATE TABLE tangul_fk_test.parent (id INT PRIMARY KEY AUTO_INCREMENT) \
+               COMMENT = 'Parents'; \
+             CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, \
+               parent_id INT NOT NULL COMMENT 'Who it belongs to', \
+               mood ENUM('sad', 'ok', 'happy') NOT NULL DEFAULT 'ok', \
+               amount DECIMAL(10, 2) CHECK (amount >= 0), \
+               doubled DECIMAL(12, 2) GENERATED ALWAYS AS (amount * 2) STORED, \
+               FOREIGN KEY (parent_id) REFERENCES tangul_fk_test.parent (id), \
+               INDEX child_mood (parent_id, mood)); \
+             CREATE VIEW tangul_fk_test.happy AS \
+               SELECT id FROM tangul_fk_test.child WHERE mood = 'happy'; \
+             CREATE FUNCTION tangul_fk_test.twice(x INT) RETURNS INT DETERMINISTIC \
+               COMMENT 'Doubles' RETURN x * 2"
+        }
+        DriverKind::Sqlite => unreachable!(),
+    };
+    let setup = format!("{drop}; CREATE SCHEMA tangul_fk_test; {objects}");
     assert_eq!(h.run(tab, &setup).await.error, None);
 
     h.engine.send(Command::RefreshSchema { conn: h.conn });
@@ -366,6 +402,93 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
         ),
         ("tangul_fk_test", "parent", &["id".to_string()][..])
     );
+
+    // What the rich catalog (#112) adds.
+    let table = |name: &str| {
+        info.tables
+            .iter()
+            .find(|t| t.schema == "tangul_fk_test" && t.name == name)
+            .unwrap_or_else(|| panic!("table {name}"))
+    };
+    assert_eq!(table("parent").comment.as_deref(), Some("Parents"));
+    assert!(table("child").size_bytes.is_some());
+    assert_eq!(table("happy").kind, TableKind::View);
+    assert_eq!(
+        col("child", "parent_id").comment.as_deref(),
+        Some("Who it belongs to")
+    );
+    assert!(col("parent", "id").identity);
+    assert!(!col("child", "id").identity);
+    assert!(col("child", "mood").enum_type.is_some());
+    assert!(
+        col("child", "mood")
+            .default
+            .as_deref()
+            .unwrap()
+            .contains("ok")
+    );
+    assert!(
+        col("child", "doubled")
+            .generated
+            .as_deref()
+            .unwrap()
+            .contains("amount")
+    );
+    let index = |name: &str| {
+        info.indexes
+            .iter()
+            .find(|i| i.schema == "tangul_fk_test" && i.name == name)
+            .unwrap_or_else(|| panic!("index {name}"))
+    };
+    assert_eq!(index("child_mood").columns, ["parent_id", "mood"]);
+    assert!(!index("child_mood").unique);
+    assert!(
+        info.indexes
+            .iter()
+            .any(|i| i.table == "parent" && i.primary && i.unique)
+    );
+    let check = info
+        .checks
+        .iter()
+        .find(|c| c.schema == "tangul_fk_test" && c.table == "child")
+        .expect("check constraint");
+    assert!(check.expression.contains("amount"), "{}", check.expression);
+    let mood = info
+        .enums
+        .iter()
+        .find(|e| e.schema == "tangul_fk_test")
+        .expect("enum");
+    assert_eq!(mood.values, ["sad", "ok", "happy"]);
+    let view = info
+        .views
+        .iter()
+        .find(|v| v.schema == "tangul_fk_test" && v.name == "happy")
+        .expect("view definition");
+    assert!(view.definition.contains("happy"), "{}", view.definition);
+    let twice = info
+        .routines
+        .iter()
+        .find(|r| r.schema == "tangul_fk_test" && r.name == "twice")
+        .expect("function");
+    assert_eq!(
+        (twice.kind.as_str(), twice.comment.as_deref()),
+        ("function", Some("Doubles"))
+    );
+    assert!(twice.arguments.contains('x'), "{}", twice.arguments);
+    if driver == DriverKind::Postgres {
+        assert_eq!(table("counts").kind, TableKind::MaterializedView);
+        assert_eq!(
+            index("child_happy").predicate.as_deref(),
+            Some("mood = 'happy'::tangul_fk_test.mood")
+        );
+        assert_eq!(mood.name, "mood");
+        assert_eq!(
+            col("child", "mood").enum_type.as_deref(),
+            Some("tangul_fk_test.mood")
+        );
+    } else {
+        assert_eq!(mood.name, "child.mood");
+    }
 
     assert_eq!(h.run(tab, drop).await.error, None);
 }

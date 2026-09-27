@@ -124,9 +124,12 @@ impl Workspace {
             if !expanded {
                 continue;
             }
-            let only_kind = tables.iter().all(|t| t.kind == tables[0].kind);
+            let only_kind = tables
+                .iter()
+                .all(|t| t.kind.group() == tables[0].kind.group());
             for kind in [TableKind::Table, TableKind::View] {
-                let items: Vec<&TableInfo> = tables.iter().filter(|t| t.kind == kind).collect();
+                let items: Vec<&TableInfo> =
+                    tables.iter().filter(|t| t.kind.group() == kind).collect();
                 if items.is_empty() {
                     continue;
                 }
@@ -402,10 +405,7 @@ impl Workspace {
                 count,
                 expanded,
             } => {
-                let label = match kind {
-                    TableKind::Table => "Tables",
-                    TableKind::View => "Views",
-                };
+                let label = if kind.is_view() { "Views" } else { "Tables" };
                 let key = (user_id, schema, kind);
                 row(1)
                     .child(folder(expanded).small().text_color(theme.muted_foreground))
@@ -426,10 +426,9 @@ impl Workspace {
                     .into_any_element()
             }
             SidebarRow::Table { table } | SidebarRow::Favorite { table } => {
-                let icon = match table.kind {
-                    TableKind::Table => Icon::new(Lucide::Table),
-                    TableKind::View => Icon::new(IconName::Eye),
-                };
+                let icon = kind_icon(table.kind);
+                let info = table_info(&table);
+                let estimate = table.row_estimate.map(short_count);
                 let name = table.name.clone();
                 let group: SharedString = format!("table-row-{ix}").into();
                 let weak = cx.entity().downgrade();
@@ -470,6 +469,18 @@ impl Workspace {
                         } else {
                             r.child(div().flex_1().min_w_0().truncate().child(name))
                         }
+                    })
+                    .when_some(estimate, |r, estimate| {
+                        r.child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(estimate),
+                        )
+                    })
+                    .when_some(info, |r, info| {
+                        r.tooltip(move |window, cx| Tooltip::new(info.clone()).build(window, cx))
                     })
                     // Rightmost, so a favorite's star lines up at the edge.
                     .children(fixed_star)
@@ -518,10 +529,7 @@ impl Workspace {
                     .into_any_element()
             }
             SidebarRow::TableHit { table } => {
-                let icon = match table.kind {
-                    TableKind::Table => Icon::new(Lucide::Table),
-                    TableKind::View => Icon::new(IconName::Eye),
-                };
+                let icon = kind_icon(table.kind);
                 let group: SharedString = format!("table-hit-{ix}").into();
                 let star = self.favorite_button(ix, &table, "table-favorite-hover", cx);
                 let fixed_star = self.fixed_star(ix, &table, group.clone(), cx);
@@ -824,4 +832,82 @@ fn hover_actions(group: SharedString, bg: Hsla) -> Div {
         .bg(bg)
         .invisible()
         .group_hover(group, |s| s.visible())
+}
+
+fn kind_icon(kind: TableKind) -> Icon {
+    if kind.is_view() {
+        Icon::new(IconName::Eye)
+    } else {
+        Icon::new(Lucide::Table)
+    }
+}
+
+/// What the row's tooltip says: the kind unless it's a plain table or view, the
+/// row estimate and the server's comment. `None` when there is nothing to add.
+fn table_info(table: &TableInfo) -> Option<SharedString> {
+    let mut head = Vec::new();
+    if !matches!(table.kind, TableKind::Table | TableKind::View) {
+        head.push(table.kind.label().to_string());
+    }
+    if let Some(n) = table.row_estimate {
+        head.push(format!(
+            "about {} rows",
+            short_count(n).trim_start_matches('~')
+        ));
+    }
+    let lines: Vec<String> = [
+        (!head.is_empty()).then(|| head.join(" · ")),
+        table.comment.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!lines.is_empty()).then(|| lines.join("\n").into())
+}
+
+/// `~950`, `~12k`, `~1.2M`: a row estimate at a glance.
+fn short_count(n: u64) -> String {
+    match n {
+        0..1_000 => format!("~{n}"),
+        1_000..10_000 => format!("~{:.1}k", n as f64 / 1e3).replace(".0k", "k"),
+        10_000..1_000_000 => format!("~{}k", n / 1_000),
+        1_000_000..10_000_000 => format!("~{:.1}M", n as f64 / 1e6).replace(".0M", "M"),
+        _ => format!("~{}M", n / 1_000_000),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{short_count, table_info};
+    use tangul_core::{TableInfo, TableKind};
+
+    #[test]
+    fn row_estimates_at_a_glance() {
+        assert_eq!(short_count(0), "~0");
+        assert_eq!(short_count(950), "~950");
+        assert_eq!(short_count(1_000), "~1k");
+        assert_eq!(short_count(1_250), "~1.2k");
+        assert_eq!(short_count(300_000), "~300k");
+        assert_eq!(short_count(1_500_000), "~1.5M");
+        assert_eq!(short_count(42_000_000), "~42M");
+    }
+
+    #[test]
+    fn tooltips_only_say_something_new() {
+        let t = |kind, comment: Option<&str>, rows| TableInfo {
+            kind,
+            comment: comment.map(str::to_string),
+            row_estimate: rows,
+            ..Default::default()
+        };
+        assert_eq!(table_info(&t(TableKind::Table, None, None)), None);
+        assert_eq!(
+            table_info(&t(TableKind::Table, Some("Customer orders"), Some(300_000))).as_deref(),
+            Some("about 300k rows\nCustomer orders")
+        );
+        assert_eq!(
+            table_info(&t(TableKind::MaterializedView, None, None)).as_deref(),
+            Some("materialized view")
+        );
+    }
 }

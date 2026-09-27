@@ -1,11 +1,12 @@
-//! Loading a connection's tables, columns and foreign keys.
+//! Loading a connection's catalog: tables, columns, foreign keys, and indexes,
+//! constraints, enums, view definitions and routines.
 
 use tangul_core::SchemaInfo;
 
 use crate::pool::Pool;
 
-/// Tables are required; columns and foreign keys are best effort (they only feed
-/// SQL assistance, and a restricted user may not be allowed to read them).
+/// Tables are required; everything else is best effort (it feeds SQL assistance and
+/// the assistant, and a restricted user may not be allowed to read all of it).
 pub(crate) async fn load_schema(pool: &Pool) -> anyhow::Result<SchemaInfo> {
     let mut lease = pool.acquire(None).await?;
     let session = &mut lease.session;
@@ -19,11 +20,17 @@ pub(crate) async fn load_schema(pool: &Pool) -> anyhow::Result<SchemaInfo> {
                 eprintln!("could not load foreign keys: {e:#}");
                 Vec::new()
             });
+            let extras = session.catalog_extras().await.unwrap_or_else(|e| {
+                eprintln!("could not load indexes, constraints and views: {e:#}");
+                Default::default()
+            });
             Ok(SchemaInfo {
                 tables,
                 columns,
                 foreign_keys,
-            })
+                ..Default::default()
+            }
+            .with_extras(extras))
         }
         Err(e) => Err(e),
     };

@@ -122,6 +122,7 @@ mod tests {
                 schema: "public".into(),
                 name: table.into(),
                 kind: TableKind::Table,
+                ..Default::default()
             }],
             ..Default::default()
         };
