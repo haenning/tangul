@@ -136,6 +136,28 @@ referenced by:
         "users.id = orders.user_id (foreign key orders_fk0)\nFROM users\nJOIN orders ON orders.user_id = users.id"
     );
     assert_eq!(
+        call(
+            &ctx,
+            "schema_slice",
+            json!({"question": "open orders of a user"})
+        )
+        .await
+        .unwrap(),
+        "\
+orders
+  id integer pk, user_id integer → users.id, status text, total real
+  check total >= 0
+  why: name; user_id: name
+
+users
+  id integer pk, email text, active integer
+  why: name
+
+paid (view)
+  id integer, user_id integer, status text, total real
+  why: user_id: name"
+    );
+    assert_eq!(
         call(&ctx, "view_definition", json!({"view": "paid"}))
             .await
             .unwrap(),

@@ -199,6 +199,7 @@ async fn every_tool_has_a_schema_and_a_description() {
             "search_schema",
             "describe_table",
             "find_join_path",
+            "schema_slice",
             "list_enums",
             "view_definition",
             "run_readonly"
@@ -441,5 +442,38 @@ async fn joins_along_foreign_keys_and_learned_joins() {
         text(&ctx, "describe_table", json!({"table": "revenue"}))
             .await
             .contains("joined in your queries:\n  app.revenue.status = app.orders.status\n")
+    );
+}
+
+#[tokio::test]
+async fn a_question_gets_its_slice_of_the_schema() {
+    let ctx = ctx(false);
+    assert_eq!(
+        text(
+            &ctx,
+            "schema_slice",
+            json!({"question": "Which customers cancelled orders?"})
+        )
+        .await,
+        "\
+app.orders (~300000 rows) — Customer orders; totals in EUR
+  id bigint pk, user_id integer → app.users.id, status app.order_status {open, paid, cancelled}, \
+total numeric(10,2), ordered date \"Day the order was placed\"
+  check total >= 0
+  why: comment: \"Customer orders; totals in EUR\", name; status: value 'cancelled'; ordered: name
+
+app.users (~100000 rows) — Registered customers
+  id integer pk, email text \"Login; unique\"
+  why: comment: \"Registered customers\""
+    );
+    assert_eq!(
+        text(
+            &ctx,
+            "schema_slice",
+            json!({"question": "weather in Berlin"})
+        )
+        .await,
+        "No table matches \"weather in Berlin\"; try other words with search_schema, or list \
+         the tables with a query."
     );
 }

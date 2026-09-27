@@ -9,7 +9,7 @@ use tangul_assist::schema::SchemaIndex;
 use tangul_assist::usage::Usage;
 use tangul_core::{CheckInfo, IndexInfo, TableKind};
 
-use super::{enum_of, resolve_table};
+use super::resolve_table;
 use crate::ctx::Ctx;
 use crate::tool::{Tool, ToolError, ToolOutput, input, schema_of};
 
@@ -84,7 +84,7 @@ pub(crate) fn describe(schema: &SchemaIndex, usage: &Usage, ix: usize) -> Descri
             default: c.default.clone(),
             generated: c.generated.clone(),
             comment: c.comment.clone(),
-            enum_values: enum_of(info, c).map(|e| e.values.clone()),
+            enum_values: schema.enum_of(c).map(|e| e.values.clone()),
             references: own_keys
                 .iter()
                 .find(|f| f.columns.len() == 1 && f.columns[0] == c.name)

@@ -6,10 +6,10 @@ mod describe;
 mod joins;
 mod query;
 mod search;
+mod slice;
 
 use tangul_assist::lexer::unquote;
 use tangul_assist::schema::SchemaIndex;
-use tangul_core::{ColumnMeta, EnumInfo, SchemaInfo};
 
 use crate::tool::{Tool, ToolError};
 
@@ -19,6 +19,7 @@ pub(crate) fn all() -> Vec<Box<dyn Tool>> {
         Box::new(search::SearchSchema),
         Box::new(describe::DescribeTable),
         Box::new(joins::FindJoinPath),
+        Box::new(slice::SchemaSlice),
         Box::new(catalog::ListEnums),
         Box::new(catalog::ViewDefinition),
         Box::new(query::RunReadonly),
@@ -38,13 +39,4 @@ pub(crate) fn resolve_table(schema: &SchemaIndex, name: &str) -> Result<usize, T
                 "table {name}; search_schema finds tables by name or comment"
             ))
         })
-}
-
-/// The values of `column`'s enum type, if it has one.
-pub(crate) fn enum_of<'a>(info: &'a SchemaInfo, column: &ColumnMeta) -> Option<&'a EnumInfo> {
-    let ty = column.enum_type.as_deref()?;
-    info.enums.iter().find(|e| {
-        // Postgres names the type `schema.type`; MySQL `table.column` in the schema.
-        ty == format!("{}.{}", e.schema, e.name) || (e.schema == column.schema && e.name == ty)
-    })
 }
