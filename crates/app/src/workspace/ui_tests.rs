@@ -365,3 +365,17 @@ fn comparing_different_columns_warns(cx: &mut TestAppContext) {
 // alive through its own subscription, which GPUI's leak check at the end of a
 // test reports. Checked once by hand-running such a test: the menu opens with the
 // fix and not without it.
+
+#[gpui_kit::test]
+fn the_palette_opens_only_once(cx: &mut TestAppContext) {
+    let (handle, _) = open(cx);
+    step(handle, cx, |window, cx| window.press("cmd-shift-p", cx));
+    step(handle, cx, |window, cx| {
+        assert!(window.find("palette").visible());
+        window.press("cmd-shift-p", cx);
+    });
+    // `find` fails on two elements with the same id.
+    step(handle, cx, |window, _| {
+        assert!(window.find("palette").visible())
+    });
+}

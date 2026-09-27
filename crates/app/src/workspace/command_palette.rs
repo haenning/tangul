@@ -9,6 +9,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // One at a time: not over itself or another dialog.
+        if window.has_active_dialog(cx) {
+            return;
+        }
         let db = self.active_db.clone();
         let bookmarks = self.data.local.bookmarks_for(db.as_deref());
         let history = match &db {
@@ -63,6 +67,8 @@ impl Workspace {
                 let workspace = workspace.clone();
                 dialog.w(px(560.)).close_button(false).child(
                     div()
+                        .id("palette")
+                        .test_support()
                         .key_context("Palette")
                         .on_action(move |_: &NextSidebarPanel, window, cx| next(window, cx))
                         .on_action(move |_: &PrevSidebarPanel, window, cx| prev(window, cx))
