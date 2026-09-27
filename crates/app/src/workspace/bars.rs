@@ -512,7 +512,7 @@ pub(super) fn ai_menu(
     db_id: &str,
     users: &[(String, String)],
     current: Option<&str>,
-    values: bool,
+    values: ValueAccess,
     warning: Option<&str>,
     workspace: &WeakEntity<Workspace>,
 ) -> PopupMenu {
@@ -549,14 +549,18 @@ pub(super) fn ai_menu(
                 }),
         );
     }
-    let (ws, db_id) = (workspace.clone(), db_id.to_string());
-    menu.separator().item(
-        PopupMenuItem::new("Let the AI read column values")
-            .checked(values)
-            .on_click(move |_, window, cx| {
-                let _ = ws.update(cx, |ws, cx| ws.set_ai_values(&db_id, !values, window, cx));
-            }),
-    )
+    menu = menu.separator().label("The AI may read from the rows");
+    for access in ValueAccess::ALL {
+        let (ws, db_id) = (workspace.clone(), db_id.to_string());
+        menu = menu.item(
+            PopupMenuItem::new(access.label())
+                .checked(values == access)
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.set_ai_values(&db_id, access, window, cx));
+                }),
+        );
+    }
+    menu
 }
 
 /// What the title bar says when the AI's user may change or drop tables.

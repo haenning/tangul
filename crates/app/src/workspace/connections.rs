@@ -89,15 +89,15 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Whether the AI may read column values of the database.
+    /// What the AI may read from the database's rows.
     pub(super) fn set_ai_values(
         &mut self,
         db_id: &str,
-        on: bool,
+        access: ValueAccess,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.update_ai(db_id, |db| db.ai_values = on, window, cx);
+        self.update_ai(db_id, |db| db.ai_values = access, window, cx);
     }
 
     pub(super) fn connect(&mut self, user_id: &str, cx: &mut Context<Self>) {

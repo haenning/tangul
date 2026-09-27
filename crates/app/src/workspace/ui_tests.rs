@@ -401,7 +401,7 @@ fn the_title_bar_shows_the_ai_user_before_yours(cx: &mut TestAppContext) {
                 users: vec![user("app"), user("reader")],
                 ssh: None,
                 assistant_user: None,
-                ai_values: false,
+                ai_values: Default::default(),
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
@@ -414,7 +414,7 @@ fn the_title_bar_shows_the_ai_user_before_yours(cx: &mut TestAppContext) {
         assert!(ai.origin.x < yours.origin.x, "the AI's user comes first");
         workspace.update(cx, |ws, cx| {
             ws.set_assistant_user("db", Some("reader".into()), window, cx);
-            ws.set_ai_values("db", true, window, cx);
+            ws.set_ai_values("db", tangul_core::ValueAccess::Statistics, window, cx);
         });
     });
     step(handle, cx, |_, cx| {
@@ -426,7 +426,7 @@ fn the_title_bar_shows_the_ai_user_before_yours(cx: &mut TestAppContext) {
             .cloned()
             .unwrap();
         assert_eq!(db.assistant_user.as_deref(), Some("reader"));
-        assert!(db.ai_values);
+        assert_eq!(db.ai_values, tangul_core::ValueAccess::Statistics);
         // The users stay as they were.
         assert_eq!(db.users.len(), 2);
     });
@@ -452,7 +452,7 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
                 }],
                 ssh: None,
                 assistant_user: None,
-                ai_values: false,
+                ai_values: Default::default(),
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
