@@ -126,6 +126,16 @@ referenced by:
   orders (user_id) → (id)"
     );
     assert_eq!(
+        call(
+            &ctx,
+            "find_join_path",
+            json!({"from": "users", "to": "orders"})
+        )
+        .await
+        .unwrap(),
+        "users.id = orders.user_id (foreign key orders_fk0)\nFROM users\nJOIN orders ON orders.user_id = users.id"
+    );
+    assert_eq!(
         call(&ctx, "view_definition", json!({"view": "paid"}))
             .await
             .unwrap(),

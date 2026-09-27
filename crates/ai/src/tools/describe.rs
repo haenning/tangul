@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tangul_assist::join_graph::{JoinGraph, JoinSource};
 use tangul_assist::schema::SchemaIndex;
+use tangul_assist::usage::Usage;
 use tangul_core::{CheckInfo, IndexInfo, TableKind};
 
 use super::{enum_of, resolve_table};
@@ -35,6 +37,8 @@ pub(crate) struct Description {
     pub checks: Vec<CheckInfo>,
     /// Other tables' columns that reference this one: `schema.table (cols) → (cols)`.
     pub referenced_by: Vec<String>,
+    /// Joins the user's queries use that no foreign key declares: `a.x = b.y`.
+    pub learned_joins: Vec<String>,
     /// The query of a view.
     pub definition: Option<String>,
 }
@@ -54,7 +58,7 @@ pub(crate) struct Column {
     pub references: Option<String>,
 }
 
-pub(crate) fn describe(schema: &SchemaIndex, ix: usize) -> Description {
+pub(crate) fn describe(schema: &SchemaIndex, usage: &Usage, ix: usize) -> Description {
     let info = schema.info();
     let table = schema.table(ix);
     let is = |s: &str, t: &str| s == table.schema && t == table.name;
@@ -106,8 +110,23 @@ pub(crate) fn describe(schema: &SchemaIndex, ix: usize) -> Description {
             )
         })
         .collect();
+    let learned_joins = JoinGraph::new(schema, usage)
+        .neighbours(ix)
+        .into_iter()
+        .filter(|s| s.source == JoinSource::Learned)
+        .map(|s| {
+            let (f, t) = (schema.sql_name(s.from), schema.sql_name(s.to));
+            s.from_cols
+                .iter()
+                .zip(&s.to_cols)
+                .map(|(a, b)| format!("{f}.{a} = {t}.{b}"))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        })
+        .collect();
     Description {
         name: schema.sql_name(ix),
+        learned_joins,
         kind: table.kind,
         comment: table.comment.clone(),
         row_estimate: table.row_estimate,
@@ -201,6 +220,12 @@ pub(crate) fn text(d: &Description) -> String {
             out.push_str(&format!("\n  {r}"));
         }
     }
+    if !d.learned_joins.is_empty() {
+        out.push_str("\njoined in your queries:");
+        for j in &d.learned_joins {
+            out.push_str(&format!("\n  {j}"));
+        }
+    }
     if let Some(def) = &d.definition {
         out.push_str(&format!("\ndefinition:\n  {}", def.replace('\n', "\n  ")));
     }
@@ -227,7 +252,7 @@ impl Tool for DescribeTable {
         let Input { table, connection } = input(value)?;
         let conn = ctx.conn(connection.as_deref())?;
         let ix = resolve_table(&conn.schema, &table)?;
-        let d = describe(&conn.schema, ix);
+        let d = describe(&conn.schema, &conn.usage, ix);
         let text = text(&d);
         Ok(ToolOutput::new(&d, text))
     }

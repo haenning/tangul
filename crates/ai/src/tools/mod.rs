@@ -3,6 +3,7 @@
 mod catalog;
 mod connections;
 mod describe;
+mod joins;
 mod query;
 mod search;
 
@@ -17,6 +18,7 @@ pub(crate) fn all() -> Vec<Box<dyn Tool>> {
         Box::new(connections::ListConnections),
         Box::new(search::SearchSchema),
         Box::new(describe::DescribeTable),
+        Box::new(joins::FindJoinPath),
         Box::new(catalog::ListEnums),
         Box::new(catalog::ViewDefinition),
         Box::new(query::RunReadonly),

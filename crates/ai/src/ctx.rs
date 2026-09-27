@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use tangul_assist::schema::SchemaIndex;
+use tangul_assist::usage::Usage;
 use tangul_core::{ConnId, DriverKind};
 use tangul_engine::EngineHandle;
 use tangul_service::knowledge::Knowledge;
@@ -33,6 +34,8 @@ pub struct Ctx {
 pub(crate) struct Conn {
     pub conn: ConnId,
     pub schema: Arc<SchemaIndex>,
+    /// What the user's queries on this database used (learned joins, …).
+    pub usage: Arc<Usage>,
 }
 
 impl Ctx {
@@ -91,6 +94,7 @@ impl Ctx {
             .ok_or_else(|| ToolError::Failed(format!("{} is not connected yet", exposed.name)))?;
         Ok(Conn {
             conn: known.conn,
+            usage: self.knowledge.usage(&known.database).unwrap_or_default(),
             schema: known.schema,
         })
     }

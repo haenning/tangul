@@ -7,6 +7,7 @@ use serde_json::json;
 use tangul_ai::{Ctx, Exposed, Registry, ToolError};
 use tangul_assist::dialect::dialect_for;
 use tangul_assist::schema::SchemaIndex;
+use tangul_assist::usage::{Usage, UsageKind, join_key};
 use tangul_core::{
     CheckInfo, ColumnMeta, ConnId, DriverKind, EnumInfo, ForeignKey, IndexInfo, SchemaInfo,
     TableInfo, TableKind, ViewDef,
@@ -153,7 +154,11 @@ fn exposed(name: &str, user: &str) -> Exposed {
 
 /// The shop exposed as `shop`; `other` is exposed too when `two` is set.
 fn ctx(two: bool) -> Ctx {
-    let knowledge = Knowledge::default();
+    shop_ctx(Knowledge::default(), two)
+}
+
+/// [`ctx`] over `knowledge`, a handle to the same pool the tools read.
+fn shop_ctx(knowledge: Knowledge, two: bool) -> Ctx {
     let schema = Arc::new(SchemaIndex::new(
         shop(),
         dialect_for(DriverKind::Postgres),
@@ -193,6 +198,7 @@ async fn every_tool_has_a_schema_and_a_description() {
             "list_connections",
             "search_schema",
             "describe_table",
+            "find_join_path",
             "list_enums",
             "view_definition",
             "run_readonly"
@@ -372,5 +378,68 @@ async fn bad_input_and_unknown_names_say_what_to_do() {
     assert_eq!(
         error(&one, "run_readonly", json!({"sql": "SELECT 1"})).await,
         ToolError::NotAllowed("queries are not available here".into())
+    );
+}
+
+#[tokio::test]
+async fn joins_along_foreign_keys_and_learned_joins() {
+    let knowledge = Knowledge::default();
+    let ctx = shop_ctx(knowledge.clone(), false);
+    assert_eq!(
+        text(
+            &ctx,
+            "find_join_path",
+            json!({"from": "orders", "to": "users"})
+        )
+        .await,
+        "app.orders.user_id = app.users.id (foreign key orders_user_id_fkey)\n\
+         FROM app.orders\n\
+         JOIN app.users ON app.users.id = app.orders.user_id"
+    );
+    // Backwards, the same condition.
+    assert!(
+        text(
+            &ctx,
+            "find_join_path",
+            json!({"from": "users", "to": "orders"})
+        )
+        .await
+        .starts_with("app.users.id = app.orders.user_id (foreign key orders_user_id_fkey)")
+    );
+    // The view isn't connected to anything …
+    assert_eq!(
+        text(
+            &ctx,
+            "find_join_path",
+            json!({"from": "revenue", "to": "users"})
+        )
+        .await,
+        "No join path between app.revenue and app.users: no foreign keys or joins from \
+         your queries connect them."
+    );
+    // … until the user's queries joined it.
+    let mut usage = Usage::default();
+    usage.record(
+        UsageKind::Join,
+        join_key(("app", "revenue", "status"), ("app", "orders", "status")),
+    );
+    knowledge.set_usage("db1", Arc::new(usage));
+    assert_eq!(
+        text(
+            &ctx,
+            "find_join_path",
+            json!({"from": "revenue", "to": "users"})
+        )
+        .await,
+        "app.revenue.status = app.orders.status (learned from your queries)\n\
+         app.orders.user_id = app.users.id (foreign key orders_user_id_fkey)\n\
+         FROM app.revenue\n\
+         JOIN app.orders ON app.orders.status = app.revenue.status\n\
+         JOIN app.users ON app.users.id = app.orders.user_id"
+    );
+    assert!(
+        text(&ctx, "describe_table", json!({"table": "revenue"}))
+            .await
+            .contains("joined in your queries:\n  app.revenue.status = app.orders.status\n")
     );
 }
