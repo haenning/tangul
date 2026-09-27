@@ -972,6 +972,12 @@ impl TableDelegate for ResultsDelegate {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |table, _, _, cx| {
+                    // In cell mode the table takes a right click for itself and
+                    // stops it, so the context menu never opens. For this click it
+                    // is off: the row records the click and the menu opens.
+                    table.cell_selectable = false;
+                    let this = cx.entity();
+                    cx.defer(move |cx| this.update(cx, |t, _| t.cell_selectable = true));
                     let d = table.delegate_mut();
                     d.menu_col = Some(col_ix);
                     if !d.selected.contains(&row_ix) {
