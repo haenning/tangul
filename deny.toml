@@ -18,7 +18,8 @@ ignore = [
 ]
 
 [licenses]
-# Permissive licenses plus MPL-2.0 (file-level copyleft, fine for an Apache-2.0 app).
+# Permissive licenses plus MPL-2.0 (file-level copyleft). No GPL-family dependencies:
+# the maintainer must stay able to ship under other terms (App Store), see CLA.md.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -36,6 +37,9 @@ allow = [
     "bzip2-1.0.6",
 ]
 confidence-threshold = 0.8
+# tangul's own crates (AGPL-3.0-only) have publish = false and are skipped.
+[licenses.private]
+ignore = true
 
 [bans]
 # GPUI's tree pulls in several versions of many crates; nothing actionable here.

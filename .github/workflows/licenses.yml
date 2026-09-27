@@ -1,0 +1,22 @@
+name: Licenses
+
+# Every pull request into main: own crates are AGPL-3.0-only, dependencies only use
+# allowed licenses (deny.toml) and THIRD_PARTY_LICENSES.md is up to date (make license).
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-about
+      - name: make license-check
+        run: make license-check

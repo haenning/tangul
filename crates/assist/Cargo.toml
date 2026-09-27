@@ -3,6 +3,7 @@ name = "tangul-assist"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 serde_json = { version = "1.0.151", features = ["preserve_order"] }

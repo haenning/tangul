@@ -97,10 +97,12 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 - Pinned versions (`gpui-kit = "=0.6.6"`, Rust 1.98.1 = Zed's toolchain) — GPUI API
   churn is the main risk, upgrades are deliberate.
 
-### D8 — Open source, Apache-2.0
-- Not a product. License Apache-2.0 (same as GPUI and gpui-component). No dependency
-  forces a license: all are permissive; the only copyleft ones are MPL-2.0 (file-level,
-  fine to use).
+### D8 — Open source, AGPL-3.0-only with a CLA
+- License AGPL-3.0-only: forks must stay open. Contributors sign the [CLA](CLA.md), so
+  the maintainer keeps the right to ship under other terms too (e.g. the Mac App Store,
+  whose terms conflict with the GPL family for third parties).
+- Dependencies stay permissive (MPL-2.0 at most, file-level copyleft); `deny.toml` keeps
+  GPL-family crates out, since they would block shipping under other terms.
 - Zed's own editor/app crates are GPL-3.0: don't copy code from them.
 - Distribution: universal DMG via tag-based GitHub releases (ad-hoc signed); Developer ID signing, notarization and a Homebrew cask later.
 

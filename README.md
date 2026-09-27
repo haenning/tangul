@@ -136,4 +136,5 @@ by, or sponsored by Zed Industries.
 
 ## License
 
-[Apache-2.0](LICENSE)
+[AGPL-3.0-only](LICENSE). Contributions are accepted under the
+[Contributor License Agreement](CLA.md).

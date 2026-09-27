@@ -30,6 +30,6 @@
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>Apache-2.0</string>
+    <string>AGPL-3.0-only</string>
 </dict>
 </plist>

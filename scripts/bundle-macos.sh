@@ -41,6 +41,8 @@ else
   cp target/release/tangul "$app/Contents/MacOS/tangul"
 fi
 sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+# License texts ship with the app (AGPL-3.0 and the dependencies' notices).
+cp LICENSE THIRD_PARTY_LICENSES.md "$app/Contents/Resources/"
 
 # Icon: the Icon Composer document (light/dark/clear variants and the system glass,
 # macOS 26+) compiled by actool into Assets.car plus tangul.icns for older macOS.
