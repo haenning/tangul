@@ -12,6 +12,7 @@ mod command_palette;
 mod connections;
 mod empty_state;
 mod history;
+mod mcp;
 mod safety;
 mod scheduled;
 mod schema;
@@ -158,6 +159,8 @@ pub struct Workspace {
     /// counter that restarts the title bar's warning pulse for each new result.
     ai_check: Task<()>,
     ai_warning_pulse: u64,
+    /// The MCP server, while `mcp.enabled` is set.
+    mcp: mcp::Mcp,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -232,6 +235,8 @@ impl Workspace {
         );
         let value = cx.new(|cx| ValuePanel::new(window, cx));
         let value_sub = cx.subscribe_in(&value, window, Self::on_value_event);
+        let settings_sub =
+            cx.observe_global::<settings::Current>(|this: &mut Self, cx| this.sync_mcp(cx));
         let mut this = Self {
             engine,
             data,
@@ -259,8 +264,15 @@ impl Workspace {
             monitor: Monitor::new(monitor_tick),
             ai_check: Task::ready(()),
             ai_warning_pulse: 0,
+            mcp: mcp::Mcp::default(),
             focus_handle: cx.focus_handle(),
-            _subscriptions: vec![search_sub, bookmark_sub, schema_sub, value_sub],
+            _subscriptions: vec![
+                search_sub,
+                bookmark_sub,
+                schema_sub,
+                value_sub,
+                settings_sub,
+            ],
             _pump: pump,
         };
         // Reopen the connection used last (else the first one) right away.
@@ -282,6 +294,7 @@ impl Workspace {
             this.refresh_history(cx);
             this.check_ai_user(cx);
         }
+        this.sync_mcp(cx);
         // Starts on the empty state; keys like ⌘T need a focused element.
         window.focus(&this.focus_handle, cx);
         this

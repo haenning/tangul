@@ -37,6 +37,7 @@ impl Workspace {
         let schema = self.schema_index(user_id, info);
         self.knowledge.set_schema(user_id, &db_id, conn, schema);
         self.usage_for(&db_id);
+        self.expose_to_mcp();
     }
 
     pub(super) fn schema_index(&self, user_id: &str, info: SchemaInfo) -> Arc<SchemaIndex> {

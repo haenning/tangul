@@ -258,6 +258,7 @@ impl Workspace {
                 "AI query help — planned",
             ))
             .child(separator())
+            .child(self.render_mcp_button(cx))
             .child(planned(
                 "schema-graph",
                 Lucide::Network,

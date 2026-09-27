@@ -25,13 +25,18 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   provider adapters map the registry generically. `Ctx` is the one security layer
   for every caller: only exposed connections and their opt-ins; SQL only through the
   gate as `Caller::Assistant`. Tests call tools through the registry and compare
-  exact output (hand-built schemas, and SQLite files with the real engine)
+  exact output (hand-built schemas, and SQLite files with the real engine).
+  `mcp.rs`: the MCP server (rmcp, Streamable HTTP on `127.0.0.1`, bearer token,
+  requests with an `Origin` refused); it builds a `Ctx` per call from a `CtxSource`
+  and records each call through an `AuditSink`
 - `crates/app`: the GPUI app
   - `workspace/`: layout and wiring; `sidebar.rs`: the sidebars left and right of the
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
     `value_panel.rs`: the value viewer (right sidebar): the inspected cell (A), the
     compared one (B) and their diff; logic in `assist::value`; `tabs.rs`: the kinds of tab (`TabItem`: query,
-    file; boards later) and the open ones
+    file; boards later) and the open ones; `mcp.rs`: runs the MCP server while
+    `mcp.enabled` is set, offers the connected databases with `ai_tools` on (each on
+    its assistant connection), its token in the Keychain, its status bar plug
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
     nothing about tabs, so boards and the assistant can reuse it
@@ -49,7 +54,7 @@ data     ← core
 engine   ← core, assist, data, drivers, tunnel
 service  ← core, assist, data, engine
 ai       ← core, assist, engine, service
-app      ← core, assist, data, engine, service   (never drivers or tunnel)
+app      ← core, assist, data, engine, service, ai   (never drivers or tunnel)
 ```
 
 ## Databases

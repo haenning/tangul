@@ -78,6 +78,9 @@ pub struct Profiles {
     /// Session cache so the Keychain is hit once per profile, and so passwords work
     /// on platforms where only the mock keyring store is available.
     passwords: HashMap<String, String>,
+    /// Off for [`Self::in_memory`]: secrets stay in the session cache, so tests never
+    /// read or overwrite the real Keychain.
+    keychain: bool,
 }
 
 impl Profiles {
@@ -101,6 +104,7 @@ impl Profiles {
             path,
             databases,
             passwords: HashMap::new(),
+            keychain: true,
         };
         if migrated && let Err(e) = store.save() {
             eprintln!("could not write migrated profiles file: {e:#}");
@@ -118,6 +122,7 @@ impl Profiles {
             path: None,
             databases,
             passwords: HashMap::new(),
+            keychain: false,
         }
     }
 
@@ -161,14 +166,17 @@ impl Profiles {
         user: DbUser,
         password: Option<String>,
     ) -> Result<()> {
+        if !self.databases.iter().any(|d| d.id == db_id) {
+            anyhow::bail!("unknown database");
+        }
+        if let Some(pw) = password {
+            self.store_secret(&user.id, pw);
+        }
         let db = self
             .databases
             .iter_mut()
             .find(|d| d.id == db_id)
             .context("unknown database")?;
-        if let Some(pw) = password {
-            set_keychain(&mut self.passwords, &user.id, pw);
-        }
         match db.users.iter_mut().find(|u| u.id == user.id) {
             Some(existing) => *existing = user,
             None => db.users.push(user),
@@ -183,11 +191,7 @@ impl Profiles {
 
     /// Stores the SSH password or key passphrase of a database.
     pub fn set_ssh_secret(&mut self, db_id: &str, secret: String) {
-        set_keychain(
-            &mut self.passwords,
-            &SshConfig::secret_account(db_id),
-            secret,
-        );
+        self.store_secret(&SshConfig::secret_account(db_id), secret);
     }
 
     /// The tunnel settings of a database with its secret, if it uses SSH.
@@ -200,10 +204,18 @@ impl Profiles {
         Some(SshTarget { config, secret })
     }
 
+    /// Stores a secret of the app's own (e.g. the MCP server's token) by account.
+    pub fn set_secret(&mut self, account: &str, secret: String) {
+        self.store_secret(account, secret);
+    }
+
     /// A secret by Keychain account (user id, or [`SshConfig::secret_account`]).
     pub fn password(&mut self, account: &str) -> Option<String> {
         if let Some(pw) = self.passwords.get(account) {
             return Some(pw.clone());
+        }
+        if !self.keychain {
+            return None;
         }
         let pw = match keychain(account).ok()?.get_password() {
             Ok(pw) => pw,
@@ -213,7 +225,7 @@ impl Profiles {
                     .ok()?
                     .get_password()
                     .ok()?;
-                set_keychain(&mut self.passwords, account, pw.clone());
+                self.store_secret(account, pw.clone());
                 pw
             }
         };
@@ -226,11 +238,15 @@ fn keychain(account: &str) -> Result<keyring::Entry> {
     Ok(keyring::Entry::new(KEYCHAIN_SERVICE, account)?)
 }
 
-fn set_keychain(cache: &mut HashMap<String, String>, account: &str, secret: String) {
-    if let Err(e) = keychain(account).and_then(|k| Ok(k.set_password(&secret)?)) {
-        eprintln!("keychain write failed: {e:#}");
+impl Profiles {
+    fn store_secret(&mut self, account: &str, secret: String) {
+        if self.keychain
+            && let Err(e) = keychain(account).and_then(|k| Ok(k.set_password(&secret)?))
+        {
+            eprintln!("keychain write failed: {e:#}");
+        }
+        self.passwords.insert(account.to_string(), secret);
     }
-    cache.insert(account.to_string(), secret);
 }
 
 /// Unique enough id for a new database or user without pulling in a uuid crate.

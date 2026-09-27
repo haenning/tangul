@@ -501,3 +501,56 @@ fn long_comments_show_three_lines_until_asked(cx: &mut TestAppContext) {
         assert!(window.try_find("show-all").is_none())
     });
 }
+
+#[gpui_kit::test]
+fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    let (handle, workspace) = open(cx);
+    let mcp = |on: bool| {
+        let mut s = crate::settings::Settings::default();
+        s.mcp.enabled = on;
+        // Any free port.
+        s.mcp.port = 0;
+        s
+    };
+    step(handle, cx, |window, cx| {
+        assert!(window.find("mcp").visible());
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles.databases.push(Database {
+                id: "db".into(),
+                name: "shop".into(),
+                driver: DriverKind::Postgres,
+                host: "localhost".into(),
+                port: 5432,
+                database: "shop".into(),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: "app".into(),
+                    user: "app".into(),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: Default::default(),
+                ai_tools: true,
+            });
+            ws.connect("app", cx);
+            assert_eq!(ws.mcp_url(), None);
+        });
+        crate::settings::set_for_test(mcp(true), cx);
+    });
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, _| {
+            let url = ws.mcp_url().expect("running");
+            assert!(url.starts_with("http://127.0.0.1:") && url.ends_with("/mcp"));
+            assert_eq!(ws.mcp_offered(), ["shop"]);
+            // Turned off for AI tools: no longer offered.
+            ws.data.profiles.databases[0].ai_tools = false;
+            ws.expose_to_mcp();
+            assert!(ws.mcp_offered().is_empty());
+        });
+        crate::settings::set_for_test(mcp(false), cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(workspace.read(cx).mcp_url(), None);
+    });
+}

@@ -11,8 +11,9 @@ pub use tangul_data::settings::*;
 /// How often the file is checked for changes.
 const POLL: Duration = Duration::from_secs(1);
 
-/// The settings in effect, as a global so any view can read them.
-struct Current(Settings);
+/// The settings in effect, as a global so any view can read them (and observe
+/// them changing).
+pub(crate) struct Current(Settings);
 impl Global for Current {}
 
 /// The settings in effect.
@@ -31,6 +32,16 @@ pub fn ensure_file(cx: &App) -> Option<PathBuf> {
 pub fn set_read_only(user: &str, on: bool, cx: &mut App) -> Result<(), String> {
     let path = ensure_file(cx).ok_or("could not create the settings file")?;
     let settings = write_read_only(&path, user, on)?;
+    cx.set_global(Current(settings));
+    cx.refresh_windows();
+    Ok(())
+}
+
+/// Sets `mcp.enabled` in the file, keeping everything else in it, and applies the
+/// change right away.
+pub fn set_mcp_enabled(on: bool, cx: &mut App) -> Result<(), String> {
+    let path = ensure_file(cx).ok_or("could not create the settings file")?;
+    let settings = write_mcp_enabled(&path, on)?;
     cx.set_global(Current(settings));
     cx.refresh_windows();
     Ok(())
@@ -73,6 +84,12 @@ fn apply(settings: &Settings, defaults: &ThemeDefaults, cx: &mut App) {
 #[cfg(test)]
 pub fn init_defaults(cx: &mut App) {
     cx.set_global(Current(Settings::default()));
+}
+
+/// Applies `settings` without the file (tests).
+#[cfg(test)]
+pub fn set_for_test(settings: Settings, cx: &mut App) {
+    cx.set_global(Current(settings));
 }
 
 pub fn init(cx: &mut App) {

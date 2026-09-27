@@ -21,6 +21,7 @@ impl Workspace {
                 cx,
             );
         }
+        self.expose_to_mcp();
         cx.notify();
     }
 
@@ -329,6 +330,7 @@ impl Workspace {
             id
         });
         self.rename_conns(&db_id, cx);
+        self.expose_to_mcp();
         if let Err(e) = result {
             window.push_notification(
                 Notification::error(format!("Could not save connection: {e:#}")),

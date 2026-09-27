@@ -18,7 +18,8 @@
 //!     "max_points": 10000,
 //!     "max_age": "365d",
 //!     "max_mb": 50
-//!   }
+//!   },
+//!   "mcp": { "enabled": false, "port": 7433 }
 //! }
 //! ```
 
@@ -50,6 +51,26 @@ pub struct Settings {
     pub chart: ChartSettings,
     pub safety: SafetySettings,
     pub monitoring: MonitoringSettings,
+    pub mcp: McpSettings,
+}
+
+/// The MCP server: MCP clients (Claude Code, …) use tangul's AI tools on the
+/// databases available to them while the app runs.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct McpSettings {
+    pub enabled: bool,
+    /// Listens on `127.0.0.1:<port>`.
+    pub port: u16,
+}
+
+impl Default for McpSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 7433,
+        }
+    }
 }
 
 /// Scheduled bookmark runs and the metrics kept of bookmark runs.
@@ -307,6 +328,10 @@ pub fn create_if_missing(editor_font_size: f32, editor_font_family: &str) -> Opt
                 "max_age": "365d",
                 "max_mb": 50,
             },
+            "mcp": {
+                "enabled": false,
+                "port": 7433,
+            },
         });
         let write = || -> std::io::Result<()> {
             std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
@@ -329,13 +354,39 @@ pub fn write_read_only(path: &Path, user: &str, on: bool) -> Result<Settings, St
     Settings::parse(&std::fs::read_to_string(path).unwrap_or_default()).map_err(|e| e.to_string())
 }
 
+/// Sets `mcp.enabled` in the file at `path`, keeping everything else in it.
+/// Returns the settings as they are now.
+pub fn write_mcp_enabled(path: &Path, on: bool) -> Result<Settings, String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let updated = with_mcp_enabled(&text, on)?;
+    std::fs::write(path, updated).map_err(|e| e.to_string())?;
+    Settings::parse(&std::fs::read_to_string(path).unwrap_or_default()).map_err(|e| e.to_string())
+}
+
+fn with_mcp_enabled(text: &str, on: bool) -> Result<String, String> {
+    let mut root = root(text)?;
+    let mcp = root
+        .as_object_mut()
+        .ok_or("settings.json must contain a JSON object")?
+        .entry("mcp")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("\"mcp\" in settings.json must be an object")?;
+    mcp.insert("enabled".into(), on.into());
+    Ok(serde_json::to_string_pretty(&root).map_err(|e| e.to_string())? + "\n")
+}
+
+/// The file's JSON; `{}` when it is empty.
+fn root(text: &str) -> Result<serde_json::Value, String> {
+    if text.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(text).map_err(|e| format!("settings.json is not valid JSON: {e}"))
+}
+
 /// `text` (the settings file) with `user` added to or removed from the read-only list.
 fn with_read_only(text: &str, user: &str, on: bool) -> Result<String, String> {
-    let mut root: serde_json::Value = if text.trim().is_empty() {
-        serde_json::json!({})
-    } else {
-        serde_json::from_str(text).map_err(|e| format!("settings.json is not valid JSON: {e}"))?
-    };
+    let mut root = root(text)?;
     let root_object = root
         .as_object_mut()
         .ok_or("settings.json must contain a JSON object")?;
@@ -437,6 +488,26 @@ mod tests {
         );
         assert!(with_read_only("{broken", "u", true).is_err());
         assert!(with_read_only("[]", "u", true).is_err());
+    }
+
+    #[test]
+    fn mcp_is_off_until_turned_on() {
+        let s = Settings::default();
+        assert_eq!((s.mcp.enabled, s.mcp.port), (false, 7433));
+        let text = r#"{"mcp": {"port": 9000}, "editor": {"font_size": 15}}"#;
+        let on = with_mcp_enabled(text, true).unwrap();
+        let s = Settings::parse(&on).unwrap();
+        assert_eq!((s.mcp.enabled, s.mcp.port), (true, 9000));
+        assert_eq!(s.font_size(), Some(15.));
+        let off = Settings::parse(&with_mcp_enabled(&on, false).unwrap()).unwrap();
+        assert!(!off.mcp.enabled);
+        assert!(
+            Settings::parse(&with_mcp_enabled("", true).unwrap())
+                .unwrap()
+                .mcp
+                .enabled
+        );
+        assert!(with_mcp_enabled(r#"{"mcp": 1}"#, true).is_err());
     }
 
     #[test]
