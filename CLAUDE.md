@@ -122,9 +122,12 @@ explicit OK, and keep them covered by tests.
 
 ## Git
 
-- All code goes through `dev`. Branch off `dev`, and open pull requests against `dev`
-  (or a branch that targets `dev`), never against `main`. Only `dev` → `main` targets
-  `main`.
+- All code goes through `dev`. Branch off `dev`, and open pull requests against `dev`,
+  never against `main`. Only `dev` → `main` targets `main`.
+- **One branch and one pull request per feature or feature set**, not per commit.
+  Commits make the branch reviewable step by step: one per finished part (an issue,
+  a refactor), each passing `make test` and `make lint`, pushed as it is done. Don't
+  stack pull requests on each other.
 - Issues close when their commit reaches `main`, so put `Closes #N` in the commit
   message. In a pull request into `dev` it has no effect.
 - CI runs only when started by hand (Actions → CI → Run workflow).
