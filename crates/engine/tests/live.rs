@@ -81,9 +81,11 @@ impl Harness {
             settings,
             user,
         };
+        // Connected, and the whole catalog loaded (it holds a session meanwhile), so
+        // the pool is idle when a test starts.
         loop {
             match h.next().await {
-                Event::Connected { .. } => break,
+                Event::Schema { complete: true, .. } => break,
                 Event::ConnectFailed { error, .. } => panic!("connect failed: {error}"),
                 _ => {}
             }
@@ -371,7 +373,12 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
 
     h.engine.send(Command::RefreshSchema { conn: h.conn });
     let info = loop {
-        if let Event::Schema { result, .. } = h.next().await {
+        if let Event::Schema {
+            result,
+            complete: true,
+            ..
+        } = h.next().await
+        {
             let info = result.expect("schema failed");
             // Skip a schema load that started before the tables existed.
             if info.tables.iter().any(|t| t.schema == "tangul_fk_test") {

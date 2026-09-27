@@ -91,9 +91,13 @@ pub enum Event {
         fingerprint: String,
         key: String,
     },
+    /// A connection's schema, sent twice per load: first tables, columns and
+    /// foreign keys (what the schema tree and completion need, as soon as they are
+    /// there), then `complete` with indexes, checks, enums, views and routines.
     Schema {
         conn: ConnId,
         result: Result<SchemaInfo, String>,
+        complete: bool,
     },
     Query {
         query: QueryId,

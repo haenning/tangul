@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tangul_core::{ConnId, ConnectConfig, DriverKind, QueryId, SshTarget, TabId};
+use tangul_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, SshTarget, TabId};
 use tangul_data::local::Local;
 use tangul_drivers::driver_for;
 use tangul_tunnel::{HostKeyError, Tunnel};
@@ -16,7 +16,7 @@ use crate::pool::{Pool, PoolStats};
 use crate::run::{
     Events, Job, Running, close_all, execute, finish, run_query, send, send_stats, validate,
 };
-use crate::schema::load_schema;
+use crate::schema::{load_extras, load_schema};
 use crate::{Command, EngineConfig, Event, MAX_CONNECTIONS, QueryError, QueryOptions, QueryOutput};
 
 pub(crate) struct Engine {
@@ -123,13 +123,7 @@ impl Engine {
             match load_schema(&pool).await {
                 Ok(schema) => {
                     send(&events, Event::Connected { conn });
-                    send(
-                        &events,
-                        Event::Schema {
-                            conn,
-                            result: Ok(schema),
-                        },
-                    );
+                    send_schema(&events, &pool, conn, schema).await;
                 }
                 Err(e) => match e.downcast_ref::<HostKeyError>() {
                     Some(HostKeyError::Unknown {
@@ -186,8 +180,17 @@ impl Engine {
         };
         let events = self.events.clone();
         tokio::spawn(async move {
-            let result = load_schema(&pool).await.map_err(|e| format!("{e:#}"));
-            send(&events, Event::Schema { conn, result });
+            match load_schema(&pool).await {
+                Ok(schema) => send_schema(&events, &pool, conn, schema).await,
+                Err(e) => send(
+                    &events,
+                    Event::Schema {
+                        conn,
+                        result: Err(format!("{e:#}")),
+                        complete: true,
+                    },
+                ),
+            }
             send_stats(&events, conn, &pool);
         });
     }
@@ -344,4 +347,25 @@ impl Engine {
             );
         }
     }
+}
+
+/// Sends `schema` at once (what the UI needs), then again with the extras.
+async fn send_schema(events: &Events, pool: &Pool, conn: ConnId, schema: SchemaInfo) {
+    send(
+        events,
+        Event::Schema {
+            conn,
+            result: Ok(schema.clone()),
+            complete: false,
+        },
+    );
+    let extras = load_extras(pool).await;
+    send(
+        events,
+        Event::Schema {
+            conn,
+            result: Ok(schema.with_extras(extras)),
+            complete: true,
+        },
+    );
 }

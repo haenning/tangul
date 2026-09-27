@@ -346,11 +346,26 @@ impl Workspace {
                 self.update_conn(conn, cx, |c| c.status = failed);
                 window.push_notification(Notification::error(error), cx);
             }
-            Event::Schema { conn, result } => match result {
-                Ok(info) => {
+            Event::Schema {
+                conn,
+                result,
+                complete,
+            } => match result {
+                Ok(mut info) => {
                     if let Some(user_id) = self.connections.tab_user(conn).map(str::to_string) {
-                        if let Err(e) = self.data.local.save_schema(&user_id, &info) {
-                            eprintln!("could not cache schema: {e:#}");
+                        if complete {
+                            if let Err(e) = self.data.local.save_schema(&user_id, &info) {
+                                eprintln!("could not cache schema: {e:#}");
+                            }
+                        } else if let Some(known) = self.knowledge.schema(&user_id) {
+                            // Tables first; until the rest arrives, keep what is known
+                            // of it (from the cache or the last load).
+                            let known = known.info();
+                            info.indexes = known.indexes.clone();
+                            info.checks = known.checks.clone();
+                            info.enums = known.enums.clone();
+                            info.views = known.views.clone();
+                            info.routines = known.routines.clone();
                         }
                         self.set_schema(&user_id, conn, info);
                         cx.notify();

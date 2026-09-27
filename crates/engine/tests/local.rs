@@ -236,3 +236,34 @@ fn a_detached_handle_drops_commands_and_sends_no_events() {
     assert!(events.is_closed());
     assert!(events.try_recv().is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_schema_comes_first_then_the_rest() {
+    let dir = std::env::temp_dir().join(format!("tangul-engine-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("data.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("CREATE TABLE t (x INTEGER); CREATE INDEX t_x ON t (x);")
+        .unwrap();
+    let (engine, events) = tangul_engine::start_with(EngineConfig::isolated());
+    connect(&engine, &path, ConnId(1));
+    let mut schemas = Vec::new();
+    while schemas.len() < 2 {
+        if let Event::Schema {
+            result, complete, ..
+        } = next(&events).await
+        {
+            schemas.push((complete, result.unwrap()));
+        }
+    }
+    // What the tree needs, without waiting for indexes and the like …
+    assert!(!schemas[0].0);
+    assert_eq!(schemas[0].1.tables.len(), 1);
+    assert!(schemas[0].1.indexes.is_empty());
+    // … then all of it.
+    assert!(schemas[1].0);
+    assert_eq!(schemas[1].1.indexes[0].name, "t_x");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

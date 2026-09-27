@@ -72,7 +72,11 @@ async fn shop_with(name: &str, values: bool) -> (PathBuf, Ctx) {
     // Connecting loads the schema, as for the app.
     let info = loop {
         match next(&events).await {
-            Event::Schema { result, .. } => break result.expect("schema"),
+            Event::Schema {
+                result,
+                complete: true,
+                ..
+            } => break result.expect("schema"),
             Event::ConnectFailed { error, .. } => panic!("{error}"),
             _ => {}
         }
