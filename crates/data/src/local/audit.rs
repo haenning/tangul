@@ -1,6 +1,7 @@
-//! What the assistant and scheduled runs did: every statement they sent, whether it
-//! ran, was held for approval or refused, and how it went. Written by the engine,
-//! which is where every statement passes.
+//! What the assistant, AI tools and scheduled runs did: every statement they sent,
+//! whether it ran, was held for approval or refused, and how it went (written by the
+//! engine, which is where every statement passes); and every AI tool call (written
+//! by whoever runs the tools, e.g. the MCP server).
 
 use anyhow::Result;
 use rusqlite::params;
@@ -14,7 +15,7 @@ const KEEP: i64 = 10_000;
 pub struct AuditEntry {
     /// Unix milliseconds.
     pub at: i64,
-    /// `assistant` or `schedule`.
+    /// `assistant`, `schedule` or `mcp`.
     pub caller: String,
     /// Where it went: `user@host/database`.
     pub target: String,

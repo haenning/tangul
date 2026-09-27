@@ -8,6 +8,7 @@ use tangul_core::{ConnId, DriverKind, ValueAccess};
 use tangul_engine::EngineHandle;
 use tangul_service::knowledge::Knowledge;
 
+use crate::audit::AuditSink;
 use crate::tool::ToolError;
 
 /// A database the user makes available to the assistant.
@@ -33,6 +34,8 @@ pub struct Ctx {
     knowledge: Knowledge,
     engine: Option<EngineHandle>,
     exposed: Vec<Exposed>,
+    /// Who calls (`mcp`, `assistant`) and where its calls are recorded.
+    audit: Option<(&'static str, AuditSink)>,
 }
 
 /// A connection resolved for a call.
@@ -55,7 +58,18 @@ impl Ctx {
             knowledge,
             engine,
             exposed,
+            audit: None,
         }
+    }
+
+    /// Records every tool call as `caller`'s in `sink`.
+    pub fn with_audit(mut self, caller: &'static str, sink: AuditSink) -> Self {
+        self.audit = Some((caller, sink));
+        self
+    }
+
+    pub(crate) fn audit(&self) -> Option<&(&'static str, AuditSink)> {
+        self.audit.as_ref()
     }
 
     pub fn exposed(&self) -> &[Exposed] {

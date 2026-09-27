@@ -1,6 +1,7 @@
 //! What a tool is, what it returns, and the registry that lists and calls them.
 
 use std::fmt;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -8,6 +9,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::audit::{ToolCall, clip};
 use crate::ctx::Ctx;
 use crate::tools;
 
@@ -112,12 +114,43 @@ impl Registry {
             .collect()
     }
 
+    /// Calls tool `name`, and records the call if the context has an audit sink.
     pub async fn call(&self, ctx: &Ctx, name: &str, input: Value) -> Result<ToolOutput, ToolError> {
-        let tool = self
-            .tools
-            .iter()
-            .find(|t| t.name() == name)
-            .ok_or_else(|| ToolError::NotFound(format!("no tool named {name}")))?;
-        tool.call(ctx, input).await
+        let started = Instant::now();
+        let record = ctx.audit().map(|(caller, sink)| {
+            let connection = input
+                .get("connection")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| match ctx.exposed() {
+                    [only] => Some(only.name.clone()),
+                    _ => None,
+                });
+            (*caller, sink.clone(), connection, clip(&input.to_string()))
+        });
+        let result = match self.tools.iter().find(|t| t.name() == name) {
+            Some(tool) => tool.call(ctx, input).await,
+            None => Err(ToolError::NotFound(format!("no tool named {name}"))),
+        };
+        if let Some((caller, sink, connection, input)) = record {
+            let (outcome, error) = match &result {
+                Ok(_) => ("ran", None),
+                Err(e @ ToolError::NotAllowed(_)) => ("refused", Some(e.to_string())),
+                Err(e) => ("failed", Some(e.to_string())),
+            };
+            sink(ToolCall {
+                at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64),
+                caller,
+                tool: name.to_string(),
+                connection,
+                input,
+                outcome,
+                error,
+                duration_ms: started.elapsed().as_millis() as i64,
+            });
+        }
+        result
     }
 }
