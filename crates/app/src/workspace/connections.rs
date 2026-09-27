@@ -3,6 +3,49 @@
 use super::*;
 
 impl Workspace {
+    /// Changes what the database lets the AI do and saves the profiles.
+    fn update_ai(
+        &mut self,
+        db_id: &str,
+        change: impl FnOnce(&mut Database),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut db) = self.data.profiles.database(db_id).cloned() else {
+            return;
+        };
+        change(&mut db);
+        if let Err(e) = self.data.profiles.upsert_database(db) {
+            window.push_notification(
+                Notification::error(format!("Could not save connection: {e:#}")),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// The database user the AI connects as; `None`: the tab's user.
+    pub(super) fn set_assistant_user(
+        &mut self,
+        db_id: &str,
+        user: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_ai(db_id, |db| db.assistant_user = user, window, cx);
+    }
+
+    /// Whether the AI may read column values of the database.
+    pub(super) fn set_ai_values(
+        &mut self,
+        db_id: &str,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_ai(db_id, |db| db.ai_values = on, window, cx);
+    }
+
     pub(super) fn connect(&mut self, user_id: &str, cx: &mut Context<Self>) {
         let Some(id) = self.connections.connect_user(
             &self.engine,

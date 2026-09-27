@@ -30,6 +30,32 @@ impl Workspace {
                 })
         };
 
+        // The AI's user: the database's assistant user, or the tab's user.
+        let ai_menu = db.map(|db| {
+            let users: Vec<(String, String)> = db
+                .users
+                .iter()
+                .map(|u| (u.id.clone(), u.user.clone()))
+                .collect();
+            let ai_user = db.assistant_user.clone();
+            let label = ai_user
+                .as_deref()
+                .or(active_user.as_deref())
+                .and_then(|id| db.user(id))
+                .map_or("No user".into(), |u| u.user.clone());
+            let (db_id, values, weak) = (db.id.clone(), db.ai_values, weak.clone());
+            Button::new("ai-user-switcher")
+                .label(label)
+                .icon(Icon::new(Lucide::Bot))
+                .ghost()
+                .small()
+                .text_color(theme.muted_foreground)
+                .tooltip("The database user the AI connects as")
+                .dropdown_menu(move |menu, _, _| {
+                    ai_menu(menu, &db_id, &users, ai_user.as_deref(), values, &weak)
+                })
+        });
+
         let user_menu = db.map(|db| {
             let users: Vec<(String, String)> = db
                 .users
@@ -65,14 +91,20 @@ impl Workspace {
             .gap_1()
             .items_center()
             .child(db_menu)
-            .when_some(user_menu, |this, user_menu| {
+            // db / 🤖 AI user | 👤 user · read-only · ●: your user next to its
+            // read-only mode.
+            .when_some(ai_menu, |this, ai_menu| {
                 this.child(
                     div()
                         .text_sm()
                         .text_color(theme.muted_foreground.opacity(0.6))
                         .child("/"),
                 )
-                .child(user_menu)
+                .child(ai_menu)
+            })
+            .when_some(user_menu, |this, user_menu| {
+                this.child(div().w(px(1.)).h_3p5().mx_0p5().bg(theme.border))
+                    .child(user_menu)
             })
             .when_some(read_only, |this, on| {
                 let color = if on {
@@ -437,6 +469,44 @@ pub(super) fn database_menu(
                 let _ = ws.update(cx, |ws, cx| {
                     ws.open_form(FormMode::NewDatabase, None, None, window, cx)
                 });
+            }),
+    )
+}
+
+/// The AI's database user (the tab's user when none is set) and whether it may
+/// read column values.
+pub(super) fn ai_menu(
+    mut menu: PopupMenu,
+    db_id: &str,
+    users: &[(String, String)],
+    current: Option<&str>,
+    values: bool,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    menu = menu.label("The AI connects as");
+    let choices = std::iter::once((None, "Same as your user".to_string())).chain(
+        users
+            .iter()
+            .map(|(id, name)| (Some(id.clone()), name.clone())),
+    );
+    for (id, name) in choices {
+        let (ws, db_id, chosen) = (workspace.clone(), db_id.to_string(), id.clone());
+        menu = menu.item(
+            PopupMenuItem::new(name)
+                .checked(current == id.as_deref())
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.set_assistant_user(&db_id, chosen.clone(), window, cx)
+                    });
+                }),
+        );
+    }
+    let (ws, db_id) = (workspace.clone(), db_id.to_string());
+    menu.separator().item(
+        PopupMenuItem::new("Let the AI read column values")
+            .checked(values)
+            .on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.set_ai_values(&db_id, !values, window, cx));
             }),
     )
 }

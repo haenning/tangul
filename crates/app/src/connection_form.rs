@@ -64,6 +64,8 @@ pub struct ConnectionForm {
     ssh_secret: Entity<InputState>,
     /// The user the AI assistant connects as; `None` uses the selected one.
     assistant_user: Option<String>,
+    /// The assistant may read column values of this database.
+    ai_values: bool,
     error: Option<SharedString>,
 }
 
@@ -170,6 +172,7 @@ impl ConnectionForm {
                     })
             }),
             assistant_user: db.and_then(|d| d.assistant_user.clone()),
+            ai_values: db.is_some_and(|d| d.ai_values),
             error: None,
         }
     }
@@ -229,6 +232,7 @@ impl ConnectionForm {
                 tls: self.tls,
                 users: base.as_ref().map(|b| b.users.clone()).unwrap_or_default(),
                 assistant_user: self.assistant_user.clone(),
+                ai_values: self.ai_values,
                 ssh: ssh.then(|| SshConfig {
                     host: value(&self.ssh_host),
                     port: ssh_port.clone().unwrap_or(22),
@@ -427,6 +431,15 @@ impl Render for ConnectionForm {
                                 "A user that may only read keeps the assistant from changing \
                                  data, whatever it asks for.",
                             ),
+                    )
+                    .child(
+                        Checkbox::new("ai-values")
+                            .label("Let the AI read column values (samples of a few thousand rows)")
+                            .checked(self.ai_values)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.ai_values = *checked;
+                                cx.notify();
+                            })),
                     ),
             )
         });
