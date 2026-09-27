@@ -147,6 +147,7 @@ fn exposed(name: &str, user: &str) -> Exposed {
     Exposed {
         name: name.into(),
         user: user.into(),
+        conn: ConnId(1),
         driver: DriverKind::Postgres,
         values: ValueAccess::None,
     }

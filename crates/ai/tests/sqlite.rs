@@ -84,10 +84,14 @@ async fn shop_with(name: &str, values: ValueAccess) -> (PathBuf, Ctx) {
     let knowledge = Knowledge::default();
     let dialect = dialect_for(DriverKind::Sqlite);
     let schema = SchemaIndex::new(info, dialect, dialect.default_schema(""));
-    knowledge.set_schema("u1", "db1", conn, Arc::new(schema));
+    // The pool knows the database through the tab's connection; queries must run on
+    // the exposed one (the AI user's). A connection that doesn't exist stands in for
+    // the tab's, so a query on it would fail.
+    knowledge.set_schema("u1", "db1", ConnId(99), Arc::new(schema));
     let exposed = Exposed {
         name: "shop".into(),
         user: "u1".into(),
+        conn,
         driver: DriverKind::Sqlite,
         values,
     };

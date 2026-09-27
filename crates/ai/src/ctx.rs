@@ -10,13 +10,17 @@ use tangul_service::knowledge::Knowledge;
 
 use crate::tool::ToolError;
 
-/// A connection the user enabled for the assistant.
+/// A database the user makes available to the assistant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exposed {
     /// How tools and models name it, e.g. `app@localhost`.
     pub name: String,
-    /// The database user id in the knowledge pool.
+    /// The database user id whose schema, usage and profiles the knowledge pool
+    /// holds (the one open in the app).
     pub user: String,
+    /// The connection the assistant's queries run on: as the database's AI user
+    /// (`service::connections::connect_assistant`), never a tab's.
+    pub conn: ConnId,
     pub driver: DriverKind,
     /// What the assistant may read from the rows (value profiles).
     pub values: ValueAccess,
@@ -104,7 +108,7 @@ impl Ctx {
             KnownValues::new()
         };
         Ok(Conn {
-            conn: known.conn,
+            conn: exposed.conn,
             known_values,
             user: exposed.user.clone(),
             values: exposed.values,
