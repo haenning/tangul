@@ -28,3 +28,6 @@ target
 
 # Python bytecode (scripts/analytics)
 __pycache__/
+
+# Local settings (see .env.example)
+.env
