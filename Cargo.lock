@@ -8064,6 +8064,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangul-ai"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "async-trait",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tangul-assist",
+ "tangul-core",
+ "tangul-engine",
+ "tangul-service",
+ "tokio",
+]
+
+[[package]]
 name = "tangul-assist"
 version = "0.1.0"
 dependencies = [

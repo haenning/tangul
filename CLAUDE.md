@@ -21,6 +21,11 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   and `knowledge`: the one pool of what is known about the databases (schema per
   user, usage per database). The editor, schema tree, results and the assistant all
   read it; don't keep copies elsewhere
+- `crates/ai`: the assistant's tools (`Tool`, `Registry`), each written once; MCP and
+  provider adapters map the registry generically. `Ctx` is the one security layer
+  for every caller: only exposed connections and their opt-ins; SQL only through the
+  gate as `Caller::Assistant`. Tests call tools through the registry and compare
+  exact output (hand-built schemas, and SQLite files with the real engine)
 - `crates/app`: the GPUI app
   - `workspace/`: layout and wiring; `sidebar.rs`: the sidebars left and right of the
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
@@ -43,6 +48,7 @@ tunnel   ← core
 data     ← core
 engine   ← core, assist, data, drivers, tunnel
 service  ← core, assist, data, engine
+ai       ← core, assist, engine, service
 app      ← core, assist, data, engine, service   (never drivers or tunnel)
 ```
 
@@ -101,7 +107,7 @@ explicit OK, and keep them covered by tests.
 - **Tests.** Changes to the gate, guard, pool or drivers come with tests, including
   live ones (`crates/engine/tests/live.rs`, e.g. `assistant_checks`: a write hidden in
   a read must fail). Aim for ≥ 95% line coverage in core, drivers, engine, assist,
-  tunnel, data and service (`.github/workflows/coverage.yml`).
+  tunnel, data, service and ai (`.github/workflows/coverage.yml`).
 
 ## Commands
 

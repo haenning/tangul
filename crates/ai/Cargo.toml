@@ -1,0 +1,23 @@
+[package]
+name = "tangul-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+schemars = "1"
+serde.workspace = true
+serde_json = "1.0.151"
+tangul-assist = { version = "0.1.0", path = "../assist" }
+tangul-core = { version = "0.1.0", path = "../core" }
+tangul-engine = { version = "0.1.0", path = "../engine" }
+tangul-service = { version = "0.1.0", path = "../service" }
+
+[dev-dependencies]
+async-channel.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
