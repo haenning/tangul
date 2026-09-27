@@ -19,8 +19,10 @@ mod sidebar;
 mod tabs;
 #[cfg(test)]
 mod ui_tests;
+mod value_panel;
 
 use sidebar::{HistoryList, Panel, Panels, SchemaTree, Side, Sidebar, SidebarRow};
+use value_panel::{Picked, ValueEvent, ValuePanel};
 
 // Shared by the status bar and the bookmarks panel.
 use bars::style_icon;
@@ -79,7 +81,7 @@ use tangul_service::schedule;
 
 use crate::{
     CloseTab, NewTab, NextSidebarPanel, OpenPalette, OpenSettings, PrevSidebarPanel, RunAll,
-    ToggleSidebar,
+    ToggleRightSidebar, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{AssistData, SharedAssist, SqlCompletion},
@@ -90,6 +92,7 @@ use crate::{
     palette::{self, PaletteAction, PaletteKind},
     query_router::{QueryRouter, RunningQuery},
     query_tab::{QueryTab, TabEvent},
+    result_view::CellValue,
     settings,
     tabs::{TabItem, Tabs},
 };
@@ -216,8 +219,15 @@ impl Workspace {
         };
         let bookmark_sub = cx.subscribe(&bookmark_search, redraw);
         let schema_sub = cx.subscribe(&schema_search, redraw);
-        let left = Sidebar::new(Panel::LEFT, SIDEBAR_WIDTH_SETTING, &data.local);
-        let right = Sidebar::new(Panel::RIGHT, RIGHT_SIDEBAR_WIDTH_SETTING, &data.local);
+        let left = Sidebar::new(Panel::LEFT, true, SIDEBAR_WIDTH_SETTING, &data.local);
+        let right = Sidebar::new(
+            Panel::RIGHT,
+            false,
+            RIGHT_SIDEBAR_WIDTH_SETTING,
+            &data.local,
+        );
+        let value = cx.new(|cx| ValuePanel::new(window, cx));
+        let value_sub = cx.subscribe_in(&value, window, Self::on_value_event);
         let mut this = Self {
             engine,
             data,
@@ -226,6 +236,7 @@ impl Workspace {
             left,
             right,
             panels: Panels {
+                value,
                 schema: SchemaTree::new(schema_search),
                 bookmark_search,
                 history: HistoryList {
@@ -244,7 +255,7 @@ impl Workspace {
             relock: HashMap::new(),
             monitor: Monitor::new(monitor_tick),
             focus_handle: cx.focus_handle(),
-            _subscriptions: vec![search_sub, bookmark_sub, schema_sub],
+            _subscriptions: vec![search_sub, bookmark_sub, schema_sub, value_sub],
             _pump: pump,
         };
         // Reopen the connection used last (else the first one) right away.
@@ -373,6 +384,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::toggle_right_sidebar))
             .on_action(cx.listener(Self::open_palette))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),

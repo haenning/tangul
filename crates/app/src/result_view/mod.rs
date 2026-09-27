@@ -13,7 +13,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    table::{DataTable, TableState},
+    table::{DataTable, TableEvent, TableState},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -21,11 +21,12 @@ use gpui_kit::*;
 use tangul_assist::chart::{ChartData, ChartView, chart_data};
 use tangul_assist::columns::ColumnFacts;
 use tangul_assist::dialect::Dialect;
-use tangul_assist::refine::{ColumnFilter, Refine, Sort, refinable, refined_sql};
+use tangul_assist::refine::{ColumnFilter, ColumnKind, Refine, Sort, refinable, refined_sql};
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::QueryId;
 use tangul_engine::{ExecEvent, QueryEvent};
 
+use crate::InspectValue;
 use crate::assets::Lucide;
 use crate::chart::{self, ResultChart};
 use crate::settings;
@@ -47,6 +48,35 @@ pub enum ResultEvent {
     Refine { sql: String, append: bool },
     /// A run (not a refinement) failed at `position` in its SQL.
     Failed { message: String, position: usize },
+    /// The inspected cell (A) changed; `open` asks to show the value viewer.
+    Inspect { cell: CellValue, open: bool },
+    /// A cell to compare with the inspected one (B).
+    Compare(CellValue),
+}
+
+/// A cell's value as it was when picked: it stays shown after the result changes.
+#[derive(Clone)]
+pub struct CellValue {
+    pub column: String,
+    /// Row number, from 1.
+    pub row: usize,
+    pub value: Option<String>,
+    /// What the schema says the column is, if it is a table column.
+    pub data_type: Option<String>,
+    /// For querying rows by this value; `None` when the result can't be queried
+    /// again (not a single SELECT).
+    pub rows: Option<RowsSource>,
+}
+
+/// The result a value came from, to query its rows by that value.
+#[derive(Clone)]
+pub struct RowsSource {
+    /// The result's statement (see `refinable`).
+    pub base: String,
+    pub columns: Vec<String>,
+    pub kinds: Vec<ColumnKind>,
+    pub column: usize,
+    pub dialect: &'static dyn Dialect,
 }
 
 enum Status {
@@ -87,6 +117,7 @@ pub struct ResultView {
     page_error: Option<SharedString>,
     /// SQL of the connection the results come from, for filtering, sorting, paging.
     dialect: Option<&'static dyn Dialect>,
+    _table_events: Subscription,
 }
 
 impl EventEmitter<ResultEvent> for ResultView {}
@@ -101,9 +132,13 @@ impl ResultView {
                 .sortable(false)
                 .col_movable(false)
                 .col_selectable(false)
-                // Rows are selected by the delegate (multi-selection).
+                // Rows are selected by the delegate (multi-selection); the table's
+                // own selection is a cell: the inspected one.
                 .row_selectable(false)
+                .cell_selectable(true)
+                .row_header(false)
         });
+        let table_events = cx.subscribe(&table, Self::on_table_event);
         Self {
             table,
             status: Status::Idle,
@@ -119,7 +154,96 @@ impl ResultView {
             derived: None,
             page_error: None,
             dialect: None,
+            _table_events: table_events,
         }
+    }
+
+    fn on_table_event(
+        &mut self,
+        _: Entity<TableState<ResultsDelegate>>,
+        event: &TableEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            TableEvent::SelectCell(row, col) => self.inspect(*row, *col, false, cx),
+            TableEvent::DoubleClickedCell(row, col) => self.inspect(*row, *col, true, cx),
+            _ => {}
+        }
+    }
+
+    /// Makes `row`, `col` the inspected cell (A) and says so.
+    fn inspect(&mut self, row: usize, col: usize, open: bool, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().inspected = Some((row, col));
+            cx.notify();
+        });
+        if let Some(cell) = self.cell_value(row, col, cx) {
+            cx.emit(ResultEvent::Inspect { cell, open });
+        }
+    }
+
+    /// Space: shows the inspected cell in the value viewer.
+    fn inspect_action(&mut self, _: &InspectValue, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((row, col)) = self.table.read(cx).delegate().inspected {
+            self.inspect(row, col, true, cx);
+        }
+    }
+
+    /// "Inspect value" in the menu: selects the cell (A) and shows it.
+    pub(super) fn inspect_cell(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        self.table
+            .update(cx, |t, cx| t.set_selected_cell(row, col, cx));
+        self.inspect(row, col, true, cx);
+    }
+
+    /// ⌥-click or "Compare with A": `row`, `col` is to be compared with the
+    /// inspected cell (B).
+    pub(super) fn compare(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().compared = Some((row, col));
+            cx.notify();
+        });
+        if let Some(cell) = self.cell_value(row, col, cx) {
+            cx.emit(ResultEvent::Compare(cell));
+        }
+    }
+
+    /// The value viewer shows another cell as A or B now: drops this grid's mark.
+    pub fn clear_mark(&mut self, compared: bool, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            if compared {
+                d.compared = None;
+            } else {
+                d.inspected = None;
+                t.clear_selection(cx);
+            }
+            cx.notify();
+        });
+    }
+
+    fn cell_value(&self, row: usize, col: usize, cx: &App) -> Option<CellValue> {
+        let d = self.table.read(cx).delegate();
+        let column = d.result.columns().get(col)?.name.clone();
+        let columns = d.column_names();
+        let rows = self
+            .base_sql
+            .clone()
+            .zip(self.dialect)
+            .map(|(base, dialect)| RowsSource {
+                base,
+                kinds: (0..columns.len()).map(|c| d.kind(c)).collect(),
+                columns,
+                column: col,
+                dialect,
+            });
+        Some(CellValue {
+            column,
+            row: row + 1,
+            value: d.result.cell(row, col).map(str::to_string),
+            data_type: d.facts.get(col).cloned().flatten().map(|f| f.data_type),
+            rows,
+        })
     }
 
     pub fn set_dialect(&mut self, dialect: &'static dyn Dialect) {
@@ -628,6 +752,7 @@ impl Render for ResultView {
         let body = self.render_body(cx);
         v_flex()
             .size_full()
+            .on_action(cx.listener(Self::inspect_action))
             .children(chips)
             .child(div().flex_1().min_h_0().child(body))
     }

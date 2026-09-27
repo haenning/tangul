@@ -27,7 +27,7 @@ use crate::{
     BookmarkQuery, RunAll, RunQuery,
     assets::Lucide,
     connection::{ConnStatus, Connection},
-    result_view::{ResultEvent, ResultView},
+    result_view::{CellValue, ResultEvent, ResultView},
 };
 use editor::{EditorEvent, RunTake, SqlEditor};
 
@@ -50,16 +50,35 @@ pub enum TabEvent {
     Bookmark(String),
     /// Open (and run) a query for rows related to the selected ones, on this tab's
     /// connection.
-    OpenRelated { title: String, sql: String },
+    OpenRelated {
+        title: String,
+        sql: String,
+    },
     /// Open SQL for the selected rows in a new tab on this tab's connection, without
     /// running it (UPDATE / DELETE statements).
-    OpenSql { title: String, sql: String },
+    OpenSql {
+        title: String,
+        sql: String,
+    },
     /// Run a filtered / sorted version of the last result (`append: false`) or its
     /// next page (`append: true`). Not a run of its own.
-    Refine { sql: String, append: bool },
+    Refine {
+        sql: String,
+        append: bool,
+    },
     /// Open a table (the target of a foreign key) in a new tab, like clicking it in
     /// the schema tree.
-    OpenTable { schema: String, table: String },
+    OpenTable {
+        schema: String,
+        table: String,
+    },
+    /// The value viewer's cells: see [`ResultEvent::Inspect`] and
+    /// [`ResultEvent::Compare`].
+    Inspect {
+        cell: CellValue,
+        open: bool,
+    },
+    Compare(CellValue),
 }
 
 pub struct QueryTab {
@@ -147,6 +166,8 @@ impl QueryTab {
             ResultEvent::OpenSql { title, sql } => TabEvent::OpenSql { title, sql },
             ResultEvent::OpenTable { schema, table } => TabEvent::OpenTable { schema, table },
             ResultEvent::Refine { sql, append } => TabEvent::Refine { sql, append },
+            ResultEvent::Inspect { cell, open } => TabEvent::Inspect { cell, open },
+            ResultEvent::Compare(cell) => TabEvent::Compare(cell),
         };
         cx.emit(event);
     }
@@ -336,6 +357,11 @@ impl QueryTab {
     ) {
         self.editor
             .update(cx, |e, cx| e.apply_validation(generation, problems, cx));
+    }
+
+    /// See [`ResultView::clear_mark`].
+    pub fn clear_value_mark(&mut self, compared: bool, cx: &mut Context<Self>) {
+        self.results.update(cx, |r, cx| r.clear_mark(compared, cx));
     }
 
     /// The last result as chart data, or why it can't be charted.

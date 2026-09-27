@@ -128,6 +128,9 @@ pub enum FilterOp {
     IsFalse,
     /// From `value` to `to`, both included; either may be empty (open end).
     Between,
+    /// Anything but `value`, NULL included (`Ne` leaves NULLs out). Not offered in
+    /// the filter bar; the value viewer's "Different value" uses it.
+    Differs,
 }
 
 impl FilterOp {
@@ -148,6 +151,7 @@ impl FilterOp {
             Self::IsTrue => "is true",
             Self::IsFalse => "is false",
             Self::Between => "from … to",
+            Self::Differs => "is not",
         }
     }
 
@@ -266,21 +270,8 @@ pub fn refined_sql(
     offset: usize,
     limit: usize,
 ) -> String {
-    // Duplicate names (`a.id, b.id`) can't be told apart outside the subquery, and
-    // MySQL refuses them in a derived table: rename them there.
-    let names = unique_names(columns);
-    let renamed = names.iter().zip(columns).any(|(n, c)| n != c);
-    let col = |i: usize| {
-        format!(
-            "{ALIAS}.{}",
-            quote_ident(dialect, names.get(i).map_or("", String::as_str))
-        )
-    };
-    let mut sql = format!("SELECT * FROM (\n{base}\n) AS {ALIAS}");
-    if renamed {
-        let list: Vec<String> = names.iter().map(|n| quote_ident(dialect, n)).collect();
-        sql.push_str(&format!(" ({})", list.join(", ")));
-    }
+    let (from, col) = wrapped(base, columns, dialect);
+    let mut sql = format!("SELECT * FROM {from}");
     let conditions: Vec<String> = refine
         .filters
         .iter()
@@ -303,6 +294,49 @@ pub fn refined_sql(
     }
     sql.push_str(&format!("\n{}", dialect.limit(limit, offset)));
     sql
+}
+
+/// The distinct values of result column `column` in `base` (from [`refinable`])
+/// with how often each occurs, most frequent first, at most `limit` of them.
+pub fn distinct_sql(
+    base: &str,
+    columns: &[String],
+    column: usize,
+    dialect: &dyn Dialect,
+    limit: usize,
+) -> String {
+    let (from, col) = wrapped(base, columns, dialect);
+    let c = col(column);
+    let name = quote_ident(dialect, columns.get(column).map_or("", String::as_str));
+    let count = quote_ident(dialect, "count");
+    format!(
+        "SELECT {c} AS {name}, COUNT(*) AS {count}\nFROM {from}\nGROUP BY {c}\n\
+         ORDER BY COUNT(*) DESC, {c}\n{}",
+        dialect.limit(limit, 0)
+    )
+}
+
+/// `base` as a derived table, and a column of it by result index. Duplicate names
+/// (`a.id, b.id`) can't be told apart outside the subquery, and MySQL refuses them
+/// in a derived table: they are renamed there.
+fn wrapped<'a>(
+    base: &str,
+    columns: &[String],
+    dialect: &'a dyn Dialect,
+) -> (String, impl Fn(usize) -> String + 'a) {
+    let names = unique_names(columns);
+    let mut from = format!("(\n{base}\n) AS {ALIAS}");
+    if names.iter().zip(columns).any(|(n, c)| n != c) {
+        let list: Vec<String> = names.iter().map(|n| quote_ident(dialect, n)).collect();
+        from.push_str(&format!(" ({})", list.join(", ")));
+    }
+    let col = move |i: usize| {
+        format!(
+            "{ALIAS}.{}",
+            quote_ident(dialect, names.get(i).map_or("", String::as_str))
+        )
+    };
+    (from, col)
 }
 
 fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, dialect: &dyn Dialect) -> String {
@@ -340,6 +374,7 @@ fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, dialect: &dyn Dialec
         FilterOp::NotNull => format!("{col} IS NOT NULL"),
         FilterOp::IsTrue => format!("{col} IS TRUE"),
         FilterOp::IsFalse => format!("{col} IS FALSE"),
+        FilterOp::Differs => format!("({} OR {col} IS NULL)", compare("<>")),
         FilterOp::Between => {
             let mut parts = Vec::new();
             let from = f.value.trim();
@@ -389,6 +424,52 @@ mod tests {
 
     fn cols(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn differs_keeps_nulls() {
+        let refine = Refine {
+            filters: vec![ColumnFilter {
+                column: 0,
+                op: FilterOp::Differs,
+                value: "a".into(),
+                to: String::new(),
+            }],
+            sort: None,
+        };
+        let pg = dialect_for(DriverKind::Postgres);
+        let sql = refined_sql(
+            "select x from t",
+            &cols(&["x"]),
+            &[ColumnKind::Text],
+            &refine,
+            pg,
+            0,
+            100,
+        );
+        assert!(
+            sql.contains("WHERE (tangul_q.x <> 'a' OR tangul_q.x IS NULL)"),
+            "{sql}"
+        );
+        assert!(sql.ends_with("LIMIT 100"), "{sql}");
+    }
+
+    #[test]
+    fn distinct_values_by_count() {
+        let my = dialect_for(DriverKind::Mysql);
+        assert_eq!(
+            distinct_sql(
+                "select a.id, b.id from a, b",
+                &cols(&["id", "id"]),
+                1,
+                my,
+                100
+            ),
+            "SELECT tangul_q.id_2 AS id, COUNT(*) AS count\n\
+             FROM (\nselect a.id, b.id from a, b\n) AS tangul_q (id, id_2)\n\
+             GROUP BY tangul_q.id_2\n\
+             ORDER BY COUNT(*) DESC, tangul_q.id_2\nLIMIT 100"
+        );
     }
 
     #[test]

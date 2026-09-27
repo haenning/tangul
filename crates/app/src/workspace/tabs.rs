@@ -236,6 +236,26 @@ impl Workspace {
                     }
                 });
             }
+            TabEvent::Inspect { cell, open } => {
+                let picked = self.picked(tab, cell, cx);
+                let old = self
+                    .panels
+                    .value
+                    .update(cx, |p, cx| p.set_a(picked, window, cx));
+                self.clear_value_mark(old, false, cx);
+                if *open {
+                    self.show_panel(Panel::Value, cx);
+                }
+            }
+            TabEvent::Compare(cell) => {
+                let picked = self.picked(tab, cell, cx);
+                let old = self
+                    .panels
+                    .value
+                    .update(cx, |p, cx| p.set_b(picked, window, cx));
+                self.clear_value_mark(old, true, cx);
+                self.show_panel(Panel::Value, cx);
+            }
             TabEvent::OpenSql { title, sql } => {
                 let conn = tab.read(cx).conn.clone();
                 let new = self.add_tab(sql, window, cx);
@@ -502,5 +522,55 @@ pub(super) fn tab_menu(
         menu.item(item("Bookmark query…", Workspace::toggle_tab_bookmark))
     } else {
         menu
+    }
+}
+
+/// The value viewer's side: cells from the tabs, and what it asks of them.
+impl Workspace {
+    /// A cell of `tab` for the value viewer.
+    fn picked(&self, tab: &Entity<QueryTab>, cell: &CellValue, cx: &App) -> Picked {
+        let t = tab.read(cx);
+        Picked {
+            tab: t.id,
+            source: format!("{} · {} · row {}", t.title, cell.column, cell.row).into(),
+            cell: cell.clone(),
+        }
+    }
+
+    fn query_tab(&self, id: TabId, cx: &App) -> Option<Entity<QueryTab>> {
+        self.tabs.queries().find(|t| t.read(cx).id == id).cloned()
+    }
+
+    /// The value viewer shows A (or B, `compared`) from elsewhere now: the tab
+    /// `old` drops its mark.
+    fn clear_value_mark(&mut self, old: Option<TabId>, compared: bool, cx: &mut Context<Self>) {
+        if let Some(tab) = old.and_then(|id| self.query_tab(id, cx)) {
+            tab.update(cx, |t, cx| t.clear_value_mark(compared, cx));
+        }
+    }
+
+    pub(super) fn on_value_event(
+        &mut self,
+        _: &Entity<ValuePanel>,
+        event: &ValueEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ValueEvent::ClearCompared(id) => self.clear_value_mark(Some(*id), true, cx),
+            ValueEvent::OpenRows { tab, title, sql } => match self.query_tab(*tab, cx) {
+                Some(tab) => {
+                    let open = TabEvent::OpenRelated {
+                        title: title.clone(),
+                        sql: sql.clone(),
+                    };
+                    self.on_tab_event(&tab, &open, window, cx);
+                }
+                None => window.push_notification(
+                    Notification::info("The tab this value is from is closed"),
+                    cx,
+                ),
+            },
+        }
     }
 }

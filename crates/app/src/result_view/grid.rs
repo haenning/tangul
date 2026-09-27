@@ -2,7 +2,10 @@
 //! straight from the ResultSet arena.
 //!
 //! Row selection is kept here rather than in the table (which knows a single row):
-//! click selects, ⇧-click extends, ⌘-click toggles. The right-click menu copies the
+//! click selects, ⇧-click extends, ⌘-click toggles. The table's own selection is the
+//! inspected cell (A, shown in the value viewer, moved with the arrow keys); ⌥-click
+//! picks a cell to compare with it (B). A long hover on a value shows all of it.
+//! The right-click menu copies the
 //! selection, follows foreign keys to related rows and writes UPDATE / DELETE
 //! statements for the selected rows (to open elsewhere, not run).
 //!
@@ -11,6 +14,7 @@
 //! the column's filter and sort popover. Scrolling to the end loads the next page.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -35,8 +39,16 @@ use super::{ResultEvent, ResultView};
 use crate::assets::Lucide;
 use crate::settings;
 
-/// Longer values are cut in the grid (full value view is a later feature).
+/// Longer values are cut in the grid (the hover card and the value viewer show all).
 const MAX_CELL_CHARS: usize = 200;
+/// Hover before a value's card opens: longer than a tooltip, so moving across the
+/// grid opens none.
+const PEEK_DELAY: Duration = Duration::from_secs(1);
+/// The card's size and how much of the value it shows.
+const PEEK_WIDTH: f32 = 420.;
+const PEEK_HEIGHT: f32 = 240.;
+const PEEK_CHARS: usize = 2_000;
+
 /// Related tables listed directly in the menu (the most used); the rest are under
 /// "Show all".
 const RELATED_SHOWN: usize = 3;
@@ -66,6 +78,9 @@ pub struct ResultsDelegate {
     /// More rows than loaded: scrolling to the end loads the next page.
     pub more: bool,
     hovered: Option<usize>,
+    /// The inspected cell (A) and the one compared with it (B): (row, column).
+    pub inspected: Option<(usize, usize)>,
+    pub compared: Option<(usize, usize)>,
     /// Column whose filter popover is open.
     filter_open: Option<usize>,
     /// Column whose foreign-key card is open (hides the aggregates meanwhile).
@@ -99,6 +114,8 @@ impl ResultsDelegate {
         self.result = ResultSet::new(cols);
         self.selected.clear();
         self.anchor = None;
+        self.inspected = None;
+        self.compared = None;
         self.menu_col = None;
         self.related.clear();
         self.edit = None;
@@ -124,6 +141,8 @@ impl ResultsDelegate {
         self.result = ResultSet::new(self.result.columns().to_vec());
         self.selected.clear();
         self.anchor = None;
+        self.inspected = None;
+        self.compared = None;
         self.more = false;
         self.filter_open = None;
         self.selection_gen += 1;
@@ -336,7 +355,7 @@ impl ResultsDelegate {
         Some(
             HoverCard::new(("fk", col_ix))
                 .anchor(Anchor::TopLeft)
-                .open_delay(std::time::Duration::from_millis(250))
+                .open_delay(Duration::from_millis(250))
                 .on_open_change(move |open, _, cx| {
                     let _ = table.update(cx, |t, cx| {
                         let d = t.delegate_mut();
@@ -745,31 +764,11 @@ impl TableDelegate for ResultsDelegate {
     ) -> Stateful<Div> {
         let selected = self.selected.contains(&row_ix);
         let highlight = cx.theme().selection.opacity(0.35);
-        div()
-            .id(("row", row_ix))
-            .relative()
-            .when(selected, |this| {
-                this.child(div().absolute().inset_0().bg(highlight))
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |table, e: &MouseDownEvent, _, cx| {
-                    table.delegate_mut().click(row_ix, e.modifiers);
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |table, _, _, cx| {
-                    let d = table.delegate_mut();
-                    if !d.selected.contains(&row_ix) {
-                        d.selected = BTreeSet::from([row_ix]);
-                        d.anchor = Some(row_ix);
-                        d.selection_gen += 1;
-                    }
-                    cx.notify();
-                }),
-            )
+        // Clicks are handled by the cells: the table stops them there (it selects
+        // the cell), so they never reach the row.
+        div().id(("row", row_ix)).relative().when(selected, |this| {
+            this.child(div().absolute().inset_0().bg(highlight))
+        })
     }
 
     fn context_menu(
@@ -792,6 +791,26 @@ impl TableDelegate for ResultsDelegate {
                 .map(|&r| self.result.cell(r, col).unwrap_or_default().to_string())
                 .collect();
             menu = menu.item(copy_item(format!("Copy {count}cell{s}"), values.join("\n")));
+        }
+        // The value viewer: this cell as A, or as B next to the inspected one.
+        if let (Some(col), Some(view)) = (
+            self.menu_col.filter(|&c| c < self.result.columns().len()),
+            self.view.clone(),
+        ) {
+            let inspect = view.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Inspect value").on_click(move |_, _, cx| {
+                    let _ = inspect.update(cx, |v, cx| v.inspect_cell(row_ix, col, cx));
+                }),
+            );
+            if self.inspected.is_some_and(|a| a != (row_ix, col)) {
+                menu = menu.item(
+                    PopupMenuItem::new("Compare with A").on_click(move |_, _, cx| {
+                        let _ = view.update(cx, |v, cx| v.compare(row_ix, col, cx));
+                    }),
+                );
+            }
+            menu = menu.separator();
         }
         menu = menu
             .item(copy_item(
@@ -891,7 +910,7 @@ impl TableDelegate for ResultsDelegate {
         &mut self,
         row_ix: usize,
         col_ix: usize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let s = settings::current(cx);
@@ -899,22 +918,134 @@ impl TableDelegate for ResultsDelegate {
             || cx.theme().mono_font_family.clone(),
             |f| f.to_string().into(),
         );
+        let font_size = s
+            .table_font_size()
+            .map_or_else(|| rems(0.75).to_pixels(window.rem_size()), px);
+        let theme = cx.theme();
+        let mark = if self.inspected == Some((row_ix, col_ix)) {
+            Some(theme.info)
+        } else if self.compared == Some((row_ix, col_ix)) {
+            Some(theme.warning)
+        } else {
+            None
+        };
         let cell = div()
+            .id(("cell", col_ix))
+            .test_support()
+            .relative()
             .size_full()
-            .font_family(family)
+            .font_family(family.clone())
             .text_xs()
             .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
             .whitespace_nowrap()
             .overflow_hidden()
+            .when_some(mark, |d, color| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_1()
+                        .border_color(color)
+                        .bg(color.opacity(0.12)),
+                )
+            })
+            // The table selects the cell (A) and stops the event, so the row
+            // selection happens here, before it.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |table, e: &MouseDownEvent, _, cx| {
+                    let d = table.delegate_mut();
+                    if e.modifiers.alt {
+                        // B, not A: the table must not select the cell.
+                        cx.stop_propagation();
+                        if let Some(view) = d.view.clone() {
+                            cx.defer(move |cx| {
+                                let _ = view.update(cx, |v, cx| v.compare(row_ix, col_ix, cx));
+                            });
+                        }
+                    } else {
+                        d.click(row_ix, e.modifiers);
+                    }
+                    cx.notify();
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |table, _, _, _| table.delegate_mut().menu_col = Some(col_ix)),
+                cx.listener(move |table, _, _, cx| {
+                    let d = table.delegate_mut();
+                    d.menu_col = Some(col_ix);
+                    if !d.selected.contains(&row_ix) {
+                        d.selected = BTreeSet::from([row_ix]);
+                        d.anchor = Some(row_ix);
+                        d.selection_gen += 1;
+                    }
+                    cx.notify();
+                }),
             );
         match self.result.cell(row_ix, col_ix) {
-            None => cell.text_color(cx.theme().muted_foreground).child("NULL"),
-            Some(value) => cell.child(display_value(value)),
+            None => cell.text_color(theme.muted_foreground).child("NULL"),
+            // Nothing more to show for an empty string.
+            Some("") => cell,
+            Some(value) => {
+                let full: SharedString = peek_text(value).into();
+                cell.child(
+                    HoverCard::new(("peek", col_ix))
+                        .anchor(Anchor::TopLeft)
+                        .open_delay(PEEK_DELAY)
+                        .appearance(false)
+                        .trigger(div().child(display_value(value)))
+                        .content(move |_, _, cx| {
+                            peek_card(full.clone(), family.clone(), font_size, cx)
+                        }),
+                )
+            }
         }
     }
+}
+
+/// The start of `value` for the hover card.
+fn peek_text(value: &str) -> String {
+    match value.char_indices().nth(PEEK_CHARS) {
+        Some((i, _)) => format!("{}…", &value[..i]),
+        None => value.to_string(),
+    }
+}
+
+/// A value in full (up to [`PEEK_CHARS`]), wrapped, with how to see all of it.
+fn peek_card(text: SharedString, family: SharedString, size: Pixels, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    v_flex()
+        .max_w(px(PEEK_WIDTH))
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.popover)
+        .text_color(theme.popover_foreground)
+        .shadow_md()
+        .child(
+            div()
+                .id("peek-text")
+                .test_support()
+                .max_h(px(PEEK_HEIGHT))
+                .overflow_hidden()
+                .px_2()
+                .py_1p5()
+                .font_family(family)
+                .text_size(size)
+                .whitespace_normal()
+                .child(text),
+        )
+        .child(
+            div()
+                .px_2()
+                .py_1()
+                .border_t_1()
+                .border_color(theme.border)
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("Space to open the full value"),
+        )
+        .into_any_element()
 }
 
 /// Single-line, length-limited representation for the grid.

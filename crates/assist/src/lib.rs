@@ -16,3 +16,4 @@ pub mod schema;
 pub mod statement;
 pub mod suggest;
 pub mod usage;
+pub mod value;

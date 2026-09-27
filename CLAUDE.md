@@ -20,7 +20,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   (the assistant uses the database's optional assistant user), scheduled bookmarks
 - `crates/app`: the GPUI app
   - `workspace/`: layout and wiring; `sidebar.rs`: the sidebars left and right of the
-    content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state; `tabs.rs`: the kinds of tab (`TabItem`: query,
+    content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
+    `value_panel.rs`: the value viewer (right sidebar): the inspected cell (A), the
+    compared one (B) and their diff; logic in `assist::value`; `tabs.rs`: the kinds of tab (`TabItem`: query,
     file; boards later) and the open ones
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
