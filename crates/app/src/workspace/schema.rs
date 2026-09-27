@@ -479,9 +479,9 @@ impl Workspace {
                                 .child(estimate),
                         )
                     })
-                    .when_some(info, |r, info| {
-                        r.tooltip(move |window, cx| Tooltip::new(info.clone()).build(window, cx))
-                    })
+                    // The kind, estimate and comment: wrapped, long comments behind
+                    // "Show all".
+                    .when_some(info, |r, info| r.hoverable_tooltip(TextCard::builder(info)))
                     // Rightmost, so a favorite's star lines up at the edge.
                     .children(fixed_star)
                     .child(

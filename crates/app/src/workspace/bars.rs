@@ -59,7 +59,8 @@ impl Workspace {
                 .ghost()
                 .small()
                 .text_color(color)
-                .tooltip(tooltip)
+                // The warning's long tooltip is the wrapper's (it wraps).
+                .when(warning.is_none(), |b| b.tooltip(tooltip.clone()))
                 .dropdown_menu(move |menu, _, _| {
                     ai_menu(
                         menu,
@@ -76,6 +77,7 @@ impl Workspace {
                 Some(_) => div()
                     .id("ai-user-warning")
                     .test_support()
+                    .tooltip(wrapped_tooltip(tooltip))
                     .child(div().child(button).with_animation(
                         ("ai-user-pulse", self.ai_warning_pulse as usize),
                         Animation::new(Duration::from_millis(1800)),
@@ -515,12 +517,18 @@ pub(super) fn ai_menu(
     workspace: &WeakEntity<Workspace>,
 ) -> PopupMenu {
     if let Some(warning) = warning {
+        // Wrapped to the menu's width, not one long line out of it.
+        let warning: SharedString = warning.to_string().into();
         menu = menu
-            .item(
-                PopupMenuItem::new(warning.to_string())
-                    .icon(IconName::TriangleAlert)
-                    .disabled(true),
-            )
+            .item(PopupMenuItem::element(move |_, cx| {
+                h_flex()
+                    .max_w(px(TEXT_WIDTH))
+                    .gap_2()
+                    .items_start()
+                    .text_color(cx.theme().danger)
+                    .child(Icon::new(IconName::TriangleAlert).xsmall().mt_0p5())
+                    .child(div().flex_1().whitespace_normal().child(warning.clone()))
+            }))
             .separator();
     }
     menu = menu.label("The AI connects as");

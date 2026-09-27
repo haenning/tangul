@@ -472,3 +472,30 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
         assert!(window.try_find("ai-user-warning").is_none())
     });
 }
+
+#[gpui_kit::test]
+fn long_comments_show_three_lines_until_asked(cx: &mut TestAppContext) {
+    use crate::ui::TextCard;
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        Theme::change(ThemeMode::Dark, None, cx);
+    });
+    let card = |cx: &mut TestAppContext, text: String| {
+        cx.open_window(size(px(400.), px(300.)), move |window, cx| {
+            let view = TextCard::builder(text)(window, cx);
+            Root::new(view, window, cx)
+        })
+    };
+    let long = card(cx, "A comment someone wrote a lot into. ".repeat(12));
+    step(long, cx, |window, cx| {
+        assert!(window.find("text-card").visible());
+        window.click("show-all", cx);
+    });
+    step(long, cx, |window, _| {
+        assert!(window.try_find("show-all").is_none())
+    });
+    let short = card(cx, "Registered customers".into());
+    step(short, cx, |window, _| {
+        assert!(window.try_find("show-all").is_none())
+    });
+}
