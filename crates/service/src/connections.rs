@@ -176,6 +176,7 @@ mod tests {
             users: vec![user("admin"), user("reader")],
             ssh: None,
             assistant_user: assistant.map(Into::into),
+            ai_values: false,
         };
         let profiles = Profiles::in_memory(vec![db(Some("reader"))]);
         assert_eq!(
@@ -223,6 +224,7 @@ mod tests {
             }],
             ssh: None,
             assistant_user: None,
+            ai_values: false,
         }]);
         let mut c = Connections::default();
         assert_eq!(

@@ -30,6 +30,62 @@ impl Workspace {
                 })
         };
 
+        // The AI's user: the database's assistant user, or the tab's user.
+        let ai_menu = db.map(|db| {
+            let users: Vec<(String, String)> = db
+                .users
+                .iter()
+                .map(|u| (u.id.clone(), u.user.clone()))
+                .collect();
+            let ai_user = db.assistant_user.clone();
+            let label = ai_user
+                .as_deref()
+                .or(active_user.as_deref())
+                .and_then(|id| db.user(id))
+                .map_or("No user".into(), |u| u.user.clone());
+            let (db_id, values, weak) = (db.id.clone(), db.ai_values, weak.clone());
+            let writable = self.knowledge.ai_writable(&db.id).filter(|n| *n > 0);
+            let warning = writable.map(ai_user_warning);
+            let (color, tooltip): (Hsla, SharedString) = match &warning {
+                Some(w) => (theme.danger, w.clone().into()),
+                None => (
+                    theme.muted_foreground,
+                    "The database user the AI connects as".into(),
+                ),
+            };
+            let button = Button::new("ai-user-switcher")
+                .label(label)
+                .icon(Icon::new(Lucide::Bot).text_color(color))
+                .ghost()
+                .small()
+                .text_color(color)
+                .tooltip(tooltip)
+                .dropdown_menu(move |menu, _, _| {
+                    ai_menu(
+                        menu,
+                        &db_id,
+                        &users,
+                        ai_user.as_deref(),
+                        values,
+                        warning.as_deref(),
+                        &weak,
+                    )
+                });
+            match writable {
+                // Pulses three times when the answer comes, then stays red.
+                Some(_) => div()
+                    .id("ai-user-warning")
+                    .test_support()
+                    .child(div().child(button).with_animation(
+                        ("ai-user-pulse", self.ai_warning_pulse as usize),
+                        Animation::new(Duration::from_millis(1800)),
+                        |el, t| el.opacity(pulse(t)),
+                    ))
+                    .into_any_element(),
+                None => button.into_any_element(),
+            }
+        });
+
         let user_menu = db.map(|db| {
             let users: Vec<(String, String)> = db
                 .users
@@ -65,14 +121,20 @@ impl Workspace {
             .gap_1()
             .items_center()
             .child(db_menu)
-            .when_some(user_menu, |this, user_menu| {
+            // db / 🤖 AI user | 👤 user · read-only · ●: your user next to its
+            // read-only mode.
+            .when_some(ai_menu, |this, ai_menu| {
                 this.child(
                     div()
                         .text_sm()
                         .text_color(theme.muted_foreground.opacity(0.6))
                         .child("/"),
                 )
-                .child(user_menu)
+                .child(ai_menu)
+            })
+            .when_some(user_menu, |this, user_menu| {
+                this.child(div().w(px(1.)).h_3p5().mx_0p5().bg(theme.border))
+                    .child(user_menu)
             })
             .when_some(read_only, |this, on| {
                 let color = if on {
@@ -131,18 +193,34 @@ impl Workspace {
     /// Zed-style bottom bar: sidebar panels, then (planned) AI and schema-graph
     /// tools; the active query's timing on the right.
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let buttons = |sidebar: &Sidebar, cx: &mut Context<Self>| {
+            sidebar
+                .panels
+                .iter()
+                .map(|&panel| {
+                    Button::new(("panel", panel as usize))
+                        .icon(Icon::new(panel.icon()))
+                        .ghost()
+                        .xsmall()
+                        .selected(sidebar.shows(panel))
+                        .tooltip(panel.label())
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(panel, cx)))
+                })
+                .collect::<Vec<_>>()
+        };
+        let (left, right) = (buttons(&self.left, cx), buttons(&self.right, cx));
         let theme = cx.theme();
+        // File tabs (settings) have no results to time or chart.
         let (query_text, running, chart) = self
             .tabs
-            .get(self.active_tab)
+            .active_query()
             .map(|tab| {
                 let t = tab.read(cx);
-                let chart = (t.chart(), t.chart_shown());
+                let chart = (t.chart(cx), t.chart_shown(cx));
                 (
                     t.status_text(cx),
-                    t.is_running(),
-                    // File tabs (settings) have no results to chart.
-                    t.file_path().is_none().then(|| (tab.clone(), chart)),
+                    t.is_running(cx),
+                    Some((tab.clone(), chart)),
                 )
             })
             .unwrap_or_default();
@@ -150,16 +228,7 @@ impl Workspace {
             chart_button(tab, data, shown, theme.chart_1, theme.muted_foreground)
         });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
-        let panels = SidebarView::ALL.map(|view| {
-            let active = self.sidebar_open && self.sidebar_view == view;
-            Button::new(("panel", view as usize))
-                .icon(Icon::new(view.icon()))
-                .ghost()
-                .xsmall()
-                .selected(active)
-                .tooltip(view.label())
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(view, cx)))
-        });
+
         let planned = |id: &'static str, icon: Lucide, tooltip: &'static str| {
             Button::new(id)
                 .icon(Icon::new(icon))
@@ -178,7 +247,7 @@ impl Workspace {
             .bg(theme.title_bar)
             .text_xs()
             .text_color(theme.muted_foreground)
-            .children(panels)
+            .children(left)
             .child(separator())
             .child(planned("ai-agent", Lucide::Bot, "Agent via ACP — planned"))
             .child(planned(
@@ -196,6 +265,7 @@ impl Workspace {
             .when(running, |this| this.child(Spinner::new().xsmall()))
             .child(div().pr_1().child(query_text))
             .children(chart_button)
+            .children(right)
             .child(div().w_1())
     }
 
@@ -224,17 +294,17 @@ impl Workspace {
                 ("In transaction", s.pinned.to_string()),
             ],
         ));
-        let tables = state.schema.tables();
-        let views = tables.iter().filter(|t| t.kind == TableKind::View).count();
+        let Some(schema) = self.active_schema() else {
+            return sections;
+        };
+        let tables = schema.tables();
+        let views = tables.iter().filter(|t| t.kind.is_view()).count();
         sections.push((
             "Schema",
             vec![
                 ("Tables", (tables.len() - views).to_string()),
                 ("Views", views.to_string()),
-                (
-                    "Foreign keys",
-                    state.schema.foreign_keys().len().to_string(),
-                ),
+                ("Foreign keys", schema.foreign_keys().len().to_string()),
             ],
         ));
         sections
@@ -433,6 +503,68 @@ pub(super) fn database_menu(
     )
 }
 
+/// The AI's database user (the tab's user when none is set) and whether it may
+/// read column values.
+pub(super) fn ai_menu(
+    mut menu: PopupMenu,
+    db_id: &str,
+    users: &[(String, String)],
+    current: Option<&str>,
+    values: bool,
+    warning: Option<&str>,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    if let Some(warning) = warning {
+        menu = menu
+            .item(
+                PopupMenuItem::new(warning.to_string())
+                    .icon(IconName::TriangleAlert)
+                    .disabled(true),
+            )
+            .separator();
+    }
+    menu = menu.label("The AI connects as");
+    let choices = std::iter::once((None, "Same as your user".to_string())).chain(
+        users
+            .iter()
+            .map(|(id, name)| (Some(id.clone()), name.clone())),
+    );
+    for (id, name) in choices {
+        let (ws, db_id, chosen) = (workspace.clone(), db_id.to_string(), id.clone());
+        menu = menu.item(
+            PopupMenuItem::new(name)
+                .checked(current == id.as_deref())
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.set_assistant_user(&db_id, chosen.clone(), window, cx)
+                    });
+                }),
+        );
+    }
+    let (ws, db_id) = (workspace.clone(), db_id.to_string());
+    menu.separator().item(
+        PopupMenuItem::new("Let the AI read column values")
+            .checked(values)
+            .on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.set_ai_values(&db_id, !values, window, cx));
+            }),
+    )
+}
+
+/// What the title bar says when the AI's user may change or drop tables.
+fn ai_user_warning(tables: u64) -> String {
+    let noun = if tables == 1 { "table" } else { "tables" };
+    format!(
+        "Your current AI user can change or drop {tables} {noun}. It is strongly \
+         recommended to use a user that is read-only on the server."
+    )
+}
+
+/// Opacity over the warning's animation (0 to 1): three dips, ending fully visible.
+fn pulse(t: f32) -> f32 {
+    0.35 + 0.65 * (0.5 + 0.5 * (t * 3.0 * std::f32::consts::TAU).cos())
+}
+
 pub(super) fn user_menu(
     mut menu: PopupMenu,
     db_id: &str,
@@ -486,4 +618,22 @@ pub(super) fn user_menu(
                 });
             }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ai_user_warning, pulse};
+
+    #[test]
+    fn the_warning_and_its_pulse() {
+        assert_eq!(
+            ai_user_warning(1),
+            "Your current AI user can change or drop 1 table. It is strongly recommended \
+             to use a user that is read-only on the server."
+        );
+        assert!(ai_user_warning(3).contains("3 tables"));
+        // Starts and ends fully visible, dims in between.
+        assert!((pulse(0.0) - 1.0).abs() < 1e-5 && (pulse(1.0) - 1.0).abs() < 1e-5);
+        assert!(pulse(1.0 / 6.0) < 0.4);
+    }
 }

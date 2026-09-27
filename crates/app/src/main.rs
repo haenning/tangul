@@ -1,15 +1,17 @@
 mod assets;
 mod bookmark_form;
 mod chart;
-mod column_filter;
 mod completion;
 mod connection;
 mod connection_form;
+mod file_tab;
 mod monitor;
 mod palette;
+mod query_router;
 mod query_tab;
-mod results;
+mod result_view;
 mod settings;
+mod tabs;
 mod workspace;
 
 use gpui_kit::component::{Root, Theme, ThemeMode, TitleBar};
@@ -19,6 +21,9 @@ actions!(
     tangul,
     [
         RunQuery,
+        RunAll,
+        InspectValue,
+        ToggleRightSidebar,
         BookmarkQuery,
         SaveFile,
         NewTab,
@@ -52,27 +57,36 @@ fn main() {
         Theme::change(ThemeMode::Dark, None, cx);
         settings::init(cx);
 
-        cx.bind_keys([
-            // Must win over the editor's own `secondary-enter` (newline), hence the
-            // same depth ("Input") and registration after gpui_kit::init.
-            KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
-            KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
-            KeyBinding::new("secondary-s", SaveFile, Some("QueryEditor > Input")),
-            KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
-            KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
-            KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
-            KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
-            KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
-            // In the command palette: switch the sidebar panel.
-            KeyBinding::new("tab", NextSidebarPanel, Some("Palette")),
-            KeyBinding::new("shift-tab", PrevSidebarPanel, Some("Palette")),
-            KeyBinding::new("secondary-q", Quit, None),
-        ]);
+        bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
         open_main_window(engine, events, cx);
         cx.activate(true);
     });
+}
+
+/// The app's key bindings (also used by the UI tests).
+fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        // Must win over the editor's own `secondary-enter` (newline), hence the
+        // same depth ("Input") and registration after gpui_kit::init.
+        KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
+        KeyBinding::new("secondary-shift-enter", RunAll, Some("QueryEditor > Input")),
+        KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
+        KeyBinding::new("secondary-s", SaveFile, Some("QueryEditor > Input")),
+        KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
+        KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
+        KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
+        KeyBinding::new("alt-secondary-b", ToggleRightSidebar, Some("Workspace")),
+        // On a result: show the inspected cell in the value viewer.
+        KeyBinding::new("space", InspectValue, Some("DataTable")),
+        KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
+        KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
+        // In the command palette: switch the sidebar panel.
+        KeyBinding::new("tab", NextSidebarPanel, Some("Palette")),
+        KeyBinding::new("shift-tab", PrevSidebarPanel, Some("Palette")),
+        KeyBinding::new("secondary-q", Quit, None),
+    ]);
 }
 
 /// Opens the workspace window. Only one exists at a time: the engine's event stream
@@ -98,7 +112,9 @@ fn open_main_window(
     };
     cx.spawn(async move |cx| {
         cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| workspace::Workspace::new(engine, events, window, cx));
+            let view = cx.new(|cx| {
+                workspace::Workspace::new(engine, events, tangul_data::Data::open(), window, cx)
+            });
             cx.new(|cx| Root::new(view, window, cx))
         })
         .expect("failed to open window");

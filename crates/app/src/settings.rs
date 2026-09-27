@@ -69,6 +69,12 @@ fn apply(settings: &Settings, defaults: &ThemeDefaults, cx: &mut App) {
 }
 
 /// Loads and applies the settings, then re-applies them whenever the file changes.
+/// The defaults, without reading `settings.json` (tests).
+#[cfg(test)]
+pub fn init_defaults(cx: &mut App) {
+    cx.set_global(Current(Settings::default()));
+}
+
 pub fn init(cx: &mut App) {
     cx.set_global(Current(Settings::default()));
     let defaults = {

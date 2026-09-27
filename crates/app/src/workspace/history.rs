@@ -4,8 +4,15 @@ use super::*;
 
 impl Workspace {
     pub(super) fn refresh_history(&mut self, cx: &mut Context<Self>) {
-        let search = self.history_search.read(cx).value().trim().to_string();
-        self.history = match &self.active_db {
+        let search = self
+            .panels
+            .history
+            .search
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        self.panels.history.entries = match &self.active_db {
             Some(db) => self.data.local.history(db, &search, HISTORY_LIMIT),
             None => Vec::new(),
         };
@@ -66,34 +73,34 @@ impl Workspace {
             eprintln!("could not record history: {e:#}");
         }
         if succeeded {
-            if let Some(state) = self.conns.get(&run.user_id).map(|c| c.read(cx)) {
-                let learned = learn(&run.sql, &state.schema);
+            if self.conns.contains_key(&run.user_id) {
+                let schema = self.schema_of(&run.user_id);
+                let learned = learn(&run.sql, &schema);
                 let now = now_ms() / 1000;
                 if let Err(e) = self.data.local.record_usage(&db_id, &learned, now) {
                     eprintln!("could not record usage: {e:#}");
                 }
-                let usage = Arc::new(self.data.local.usage(&db_id, now));
-                self.usage.insert(db_id.clone(), usage.clone());
+                let usage = Arc::new(Usage::from_stats(now, self.data.local.usage(&db_id)));
+                self.knowledge.set_usage(&db_id, usage.clone());
                 // Related rows (foreign keys, most used first) and UPDATE / DELETE
                 // statements in the result's context menu.
                 if let Some(tab) = &tab {
                     let columns = tab.read(cx).result_columns(cx);
-                    let mut links = related_links(&run.sql, &columns, &state.schema);
+                    let mut links = related_links(&run.sql, &columns, &schema);
                     if links.len() > 1 {
                         let bookmarked: Vec<_> = self
                             .data
                             .local
                             .bookmarks_for(Some(&db_id))
                             .iter()
-                            .flat_map(|b| learn(&b.sql, &state.schema))
+                            .flat_map(|b| learn(&b.sql, &schema))
                             .collect();
                         rank_links(&mut links, &usage, &bookmarked);
                     }
-                    let edit = row_edit(&run.sql, &columns, &state.schema);
-                    let facts = column_facts(&run.sql, &columns, &state.schema);
+                    let edit = row_edit(&run.sql, &columns, &schema);
+                    let facts = column_facts(&run.sql, &columns, &schema);
                     tab.update(cx, |t, cx| t.set_row_actions(links, edit, facts, cx));
                 }
-                self.sync_assist_for_db(&db_id, cx);
             }
             let runs = self.data.local.runs(&db_id, &fp);
             let hint = (runs >= BOOKMARK_HINT_RUNS && !self.data.local.is_bookmarked(&db_id, &fp))
@@ -112,11 +119,20 @@ impl Workspace {
 
     pub(super) fn render_history_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let entries = self.history.clone();
+        let entries = self.panels.history.entries.clone();
         let count = entries.len();
         let empty: Option<&str> = if self.active_db.is_none() {
             Some("Select a database to see its history.")
-        } else if count == 0 && self.history_search.read(cx).value().trim().is_empty() {
+        } else if count == 0
+            && self
+                .panels
+                .history
+                .search
+                .read(cx)
+                .value()
+                .trim()
+                .is_empty()
+        {
             Some("Queries you run show up here.")
         } else if count == 0 {
             Some("No matching queries.")
@@ -139,7 +155,7 @@ impl Workspace {
                 div()
                     .px_2()
                     .pb_2()
-                    .child(Input::new(&self.history_search).small()),
+                    .child(Input::new(&self.panels.history.search).small()),
             )
             .children(empty.map(|text| {
                 div()

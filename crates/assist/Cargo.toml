@@ -6,6 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+similar = "3"
 tangul-core = { version = "0.1.0", path = "../core" }
 
 [lints]

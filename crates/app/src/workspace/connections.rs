@@ -3,6 +3,103 @@
 use super::*;
 
 impl Workspace {
+    /// Changes what the database lets the AI do and saves the profiles.
+    fn update_ai(
+        &mut self,
+        db_id: &str,
+        change: impl FnOnce(&mut Database),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut db) = self.data.profiles.database(db_id).cloned() else {
+            return;
+        };
+        change(&mut db);
+        if let Err(e) = self.data.profiles.upsert_database(db) {
+            window.push_notification(
+                Notification::error(format!("Could not save connection: {e:#}")),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// The database user the AI connects as; `None`: the tab's user.
+    pub(super) fn set_assistant_user(
+        &mut self,
+        db_id: &str,
+        user: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_ai(db_id, |db| db.assistant_user = user, window, cx);
+        self.check_ai_user(cx);
+    }
+
+    /// Asks the server how many tables the AI's database user (of the active
+    /// database) may change or drop; the title bar warns when it may any. Runs as
+    /// the assistant, through the gate, on the assistant's own connection.
+    pub(super) fn check_ai_user(&mut self, cx: &mut Context<Self>) {
+        let (Some(db_id), Some(user_id)) = (self.active_db.clone(), self.active_user.clone())
+        else {
+            return;
+        };
+        let Some(sql) = self
+            .data
+            .profiles
+            .database(&db_id)
+            .and_then(|db| dialect_for(db.driver).writable_tables_sql())
+        else {
+            return;
+        };
+        let Some(conn) =
+            self.connections
+                .connect_assistant(&self.engine, &mut self.data.profiles, &user_id)
+        else {
+            return;
+        };
+        let (engine, query) = (self.engine.clone(), QueryId(self.next_id()));
+        let options = QueryOptions {
+            row_limit: 1,
+            ..QueryOptions::new(Caller::Assistant)
+        };
+        self.ai_check = cx.spawn(async move |this, cx| {
+            let result = engine.query(query, conn, sql, options).await;
+            let _ = this.update(cx, |ws, cx| match result {
+                Ok(out) => {
+                    let tables = out
+                        .results
+                        .last()
+                        .and_then(|r| r.cell(0, 0))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    ws.set_ai_writable(&db_id, tables, cx);
+                }
+                Err(e) => eprintln!("could not check the AI user's rights: {}", e.message),
+            });
+        });
+    }
+
+    /// The AI's user of `db_id` may change or drop `tables` tables.
+    pub(super) fn set_ai_writable(&mut self, db_id: &str, tables: u64, cx: &mut Context<Self>) {
+        self.knowledge.set_ai_writable(db_id, tables);
+        if tables > 0 {
+            self.ai_warning_pulse += 1;
+        }
+        cx.notify();
+    }
+
+    /// Whether the AI may read column values of the database.
+    pub(super) fn set_ai_values(
+        &mut self,
+        db_id: &str,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_ai(db_id, |db| db.ai_values = on, window, cx);
+    }
+
     pub(super) fn connect(&mut self, user_id: &str, cx: &mut Context<Self>) {
         let Some(id) = self.connections.connect_user(
             &self.engine,
@@ -24,23 +121,20 @@ impl Workspace {
                 c.status = ConnStatus::Connecting;
                 cx.notify();
             });
+            self.knowledge.set_conn(user_id, id);
         } else {
             // Show (and complete against) the cached schema until the server answers.
-            let schema = self.schema_index(
-                user_id,
-                self.data.local.cached_schema(user_id).unwrap_or_default(),
-            );
+            let cached = self.data.local.cached_schema(user_id).unwrap_or_default();
+            self.set_schema(user_id, id, cached);
             let conn = cx.new(|_| Connection {
                 id,
                 name,
                 driver,
                 status: ConnStatus::Connecting,
-                schema,
                 stats: PoolStats::default(),
             });
             self.conns.insert(user_id.to_string(), conn);
         }
-        self.sync_assist(user_id, cx);
         cx.notify();
     }
 
@@ -65,6 +159,7 @@ impl Workspace {
         self.data.local.set_setting(LAST_USER_SETTING, &user_id);
         self.assign_active_tab(&user_id, window, cx);
         self.refresh_history(cx);
+        self.check_ai_user(cx);
         cx.notify();
     }
 
@@ -109,8 +204,8 @@ impl Workspace {
         let Some(conn) = self.tab_conn(user_id) else {
             return;
         };
-        if let Some(tab) = self.tabs.get(self.active_tab) {
-            if tab.read(cx).is_running() {
+        if let Some(tab) = self.tabs.active_query().cloned() {
+            if tab.read(cx).is_running(cx) {
                 return;
             }
             tab.update(cx, |t, cx| t.set_conn(conn, cx));
@@ -274,20 +369,10 @@ impl Workspace {
         };
         match event {
             Event::Query { query, event } => {
-                let finished = match &event {
-                    QueryEvent::Finished { elapsed, error, .. } => {
-                        Some((error.clone(), elapsed.as_millis() as i64))
-                    }
-                    QueryEvent::Exec(_) => None,
-                };
-                if let Some(tab) = self.queries.get(&query).and_then(|q| q.tab.upgrade()) {
-                    tab.update(cx, |t, cx| t.on_query_event(event, cx));
-                }
-                if let Some((error, elapsed_ms)) = finished
-                    && let Some(run) = self.queries.remove(&query)
-                    && !run.derived
+                if let Some(done) = self.router.deliver(query, event, cx)
+                    && !done.run.derived
                 {
-                    self.record_run(run, error, elapsed_ms, cx);
+                    self.record_run(done.run, done.error, done.elapsed_ms, cx);
                 }
             }
             Event::Connected { conn } => {
@@ -296,7 +381,8 @@ impl Workspace {
                 if let Some(user_id) = self.connections.tab_user(conn).map(str::to_string)
                     && let Some(tc) = self.tab_conn(&user_id)
                 {
-                    for tab in &self.tabs {
+                    let tabs: Vec<_> = self.tabs.queries().cloned().collect();
+                    for tab in tabs {
                         if tab.read(cx).conn.is_none() {
                             tab.update(cx, |t, cx| t.set_conn(tc.clone(), cx));
                         }
@@ -315,25 +401,35 @@ impl Workspace {
                 self.update_conn(conn, cx, |c| c.status = failed);
                 window.push_notification(Notification::error(error), cx);
             }
-            Event::Schema { conn, result } => match result {
-                Ok(info) => {
+            Event::Schema {
+                conn,
+                result,
+                complete,
+            } => match result {
+                Ok(mut info) => {
                     if let Some(user_id) = self.connections.tab_user(conn).map(str::to_string) {
-                        if let Err(e) = self.data.local.save_schema(&user_id, &info) {
-                            eprintln!("could not cache schema: {e:#}");
+                        if complete {
+                            if let Err(e) = self.data.local.save_schema(&user_id, &info) {
+                                eprintln!("could not cache schema: {e:#}");
+                            }
+                        } else if let Some(known) = self.knowledge.schema(&user_id) {
+                            // Tables first; until the rest arrives, keep what is known
+                            // of it (from the cache or the last load).
+                            let known = known.info();
+                            info.indexes = known.indexes.clone();
+                            info.checks = known.checks.clone();
+                            info.enums = known.enums.clone();
+                            info.views = known.views.clone();
+                            info.routines = known.routines.clone();
                         }
-                        let schema = self.schema_index(&user_id, info);
-                        self.update_conn(conn, cx, |c| c.schema = schema);
-                        self.sync_assist(&user_id, cx);
+                        self.set_schema(&user_id, conn, info);
+                        cx.notify();
                     }
                 }
                 Err(e) => window.push_notification(Notification::error(e), cx),
             },
             Event::Validated { request, problems } => {
-                if let Some((tab, generation)) = self.validations.remove(&request)
-                    && let Some(tab) = tab.upgrade()
-                {
-                    tab.update(cx, |t, cx| t.apply_validation(generation, problems, cx));
-                }
+                self.router.deliver_check(request, problems, cx)
             }
             Event::PoolStats { conn, stats } => {
                 // Only the title bar shows them: tabs aren't redrawn for every tick.

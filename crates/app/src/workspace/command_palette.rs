@@ -9,6 +9,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // One at a time: not over itself or another dialog.
+        if window.has_active_dialog(cx) {
+            return;
+        }
         let db = self.active_db.clone();
         let bookmarks = self.data.local.bookmarks_for(db.as_deref());
         let history = match &db {
@@ -63,6 +67,8 @@ impl Workspace {
                 let workspace = workspace.clone();
                 dialog.w(px(560.)).close_button(false).child(
                     div()
+                        .id("palette")
+                        .test_support()
                         .key_context("Palette")
                         .on_action(move |_: &NextSidebarPanel, window, cx| next(window, cx))
                         .on_action(move |_: &PrevSidebarPanel, window, cx| prev(window, cx))
@@ -95,6 +101,11 @@ impl Workspace {
     ) {
         match action {
             PaletteAction::Settings => self.open_settings(window, cx),
+            PaletteAction::RunAll => {
+                if let Some(tab) = self.tabs.active_query().cloned() {
+                    tab.update(cx, |t, cx| t.run_all(&RunAll, window, cx));
+                }
+            }
             PaletteAction::Bookmark(id) => self.open_bookmark(&id, false, window, cx),
             PaletteAction::History(sql) => self.open_sql("History", &sql, window, cx),
         }
@@ -108,21 +119,20 @@ pub(super) fn palette_pills(workspace: &WeakEntity<Workspace>, cx: &App) -> AnyE
         return div().into_any_element();
     };
     let ws = ws.read(cx);
-    let (open, current) = (ws.sidebar_open, ws.sidebar_view);
     let theme = cx.theme();
     h_flex()
         .px_3()
         .pt_2()
         .gap_1()
         .items_center()
-        .children(SidebarView::ALL.map(|view| {
+        .children(ws.left.panels.iter().map(|&view| {
             let workspace = workspace.clone();
             Button::new(("palette-panel", view as usize))
                 .icon(Icon::new(view.icon()))
                 .label(view.label())
                 .xsmall()
                 .ghost()
-                .selected(open && view == current)
+                .selected(ws.left.shows(view))
                 .on_click(move |_, window, cx| {
                     let _ = workspace.update(cx, |ws, cx| ws.show_panel(view, cx));
                     window.refresh();

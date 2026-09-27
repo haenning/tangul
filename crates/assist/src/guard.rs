@@ -4,6 +4,7 @@
 //! `SELECT` can still write).
 
 use crate::analyze::{significant, statements};
+use crate::dialect;
 use crate::lexer::{Token, TokenKind};
 
 /// A statement the guard has something to say about.
@@ -31,34 +32,6 @@ const WRITES: &[&str] = &[
 const READS: &[&str] = &[
     "SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "DESC", "TABLE", "VALUES",
 ];
-/// Functions a `SELECT` can call that change something (sessions, files, sequences,
-/// settings, other servers) or read files. Matched as substrings, lower case.
-const SIDE_EFFECTS: &[&str] = &[
-    "pg_terminate_backend",
-    "pg_cancel_backend",
-    "pg_reload_conf",
-    "pg_rotate_logfile",
-    "pg_promote",
-    "pg_notify",
-    "pg_advisory",
-    "set_config",
-    "nextval",
-    "setval",
-    "lo_import",
-    "lo_export",
-    "lo_unlink",
-    "pg_read_file",
-    "pg_read_binary_file",
-    "pg_ls_dir",
-    "pg_file_write",
-    "dblink",
-    "load_file",
-    "get_lock",
-    "release_lock",
-    "sys_exec",
-    "sys_eval",
-];
-
 /// A statement that isn't plainly a read: (keyword, statement text).
 pub type NotRead = (String, String);
 
@@ -101,7 +74,12 @@ fn not_read(sql: &str) -> Option<NotRead> {
         return Some(("FOR UPDATE".to_string(), statement));
     }
     let lower = sql.to_ascii_lowercase();
-    if let Some(name) = SIDE_EFFECTS.iter().find(|name| lower.contains(*name)) {
+    // Every dialect's, whichever database this goes to: stricter, and the guard
+    // needs no connection.
+    let side_effect = dialect::all()
+        .flat_map(|d| d.side_effect_functions())
+        .find(|name| lower.contains(*name));
+    if let Some(name) = side_effect {
         return Some((name.to_uppercase(), statement));
     }
     None

@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension as _, params};
-use tangul_assist::chart::ChartView;
+use tangul_core::chart::ChartView;
 
 use super::{Bookmark, Local};
 
@@ -57,8 +57,9 @@ impl Local {
         })
     }
 
-    /// Inserts or replaces a bookmark (matched by id).
-    pub fn upsert_bookmark(&self, b: &Bookmark) -> Result<()> {
+    /// Inserts or replaces a bookmark (matched by id). `fingerprint` is its SQL's
+    /// (`tangul_assist::lexer::fingerprint`), for [`Local::is_bookmarked`].
+    pub fn upsert_bookmark(&self, b: &Bookmark, fingerprint: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO bookmarks (id, name, sql, database_id, fingerprint, view, scheduled)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -69,7 +70,7 @@ impl Local {
                 b.name,
                 b.sql,
                 b.database_id,
-                tangul_assist::lexer::fingerprint(&b.sql),
+                fingerprint,
                 b.view.map(ChartView::to_key),
                 b.scheduled,
             ],
@@ -96,6 +97,23 @@ impl Local {
             .collect();
         matches.sort_by_key(|b| b.database_id.is_none());
         matches.into_iter().next()
+    }
+
+    /// Computes the fingerprints bookmarks were stored without (imported ones);
+    /// `fingerprint` is `tangul_assist::lexer::fingerprint`.
+    pub fn fill_missing_fingerprints(&self, fingerprint: impl Fn(&str) -> String) -> Result<()> {
+        let missing: Vec<(String, String)> = self
+            .conn
+            .prepare("SELECT id, sql FROM bookmarks WHERE fingerprint = ''")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, sql) in missing {
+            self.conn.execute(
+                "UPDATE bookmarks SET fingerprint = ?2 WHERE id = ?1",
+                params![id, fingerprint(&sql)],
+            )?;
+        }
+        Ok(())
     }
 
     /// Whether a query with this fingerprint is bookmarked for the database.
@@ -134,21 +152,28 @@ mod tests {
             database_id: db.map(Into::into),
             ..Default::default()
         };
-        l.upsert_bookmark(&b("1", "zeta", Some("pg"))).unwrap();
-        l.upsert_bookmark(&b("2", "Alpha", None)).unwrap();
-        l.upsert_bookmark(&b("3", "other", Some("mysql"))).unwrap();
+        l.upsert_bookmark(&b("1", "zeta", Some("pg")), "fp")
+            .unwrap();
+        l.upsert_bookmark(&b("2", "Alpha", None), "fp").unwrap();
+        l.upsert_bookmark(&b("3", "other", Some("mysql")), "fp3")
+            .unwrap();
         let ids: Vec<_> = l
             .bookmarks_for(Some("pg"))
             .into_iter()
             .map(|b| b.id)
             .collect();
         assert_eq!(ids, ["2", "1"]);
-        assert!(l.is_bookmarked(
-            "pg",
-            &tangul_assist::lexer::fingerprint("SELECT * FROM t WHERE id = 7")
-        ));
+        assert!(l.is_bookmarked("pg", "fp"));
+        // Another database's bookmark doesn't count.
+        assert!(!l.is_bookmarked("pg", "fp3"));
         l.delete_bookmark("2").unwrap();
         assert!(l.bookmark("2").is_none());
+        // Stored without one (imported): filled in later.
+        l.upsert_bookmark(&b("4", "imported", Some("pg")), "")
+            .unwrap();
+        l.fill_missing_fingerprints(|sql| format!("fp of {sql}"))
+            .unwrap();
+        assert!(l.is_bookmarked("pg", "fp of select * from t where id = 1"));
     }
 
     #[test]
@@ -161,11 +186,11 @@ mod tests {
             database_id: db.map(Into::into),
             ..Default::default()
         };
-        l.upsert_bookmark(&b("1", "select * from t where id = 1;", None))
+        l.upsert_bookmark(&b("1", "select * from t where id = 1;", None), "fp")
             .unwrap();
-        l.upsert_bookmark(&b("2", "select * from t where id = 1", Some("pg")))
+        l.upsert_bookmark(&b("2", "select * from t where id = 1", Some("pg")), "fp")
             .unwrap();
-        l.upsert_bookmark(&b("3", "select 2", Some("mysql")))
+        l.upsert_bookmark(&b("3", "select 2", Some("mysql")), "fp2")
             .unwrap();
         let found = |db: &str, sql: &str| l.bookmark_for_sql(db, sql).map(|b| b.id);
         // Trailing semicolons and whitespace don't matter; the own one wins.
@@ -191,16 +216,16 @@ mod tests {
             sql: "select 1".into(),
             ..Default::default()
         };
-        l.upsert_bookmark(&b).unwrap();
+        l.upsert_bookmark(&b, "fp").unwrap();
         assert_eq!(l.bookmark("1").unwrap(), b);
         b.view = ChartView::from_key("bars:1");
         b.scheduled = true;
-        l.upsert_bookmark(&b).unwrap();
+        l.upsert_bookmark(&b, "fp").unwrap();
         assert_eq!(l.bookmark("1").unwrap(), b);
         // Only bookmarks for one database run on a schedule.
         assert!(l.scheduled_bookmarks().is_empty());
         b.database_id = Some("pg".into());
-        l.upsert_bookmark(&b).unwrap();
+        l.upsert_bookmark(&b, "fp").unwrap();
         assert_eq!(l.scheduled_bookmarks(), vec![b]);
     }
 }

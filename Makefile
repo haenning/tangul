@@ -5,9 +5,13 @@ MYSQL_URL ?= root:@127.0.0.1:53306/app
 SSH_URL   ?= tangul:tangul@127.0.0.1:52222
 DEV_CONFIG := target/dev-config
 
+# Local settings (see .env.example), e.g. the certificate that signs local builds.
+-include .env
+export TANGUL_SIGN_IDENTITY
+
 .DEFAULT_GOAL := help
 .PHONY: help setup tools docker-up db-up db-down db-reset db-logs psql mysql run run-release run-dev \
-        test test-live fmt lint license license-check ci app dmg install
+        test test-live fmt lint license license-check ci app dmg install signing-cert
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -70,6 +74,9 @@ app: ## Build target/bundle/tangul.app and a DMG (UNIVERSAL=1 for Apple Silicon 
 	scripts/bundle-macos.sh $(if $(UNIVERSAL),--universal)
 
 dmg: app ## Same as app (the DMG is built alongside)
+
+signing-cert: ## Create a local code-signing certificate, so installs keep Keychain access
+	scripts/local-signing-cert.sh
 
 install: app ## Build the app and copy it to /Applications
 	rm -rf /Applications/tangul.app

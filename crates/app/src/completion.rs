@@ -1,10 +1,5 @@
 //! Bridges `tangul_assist::complete` into the editor's completion menu.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
-
 use anyhow::Result;
 use gpui_kit::component::input::{CompletionProvider, Rope, RopeExt as _};
 use gpui_kit::*;
@@ -13,23 +8,13 @@ use lsp_types::{
     TextEdit,
 };
 use tangul_assist::complete::{SuggestionKind, complete};
-use tangul_assist::schema::SchemaIndex;
-use tangul_assist::usage::Usage;
-use tangul_core::ConnId;
+use tangul_service::knowledge::Knowledge;
 
 use crate::query_tab::QueryTab;
 
-/// What completion knows per connection. Owned by the workspace, read by every tab.
-#[derive(Clone)]
-pub struct AssistData {
-    pub schema: Arc<SchemaIndex>,
-    pub usage: Arc<Usage>,
-}
-
-pub type SharedAssist = Rc<RefCell<HashMap<ConnId, AssistData>>>;
-
 pub struct SqlCompletion {
-    pub data: SharedAssist,
+    /// Schema and usage of the tab's connection, from the one pool.
+    pub knowledge: Knowledge,
     pub tab: WeakEntity<QueryTab>,
 }
 
@@ -49,7 +34,7 @@ impl CompletionProvider for SqlCompletion {
         let Some(conn) = self.tab.upgrade().and_then(|t| t.read(cx).conn_id(cx)) else {
             return empty();
         };
-        let Some(data) = self.data.borrow().get(&conn).cloned() else {
+        let Some((schema, usage)) = self.knowledge.for_conn(conn) else {
             return empty();
         };
         let rope = rope.clone();
@@ -67,7 +52,7 @@ impl CompletionProvider for SqlCompletion {
                     return Ok(CompletionResponse::Array(Vec::new()));
                 }
             }
-            let completion = complete(&text, offset, &data.schema, &data.usage);
+            let completion = complete(&text, offset, &schema, &usage);
             let range = lsp_types::Range {
                 start: rope.offset_to_position(completion.replace.start),
                 end: rope.offset_to_position(completion.replace.end),

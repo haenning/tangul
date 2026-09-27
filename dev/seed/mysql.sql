@@ -8,12 +8,12 @@ INSERT INTO digits VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9);
 
 CREATE TABLE users (
     id         INT PRIMARY KEY AUTO_INCREMENT,
-    email      VARCHAR(255) NOT NULL UNIQUE,
+    email      VARCHAR(255) NOT NULL UNIQUE COMMENT 'Login; unique',
     name       VARCHAR(255),
-    active     BOOLEAN NOT NULL DEFAULT TRUE,
+    active     BOOLEAN NOT NULL DEFAULT TRUE COMMENT 'False once the account is closed',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    meta       JSON
-);
+    meta       JSON COMMENT 'Settings as JSON: plan (free or pro) and n'
+) COMMENT = 'Registered customers';
 
 -- 100k rows from a digits cross join (portable, no recursive CTE limits).
 INSERT INTO users (email, name, active, meta)
@@ -29,11 +29,13 @@ FROM (
 CREATE TABLE orders (
     id      BIGINT PRIMARY KEY AUTO_INCREMENT,
     user_id INT NOT NULL,
-    total   DECIMAL(10, 2) NOT NULL,
-    status  VARCHAR(20) NOT NULL,
-    ordered DATE NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users (id)
-);
+    total   DECIMAL(10, 2) NOT NULL CHECK (total >= 0),
+    status  ENUM('open', 'paid', 'shipped', 'cancelled') NOT NULL
+              COMMENT 'Where an order is: open until paid, then shipped',
+    ordered DATE NOT NULL COMMENT 'Day the order was placed',
+    FOREIGN KEY (user_id) REFERENCES users (id),
+    INDEX orders_user_ordered (user_id, ordered)
+) COMMENT = 'Customer orders; totals in EUR';
 
 INSERT INTO orders (user_id, total, status, ordered)
 SELECT (n % 100000) + 1,
@@ -104,3 +106,12 @@ CREATE TABLE types_showcase (
 INSERT INTO types_showcase VALUES
     (1, UNHEX('DEADBEEF'), NOW(), REPEAT('long ', 200)),
     (2, NULL, NULL, 'Ümlaut ✓ emoji 🚀');
+
+-- A function with a comment, for the catalog (READS SQL DATA: allowed with binary
+-- logging on, MySQL 8's default).
+CREATE FUNCTION order_count(uid INT) RETURNS BIGINT READS SQL DATA
+COMMENT 'Number of orders of a user'
+RETURN (SELECT COUNT(*) FROM orders WHERE user_id = uid);
+
+-- Row estimates come from statistics.
+ANALYZE TABLE users, orders, addresses, sessions, tickets, audit_log;

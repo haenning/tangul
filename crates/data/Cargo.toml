@@ -11,7 +11,6 @@ dirs = "7.0.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.151"
-tangul-assist = { version = "0.1.0", path = "../assist" }
 tangul-core = { version = "0.1.0", path = "../core" }
 toml = "1.1.6"
 

@@ -11,6 +11,8 @@ const LABEL_LEN: usize = 120;
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteAction {
     Settings,
+    /// Run everything in the active query tab's editor.
+    RunAll,
     /// Bookmark id.
     Bookmark(String),
     /// SQL of the history entry.
@@ -41,11 +43,18 @@ pub struct PaletteGroup {
 
 /// Groups in display order; groups without entries are left out.
 pub fn groups(bookmarks: &[Bookmark], history: &[HistoryEntry]) -> Vec<PaletteGroup> {
-    let commands = vec![PaletteItem {
-        label: "Open settings".into(),
-        search: "preferences settings.json font size editor".into(),
-        action: PaletteAction::Settings,
-    }];
+    let commands = vec![
+        PaletteItem {
+            label: "Open settings".into(),
+            search: "preferences settings.json font size editor".into(),
+            action: PaletteAction::Settings,
+        },
+        PaletteItem {
+            label: "Run all statements  ⌘⇧↵".into(),
+            search: "execute script whole editor".into(),
+            action: PaletteAction::RunAll,
+        },
+    ];
     let bookmarks = bookmarks
         .iter()
         .map(|b| PaletteItem {

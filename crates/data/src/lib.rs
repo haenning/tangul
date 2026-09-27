@@ -34,6 +34,16 @@ impl Data {
         }
     }
 
+    /// No saved databases and in-memory stores: nothing is read from or written to
+    /// disk (tests).
+    pub fn in_memory() -> Self {
+        Self {
+            profiles: Profiles::in_memory(Vec::new()),
+            local: Local::open(None),
+            metrics: Metrics::open(None),
+        }
+    }
+
     /// Deletes a bookmark and the runs recorded for it.
     pub fn delete_bookmark(&self, id: &str) -> Result<()> {
         self.metrics.delete_bookmark(id);
