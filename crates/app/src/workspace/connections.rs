@@ -24,23 +24,20 @@ impl Workspace {
                 c.status = ConnStatus::Connecting;
                 cx.notify();
             });
+            self.knowledge.set_conn(user_id, id);
         } else {
             // Show (and complete against) the cached schema until the server answers.
-            let schema = self.schema_index(
-                user_id,
-                self.data.local.cached_schema(user_id).unwrap_or_default(),
-            );
+            let cached = self.data.local.cached_schema(user_id).unwrap_or_default();
+            self.set_schema(user_id, id, cached);
             let conn = cx.new(|_| Connection {
                 id,
                 name,
                 driver,
                 status: ConnStatus::Connecting,
-                schema,
                 stats: PoolStats::default(),
             });
             self.conns.insert(user_id.to_string(), conn);
         }
-        self.sync_assist(user_id, cx);
         cx.notify();
     }
 
@@ -312,9 +309,8 @@ impl Workspace {
                         if let Err(e) = self.data.local.save_schema(&user_id, &info) {
                             eprintln!("could not cache schema: {e:#}");
                         }
-                        let schema = self.schema_index(&user_id, info);
-                        self.update_conn(conn, cx, |c| c.schema = schema);
-                        self.sync_assist(&user_id, cx);
+                        self.set_schema(&user_id, conn, info);
+                        cx.notify();
                     }
                 }
                 Err(e) => window.push_notification(Notification::error(e), cx),

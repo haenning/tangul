@@ -15,8 +15,8 @@ impl Workspace {
 
     /// The table's name for generated SQL: without the default schema (`public`, or
     /// the MySQL connection's database) and quoted only where needed.
-    pub(super) fn sql_name(&self, table: &TableInfo, cx: &App) -> Option<String> {
-        let schema = &self.active_conn(cx)?.schema;
+    pub(super) fn sql_name(&self, table: &TableInfo) -> Option<String> {
+        let schema = self.active_schema()?;
         match schema.resolve(Some(&table.schema), &table.name) {
             Some(ix) => Some(schema.sql_name(ix)),
             None => self.qualified_name(table),
@@ -29,7 +29,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (Some(name), Some(db)) = (self.sql_name(table, cx), self.active_database()) else {
+        let (Some(name), Some(db)) = (self.sql_name(table), self.active_database()) else {
             return;
         };
         let sql = select_rows(dialect_for(db.driver), &name, OPEN_ROWS);
@@ -42,7 +42,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = self.sql_name(table, cx) else {
+        let Some(name) = self.sql_name(table) else {
             return;
         };
         self.run_in_new_tab(
@@ -68,16 +68,17 @@ impl Workspace {
         });
     }
 
-    pub(super) fn build_sidebar_rows(&self, search: &str, cx: &App) -> Vec<SidebarRow> {
-        let Some((user_id, state)) = self
+    pub(super) fn build_sidebar_rows(&self, search: &str) -> Vec<SidebarRow> {
+        let Some(user_id) = self
             .active_user
             .as_ref()
-            .and_then(|id| Some((id, self.conns.get(id)?.read(cx))))
+            .filter(|id| self.conns.contains_key(id.as_str()))
         else {
             return Vec::new();
         };
+        let schema_ix = self.schema_of(user_id);
         if !search.is_empty() {
-            return self.search_rows(&state.schema, search);
+            return self.search_rows(&schema_ix, search);
         }
         let mut rows = Vec::new();
         let favorites: Vec<SidebarRow> = self
@@ -86,9 +87,9 @@ impl Workspace {
             .favorites
             .iter()
             .filter_map(|(schema, name)| {
-                let ix = state.schema.resolve(Some(schema), name)?;
+                let ix = schema_ix.resolve(Some(schema), name)?;
                 Some(SidebarRow::Favorite {
-                    table: state.schema.table(ix).clone(),
+                    table: schema_ix.table(ix).clone(),
                 })
             })
             .collect();
@@ -102,8 +103,7 @@ impl Workspace {
             rows.push(SidebarRow::Heading(title.into()));
         }
         // Drivers return tables ordered by schema, then name.
-        let schemas: Vec<&[TableInfo]> = state
-            .schema
+        let schemas: Vec<&[TableInfo]> = schema_ix
             .tables()
             .chunk_by(|a, b| a.schema == b.schema)
             .collect();
@@ -443,7 +443,7 @@ impl Workspace {
                         let Some(ws) = weak.upgrade() else {
                             return menu;
                         };
-                        let list = ws.read(cx).table_suggestions(&menu_table, cx);
+                        let list = ws.read(cx).table_suggestions(&menu_table);
                         suggestions_menu(menu, &menu_table.name, list, &weak)
                     });
                 let revealed = !in_favorites
@@ -628,10 +628,8 @@ impl Workspace {
                     this.assign_active_tab(&user_id, window, cx);
                 }))
         };
-        match self
-            .active_conn(cx)
-            .map(|c| (&c.status, c.schema.tables().is_empty()))
-        {
+        let no_tables = self.active_schema().is_none_or(|s| s.tables().is_empty());
+        match self.active_conn(cx).map(|c| (&c.status, no_tables)) {
             None => Some(
                 body.child(message("Not connected.".into()))
                     .child(connect("Connect"))
@@ -667,7 +665,7 @@ impl Workspace {
             .as_deref()
             .map(|db| self.data.local.favorites(db))
             .unwrap_or_default();
-        self.panels.schema.rows = self.build_sidebar_rows(&search, cx);
+        self.panels.schema.rows = self.build_sidebar_rows(&search);
         if let Some((schema, table)) = self.panels.schema.reveal.take() {
             let target = self.panels.schema.rows.iter().position(|row| match row {
                 SidebarRow::Table { table: t } => {
@@ -683,9 +681,8 @@ impl Workspace {
                     .scroll_to_item(ix, ScrollStrategy::Center);
             }
         }
-        let has_schema = self
-            .active_conn(cx)
-            .is_some_and(|c| !c.schema.tables().is_empty());
+        let has_schema = self.active_conn(cx).is_some()
+            && self.active_schema().is_some_and(|s| !s.tables().is_empty());
         let no_hits = !search.is_empty() && self.panels.schema.rows.is_empty();
         let empty = self.render_sidebar_empty(cx);
         let theme = cx.theme();

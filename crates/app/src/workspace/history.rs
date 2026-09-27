@@ -73,34 +73,34 @@ impl Workspace {
             eprintln!("could not record history: {e:#}");
         }
         if succeeded {
-            if let Some(state) = self.conns.get(&run.user_id).map(|c| c.read(cx)) {
-                let learned = learn(&run.sql, &state.schema);
+            if self.conns.contains_key(&run.user_id) {
+                let schema = self.schema_of(&run.user_id);
+                let learned = learn(&run.sql, &schema);
                 let now = now_ms() / 1000;
                 if let Err(e) = self.data.local.record_usage(&db_id, &learned, now) {
                     eprintln!("could not record usage: {e:#}");
                 }
                 let usage = Arc::new(Usage::from_stats(now, self.data.local.usage(&db_id)));
-                self.usage.insert(db_id.clone(), usage.clone());
+                self.knowledge.set_usage(&db_id, usage.clone());
                 // Related rows (foreign keys, most used first) and UPDATE / DELETE
                 // statements in the result's context menu.
                 if let Some(tab) = &tab {
                     let columns = tab.read(cx).result_columns(cx);
-                    let mut links = related_links(&run.sql, &columns, &state.schema);
+                    let mut links = related_links(&run.sql, &columns, &schema);
                     if links.len() > 1 {
                         let bookmarked: Vec<_> = self
                             .data
                             .local
                             .bookmarks_for(Some(&db_id))
                             .iter()
-                            .flat_map(|b| learn(&b.sql, &state.schema))
+                            .flat_map(|b| learn(&b.sql, &schema))
                             .collect();
                         rank_links(&mut links, &usage, &bookmarked);
                     }
-                    let edit = row_edit(&run.sql, &columns, &state.schema);
-                    let facts = column_facts(&run.sql, &columns, &state.schema);
+                    let edit = row_edit(&run.sql, &columns, &schema);
+                    let facts = column_facts(&run.sql, &columns, &schema);
                     tab.update(cx, |t, cx| t.set_row_actions(links, edit, facts, cx));
                 }
-                self.sync_assist_for_db(&db_id, cx);
             }
             let runs = self.data.local.runs(&db_id, &fp);
             let hint = (runs >= BOOKMARK_HINT_RUNS && !self.data.local.is_bookmarked(&db_id, &fp))

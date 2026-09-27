@@ -14,7 +14,7 @@ impl Workspace {
         let engine = self.engine.clone();
         let tab = cx.new(|cx| QueryTab::new(id, conn, sql, engine, window, cx));
         let provider = Rc::new(SqlCompletion {
-            data: self.assist.clone(),
+            knowledge: self.knowledge.clone(),
             tab: tab.downgrade(),
         });
         tab.update(cx, |t, cx| t.set_completion(provider, cx));
@@ -276,17 +276,15 @@ impl Workspace {
                 let Some(conn) = tab.read(cx).conn.clone() else {
                     return;
                 };
-                let state = conn.read(cx);
-                let Some(ix) = state.schema.resolve(Some(schema), table) else {
+                let Some((known, _)) = self.knowledge.for_conn(conn.read(cx).id) else {
+                    return;
+                };
+                let Some(ix) = known.resolve(Some(schema), table) else {
                     return;
                 };
                 let event = TabEvent::OpenRelated {
                     title: table.clone(),
-                    sql: select_rows(
-                        state.schema.dialect(),
-                        &state.schema.sql_name(ix),
-                        OPEN_ROWS,
-                    ),
+                    sql: select_rows(known.dialect(), &known.sql_name(ix), OPEN_ROWS),
                 };
                 self.on_tab_event(tab, &event, window, cx);
             }

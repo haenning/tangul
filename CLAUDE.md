@@ -17,7 +17,10 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`,
   `metrics.db`, `settings.json`)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
-  (the assistant uses the database's optional assistant user), scheduled bookmarks
+  (the assistant uses the database's optional assistant user), scheduled bookmarks,
+  and `knowledge`: the one pool of what is known about the databases (schema per
+  user, usage per database). The editor, schema tree, results and the assistant all
+  read it; don't keep copies elsewhere
 - `crates/app`: the GPUI app
   - `workspace/`: layout and wiring; `sidebar.rs`: the sidebars left and right of the
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;

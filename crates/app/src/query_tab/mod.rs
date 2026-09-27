@@ -118,7 +118,7 @@ impl QueryTab {
         let editor = cx.new(|cx| SqlEditor::new(sql, window, cx));
         let results = cx.new(|cx| ResultView::new(window, cx));
         if let Some(conn) = &conn {
-            let dialect = conn.read(cx).schema.dialect();
+            let dialect = conn.read(cx).dialect();
             results.update(cx, |r, _| r.set_dialect(dialect));
         }
         let subscriptions = vec![
@@ -268,7 +268,7 @@ impl QueryTab {
             });
             self.in_transaction = false;
         }
-        let dialect = conn.read(cx).schema.dialect();
+        let dialect = conn.read(cx).dialect();
         self.results.update(cx, |r, _| r.set_dialect(dialect));
         self._conn_changes = Some(cx.observe(&conn, |_, _, cx| cx.notify()));
         self.conn = Some(conn);
@@ -281,7 +281,7 @@ impl QueryTab {
             return;
         }
         // Without a connection nothing runs; the workspace says so.
-        let dialect = self.conn.as_ref().map(|c| c.read(cx).schema.dialect());
+        let dialect = self.conn.as_ref().map(|c| c.read(cx).dialect());
         let take = self.editor.update(cx, |e, cx| match dialect {
             Some(d) => e.take_run(d, cx),
             None => e.take_run_all(cx),

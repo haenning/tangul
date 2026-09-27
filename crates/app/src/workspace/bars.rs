@@ -232,17 +232,17 @@ impl Workspace {
                 ("In transaction", s.pinned.to_string()),
             ],
         ));
-        let tables = state.schema.tables();
+        let Some(schema) = self.active_schema() else {
+            return sections;
+        };
+        let tables = schema.tables();
         let views = tables.iter().filter(|t| t.kind == TableKind::View).count();
         sections.push((
             "Schema",
             vec![
                 ("Tables", (tables.len() - views).to_string()),
                 ("Views", views.to_string()),
-                (
-                    "Foreign keys",
-                    state.schema.foreign_keys().len().to_string(),
-                ),
+                ("Foreign keys", schema.foreign_keys().len().to_string()),
             ],
         ));
         sections

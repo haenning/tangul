@@ -27,7 +27,6 @@ use value_panel::{Picked, ValueEvent, ValuePanel};
 // Shared by the status bar and the bookmarks panel.
 use bars::style_icon;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -77,6 +76,7 @@ use tangul_engine::{
     QueryOutput,
 };
 use tangul_service::connections::{Connections, Purpose};
+use tangul_service::knowledge::Knowledge;
 use tangul_service::schedule;
 
 use crate::{
@@ -84,7 +84,7 @@ use crate::{
     ToggleRightSidebar, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
-    completion::{AssistData, SharedAssist, SqlCompletion},
+    completion::SqlCompletion,
     connection::{ConnStatus, Connection},
     connection_form::{ConnectionForm, FormMode, FormOutput},
     file_tab::FileTab,
@@ -126,10 +126,9 @@ pub struct Workspace {
     engine: EngineHandle,
     /// Saved databases, local.db and metrics.db.
     data: Data,
-    /// Schema and usage per connection, shared with the editors' completion.
-    assist: SharedAssist,
-    /// Learned usage by database id.
-    usage: HashMap<String, Arc<Usage>>,
+    /// What is known about the databases (schema per user, usage per database):
+    /// the one pool completion, the schema tree, results and the assistant read.
+    knowledge: Knowledge,
     /// The sidebars left and right of the content, and their panels' state.
     left: Sidebar,
     right: Sidebar,
@@ -231,8 +230,7 @@ impl Workspace {
         let mut this = Self {
             engine,
             data,
-            assist: Rc::new(RefCell::new(HashMap::new())),
-            usage: HashMap::new(),
+            knowledge: Knowledge::default(),
             left,
             right,
             panels: Panels {

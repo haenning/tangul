@@ -1,18 +1,42 @@
-//! What completion and suggestions know: schema and learned usage per connection.
+//! Filling the knowledge pool (`tangul_service::knowledge`) from the connections and
+//! `local.db`, and reading from it.
 
 use super::*;
 
 impl Workspace {
+    /// The database's learned usage, loaded from `local.db` into the pool once.
     pub(super) fn usage_for(&mut self, db_id: &str) -> Arc<Usage> {
-        if let Some(u) = self.usage.get(db_id) {
-            return u.clone();
+        if let Some(u) = self.knowledge.usage(db_id) {
+            return u;
         }
         let u = Arc::new(Usage::from_stats(
             now_ms() / 1000,
             self.data.local.usage(db_id),
         ));
-        self.usage.insert(db_id.to_string(), u.clone());
+        self.knowledge.set_usage(db_id, u.clone());
         u
+    }
+
+    /// The schema of `user_id` from the pool; empty until it was opened.
+    pub(super) fn schema_of(&self, user_id: &str) -> Arc<SchemaIndex> {
+        self.knowledge
+            .schema(user_id)
+            .unwrap_or_else(|| self.schema_index(user_id, SchemaInfo::default()))
+    }
+
+    /// The active user's schema.
+    pub(super) fn active_schema(&self) -> Option<Arc<SchemaIndex>> {
+        Some(self.schema_of(self.active_user.as_deref()?))
+    }
+
+    /// Puts `user_id`'s schema into the pool, on connection `conn`.
+    pub(super) fn set_schema(&mut self, user_id: &str, conn: ConnId, info: SchemaInfo) {
+        let Some(db_id) = self.find_user(user_id).map(|(db, _)| db.id.clone()) else {
+            return;
+        };
+        let schema = self.schema_index(user_id, info);
+        self.knowledge.set_schema(user_id, &db_id, conn, schema);
+        self.usage_for(&db_id);
     }
 
     pub(super) fn schema_index(&self, user_id: &str, info: SchemaInfo) -> Arc<SchemaIndex> {
@@ -26,48 +50,16 @@ impl Workspace {
         Arc::new(SchemaIndex::new(info, dialect, default))
     }
 
-    /// Publishes a connection's schema and usage to the completion providers.
-    pub(super) fn sync_assist(&mut self, user_id: &str, cx: &App) {
-        let Some(db_id) = self.find_user(user_id).map(|(db, _)| db.id.clone()) else {
-            return;
-        };
-        let usage = self.usage_for(&db_id);
-        if let Some(state) = self.conns.get(user_id).map(|c| c.read(cx)) {
-            self.assist.borrow_mut().insert(
-                state.id,
-                AssistData {
-                    schema: state.schema.clone(),
-                    usage,
-                },
-            );
-        }
-    }
-
-    pub(super) fn sync_assist_for_db(&mut self, db_id: &str, cx: &App) {
-        let users: Vec<String> = self
-            .data
-            .profiles
-            .database(db_id)
-            .into_iter()
-            .flat_map(|db| &db.users)
-            .filter(|u| self.conns.contains_key(&u.id))
-            .map(|u| u.id.clone())
-            .collect();
-        for u in users {
-            self.sync_assist(&u, cx);
-        }
-    }
-
     /// Suggestions for a table of the active connection: learned from history first,
     /// then generated from its keys.
-    pub(super) fn table_suggestions(&self, table: &TableInfo, cx: &App) -> Vec<QuerySuggestion> {
-        let (Some(state), Some(db)) = (self.active_conn(cx), self.active_db.as_deref()) else {
+    pub(super) fn table_suggestions(&self, table: &TableInfo) -> Vec<QuerySuggestion> {
+        let (Some(schema), Some(db)) = (self.active_schema(), self.active_db.as_deref()) else {
             return Vec::new();
         };
-        let Some(ix) = state.schema.resolve(Some(&table.schema), &table.name) else {
+        let Some(ix) = schema.resolve(Some(&table.schema), &table.name) else {
             return Vec::new();
         };
         let patterns = self.data.local.patterns(db, 200);
-        suggest_for_table(ix, &state.schema, &patterns)
+        suggest_for_table(ix, &schema, &patterns)
     }
 }
