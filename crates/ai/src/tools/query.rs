@@ -111,6 +111,10 @@ impl Tool for RunReadonly {
         schema_of::<Input>()
     }
 
+    fn runs_sql(&self) -> bool {
+        true
+    }
+
     async fn call(&self, ctx: &Ctx, value: Value) -> Result<ToolOutput, ToolError> {
         let Input {
             sql,
@@ -142,6 +146,7 @@ impl Tool for RunReadonly {
             },
         };
         let text = text(&rows);
-        Ok(ToolOutput::new(&rows, text))
+        let n = rows.rows.len() as u64;
+        Ok(ToolOutput::new(&rows, text).with_rows(n))
     }
 }

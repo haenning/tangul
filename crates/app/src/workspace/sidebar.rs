@@ -141,6 +141,8 @@ impl SchemaTree {
 /// The history panel: the search and what it found.
 pub(super) struct HistoryList {
     pub(super) search: Entity<InputState>,
+    /// Whose runs are shown; none chosen: everyone's.
+    pub(super) sources: Vec<Source>,
     pub(super) entries: Vec<HistoryEntry>,
 }
 

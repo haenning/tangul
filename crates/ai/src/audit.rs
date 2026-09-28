@@ -18,6 +18,10 @@ pub struct ToolCall {
     pub connection: Option<String>,
     /// The input as JSON, cut to 2000 characters.
     pub input: String,
+    /// The whole statement, when the tool ran one on the database (`run_readonly`).
+    pub sql: Option<String>,
+    /// Rows it returned, when it ran one.
+    pub rows: Option<u64>,
     /// `ran`, `refused` (not allowed) or `failed`.
     pub outcome: &'static str,
     pub error: Option<String>,

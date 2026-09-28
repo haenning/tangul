@@ -323,6 +323,16 @@ async fn a_client_lists_and_calls_the_tools() {
             ("mcp", "run_readonly", "refused")
         ]
     );
+    // The statement a call ran, whole, and its rows: for the database's history.
+    let ran: Vec<_> = calls.iter().map(|c| (c.sql.as_deref(), c.rows)).collect();
+    assert_eq!(
+        ran,
+        [
+            (None, None),
+            (Some("SELECT count(*) AS n FROM users"), Some(1)),
+            (Some("DELETE FROM users"), None)
+        ]
+    );
     drop(calls);
     server.stop();
     std::fs::remove_dir_all(&dir).unwrap();
