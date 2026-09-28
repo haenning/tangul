@@ -70,7 +70,7 @@ use tangul_core::{
     TableKind, ValueAccess,
 };
 use tangul_data::Data;
-use tangul_data::local::{Bookmark, HistoryEntry, Local, NewHistory, bare_sql};
+use tangul_data::local::{Bookmark, HistoryEntry, Local, NewHistory, Source, bare_sql};
 use tangul_data::metrics;
 use tangul_engine::{
     Approval, Caller, Command, Decision, EngineHandle, Event, Guard, PoolStats, QueryOptions,
@@ -249,6 +249,7 @@ impl Workspace {
                 bookmark_search,
                 history: HistoryList {
                     search: history_search,
+                    sources: Vec::new(),
                     entries: Vec::new(),
                 },
             },

@@ -686,3 +686,118 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
     });
 }
+
+#[gpui_kit::test]
+fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    use tangul_data::local::{HistoryEntry, NewHistory, Source};
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles.databases.push(Database {
+                id: "db".into(),
+                name: "shop".into(),
+                driver: DriverKind::Postgres,
+                host: "localhost".into(),
+                port: 5432,
+                database: "shop".into(),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: "app".into(),
+                    user: "app".into(),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: Default::default(),
+                ai_tools: true,
+            });
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.connect("app", cx);
+        });
+        let mut s = crate::settings::Settings::default();
+        s.mcp.enabled = true;
+        s.mcp.port = 0;
+        crate::settings::set_for_test(s, cx);
+    });
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data
+                .local
+                .add_history(&NewHistory {
+                    database_id: "db",
+                    user_id: "app",
+                    sql: "SELECT 1",
+                    fingerprint: "one",
+                    entry: HistoryEntry {
+                        sql: "SELECT 1".into(),
+                        source: Source::App,
+                        started_at: 1,
+                        duration_ms: 1,
+                        rows: Some(1),
+                        error: None,
+                    },
+                })
+                .unwrap();
+            // What the server hands over after a client's run_readonly.
+            ws.record_mcp_call(
+                tangul_ai::ToolCall {
+                    at: 100,
+                    caller: "mcp",
+                    tool: "run_readonly".into(),
+                    connection: Some("shop".into()),
+                    input: String::new(),
+                    sql: Some("SELECT count(*) FROM orders".into()),
+                    rows: Some(1),
+                    outcome: "ran",
+                    error: None,
+                    duration_ms: 7,
+                },
+                cx,
+            );
+        });
+        window.click(button(Panel::History), cx);
+    });
+    let shown = |cx: &mut TestAppContext| -> Vec<(Source, String)> {
+        workspace.read_with(cx, |ws, _| {
+            ws.panels
+                .history
+                .entries
+                .iter()
+                .map(|e| (e.source, e.sql.clone()))
+                .collect()
+        })
+    };
+    // None chosen: everyone's, each with who ran it.
+    assert_eq!(
+        shown(cx),
+        [
+            (Source::Mcp, "SELECT count(*) FROM orders".to_string()),
+            (Source::App, "SELECT 1".into())
+        ]
+    );
+    step(handle, cx, |window, cx| {
+        assert!(window.find(("history-source-icon", 0usize)).visible());
+        assert!(window.find(("history-source-icon", 1usize)).visible());
+        window.click(("history-source", Source::Mcp as usize), cx);
+    });
+    assert_eq!(
+        shown(cx),
+        [(Source::Mcp, "SELECT count(*) FROM orders".to_string())]
+    );
+    step(handle, cx, |window, cx| {
+        // Filtered, the row still says who ran it.
+        assert!(window.find(("history-source-icon", 0usize)).visible());
+        window.click(("history-source", Source::App as usize), cx);
+    });
+    assert_eq!(shown(cx).len(), 2, "app and mcp chosen");
+    step(handle, cx, |window, cx| {
+        window.click(("history-source", Source::Mcp as usize), cx);
+        window.click(("history-source", Source::App as usize), cx);
+    });
+    assert_eq!(shown(cx).len(), 2, "none chosen again");
+    step(handle, cx, |window, cx| {
+        window.click(("history-source", Source::Ai as usize), cx)
+    });
+    assert!(shown(cx).is_empty(), "the assistant ran nothing yet");
+}

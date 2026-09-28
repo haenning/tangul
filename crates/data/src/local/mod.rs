@@ -35,10 +35,42 @@ pub struct Bookmark {
     pub scheduled: bool,
 }
 
+/// Who ran a query in the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Source {
+    /// You, in a tab.
+    #[default]
+    App,
+    /// The in-app assistant.
+    Ai,
+    /// An MCP client (Claude Code, …) through tangul's MCP server.
+    Mcp,
+}
+
+impl Source {
+    pub const ALL: [Self; 3] = [Self::App, Self::Ai, Self::Mcp];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Ai => "ai",
+            Self::Mcp => "mcp",
+        }
+    }
+
+    fn parse(text: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|s| s.as_str() == text)
+            .unwrap_or_default()
+    }
+}
+
 /// One executed script.
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub sql: String,
+    pub source: Source,
     /// Unix milliseconds.
     pub started_at: i64,
     pub duration_ms: i64,
@@ -111,6 +143,7 @@ const MIGRATIONS: &[&str] = &[
         rows INTEGER
     );
     CREATE INDEX audit_at ON audit (at DESC);",
+    "ALTER TABLE history ADD COLUMN source TEXT NOT NULL DEFAULT 'app';",
 ];
 
 pub struct Local {

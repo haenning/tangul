@@ -1,17 +1,20 @@
-//! Every executed script, with timing, rows and error.
+//! Every script run on a database, with timing, rows and error, and who ran it
+//! (you, the assistant, an MCP client). What is learned from it (patterns, the
+//! bookmark hint, the last user) comes from your own runs only.
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension as _, params};
 use tangul_core::usage::HistoryPattern;
 
-use super::{HistoryEntry, Local, NewHistory};
+use super::{HistoryEntry, Local, NewHistory, Source};
 
 impl Local {
     pub fn add_history(&self, h: &NewHistory) -> Result<()> {
         self.conn.execute(
             "INSERT INTO history
-               (database_id, user_id, sql, fingerprint, started_at, duration_ms, rows, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+               (database_id, user_id, sql, fingerprint, started_at, duration_ms, rows, error,
+                source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 h.database_id,
                 h.user_id,
@@ -21,13 +24,26 @@ impl Local {
                 h.entry.duration_ms,
                 h.entry.rows,
                 h.entry.error,
+                h.entry.source.as_str(),
             ],
         )?;
         Ok(())
     }
 
-    /// Most recent runs for a database, optionally filtered by a substring.
-    pub fn history(&self, db_id: &str, search: &str, limit: usize) -> Vec<HistoryEntry> {
+    /// Most recent runs for a database, optionally filtered by a substring and by
+    /// who ran them (`sources`; empty: everyone).
+    pub fn history(
+        &self,
+        db_id: &str,
+        search: &str,
+        sources: &[Source],
+        limit: usize,
+    ) -> Vec<HistoryEntry> {
+        let sources: Vec<&str> = match sources {
+            [] => Source::ALL.iter().map(|s| s.as_str()).collect(),
+            some => some.iter().map(|s| s.as_str()).collect(),
+        };
+        let sources = serde_json::to_string(&sources).unwrap_or_default();
         let pattern = format!(
             "%{}%",
             search
@@ -38,13 +54,15 @@ impl Local {
         let result = self
             .conn
             .prepare_cached(
-                "SELECT sql, started_at, duration_ms, rows, error FROM history
+                "SELECT sql, started_at, duration_ms, rows, error, source FROM history
                  WHERE database_id = ?1 AND sql LIKE ?2 ESCAPE '\\'
+                   AND source IN (SELECT value FROM json_each(?4))
                  ORDER BY started_at DESC LIMIT ?3",
             )
             .and_then(|mut stmt| {
-                stmt.query_map(params![db_id, pattern, limit as i64], |r| {
+                stmt.query_map(params![db_id, pattern, limit as i64, sources], |r| {
                     Ok(HistoryEntry {
+                        source: Source::parse(&r.get::<_, String>(5)?),
                         sql: r.get(0)?,
                         started_at: r.get(1)?,
                         duration_ms: r.get(2)?,
@@ -64,7 +82,7 @@ impl Local {
     pub fn last_user(&self, db_id: &str) -> Option<String> {
         self.conn
             .query_row(
-                "SELECT user_id FROM history WHERE database_id = ?1
+                "SELECT user_id FROM history WHERE database_id = ?1 AND source = 'app'
                  ORDER BY started_at DESC LIMIT 1",
                 params![db_id],
                 |r| r.get(0),
@@ -78,7 +96,8 @@ impl Local {
         self.conn
             .query_row(
                 "SELECT COUNT(*) FROM history
-                 WHERE database_id = ?1 AND fingerprint = ?2 AND error IS NULL",
+                 WHERE database_id = ?1 AND fingerprint = ?2 AND error IS NULL
+                   AND source = 'app'",
                 params![db_id, fingerprint],
                 |r| r.get(0),
             )
@@ -92,10 +111,11 @@ impl Local {
             .prepare_cached(
                 "SELECT (SELECT h2.sql FROM history h2
                          WHERE h2.database_id = h.database_id AND h2.fingerprint = h.fingerprint
+                           AND h2.source = 'app'
                          ORDER BY h2.started_at DESC LIMIT 1),
                         COUNT(*)
                  FROM history h
-                 WHERE h.database_id = ?1 AND h.error IS NULL
+                 WHERE h.database_id = ?1 AND h.error IS NULL AND h.source = 'app'
                  GROUP BY h.fingerprint
                  ORDER BY COUNT(*) DESC, MAX(h.started_at) DESC
                  LIMIT ?2",
@@ -123,6 +143,17 @@ mod tests {
     /// `fingerprint` stands in for the real one (the same for queries that differ
     /// only in values).
     fn run(local: &Local, sql: &str, fingerprint: &str, at: i64, error: Option<&str>) {
+        run_by(local, Source::App, sql, fingerprint, at, error);
+    }
+
+    fn run_by(
+        local: &Local,
+        source: Source,
+        sql: &str,
+        fingerprint: &str,
+        at: i64,
+        error: Option<&str>,
+    ) {
         local
             .add_history(&NewHistory {
                 database_id: "db",
@@ -131,6 +162,7 @@ mod tests {
                 fingerprint,
                 entry: HistoryEntry {
                     sql: sql.into(),
+                    source,
                     started_at: at,
                     duration_ms: 3,
                     rows: Some(1),
@@ -154,9 +186,44 @@ mod tests {
         );
         assert_eq!(p.len(), 2);
         assert_eq!(l.runs("db", "t by id"), 2);
-        assert_eq!(l.history("db", "", 10)[0].error.as_deref(), Some("boom"));
+        assert_eq!(
+            l.history("db", "", &[], 10)[0].error.as_deref(),
+            Some("boom")
+        );
         assert_eq!(l.last_user("db").as_deref(), Some("u"));
         assert_eq!(l.last_user("other"), None);
-        assert_eq!(l.history("db", "%", 10).len(), 1);
+        assert_eq!(l.history("db", "%", &[], 10).len(), 1);
+    }
+
+    #[test]
+    fn everyone_s_runs_filtered_by_who_ran_them() {
+        let l = Local::in_memory();
+        run(&l, "select 1", "one", 1, None);
+        run_by(&l, Source::Mcp, "select 2", "two", 2, None);
+        run_by(&l, Source::Mcp, "select 2", "two", 3, None);
+        run_by(&l, Source::Ai, "select 3", "three", 4, Some("boom"));
+        let seen = |sources: &[Source]| -> Vec<(Source, String)> {
+            l.history("db", "", sources, 10)
+                .into_iter()
+                .map(|e| (e.source, e.sql))
+                .collect()
+        };
+        // None chosen: everything, newest first.
+        assert_eq!(
+            seen(&[]),
+            [
+                (Source::Ai, "select 3".to_string()),
+                (Source::Mcp, "select 2".into()),
+                (Source::Mcp, "select 2".into()),
+                (Source::App, "select 1".into()),
+            ]
+        );
+        assert_eq!(seen(&[Source::App]), [(Source::App, "select 1".into())]);
+        assert_eq!(seen(&[Source::App, Source::Ai]).len(), 2);
+        assert_eq!(seen(&[Source::Mcp]).len(), 2);
+        // Only your runs are learned from.
+        let p = l.patterns("db", 10);
+        assert_eq!((p.len(), p[0].sql.as_str()), (1, "select 1"));
+        assert_eq!(l.runs("db", "two"), 0);
     }
 }

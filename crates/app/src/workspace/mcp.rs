@@ -1,6 +1,7 @@
 //! The MCP server (`tangul_ai::mcp`) while `mcp.enabled` is set: which databases it
-//! offers, its token (Keychain), where its tool calls are recorded (the audit log)
-//! and its button in the status bar.
+//! offers, its token (Keychain), where its tool calls are recorded (the audit log,
+//! and the statements they ran in the database's history) and its button in the
+//! status bar.
 
 use std::collections::HashSet;
 use std::sync::atomic::AtomicU64;
@@ -8,19 +9,27 @@ use std::sync::{Mutex, PoisonError, RwLock};
 
 use tangul_ai::mcp::{CtxSource, McpServer, new_token};
 use tangul_ai::{AuditSink, Ctx, Exposed, ProposalSink, SqlProposal, ToolCall};
-use tangul_data::local::AuditEntry;
+use tangul_data::local::{AuditEntry, Source};
 
 use super::*;
 
 /// Keychain account of the server's token.
 const TOKEN_ACCOUNT: &str = "mcp-token";
 
-/// Fields drop in order: the proposal task goes before the server, so the server
+/// What the server's thread hands to the window.
+enum McpEvent {
+    /// A call that ran a statement: into the database's history.
+    Ran(ToolCall),
+    /// Statements to open in a tab (`propose_sql`).
+    Proposed(SqlProposal),
+}
+
+/// Fields drop in order: the event task goes before the server, so the server
 /// closing its end never wakes the task from the server's thread.
 #[derive(Default)]
 pub(super) struct Mcp {
-    /// Opens the statements clients propose (`propose_sql`) in tabs.
-    proposals: Option<Task<()>>,
+    /// Takes the server's events (see [`McpEvent`]) in the window.
+    events: Option<Task<()>>,
     server: Option<McpServer>,
     /// The port it could not start on, and why.
     failed: Option<(u16, String)>,
@@ -55,17 +64,20 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Stops the server, and the task opening its proposals first.
+    /// Stops the server, and the task taking its events first.
     fn stop_mcp(&mut self) {
-        self.mcp.proposals = None;
+        self.mcp.events = None;
         self.mcp.server = None;
     }
 
     fn start_mcp(&mut self, port: u16, cx: &mut Context<Self>) {
         let token = self.mcp_token();
         let (knowledge, engine) = (self.knowledge.clone(), self.engine.clone());
-        let (exposed, sink) = (self.mcp.exposed.clone(), self.mcp_audit());
-        let proposals = self.mcp_proposals(cx);
+        let events = self.mcp_events(cx);
+        let (exposed, sink) = (self.mcp.exposed.clone(), self.mcp_audit(events.clone()));
+        let proposals: ProposalSink = Arc::new(move |proposal| {
+            let _ = events.try_send(McpEvent::Proposed(proposal));
+        });
         let source: CtxSource = Arc::new(move || {
             let exposed = exposed
                 .read()
@@ -85,30 +97,89 @@ impl Workspace {
         }
     }
 
-    /// Where clients' proposals go: to this window, which opens each in a tab.
-    pub(super) fn mcp_proposals(&mut self, cx: &mut Context<Self>) -> ProposalSink {
-        let (tx, rx) = async_channel::unbounded::<SqlProposal>();
-        self.mcp.proposals = Some(cx.spawn(async move |this, cx| {
-            while let Ok(proposal) = rx.recv().await {
+    /// Where the server's events go: to this window, which records the statements
+    /// clients ran in the history and opens their proposals in tabs.
+    fn mcp_events(&mut self, cx: &mut Context<Self>) -> async_channel::Sender<McpEvent> {
+        let (tx, rx) = async_channel::unbounded::<McpEvent>();
+        self.mcp.events = Some(cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv().await {
                 // The workspace's window (there is one at a time).
-                let opened = cx.update(|cx| {
+                let handled = cx.update(|cx| {
                     let window = cx.windows().first().copied()?;
                     window
                         .update(cx, |_, window, cx| {
-                            this.update(cx, |ws, cx| ws.open_proposal(proposal, window, cx))
-                                .ok()
+                            this.update(cx, |ws, cx| match event {
+                                McpEvent::Ran(call) => ws.record_mcp_call(call, cx),
+                                McpEvent::Proposed(p) => ws.open_proposal(p, window, cx),
+                            })
+                            .ok()
                         })
                         .ok()
                         .flatten()
                 });
-                if opened.is_none() {
+                if handled.is_none() {
                     break;
                 }
             }
         }));
+        tx
+    }
+
+    /// A proposal from a client, as the server hands it over (tests).
+    #[cfg(test)]
+    pub(super) fn mcp_proposals(&mut self, cx: &mut Context<Self>) -> ProposalSink {
+        let events = self.mcp_events(cx);
         Arc::new(move |proposal| {
-            let _ = tx.try_send(proposal);
+            let _ = events.try_send(McpEvent::Proposed(proposal));
         })
+    }
+
+    /// Records the statement a client's call ran in its database's history.
+    pub(super) fn record_mcp_call(&mut self, call: ToolCall, cx: &mut Context<Self>) {
+        let Some(sql) = call.sql.as_deref() else {
+            return;
+        };
+        let user = {
+            let exposed = self
+                .mcp
+                .exposed
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            let named = |e: &&Exposed| match &call.connection {
+                Some(name) => e.name.eq_ignore_ascii_case(name),
+                None => exposed.len() == 1,
+            };
+            exposed.iter().find(named).map(|e| e.user.clone())
+        };
+        let Some(user) = user else {
+            return;
+        };
+        let Some(db_id) = self.find_user(&user).map(|(db, _)| db.id.clone()) else {
+            return;
+        };
+        // Passwords (`CREATE ROLE … PASSWORD '…'`) are never kept.
+        let sql = tangul_assist::redact::redact(sql);
+        let fp = fingerprint(&sql);
+        let entry = NewHistory {
+            database_id: &db_id,
+            user_id: &user,
+            sql: &sql,
+            fingerprint: &fp,
+            entry: HistoryEntry {
+                sql: sql.to_string(),
+                source: Source::Mcp,
+                started_at: call.at - call.duration_ms,
+                duration_ms: call.duration_ms,
+                rows: call.rows.map(|n| n as i64),
+                error: call.error,
+            },
+        };
+        if let Err(e) = self.data.local.add_history(&entry) {
+            eprintln!("could not record history: {e:#}");
+        }
+        if self.active_db.as_deref() == Some(db_id.as_str()) {
+            self.refresh_history(cx);
+        }
     }
 
     /// Opens a proposal in a new tab, not run, on your connection to its database.
@@ -150,12 +221,16 @@ impl Workspace {
     }
 
     /// Writes each tool call to the audit log (its own handle on `local.db`, as the
-    /// calls come from the server's thread).
-    fn mcp_audit(&self) -> AuditSink {
+    /// calls come from the server's thread), and hands the ones that ran a statement
+    /// to the window for the history (a refused one never ran).
+    fn mcp_audit(&self, events: async_channel::Sender<McpEvent>) -> AuditSink {
         let local = Mutex::new(Local::open(self.data.profiles.dir()));
         let calls = self.mcp.calls.clone();
         Arc::new(move |call: ToolCall| {
             calls.fetch_add(1, Ordering::Relaxed);
+            if call.sql.is_some() && call.outcome != "refused" {
+                let _ = events.try_send(McpEvent::Ran(call.clone()));
+            }
             let entry = AuditEntry {
                 at: call.at,
                 caller: call.caller.into(),

@@ -101,6 +101,7 @@ mod tests {
 
     fn history(sql: &str) -> HistoryEntry {
         HistoryEntry {
+            source: Default::default(),
             sql: sql.into(),
             started_at: 0,
             duration_ms: 1,
