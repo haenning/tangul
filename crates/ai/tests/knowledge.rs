@@ -554,6 +554,13 @@ async fn every_call_is_recorded() {
         )
         .await;
     let _ = registry.call(&ctx, "drop_table", json!({})).await;
+    let _ = registry
+        .call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": "CREATE ROLE r LOGIN PASSWORD 'hunter2'"}),
+        )
+        .await;
     let calls = calls.lock().unwrap();
     let seen: Vec<_> = calls
         .iter()
@@ -572,7 +579,13 @@ async fn every_call_is_recorded() {
             ("mcp", "describe_table", Some("shop"), "ran"),
             ("mcp", "column_profile", Some("shop"), "refused"),
             ("mcp", "drop_table", Some("shop"), "failed"),
+            ("mcp", "propose_sql", Some("shop"), "refused"),
         ]
+    );
+    // Passwords never reach the audit log.
+    assert_eq!(
+        calls[3].input,
+        r#"{"sql":"CREATE ROLE r LOGIN PASSWORD '***'"}"#
     );
     assert_eq!(calls[0].input, r#"{"table":"orders"}"#);
     assert!(

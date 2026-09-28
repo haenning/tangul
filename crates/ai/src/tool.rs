@@ -8,6 +8,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tangul_assist::redact::redact;
 
 use crate::audit::{ToolCall, clip};
 use crate::ctx::Ctx;
@@ -139,14 +140,19 @@ impl Registry {
                     [only] => Some(only.name.clone()),
                     _ => None,
                 });
-            (*caller, sink.clone(), connection, clip(&input.to_string()))
+            // Passwords in SQL (`… PASSWORD '…'`) are never kept.
+            let mut logged = input.clone();
+            if let Some(Value::String(sql)) = logged.get_mut("sql") {
+                *sql = redact(sql).into_owned();
+            }
+            (*caller, sink.clone(), connection, clip(&logged.to_string()))
         });
         let tool = self.tools.iter().find(|t| t.name() == name);
         let sql = tool
             .filter(|t| t.runs_sql())
             .and_then(|_| input.get("sql"))
             .and_then(Value::as_str)
-            .map(str::to_string);
+            .map(|sql| redact(sql).into_owned());
         let result = match tool {
             Some(tool) => tool.call(ctx, input).await,
             None => Err(ToolError::NotFound(format!("no tool named {name}"))),
