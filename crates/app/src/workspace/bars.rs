@@ -589,7 +589,7 @@ pub(super) fn ai_menu(
                 }),
         );
     }
-    menu = menu.separator().label("The AI may read from the rows");
+    menu = menu.separator().label("Value profiles for the AI");
     for access in ValueAccess::ALL {
         let (ws, db_id) = (workspace.clone(), db_id.to_string());
         menu = menu.item(
@@ -600,8 +600,19 @@ pub(super) fn ai_menu(
                 }),
         );
     }
-    menu
+    menu.item(PopupMenuItem::element(|_, cx| {
+        div()
+            .max_w(px(TEXT_WIDTH))
+            .whitespace_normal()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(VALUES_NOTE)
+    }))
 }
+
+/// Under the value profile levels: what they don't limit.
+const VALUES_NOTE: &str = "The AI's own queries return rows whatever this says; the \
+    grants of its database user decide what it can read.";
 
 /// What the title bar says while the AI connects as your own user.
 const SAME_USER_NOTE: &str = "The AI connects as your own user: it can read whatever you \

@@ -524,7 +524,7 @@ async fn column_values_only_with_the_users_consent() {
         )
         .await,
         ToolError::NotAllowed(
-            "reading from the rows is off for this database; the user can allow \
+            "value profiles are off for this database; the user can allow \
              statistics or values in the AI menu of the title bar"
                 .into()
         )

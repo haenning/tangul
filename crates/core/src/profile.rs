@@ -63,8 +63,8 @@ pub struct Database {
     /// `None` uses the user selected in the app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_user: Option<String>,
-    /// What the assistant may read from the rows (value profiles). Nothing unless
-    /// the user allows it.
+    /// The value profiles the assistant may take (none unless the user allows them).
+    /// Its own queries return rows either way: the AI user's grants decide those.
     #[serde(default, skip_serializing_if = "ValueAccess::is_none")]
     pub ai_values: ValueAccess,
     /// AI tools (MCP clients, the assistant) may use this database. On unless the
@@ -177,11 +177,12 @@ impl ConnectConfig {
     }
 }
 
-/// What the assistant may read from a database's rows, for value profiles.
+/// The value profiles the assistant may take of a database's columns. Not a limit on
+/// its queries, which return whatever rows its database user may read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueAccess {
-    /// Nothing from the rows.
+    /// No value profiles.
     #[default]
     None,
     /// Counts only: rows looked at, NULLs, distinct values. No values.
@@ -213,7 +214,7 @@ impl ValueAccess {
 
     pub fn label(self) -> &'static str {
         match self {
-            ValueAccess::None => "Nothing from the rows",
+            ValueAccess::None => "No value profiles",
             ValueAccess::Statistics => "Statistics: NULL share, distinct count",
             ValueAccess::Values => "Values: range and most frequent values",
         }

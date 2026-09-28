@@ -526,7 +526,7 @@ impl Render for ConnectionForm {
                             .gap_2()
                             .items_center()
                             .flex_wrap()
-                            .child(div().text_xs().child("AI reads"))
+                            .child(div().text_xs().child("Value profiles"))
                             .children(ValueAccess::ALL.map(|access| {
                                 let b = Button::new(SharedString::from(format!(
                                     "ai-values-{access:?}"
