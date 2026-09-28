@@ -11,7 +11,7 @@ export TANGUL_SIGN_IDENTITY
 
 .DEFAULT_GOAL := help
 .PHONY: help setup tools docker-up db-up db-down db-reset db-logs psql mysql run run-release run-dev \
-        test test-live fmt lint license license-check ci app dmg install signing-cert
+        test test-live fmt lint license license-check ci app dmg install signing-cert release
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -77,6 +77,9 @@ dmg: app ## Same as app (the DMG is built alongside)
 
 signing-cert: ## Create a local code-signing certificate, so installs keep Keychain access
 	scripts/local-signing-cert.sh
+
+release: ## Release main: asks for the version, bumps and tags it, merges main into dev
+	scripts/release.sh
 
 install: app ## Build the app and copy it to /Applications
 	rm -rf /Applications/tangul.app
