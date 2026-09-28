@@ -282,11 +282,17 @@ impl Workspace {
                 continue;
             }
             let db = db.clone();
-            let Some(conn) =
-                self.connections
-                    .connect_assistant(&self.engine, &mut self.data.profiles, &user_id)
-            else {
-                continue;
+            // No AI connection: shown in the title bar, and the database isn't offered.
+            let conn = match self.connections.connect_assistant(
+                &self.engine,
+                &mut self.data.profiles,
+                &user_id,
+            ) {
+                Ok(conn) => conn,
+                Err(problem) => {
+                    self.ai_problems.insert(db.id.clone(), problem);
+                    continue;
+                }
             };
             // Clients name a database by it, so no two may share one.
             let base = db.display_name();

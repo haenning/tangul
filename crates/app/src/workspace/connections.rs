@@ -33,6 +33,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Checked again with the new user.
+        self.ai_problems.remove(db_id);
         self.update_ai(db_id, |db| db.assistant_user = user, window, cx);
         self.check_ai_user(cx);
     }
@@ -53,11 +55,17 @@ impl Workspace {
         else {
             return;
         };
-        let Some(conn) =
-            self.connections
-                .connect_assistant(&self.engine, &mut self.data.profiles, &user_id)
-        else {
-            return;
+        let conn = match self.connections.connect_assistant(
+            &self.engine,
+            &mut self.data.profiles,
+            &user_id,
+        ) {
+            Ok(conn) => conn,
+            Err(problem) => {
+                self.ai_problems.insert(db_id, problem);
+                cx.notify();
+                return;
+            }
         };
         let (engine, query) = (self.engine.clone(), QueryId(self.next_id()));
         let options = QueryOptions {
@@ -79,6 +87,46 @@ impl Workspace {
                 Err(e) => eprintln!("could not check the AI user's rights: {}", e.message),
             });
         });
+    }
+
+    /// The database the AI's connection `conn` belongs to.
+    fn ai_database(&self, conn: ConnId) -> Option<(String, String)> {
+        let user_id = self.connections.key(conn)?;
+        let (db, user) = self.find_user(user_id)?;
+        Some((db.id.clone(), user.user.clone()))
+    }
+
+    /// The AI's connection `conn` could not connect: shown in the title bar (and
+    /// once as a notification), never answered by connecting as someone else. It
+    /// tries again, as the same user, the next time the databases are offered.
+    pub(super) fn ai_connect_failed(
+        &mut self,
+        conn: ConnId,
+        error: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found = self.ai_database(conn);
+        self.connections.forget(conn);
+        let Some((db_id, user)) = found else {
+            return;
+        };
+        let problem = format!("The AI could not connect as {user}: {error}");
+        if self.ai_problems.get(&db_id) != Some(&problem) {
+            window.push_notification(Notification::error(problem.clone()), cx);
+            self.ai_problems.insert(db_id, problem);
+            self.ai_warning_pulse += 1;
+        }
+        cx.notify();
+    }
+
+    /// The AI's connection `conn` is up: nothing to report any more.
+    pub(super) fn ai_connected(&mut self, conn: ConnId, cx: &mut Context<Self>) {
+        if let Some((db_id, _)) = self.ai_database(conn)
+            && self.ai_problems.remove(&db_id).is_some()
+        {
+            cx.notify();
+        }
     }
 
     /// The AI's user of `db_id` may change or drop `tables` tables.

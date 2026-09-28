@@ -159,6 +159,9 @@ pub struct Workspace {
     /// counter that restarts the title bar's warning pulse for each new result.
     ai_check: Task<()>,
     ai_warning_pulse: u64,
+    /// Why the AI has no connection to a database, by database id: shown in the
+    /// title bar until it connects (it never connects as anyone else instead).
+    ai_problems: HashMap<String, String>,
     /// The MCP server, while `mcp.enabled` is set.
     mcp: mcp::Mcp,
     focus_handle: FocusHandle,
@@ -265,6 +268,7 @@ impl Workspace {
             monitor: Monitor::new(monitor_tick),
             ai_check: Task::ready(()),
             ai_warning_pulse: 0,
+            ai_problems: HashMap::new(),
             mcp: mcp::Mcp::default(),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![

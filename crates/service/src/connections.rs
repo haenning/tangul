@@ -88,19 +88,21 @@ impl Connections {
         Some(id)
     }
 
-    /// Connects the AI assistant for `user_id`'s database: as the database's assistant
-    /// user if one is set (and still saved), else as `user_id`.
+    /// Connects the AI assistant for `user_id`'s database, as [`assistant_user`] says.
+    /// Never as anyone else: when that user is gone, the error says so and the AI
+    /// has no connection to the database.
     pub fn connect_assistant(
         &mut self,
         engine: &EngineHandle,
         profiles: &mut Profiles,
         user_id: &str,
-    ) -> Option<ConnId> {
+    ) -> Result<ConnId, String> {
         let as_user = assistant_user(profiles, user_id)?;
         if let Some(conn) = self.get(Purpose::Assistant, &as_user) {
-            return Some(conn);
+            return Ok(conn);
         }
         self.connect_user(engine, profiles, &as_user, Purpose::Assistant)
+            .ok_or_else(|| format!("The AI's user {as_user} is not saved"))
     }
 
     /// The connection to a local SQLite file, opened read-only if it isn't yet.
@@ -134,14 +136,21 @@ impl Connections {
     }
 }
 
-/// The user (id) the assistant connects as for `user_id`'s database.
-pub fn assistant_user(profiles: &Profiles, user_id: &str) -> Option<String> {
-    let (db, _) = profiles.user(user_id)?;
-    let chosen = db
-        .assistant_user
-        .as_deref()
-        .filter(|id| db.users.iter().any(|u| u.id == *id));
-    Some(chosen.unwrap_or(user_id).to_string())
+/// The user (id) the assistant connects as for `user_id`'s database: the
+/// database's AI user, or `user_id` itself when none is chosen ("same as your
+/// user"). A chosen AI user that no longer exists is an error, never a reason to
+/// connect as `user_id` instead.
+pub fn assistant_user(profiles: &Profiles, user_id: &str) -> Result<String, String> {
+    let (db, _) = profiles
+        .user(user_id)
+        .ok_or_else(|| format!("The user {user_id} is not saved"))?;
+    match db.assistant_user.as_deref() {
+        None => Ok(user_id.to_string()),
+        Some(id) if db.users.iter().any(|u| u.id == id) => Ok(id.to_string()),
+        Some(id) => Err(format!(
+            "The AI's user {id} no longer exists; choose one in the AI menu"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -180,16 +189,17 @@ mod tests {
             ai_tools: true,
         };
         let profiles = Profiles::in_memory(vec![db(Some("reader"))]);
-        assert_eq!(
-            assistant_user(&profiles, "admin").as_deref(),
-            Some("reader")
-        );
-        // Not set, or a user that no longer exists: the selected user.
+        assert_eq!(assistant_user(&profiles, "admin"), Ok("reader".into()));
+        // Not set: the selected user ("same as your user").
         let profiles = Profiles::in_memory(vec![db(None)]);
-        assert_eq!(assistant_user(&profiles, "admin").as_deref(), Some("admin"));
+        assert_eq!(assistant_user(&profiles, "admin"), Ok("admin".into()));
+        // A user that no longer exists: an error, never the selected user instead.
         let profiles = Profiles::in_memory(vec![db(Some("gone"))]);
-        assert_eq!(assistant_user(&profiles, "admin").as_deref(), Some("admin"));
-        assert_eq!(assistant_user(&profiles, "nobody"), None);
+        assert_eq!(
+            assistant_user(&profiles, "admin"),
+            Err("The AI's user gone no longer exists; choose one in the AI menu".into())
+        );
+        assert!(assistant_user(&profiles, "nobody").is_err());
     }
 
     #[test]
@@ -235,7 +245,7 @@ mod tests {
         );
         let conn = c.connect_assistant(&engine, &mut profiles, "u").unwrap();
         assert_eq!(c.get(Purpose::Assistant, "u"), Some(conn));
-        assert_eq!(c.connect_assistant(&engine, &mut profiles, "u"), Some(conn));
+        assert_eq!(c.connect_assistant(&engine, &mut profiles, "u"), Ok(conn));
         let options = QueryOptions::new(Caller::Assistant);
         let out = engine
             .query(

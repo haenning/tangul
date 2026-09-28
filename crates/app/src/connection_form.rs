@@ -483,10 +483,13 @@ impl Render for ConnectionForm {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(
-                                "A user that may only read keeps the assistant from changing \
-                                 data, whatever it asks for.",
-                            ),
+                            .child(if current.is_none() {
+                                "Selected user: the AI reads with your user's rights. A user \
+                                 that may only read on the server is the safer choice."
+                            } else {
+                                "The AI connects only as this user; if it can't, tangul says \
+                                 so and never uses yours instead."
+                            }),
                     )
                     .when(can_set_up, |this| {
                         this.child(

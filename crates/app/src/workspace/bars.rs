@@ -38,17 +38,37 @@ impl Workspace {
                 .map(|u| (u.id.clone(), u.user.clone()))
                 .collect();
             let ai_user = db.assistant_user.clone();
-            let label = ai_user
-                .as_deref()
-                .or(active_user.as_deref())
-                .and_then(|id| db.user(id))
-                .map_or("No user".into(), |u| u.user.clone());
+            // A chosen user that is gone: the AI has no connection (never yours
+            // instead).
+            let missing = ai_user.as_deref().filter(|id| db.user(id).is_none());
+            let label = match missing {
+                Some(_) => "Missing user".into(),
+                None => ai_user
+                    .as_deref()
+                    .or(active_user.as_deref())
+                    .and_then(|id| db.user(id))
+                    .map_or("No user".into(), |u| u.user.clone()),
+            };
             let (db_id, values, weak) = (db.id.clone(), db.ai_values, weak.clone());
             let writable = self.knowledge.ai_writable(&db.id).filter(|n| *n > 0);
-            let warning = writable.map(ai_user_warning);
-            let (color, tooltip): (Hsla, SharedString) = match &warning {
-                Some(w) => (theme.danger, w.clone().into()),
-                None => (
+            let problem = match missing {
+                Some(id) => Some(format!(
+                    "The AI's user {id} no longer exists, so the AI can't use this \
+                     database. Choose its user below."
+                )),
+                None => self.ai_problems.get(&db.id).cloned(),
+            };
+            let alerts: Vec<String> = problem
+                .into_iter()
+                .chain(writable.map(ai_user_warning))
+                .collect();
+            let warning = (!alerts.is_empty()).then(|| alerts.join("\n\n"));
+            // Allowed, but the user should know what it means.
+            let note = ai_user.is_none().then(|| SAME_USER_NOTE.to_string());
+            let (color, tooltip): (Hsla, SharedString) = match (&warning, &note) {
+                (Some(w), _) => (theme.danger, w.clone().into()),
+                (None, Some(n)) => (theme.warning, n.clone().into()),
+                (None, None) => (
                     theme.muted_foreground,
                     "The database user the AI connects as".into(),
                 ),
@@ -59,22 +79,28 @@ impl Workspace {
                 .ghost()
                 .small()
                 .text_color(color)
-                // The warning's long tooltip is the wrapper's (it wraps).
-                .when(warning.is_none(), |b| b.tooltip(tooltip.clone()))
-                .dropdown_menu(move |menu, _, _| {
-                    ai_menu(
-                        menu,
-                        &db_id,
-                        &users,
-                        ai_user.as_deref(),
-                        values,
-                        warning.as_deref(),
-                        &weak,
-                    )
+                // A long tooltip is the wrapper's (it wraps).
+                .when(warning.is_none() && note.is_none(), |b| {
+                    b.tooltip(tooltip.clone())
+                })
+                .dropdown_menu({
+                    let (warning, note) = (warning.clone(), note.clone());
+                    move |menu, _, _| {
+                        ai_menu(
+                            menu,
+                            &db_id,
+                            &users,
+                            ai_user.as_deref(),
+                            values,
+                            warning.as_deref(),
+                            note.as_deref(),
+                            &weak,
+                        )
+                    }
                 });
-            match writable {
+            match (&warning, &note) {
                 // Pulses three times when the answer comes, then stays red.
-                Some(_) => div()
+                (Some(_), _) => div()
                     .id("ai-user-warning")
                     .test_support()
                     .tooltip(wrapped_tooltip(tooltip))
@@ -84,7 +110,13 @@ impl Workspace {
                         |el, t| el.opacity(pulse(t)),
                     ))
                     .into_any_element(),
-                None => button.into_any_element(),
+                (None, Some(_)) => div()
+                    .id("ai-user-note")
+                    .test_support()
+                    .tooltip(wrapped_tooltip(tooltip))
+                    .child(button)
+                    .into_any_element(),
+                (None, None) => button.into_any_element(),
             }
         });
 
@@ -507,7 +539,9 @@ pub(super) fn database_menu(
 }
 
 /// The AI's database user (the tab's user when none is set) and whether it may
-/// read column values.
+/// read column values. `warning`: what is wrong (red); `note`: what the choice
+/// means.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn ai_menu(
     mut menu: PopupMenu,
     db_id: &str,
@@ -515,20 +549,25 @@ pub(super) fn ai_menu(
     current: Option<&str>,
     values: ValueAccess,
     warning: Option<&str>,
+    note: Option<&str>,
     workspace: &WeakEntity<Workspace>,
 ) -> PopupMenu {
-    if let Some(warning) = warning {
+    for (text, danger) in [(warning, true), (note, false)] {
+        let Some(text) = text else {
+            continue;
+        };
         // Wrapped to the menu's width, not one long line out of it.
-        let warning: SharedString = warning.to_string().into();
+        let text: SharedString = text.to_string().into();
         menu = menu
             .item(PopupMenuItem::element(move |_, cx| {
+                let theme = cx.theme();
                 h_flex()
                     .max_w(px(TEXT_WIDTH))
                     .gap_2()
                     .items_start()
-                    .text_color(cx.theme().danger)
+                    .text_color(if danger { theme.danger } else { theme.warning })
                     .child(Icon::new(IconName::TriangleAlert).xsmall().mt_0p5())
-                    .child(div().flex_1().whitespace_normal().child(warning.clone()))
+                    .child(div().flex_1().whitespace_normal().child(text.clone()))
             }))
             .separator();
     }
@@ -563,6 +602,11 @@ pub(super) fn ai_menu(
     }
     menu
 }
+
+/// What the title bar says while the AI connects as your own user.
+const SAME_USER_NOTE: &str = "The AI connects as your own user: it can read whatever you \
+    can, and what it reads goes to the AI model. tangul never runs its writes, but a user \
+    that may only read on the server is the safer choice.";
 
 /// What the title bar says when the AI's user may change or drop tables.
 fn ai_user_warning(tables: u64) -> String {
