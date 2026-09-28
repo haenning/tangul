@@ -99,13 +99,6 @@ pub trait Dialect: Sync {
         None
     }
 
-    /// SQL comment lines shown after [`Self::readonly_account_sql`]: an optional step
-    /// the admin may uncomment, for rights the login gets from everyone's defaults
-    /// rather than from its grants.
-    fn readonly_account_note(&self) -> Option<&'static str> {
-        None
-    }
-
     /// Functions a `SELECT` can call that change something (sessions, files,
     /// sequences, settings, other servers) or read files. Lower case; the guard
     /// matches them as substrings.
@@ -365,20 +358,6 @@ mod tests {
         );
         assert_eq!(
             d(DriverKind::Sqlite).readonly_account_sql("a", "b", "c", &[]),
-            None
-        );
-    }
-
-    #[test]
-    fn read_only_account_notes() {
-        let note = dialect_for(DriverKind::Postgres)
-            .readonly_account_note()
-            .unwrap();
-        assert!(note.lines().all(|l| l.starts_with("--")), "{note}");
-        assert!(note.contains("-- REVOKE CREATE ON SCHEMA public FROM PUBLIC;"));
-        assert_eq!(dialect_for(DriverKind::Mysql).readonly_account_note(), None);
-        assert_eq!(
-            dialect_for(DriverKind::Sqlite).readonly_account_note(),
             None
         );
     }

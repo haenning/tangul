@@ -152,18 +152,6 @@ impl Dialect for Postgres {
         Some(sql)
     }
 
-    /// Before Postgres 15, `PUBLIC` (every role) may create tables in schema
-    /// `public`, so the AI's login could write there outside tangul. Revoking it
-    /// can't be limited to one role, so it stays the admin's choice.
-    fn readonly_account_note(&self) -> Option<&'static str> {
-        Some(
-            "-- Postgres 14 and older: every role, this one too, may create tables in \
-             schema public.\n\
-             -- To stop that for all roles (check that none relies on it), uncomment:\n\
-             -- REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
-        )
-    }
-
     fn lexing(&self) -> Lexing {
         Lexing {
             nested_comments: true,

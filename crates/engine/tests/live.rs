@@ -525,14 +525,10 @@ async fn writable_checks(driver: DriverKind, cfg: ConnectConfig) {
     };
     // Left over from an aborted run (fails harmlessly if there is none).
     admin.run(TabId(1), clear).await;
-    let mut create = dialect
+    let create = dialect
         .readonly_account_sql("tangul_ro_live", "ro-pw", &cfg.database, &[schema])
         .expect("account statements")
         .join(";\n");
-    // As the app opens it: the commented-out step last.
-    if let Some(note) = dialect.readonly_account_note() {
-        create.push_str(&format!(";\n\n{note}\n"));
-    }
     assert_eq!(admin.run(TabId(1), &create).await.error, None, "{create}");
     let reader = ConnectConfig {
         user: "tangul_ro_live".into(),
@@ -552,14 +548,6 @@ async fn writable_checks(driver: DriverKind, cfg: ConnectConfig) {
         writable_count(&mut ro, tables).await > 0,
         "it can see the tables"
     );
-    if driver == DriverKind::Postgres {
-        // What the note is about: from Postgres 15 on, PUBLIC may not create in public.
-        let version = "SELECT current_setting('server_version_num')::int / 10000";
-        if writable_count(&mut ro, version).await >= 15 {
-            let create_in_public = "SELECT count(*) WHERE has_schema_privilege('public', 'CREATE')";
-            assert_eq!(writable_count(&mut ro, create_in_public).await, 0);
-        }
-    }
     drop_harness(ro).await;
     let limit = match driver {
         DriverKind::Postgres => {
