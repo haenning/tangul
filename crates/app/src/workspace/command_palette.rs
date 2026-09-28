@@ -16,7 +16,7 @@ impl Workspace {
         let db = self.active_db.clone();
         let bookmarks = self.data.local.bookmarks_for(db.as_deref());
         let history = match &db {
-            Some(db) => self.data.local.history(db, "", HISTORY_LIMIT),
+            Some(db) => self.data.local.history(db, "", &[], HISTORY_LIMIT),
             None => Vec::new(),
         };
         let groups = palette::groups(&bookmarks, &history);

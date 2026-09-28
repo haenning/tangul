@@ -18,6 +18,8 @@ use crate::tools;
 pub struct ToolOutput {
     pub data: Value,
     pub text: String,
+    /// Rows the statement it ran returned (tools that run one).
+    pub rows: Option<u64>,
 }
 
 impl ToolOutput {
@@ -25,7 +27,13 @@ impl ToolOutput {
         Self {
             data: serde_json::to_value(data).unwrap_or(Value::Null),
             text: text.into(),
+            rows: None,
         }
+    }
+
+    pub(crate) fn with_rows(mut self, rows: u64) -> Self {
+        self.rows = Some(rows);
+        self
     }
 }
 
@@ -71,6 +79,11 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     /// JSON Schema of the input (see [`schema_of`]).
     fn input_schema(&self) -> Value;
+    /// Whether its input's `sql` is a statement it runs on the database (recorded
+    /// with the call, for the database's history).
+    fn runs_sql(&self) -> bool {
+        false
+    }
     async fn call(&self, ctx: &Ctx, input: Value) -> Result<ToolOutput, ToolError>;
 }
 
@@ -128,7 +141,13 @@ impl Registry {
                 });
             (*caller, sink.clone(), connection, clip(&input.to_string()))
         });
-        let result = match self.tools.iter().find(|t| t.name() == name) {
+        let tool = self.tools.iter().find(|t| t.name() == name);
+        let sql = tool
+            .filter(|t| t.runs_sql())
+            .and_then(|_| input.get("sql"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let result = match tool {
             Some(tool) => tool.call(ctx, input).await,
             None => Err(ToolError::NotFound(format!("no tool named {name}"))),
         };
@@ -146,6 +165,8 @@ impl Registry {
                 tool: name.to_string(),
                 connection,
                 input,
+                sql,
+                rows: result.as_ref().ok().and_then(|out| out.rows),
                 outcome,
                 error,
                 duration_ms: started.elapsed().as_millis() as i64,

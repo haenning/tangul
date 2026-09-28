@@ -12,11 +12,24 @@ impl Workspace {
             .value()
             .trim()
             .to_string();
+        let sources = &self.panels.history.sources;
         self.panels.history.entries = match &self.active_db {
-            Some(db) => self.data.local.history(db, &search, HISTORY_LIMIT),
+            Some(db) => self.data.local.history(db, &search, sources, HISTORY_LIMIT),
             None => Vec::new(),
         };
         cx.notify();
+    }
+
+    /// Shows or hides `source`'s runs among the chosen ones.
+    pub(super) fn toggle_history_source(&mut self, source: Source, cx: &mut Context<Self>) {
+        let sources = &mut self.panels.history.sources;
+        match sources.iter().position(|s| *s == source) {
+            Some(ix) => {
+                sources.remove(ix);
+            }
+            None => sources.push(source),
+        }
+        self.refresh_history(cx);
     }
 
     /// Records a finished query in history and, if it succeeded, learns from it.
@@ -67,6 +80,7 @@ impl Workspace {
             fingerprint: &fp,
             entry: HistoryEntry {
                 sql: sql.to_string(),
+                source: Source::App,
                 started_at: run.started_at,
                 duration_ms: elapsed_ms,
                 rows,
@@ -125,6 +139,7 @@ impl Workspace {
     }
 
     pub(super) fn render_history_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let sources = self.render_history_sources(cx);
         let theme = cx.theme();
         let entries = self.panels.history.entries.clone();
         let count = entries.len();
@@ -140,7 +155,7 @@ impl Workspace {
                 .trim()
                 .is_empty()
         {
-            Some("Queries you run show up here.")
+            Some("Queries run on this database show up here.")
         } else if count == 0 {
             Some("No matching queries.")
         } else {
@@ -161,9 +176,10 @@ impl Workspace {
             .child(
                 div()
                     .px_2()
-                    .pb_2()
+                    .pb_1()
                     .child(Input::new(&self.panels.history.search).small()),
             )
+            .child(sources)
             .children(empty.map(|text| {
                 div()
                     .px_3()
@@ -185,6 +201,34 @@ impl Workspace {
                 .px_1()
                 .flex_1(),
             )
+    }
+
+    /// Whose runs to show: you, the assistant (AI), MCP clients. None
+    /// chosen shows everyone's.
+    fn render_history_sources(&self, cx: &mut Context<Self>) -> AnyElement {
+        let chosen = &self.panels.history.sources;
+        h_flex()
+            .px_2()
+            .pb_2()
+            .gap_1()
+            .children(Source::ALL.map(|source| {
+                let (label, tooltip) = match source {
+                    Source::App => ("You", "Queries you ran"),
+                    Source::Ai => ("AI", "Queries the assistant ran"),
+                    Source::Mcp => ("MCP", "Queries MCP clients (Claude Code, …) ran"),
+                };
+                Button::new(("history-source", source as usize))
+                    .icon(Icon::new(source_icon(source)))
+                    .label(label)
+                    .xsmall()
+                    .ghost()
+                    .selected(chosen.contains(&source))
+                    .tooltip(tooltip)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_history_source(source, cx)),
+                    )
+            }))
+            .into_any_element()
     }
 
     pub(super) fn render_history_row(
@@ -211,6 +255,23 @@ impl Workspace {
             .rounded(theme.radius)
             .hover(|s| s.bg(theme.sidebar_accent))
             .cursor_pointer()
+            // Who ran it, whatever is filtered.
+            .child(
+                div()
+                    .id(("history-source-icon", ix))
+                    .test_support()
+                    .flex_none()
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(source_icon(entry.source)).xsmall())
+                    .tooltip({
+                        let who: SharedString = match entry.source {
+                            Source::App => "You ran it".into(),
+                            Source::Ai => "The assistant ran it".into(),
+                            Source::Mcp => "An MCP client ran it".into(),
+                        };
+                        move |window, cx| Tooltip::new(who.clone()).build(window, cx)
+                    }),
+            )
             .child(
                 v_flex()
                     .flex_1()
@@ -254,6 +315,15 @@ impl Workspace {
                 this.open_sql("History", &open_sql, window, cx)
             }))
             .into_any_element()
+    }
+}
+
+/// Who ran a query: a user (you), the robot (the assistant), the plug (MCP).
+fn source_icon(source: Source) -> Lucide {
+    match source {
+        Source::App => Lucide::User,
+        Source::Ai => Lucide::Bot,
+        Source::Mcp => Lucide::Plug,
     }
 }
 

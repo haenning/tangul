@@ -135,6 +135,10 @@ impl Tool for RunReadonly {
         schema_of::<Input>()
     }
 
+    fn runs_sql(&self) -> bool {
+        true
+    }
+
     async fn call(&self, ctx: &Ctx, value: Value) -> Result<ToolOutput, ToolError> {
         let Input {
             sql,
