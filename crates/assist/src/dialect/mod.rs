@@ -84,6 +84,20 @@ pub trait Dialect: Sync {
         None
     }
 
+    /// Statements an admin runs to create a login that may only read: `user` with
+    /// `password` may connect to `database` and select from the tables of `schemas`
+    /// (for Postgres also from tables created there later by the admin). `None`
+    /// where the database has no users (SQLite).
+    fn readonly_account_sql(
+        &self,
+        _user: &str,
+        _password: &str,
+        _database: &str,
+        _schemas: &[String],
+    ) -> Option<Vec<String>> {
+        None
+    }
+
     /// Functions a `SELECT` can call that change something (sessions, files,
     /// sequences, settings, other servers) or read files. Lower case; the guard
     /// matches them as substrings.
@@ -302,6 +316,41 @@ mod tests {
         assert_eq!(
             d(DriverKind::Sqlite).default_schema("").as_deref(),
             Some("main")
+        );
+    }
+
+    #[test]
+    fn read_only_accounts() {
+        let d = dialect_for;
+        let schemas = ["public".to_string(), "Sales".to_string()];
+        assert_eq!(
+            d(DriverKind::Postgres)
+                .readonly_account_sql("tangul_ai", "p'w", "shop", &schemas)
+                .unwrap(),
+            [
+                "CREATE ROLE tangul_ai LOGIN PASSWORD 'p''w'",
+                "ALTER ROLE tangul_ai SET default_transaction_read_only = on",
+                "GRANT CONNECT ON DATABASE shop TO tangul_ai",
+                "GRANT USAGE ON SCHEMA public TO tangul_ai",
+                "GRANT SELECT ON ALL TABLES IN SCHEMA public TO tangul_ai",
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO tangul_ai",
+                "GRANT USAGE ON SCHEMA \"Sales\" TO tangul_ai",
+                "GRANT SELECT ON ALL TABLES IN SCHEMA \"Sales\" TO tangul_ai",
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA \"Sales\" GRANT SELECT ON TABLES TO tangul_ai",
+            ]
+        );
+        assert_eq!(
+            d(DriverKind::Mysql)
+                .readonly_account_sql("tangul_ai", "pw", "shop", &["shop".to_string()])
+                .unwrap(),
+            [
+                "CREATE USER 'tangul_ai'@'%' IDENTIFIED BY 'pw'",
+                "GRANT SELECT, SHOW VIEW ON shop.* TO 'tangul_ai'@'%'",
+            ]
+        );
+        assert_eq!(
+            d(DriverKind::Sqlite).readonly_account_sql("a", "b", "c", &[]),
+            None
         );
     }
 }

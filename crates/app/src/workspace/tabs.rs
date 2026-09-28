@@ -300,6 +300,8 @@ impl Workspace {
                     Decision::Refuse(reason) => {
                         window.push_notification(Notification::error(reason), cx)
                     }
+                    // Only for the assistant; tabs run as the user.
+                    Decision::Propose(_) => {}
                 }
             }
         }

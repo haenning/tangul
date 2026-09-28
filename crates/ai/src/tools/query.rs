@@ -39,8 +39,8 @@ pub(crate) struct Rows {
 }
 
 /// Runs `sql` on `conn` through the engine's gate as the assistant, keeping at most
-/// `limit` rows. A write comes back refused: it was held, and the pass that would
-/// run it stays with the user (the model never sees it).
+/// `limit` rows. A statement that isn't a read comes back refused: the engine never
+/// runs it for the assistant; `propose_sql` opens it for the user instead.
 pub(crate) async fn read(
     ctx: &Ctx,
     conn: ConnId,
@@ -55,9 +55,11 @@ pub(crate) async fn read(
         .query(next_query(), conn, sql, options)
         .await
         .map_err(|e| {
-            if e.held.is_some() {
+            if e.proposal.is_some() {
                 ToolError::NotAllowed(
-                    "this statement writes and was not run; propose it to the user instead".into(),
+                    "this statement changes something and was not run; use propose_sql to \
+                     open it for the user to review and run"
+                        .into(),
                 )
             } else {
                 ToolError::Failed(e.message)

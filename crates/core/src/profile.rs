@@ -67,6 +67,10 @@ pub struct Database {
     /// the user allows it.
     #[serde(default, skip_serializing_if = "ValueAccess::is_none")]
     pub ai_values: ValueAccess,
+    /// AI tools (MCP clients, the assistant) may use this database. On unless the
+    /// user turns it off; only written when off.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub ai_tools: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -236,4 +240,12 @@ impl<'de> Deserialize<'de> for ValueAccess {
             },
         })
     }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }

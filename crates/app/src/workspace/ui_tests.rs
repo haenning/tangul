@@ -402,6 +402,7 @@ fn the_title_bar_shows_the_ai_user_before_yours(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_tools: true,
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
@@ -453,6 +454,7 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_tools: true,
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
@@ -497,5 +499,172 @@ fn long_comments_show_three_lines_until_asked(cx: &mut TestAppContext) {
     let short = card(cx, "Registered customers".into());
     step(short, cx, |window, _| {
         assert!(window.try_find("show-all").is_none())
+    });
+}
+
+#[gpui_kit::test]
+fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    let (handle, workspace) = open(cx);
+    let mcp = |on: bool| {
+        let mut s = crate::settings::Settings::default();
+        s.mcp.enabled = on;
+        // Any free port.
+        s.mcp.port = 0;
+        s
+    };
+    step(handle, cx, |window, cx| {
+        assert!(window.find("mcp").visible());
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles.databases.push(Database {
+                id: "db".into(),
+                name: "shop".into(),
+                driver: DriverKind::Postgres,
+                host: "localhost".into(),
+                port: 5432,
+                database: "shop".into(),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: "app".into(),
+                    user: "app".into(),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: Default::default(),
+                ai_tools: true,
+            });
+            ws.connect("app", cx);
+            assert_eq!(ws.mcp_url(), None);
+        });
+        crate::settings::set_for_test(mcp(true), cx);
+    });
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, _| {
+            let url = ws.mcp_url().expect("running");
+            assert!(url.starts_with("http://127.0.0.1:") && url.ends_with("/mcp"));
+            assert_eq!(ws.mcp_offered(), ["shop"]);
+            // Turned off for AI tools: no longer offered.
+            ws.data.profiles.databases[0].ai_tools = false;
+            ws.expose_to_mcp();
+            assert!(ws.mcp_offered().is_empty());
+        });
+        crate::settings::set_for_test(mcp(false), cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(workspace.read(cx).mcp_url(), None);
+    });
+}
+
+#[gpui_kit::test]
+fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles.databases.push(Database {
+                id: "db".into(),
+                name: "shop".into(),
+                driver: DriverKind::Postgres,
+                host: "localhost".into(),
+                port: 5432,
+                database: "shop".into(),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: "app".into(),
+                    user: "app".into(),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: Default::default(),
+                ai_tools: true,
+            });
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.open_form(
+                crate::connection_form::FormMode::EditDatabase,
+                Some("db".into()),
+                None,
+                window,
+                cx,
+            );
+        })
+    });
+    step(handle, cx, |window, cx| {
+        window.click("set-up-ai-account", cx)
+    });
+    step(handle, cx, |window, cx| window.click("save", cx));
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let db = ws.data.profiles.database("db").unwrap().clone();
+        let ai = db
+            .users
+            .iter()
+            .find(|u| u.user == "tangul_ai")
+            .expect("added");
+        assert_eq!(db.assistant_user.as_deref(), Some(ai.id.as_str()));
+        let tab = ws.tabs.active_query().expect("statements opened").clone();
+        let t = tab.read(cx);
+        assert_eq!(t.title.as_ref(), "Read-only AI user");
+        let sql = t.sql(cx);
+        assert!(
+            sql.contains("CREATE ROLE tangul_ai LOGIN PASSWORD '"),
+            "{sql}"
+        );
+        assert!(sql.contains("GRANT SELECT ON ALL TABLES IN SCHEMA public TO tangul_ai"));
+        // Not run: nothing went to the engine for it.
+        assert!(!t.is_running(cx));
+    });
+    // Its password is kept (in the session cache for in-memory profiles).
+    workspace.update(cx, |ws, _| {
+        let ai = ws.data.profiles.databases[0].users[1].id.clone();
+        assert_eq!(ws.data.profiles.password(&ai).map(|p| p.len()), Some(24));
+    });
+}
+
+#[gpui_kit::test]
+fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    let (handle, workspace) = open(cx);
+    let sql =
+        "-- Proposed by the assistant: fix the total\nUPDATE orders SET total = 0 WHERE id = 1";
+    let sink = step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles.databases.push(Database {
+                id: "db".into(),
+                name: "shop".into(),
+                driver: DriverKind::Postgres,
+                host: "localhost".into(),
+                port: 5432,
+                database: "shop".into(),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: "app".into(),
+                    user: "app".into(),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: Default::default(),
+                ai_tools: true,
+            });
+            ws.connect("app", cx);
+            ws.mcp_proposals(cx)
+        })
+    });
+    // As the MCP server does (from its thread in the app; the test scheduler wants
+    // this one).
+    sink(tangul_ai::SqlProposal {
+        connection: "shop".into(),
+        user: "app".into(),
+        sql: sql.into(),
+    });
+    cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.active_query().expect("opened").read(cx);
+        assert_eq!(tab.title.as_ref(), "Proposed · shop");
+        assert_eq!(tab.sql(cx), sql);
+        assert!(!tab.is_running(cx), "not run");
+        let conn = tab.conn.as_ref().expect("on a connection");
+        assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
     });
 }

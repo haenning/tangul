@@ -8,15 +8,20 @@ use tangul_core::{ConnId, DriverKind, ValueAccess};
 use tangul_engine::EngineHandle;
 use tangul_service::knowledge::Knowledge;
 
+use crate::audit::AuditSink;
 use crate::tool::ToolError;
 
-/// A connection the user enabled for the assistant.
+/// A database the user makes available to the assistant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exposed {
     /// How tools and models name it, e.g. `app@localhost`.
     pub name: String,
-    /// The database user id in the knowledge pool.
+    /// The database user id whose schema, usage and profiles the knowledge pool
+    /// holds (the one open in the app).
     pub user: String,
+    /// The connection the assistant's queries run on: as the database's AI user
+    /// (`service::connections::connect_assistant`), never a tab's.
+    pub conn: ConnId,
     pub driver: DriverKind,
     /// What the assistant may read from the rows (value profiles).
     pub values: ValueAccess,
@@ -29,7 +34,25 @@ pub struct Ctx {
     knowledge: Knowledge,
     engine: Option<EngineHandle>,
     exposed: Vec<Exposed>,
+    /// Who calls (`mcp`, `assistant`) and where its calls are recorded.
+    audit: Option<(&'static str, AuditSink)>,
+    /// Where `propose_sql` sends statements for the user; none: it can't.
+    proposals: Option<ProposalSink>,
 }
+
+/// Statements the assistant proposes: the app opens them in a new tab, unrun, on
+/// the user's connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlProposal {
+    /// The exposed connection's name.
+    pub connection: String,
+    /// The database user whose tab connection gets it (see [`Exposed::user`]).
+    pub user: String,
+    pub sql: String,
+}
+
+/// Where proposals go.
+pub type ProposalSink = Arc<dyn Fn(SqlProposal) + Send + Sync>;
 
 /// A connection resolved for a call.
 pub(crate) struct Conn {
@@ -51,7 +74,29 @@ impl Ctx {
             knowledge,
             engine,
             exposed,
+            audit: None,
+            proposals: None,
         }
+    }
+
+    /// Records every tool call as `caller`'s in `sink`.
+    pub fn with_audit(mut self, caller: &'static str, sink: AuditSink) -> Self {
+        self.audit = Some((caller, sink));
+        self
+    }
+
+    pub(crate) fn audit(&self) -> Option<&(&'static str, AuditSink)> {
+        self.audit.as_ref()
+    }
+
+    /// Sends what `propose_sql` proposes to `sink`.
+    pub fn with_proposals(mut self, sink: ProposalSink) -> Self {
+        self.proposals = Some(sink);
+        self
+    }
+
+    pub(crate) fn proposals(&self) -> Option<&ProposalSink> {
+        self.proposals.as_ref()
     }
 
     pub fn exposed(&self) -> &[Exposed] {
@@ -104,7 +149,7 @@ impl Ctx {
             KnownValues::new()
         };
         Ok(Conn {
-            conn: known.conn,
+            conn: exposed.conn,
             known_values,
             user: exposed.user.clone(),
             values: exposed.values,

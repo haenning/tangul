@@ -25,13 +25,18 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   provider adapters map the registry generically. `Ctx` is the one security layer
   for every caller: only exposed connections and their opt-ins; SQL only through the
   gate as `Caller::Assistant`. Tests call tools through the registry and compare
-  exact output (hand-built schemas, and SQLite files with the real engine)
+  exact output (hand-built schemas, and SQLite files with the real engine).
+  `mcp.rs`: the MCP server (rmcp, Streamable HTTP on `127.0.0.1`, bearer token,
+  requests with an `Origin` refused); it builds a `Ctx` per call from a `CtxSource`
+  and records each call through an `AuditSink`
 - `crates/app`: the GPUI app
   - `workspace/`: layout and wiring; `sidebar.rs`: the sidebars left and right of the
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
     `value_panel.rs`: the value viewer (right sidebar): the inspected cell (A), the
     compared one (B) and their diff; logic in `assist::value`; `tabs.rs`: the kinds of tab (`TabItem`: query,
-    file; boards later) and the open ones
+    file; boards later) and the open ones; `mcp.rs`: runs the MCP server while
+    `mcp.enabled` is set, offers the connected databases with `ai_tools` on (each on
+    its assistant connection), its token in the Keychain, its status bar plug
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
     nothing about tabs, so boards and the assistant can reuse it
@@ -49,7 +54,7 @@ data     ← core
 engine   ← core, assist, data, drivers, tunnel
 service  ← core, assist, data, engine
 ai       ← core, assist, engine, service
-app      ← core, assist, data, engine, service   (never drivers or tunnel)
+app      ← core, assist, data, engine, service, ai   (never drivers or tunnel)
 ```
 
 ## Databases
@@ -77,8 +82,8 @@ explicit OK, and keep them covered by tests.
 
 - **One gate.** Every statement to a database passes the engine's gate
   (`crates/engine/src/gate.rs`). Front ends pass only a `Caller` (User, Schedule,
-  Assistant) and an `Approval`; they never decide read-only mode, the time limit or
-  approval themselves. No command, flag or setting skips the gate. The engine reads
+  Assistant) and an `Approval` (the tab dialog's go-ahead); they never decide
+  read-only mode or the time limit themselves. No command, flag or setting skips the gate. The engine reads
   `settings.json` itself.
 - **User (tabs).** In write mode the user writes freely; the "UPDATE/DELETE without
   WHERE" dialog stays (`Approval::Confirmed`). Read-only mode of a database user is lifted
@@ -86,24 +91,24 @@ explicit OK, and keep them covered by tests.
   the statement then has to be run again); a go-ahead never runs a write past it. Tabs (`Command::Execute`) are the user's only.
 - **Schedules.** Only statements on the read allow-list (`assist::guard::not_reads`);
   anything else is refused. Reads run like the assistant's.
-- **Assistant reads.** Only allow-listed reads run without approval, through
+- **Assistant reads.** Only allow-listed reads run, through
   `EngineHandle::query` (never on a tab's session), in `Mode::RolledBack`: session
   read-only, inside `START TRANSACTION READ ONLY`, always rolled back.
-- **Assistant writes** (anything not on the allow-list) are held. The engine issues a
-  random single-use `Pass`, bound to the connection and the exact SQL, valid 10 minutes.
-  - The pass is sent only after a person clicked approve. It is never given to the
-    model or an MCP client, which could otherwise approve its own writes.
-  - An approved write runs in `Mode::OwnSession`: a new session, closed afterwards. The
-    pooled sessions never allow the assistant to write.
-  - In read-only mode the assistant can't write at all, approved or not.
+- **Assistant writes** (anything not on the allow-list) never run for the assistant,
+  whatever approval comes along. The gate returns them as a `Proposal`; `propose_sql`
+  opens statements in a new tab, unrun, on the user's own connection, where the user
+  runs them as themselves (`Caller::User`, with the user's rules). There is no path that
+  lets the assistant, the model or an MCP client execute a write.
 - **Assistant database user.** A database may name its own user for the assistant
-  (recommended: SELECT-only role). An approved write runs as the user of the connection
-  it was sent on. On MySQL some statements commit implicitly, so the role's grants are
-  the real protection there.
+  (recommended: the SELECT-only role the database form sets up). The assistant's reads
+  run on its own connection as that user. On MySQL some statements commit implicitly,
+  so the role's grants are the real protection there.
+- **Secrets.** Passwords in SQL (`… PASSWORD '…'`, `IDENTIFIED BY '…'`) are replaced by
+  `assist::redact` before history, bookmarks and the audit log.
 - **Everyone.** `safety.max_query_time` applies to every caller, set on the server and
   enforced by the engine's timer.
-- **Audit.** Assistant and schedule runs (ran, held, refused) go to the `audit` table in
-  `local.db`.
+- **Audit.** Assistant and schedule runs (ran, proposed, refused) and every AI tool
+  call (caller `mcp`) go to the `audit` table in `local.db`.
 - **Tests.** Changes to the gate, guard, pool or drivers come with tests, including
   live ones (`crates/engine/tests/live.rs`, e.g. `assistant_checks`: a write hidden in
   a read must fail). Aim for ≥ 95% line coverage in core, drivers, engine, assist,

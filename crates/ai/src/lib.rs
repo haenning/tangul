@@ -12,9 +12,12 @@
 //!
 //! Outputs carry structured data (for tests and UI) and a compact text for models.
 
+mod audit;
 mod ctx;
+pub mod mcp;
 mod tool;
 mod tools;
 
-pub use ctx::{Ctx, Exposed};
+pub use audit::{AuditSink, ToolCall};
+pub use ctx::{Ctx, Exposed, ProposalSink, SqlProposal};
 pub use tool::{Registry, Tool, ToolError, ToolOutput, ToolSpec};

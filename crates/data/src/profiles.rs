@@ -66,6 +66,7 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_tools: true,
             }),
         }
     }
@@ -77,6 +78,9 @@ pub struct Profiles {
     /// Session cache so the Keychain is hit once per profile, and so passwords work
     /// on platforms where only the mock keyring store is available.
     passwords: HashMap<String, String>,
+    /// [`Self::in_memory`]: never saved, and secrets stay in the session cache, so
+    /// tests never read or overwrite the real Keychain.
+    in_memory: bool,
 }
 
 impl Profiles {
@@ -100,6 +104,7 @@ impl Profiles {
             path,
             databases,
             passwords: HashMap::new(),
+            in_memory: false,
         };
         if migrated && let Err(e) = store.save() {
             eprintln!("could not write migrated profiles file: {e:#}");
@@ -117,6 +122,7 @@ impl Profiles {
             path: None,
             databases,
             passwords: HashMap::new(),
+            in_memory: true,
         }
     }
 
@@ -128,6 +134,9 @@ impl Profiles {
     }
 
     pub fn save(&self) -> Result<()> {
+        if self.in_memory {
+            return Ok(());
+        }
         let path = self.path.as_ref().context("no config directory")?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -160,14 +169,17 @@ impl Profiles {
         user: DbUser,
         password: Option<String>,
     ) -> Result<()> {
+        if !self.databases.iter().any(|d| d.id == db_id) {
+            anyhow::bail!("unknown database");
+        }
+        if let Some(pw) = password {
+            self.store_secret(&user.id, pw);
+        }
         let db = self
             .databases
             .iter_mut()
             .find(|d| d.id == db_id)
             .context("unknown database")?;
-        if let Some(pw) = password {
-            set_keychain(&mut self.passwords, &user.id, pw);
-        }
         match db.users.iter_mut().find(|u| u.id == user.id) {
             Some(existing) => *existing = user,
             None => db.users.push(user),
@@ -182,11 +194,7 @@ impl Profiles {
 
     /// Stores the SSH password or key passphrase of a database.
     pub fn set_ssh_secret(&mut self, db_id: &str, secret: String) {
-        set_keychain(
-            &mut self.passwords,
-            &SshConfig::secret_account(db_id),
-            secret,
-        );
+        self.store_secret(&SshConfig::secret_account(db_id), secret);
     }
 
     /// The tunnel settings of a database with its secret, if it uses SSH.
@@ -199,10 +207,18 @@ impl Profiles {
         Some(SshTarget { config, secret })
     }
 
+    /// Stores a secret of the app's own (e.g. the MCP server's token) by account.
+    pub fn set_secret(&mut self, account: &str, secret: String) {
+        self.store_secret(account, secret);
+    }
+
     /// A secret by Keychain account (user id, or [`SshConfig::secret_account`]).
     pub fn password(&mut self, account: &str) -> Option<String> {
         if let Some(pw) = self.passwords.get(account) {
             return Some(pw.clone());
+        }
+        if self.in_memory {
+            return None;
         }
         let pw = match keychain(account).ok()?.get_password() {
             Ok(pw) => pw,
@@ -212,7 +228,7 @@ impl Profiles {
                     .ok()?
                     .get_password()
                     .ok()?;
-                set_keychain(&mut self.passwords, account, pw.clone());
+                self.store_secret(account, pw.clone());
                 pw
             }
         };
@@ -225,11 +241,15 @@ fn keychain(account: &str) -> Result<keyring::Entry> {
     Ok(keyring::Entry::new(KEYCHAIN_SERVICE, account)?)
 }
 
-fn set_keychain(cache: &mut HashMap<String, String>, account: &str, secret: String) {
-    if let Err(e) = keychain(account).and_then(|k| Ok(k.set_password(&secret)?)) {
-        eprintln!("keychain write failed: {e:#}");
+impl Profiles {
+    fn store_secret(&mut self, account: &str, secret: String) {
+        if !self.in_memory
+            && let Err(e) = keychain(account).and_then(|k| Ok(k.set_password(&secret)?))
+        {
+            eprintln!("keychain write failed: {e:#}");
+        }
+        self.passwords.insert(account.to_string(), secret);
     }
-    cache.insert(account.to_string(), secret);
 }
 
 /// Unique enough id for a new database or user without pulling in a uuid crate.
@@ -241,8 +261,29 @@ pub fn new_id() -> String {
     format!("p{nanos:x}")
 }
 
+/// A random password of 24 letters and digits (about 143 bits), safe in any SQL
+/// string literal or connection string.
+pub fn new_password() -> String {
+    const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let mut bytes = [0u8; 24];
+    getrandom::fill(&mut bytes).expect("system randomness");
+    // 256 is not a multiple of the alphabet's size; the bias is negligible here.
+    bytes
+        .iter()
+        .map(|b| CHARS[usize::from(*b) % CHARS.len()] as char)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn passwords_are_new_each_time() {
+        let (a, b) = (new_password(), new_password());
+        assert_eq!(a.len(), 24);
+        assert_ne!(a, b);
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
 
     #[test]
     fn what_the_ai_may_read_loads_old_and_new_files() {
@@ -271,6 +312,25 @@ mod tests {
                 .unwrap()
                 .contains("ai_values = \"statistics\"")
         );
+    }
+
+    #[test]
+    fn ai_tools_are_on_unless_turned_off() {
+        use tangul_core::Database;
+        let db = |extra: &str| -> Database {
+            toml::from_str(&format!(
+                "id = \"d\"\nname = \"n\"\ndriver = \"postgres\"\nhost = \"h\"\nport = 5432\n{extra}"
+            ))
+            .unwrap()
+        };
+        // Saved before the setting existed: on.
+        assert!(db("").ai_tools);
+        assert!(!db("ai_tools = false").ai_tools);
+        // Only written when off.
+        let mut d = db("");
+        assert!(!toml::to_string(&d).unwrap().contains("ai_tools"));
+        d.ai_tools = false;
+        assert!(toml::to_string(&d).unwrap().contains("ai_tools = false"));
     }
     use super::*;
 

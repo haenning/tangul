@@ -501,35 +501,53 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
 }
 
 /// The dialect's count of tables the connected user may change or drop: all of
-/// them for the admin, none for a user with SELECT only.
+/// them for the admin, none for the read-only account the dialect sets up (which
+/// can still read).
 async fn writable_checks(driver: DriverKind, cfg: ConnectConfig) {
-    let sql = tangul_assist::dialect::dialect_for(driver)
+    let dialect = tangul_assist::dialect::dialect_for(driver);
+    let sql = dialect
         .writable_tables_sql()
         .expect("a count for this database");
     let mut admin = Harness::connect(driver, cfg.clone()).await;
     assert!(writable_count(&mut admin, sql).await > 0);
-    let (create, drop) = match driver {
+    let (clear, schema, drop) = match driver {
         DriverKind::Postgres => (
-            "DROP ROLE IF EXISTS tangul_ro_live; CREATE ROLE tangul_ro_live LOGIN PASSWORD 'ro'; \
-             GRANT SELECT ON ALL TABLES IN SCHEMA public TO tangul_ro_live",
+            "DROP OWNED BY tangul_ro_live; DROP ROLE tangul_ro_live",
+            "public".to_string(),
             "DROP OWNED BY tangul_ro_live; DROP ROLE tangul_ro_live",
         ),
         DriverKind::Mysql => (
-            "DROP USER IF EXISTS 'tangul_ro_live'@'%'; \
-             CREATE USER 'tangul_ro_live'@'%' IDENTIFIED BY 'ro'; \
-             GRANT SELECT ON *.* TO 'tangul_ro_live'@'%'",
+            "DROP USER IF EXISTS 'tangul_ro_live'@'%'",
+            cfg.database.clone(),
             "DROP USER 'tangul_ro_live'@'%'",
         ),
         DriverKind::Sqlite => unreachable!(),
     };
-    assert_eq!(admin.run(TabId(1), create).await.error, None);
+    // Left over from an aborted run (fails harmlessly if there is none).
+    admin.run(TabId(1), clear).await;
+    let create = dialect
+        .readonly_account_sql("tangul_ro_live", "ro-pw", &cfg.database, &[schema])
+        .expect("account statements")
+        .join(";\n");
+    assert_eq!(admin.run(TabId(1), &create).await.error, None, "{create}");
     let reader = ConnectConfig {
         user: "tangul_ro_live".into(),
-        password: Some("ro".into()),
+        password: Some("ro-pw".into()),
         ..cfg
     };
     let mut ro = Harness::connect(driver, reader).await;
     assert_eq!(writable_count(&mut ro, sql).await, 0);
+    let tables = match driver {
+        DriverKind::Postgres => {
+            "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' \
+             AND has_table_privilege(format('%I.%I', schemaname, tablename), 'SELECT')"
+        }
+        _ => "SELECT count(*) FROM information_schema.tables WHERE table_schema = DATABASE()",
+    };
+    assert!(
+        writable_count(&mut ro, tables).await > 0,
+        "it can see the tables"
+    );
     drop_harness(ro).await;
     assert_eq!(admin.run(TabId(1), drop).await.error, None);
 }
@@ -604,8 +622,8 @@ async fn read_only_checks(h: &mut Harness, switch_to_read_write: &str) {
 
 /// The assistant through [`EngineHandle::query`]: reads run in a read-only
 /// transaction that is rolled back, so a write hidden in a read (`sneak`, a
-/// statement on the allow-list that writes) doesn't stay; an approved write runs on
-/// a session of its own, which is closed afterwards.
+/// statement on the allow-list that writes) doesn't stay; a write is only proposed,
+/// never run.
 async fn assistant_checks(h: &mut Harness, sneak: Option<(&str, &str)>) {
     let tab = TabId(11);
     h.set(false, None);
@@ -628,21 +646,24 @@ async fn assistant_checks(h: &mut Harness, sneak: Option<(&str, &str)>) {
     if let Some((create, call)) = sneak {
         assert_eq!(h.run(tab, create).await.error, None);
         let error = ask(h, call, Approval::None).await.unwrap_err();
-        assert!(error.held.is_none(), "{call} passes the allow-list");
+        assert!(error.proposal.is_none(), "{call} passes the allow-list");
         let message = error.message.to_lowercase().replace('-', " ");
         assert!(message.contains("read only"), "{error}");
     }
-    let before = h.stats().await.open;
 
-    let write = "INSERT INTO tangul_ai_test VALUES (2)";
-    let held = ask(h, write, Approval::None).await.unwrap_err();
-    let pass = held.held.expect("held for approval").pass;
-    let out = ask(h, write, Approval::Pass(pass)).await.unwrap();
-    assert_eq!(out.rows, Some(1));
-    // The write stayed; the session it ran on is gone again.
-    assert_eq!(h.stats().await.open, before);
+    for write in [
+        "INSERT INTO tangul_ai_test VALUES (2)",
+        "SELECT 1; DELETE FROM tangul_ai_test",
+        "SELECT * FROM tangul_ai_test FOR UPDATE",
+    ] {
+        for approval in [Approval::None, Approval::Confirmed] {
+            let error = ask(h, write, approval).await.unwrap_err();
+            assert!(error.proposal.is_some(), "{write} is proposed");
+        }
+    }
+    // Nothing the assistant sent changed data.
     let out = ask(h, count, Approval::None).await.unwrap();
-    assert_eq!(out.results[0].cell(0, 0), Some("2"));
+    assert_eq!(out.results[0].cell(0, 0), Some("1"));
     h.run(tab, "DROP TABLE tangul_ai_test").await;
 }
 

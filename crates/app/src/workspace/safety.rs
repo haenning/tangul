@@ -119,17 +119,10 @@ impl Workspace {
                     allow.to_string(),
                 )
             }
-            // Not from tabs: the assistant's statements are approved in its panel.
-            Guard::Assistant { statements } => (
-                "Approve the assistant's statements",
-                "The assistant wants to run statements that change data:".to_string(),
-                statements.clone(),
-                "Allow".to_string(),
-            ),
         };
         let read_only_user = match &guard {
             Guard::ReadOnly { user, .. } => Some(user.clone()),
-            Guard::Unfiltered { .. } | Guard::Assistant { .. } => None,
+            Guard::Unfiltered { .. } => None,
         };
         window.open_dialog(cx, move |dialog, _, cx| {
             let theme = cx.theme();

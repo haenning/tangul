@@ -21,6 +21,7 @@ impl Workspace {
                 cx,
             );
         }
+        self.expose_to_mcp();
         cx.notify();
     }
 
@@ -298,6 +299,7 @@ impl Workspace {
             database,
             user,
             ssh_secret,
+            ai_account,
         } = output;
         let db_id = database.id.clone();
         let target_changed = ssh_secret.is_some()
@@ -329,6 +331,7 @@ impl Workspace {
             id
         });
         self.rename_conns(&db_id, cx);
+        self.expose_to_mcp();
         if let Err(e) = result {
             window.push_notification(
                 Notification::error(format!("Could not save connection: {e:#}")),
@@ -353,9 +356,82 @@ impl Workspace {
         }
         if let Some(user_id) = user_id {
             self.connect(&user_id, cx);
-            self.select_user(db_id, user_id, window, cx);
+            self.select_user(db_id.clone(), user_id, window, cx);
         }
+        if let Some((user, password)) = ai_account {
+            self.open_ai_account_sql(&db_id, user, password, window, cx);
+        }
+        self.check_ai_user(cx);
         cx.notify();
+    }
+
+    /// Saves the new read-only AI user's password and opens the statements that
+    /// create it, unrun, on one of your users of the database: an admin runs them.
+    fn open_ai_account_sql(
+        &mut self,
+        db_id: &str,
+        user: DbUser,
+        password: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = user.user.clone();
+        let ai_id = user.id.clone();
+        if let Err(e) = self
+            .data
+            .profiles
+            .upsert_user(db_id, user, Some(password.clone()))
+        {
+            window.push_notification(
+                Notification::error(format!("Could not save the AI user: {e:#}")),
+                cx,
+            );
+            return;
+        }
+        let Some(db) = self.data.profiles.database(db_id).cloned() else {
+            return;
+        };
+        // Yours: the active one if it is of this database, else the first other one.
+        let admin = self
+            .active_user
+            .clone()
+            .filter(|id| self.active_db.as_deref() == Some(db_id) && *id != ai_id)
+            .or_else(|| {
+                db.users
+                    .iter()
+                    .find(|u| u.id != ai_id)
+                    .map(|u| u.id.clone())
+            });
+        let dialect = dialect_for(db.driver);
+        // Every schema that has tables, as far as they are known.
+        let mut schemas: Vec<String> = admin
+            .as_deref()
+            .and_then(|id| self.knowledge.schema(id))
+            .map(|s| s.tables().iter().map(|t| t.schema.clone()).collect())
+            .unwrap_or_default();
+        schemas.sort();
+        schemas.dedup();
+        if schemas.is_empty() {
+            schemas.extend(dialect.default_schema(&db.database));
+        }
+        let Some(statements) =
+            dialect.readonly_account_sql(&name, &password, &db.database, &schemas)
+        else {
+            return;
+        };
+        if let Some(admin) = admin
+            && self.active_user.as_deref() != Some(admin.as_str())
+        {
+            self.connect(&admin, cx);
+            self.select_user(db_id.to_string(), admin, window, cx);
+        }
+        let sql = format!(
+            "-- Creates {name}, the AI's user, that may only read. Run it as a user that \
+             may create users and grant rights.\n\
+             -- The password is in the Keychain; history keeps it hidden.\n{};\n",
+            statements.join(";\n")
+        );
+        self.open_sql("Read-only AI user", &sql, window, cx);
     }
 
     pub(super) fn on_engine_event(

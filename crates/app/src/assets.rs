@@ -32,6 +32,7 @@ gpui_kit::assets::icon_assets!(
         Pencil,
         PencilOff,
         Pin,
+        Plug,
         RotateCcwClock,
         Rows3,
         Sparkles,

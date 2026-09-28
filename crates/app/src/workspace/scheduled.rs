@@ -151,6 +151,11 @@ impl Workspace {
                     cx,
                 );
             }
+            // Connected again the next time the AI's databases are offered.
+            (Some(Purpose::Assistant), Event::ConnectFailed { error, .. }) => {
+                eprintln!("the AI's connection failed: {error}");
+                self.connections.forget(conn);
+            }
             // A scheduled run on it fails by itself and forgets it.
             (Some(_), _) => {}
         }

@@ -174,11 +174,7 @@ pub(crate) async fn run_query(
         }
     };
     let started = Instant::now();
-    let acquired = match run.mode {
-        Mode::OwnSession => pool.acquire_own().await,
-        Mode::AsSent | Mode::RolledBack => pool.acquire(None).await,
-    };
-    let mut lease = acquired.map_err(|e| error(&e))?;
+    let mut lease = pool.acquire(None).await.map_err(|e| error(&e))?;
     let mut synced = match sync_read_only(&mut lease, run.read_only).await {
         Ok(()) => sync_timeout(&mut lease, run.timeout).await,
         Err(e) => Err(e),
@@ -216,9 +212,9 @@ pub(crate) async fn run_query(
     Ok(output)
 }
 
-/// After a [`Command::Query`]: rolls back what [`Mode::RolledBack`] started, closes an
-/// own session, and gives any other session back unless it is left in a
-/// transaction (then it is closed, and the server rolls back).
+/// After a [`Command::Query`]: rolls back what [`Mode::RolledBack`] started, and gives
+/// the session back unless it is left in a transaction (then it is closed, and the
+/// server rolls back).
 pub(crate) async fn done_with(pool: &Pool, mut lease: Lease, mode: Mode) {
     if mode == Mode::RolledBack
         && lease.session.in_transaction()
@@ -226,7 +222,7 @@ pub(crate) async fn done_with(pool: &Pool, mut lease: Lease, mode: Mode) {
     {
         eprintln!("rollback after a read failed: {e:#}");
     }
-    if mode == Mode::OwnSession || lease.session.in_transaction() {
+    if lease.session.in_transaction() {
         close_all(vec![lease], None);
     } else {
         pool.release(None, lease);

@@ -9,7 +9,7 @@ use tangul_drivers::ExecEvent;
 use tokio::sync::oneshot;
 
 use crate::ROW_LIMIT;
-use crate::gate::{Approval, Caller, Held};
+use crate::gate::{Approval, Caller, Proposal};
 use crate::pool::PoolStats;
 
 #[derive(Debug)]
@@ -176,8 +176,9 @@ pub struct QueryError {
     pub message: String,
     /// Byte offset of the error in the SQL, when the server said where.
     pub position: Option<usize>,
-    /// Not run: a person has to approve it first (the assistant's writes).
-    pub held: Option<Held>,
+    /// Not run: the assistant's statements that aren't reads, for the user to open
+    /// and run as themselves.
+    pub proposal: Option<Proposal>,
 }
 
 impl QueryError {
@@ -185,7 +186,7 @@ impl QueryError {
         Self {
             message: message.into(),
             position: None,
-            held: None,
+            proposal: None,
         }
     }
 }

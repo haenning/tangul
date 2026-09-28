@@ -8,7 +8,7 @@ use tangul_core::{ConnId, ConnectConfig, DriverKind, QueryId, TabId, TlsMode};
 use tangul_data::local::Local;
 use tangul_data::settings::Settings;
 use tangul_engine::{
-    Approval, Caller, Command, EngineConfig, EngineHandle, Event, Guard, QueryEvent, QueryOptions,
+    Approval, Caller, Command, EngineConfig, EngineHandle, Event, QueryEvent, QueryOptions,
     SettingsSource,
 };
 
@@ -152,7 +152,7 @@ async fn query_returns_the_whole_result() {
         .await
         .unwrap_err();
     assert!(error.message.contains("schedule"), "{error}");
-    assert_eq!(error.held, None);
+    assert_eq!(error.proposal, None);
 
     let error = engine
         .query(QueryId(4), ConnId(1), FOREVER, options(10))
@@ -169,45 +169,41 @@ async fn query_returns_the_whole_result() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn assistant_writes_wait_for_approval_and_are_audited() {
+async fn assistant_writes_are_proposed_never_run_and_audited() {
     let (dir, engine, _events) = setup("assistant").await;
     let assistant = QueryOptions::new(Caller::Assistant);
     let write = "DELETE FROM t WHERE x = 1";
+    let count = "SELECT count(*) FROM t";
 
     let out = engine
-        .query(
-            QueryId(1),
-            ConnId(1),
-            "SELECT count(*) FROM t",
-            assistant.clone(),
-        )
+        .query(QueryId(1), ConnId(1), count, assistant.clone())
         .await
         .unwrap();
     assert_eq!(out.results[0].cell(0, 0), Some("3"));
 
-    // Held, with the statements to show and a pass for exactly this one.
-    let held = engine
-        .query(QueryId(2), ConnId(1), write, assistant.clone())
+    // Not run, whatever approval comes with it: a proposal of the statements.
+    for (id, approval) in [(2, Approval::None), (3, Approval::Confirmed)] {
+        let error = engine
+            .query(
+                QueryId(id),
+                ConnId(1),
+                write,
+                QueryOptions {
+                    approval,
+                    ..assistant.clone()
+                },
+            )
+            .await
+            .unwrap_err();
+        let proposal = error.proposal.clone().expect("proposed");
+        assert_eq!(proposal.statements[0].0, "DELETE");
+        assert!(error.message.contains("not run"), "{error}");
+    }
+    let out = engine
+        .query(QueryId(4), ConnId(1), count, assistant)
         .await
-        .unwrap_err()
-        .held
-        .expect("held for approval");
-    assert!(matches!(&held.guard, Guard::Assistant { statements } if statements[0].0 == "DELETE"));
-    let approved = QueryOptions {
-        approval: Approval::Pass(held.pass),
-        ..assistant.clone()
-    };
-    // Approved, it runs (and the read-only file refuses it); the pass is used up.
-    let error = engine
-        .query(QueryId(3), ConnId(1), write, approved.clone())
-        .await
-        .unwrap_err();
-    assert!(error.message.contains("readonly"), "{error}");
-    let again = engine
-        .query(QueryId(4), ConnId(1), write, approved)
-        .await
-        .unwrap_err();
-    assert!(again.held.is_some(), "a pass works once");
+        .unwrap();
+    assert_eq!(out.results[0].cell(0, 0), Some("3"), "nothing changed");
 
     let audit = Local::open(Some(&dir)).audit(10);
     let outcomes: Vec<(&str, &str)> = audit
@@ -219,13 +215,11 @@ async fn assistant_writes_wait_for_approval_and_are_audited() {
         outcomes,
         [
             ("assistant", "ran"),
-            ("assistant", "held"),
+            ("assistant", "proposed"),
+            ("assistant", "proposed"),
             ("assistant", "ran"),
-            ("assistant", "held"),
         ]
     );
-    assert_eq!(audit.last().unwrap().rows, Some(1));
-    assert!(audit[1].error.as_deref().unwrap().contains("readonly"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

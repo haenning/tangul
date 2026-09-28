@@ -3,11 +3,11 @@
 //! server needed.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::json;
-use tangul_ai::{Ctx, Exposed, Registry, ToolError};
+use tangul_ai::{Ctx, Exposed, Registry, SqlProposal, ToolError};
 use tangul_assist::dialect::dialect_for;
 use tangul_assist::schema::SchemaIndex;
 use tangul_core::{ConnId, ConnectConfig, DriverKind, TlsMode, ValueAccess};
@@ -84,10 +84,14 @@ async fn shop_with(name: &str, values: ValueAccess) -> (PathBuf, Ctx) {
     let knowledge = Knowledge::default();
     let dialect = dialect_for(DriverKind::Sqlite);
     let schema = SchemaIndex::new(info, dialect, dialect.default_schema(""));
-    knowledge.set_schema("u1", "db1", conn, Arc::new(schema));
+    // The pool knows the database through the tab's connection; queries must run on
+    // the exposed one (the AI user's). A connection that doesn't exist stands in for
+    // the tab's, so a query on it would fail.
+    knowledge.set_schema("u1", "db1", ConnId(99), Arc::new(schema));
     let exposed = Exposed {
         name: "shop".into(),
         user: "u1".into(),
+        conn,
         driver: DriverKind::Sqlite,
         values,
     };
@@ -217,7 +221,9 @@ async fn writes_are_never_run() {
         assert_eq!(
             call(&ctx, "run_readonly", json!({"sql": sql})).await,
             Err(ToolError::NotAllowed(
-                "this statement writes and was not run; propose it to the user instead".into()
+                "this statement changes something and was not run; use propose_sql to open it \
+                 for the user to review and run"
+                    .into()
             )),
             "{sql}"
         );
@@ -244,6 +250,58 @@ async fn writes_are_never_run() {
         panic!("a failure");
     };
     assert!(message.contains("nope"), "{message}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proposals_open_for_the_user_and_never_run() {
+    let (dir, ctx) = shop("propose").await;
+    let sql = "DELETE FROM orders WHERE id = 1";
+    // Without an app to open them in (e.g. tests of the tools alone).
+    assert_eq!(
+        call(&ctx, "propose_sql", json!({"sql": sql})).await,
+        Err(ToolError::NotAllowed(
+            "there is no app to open proposals in here".into()
+        ))
+    );
+    let proposed: Arc<Mutex<Vec<SqlProposal>>> = Arc::default();
+    let ctx = ctx.with_proposals({
+        let proposed = proposed.clone();
+        Arc::new(move |p| proposed.lock().unwrap().push(p))
+    });
+    assert_eq!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": format!("  {sql}\n"), "note": "  drop the\ntest order "})
+        )
+        .await
+        .unwrap(),
+        "Opened in tangul in a new tab on shop for the user to review and run. It was not run."
+    );
+    assert_eq!(
+        *proposed.lock().unwrap(),
+        [SqlProposal {
+            connection: "shop".into(),
+            user: "u1".into(),
+            sql: format!("-- Proposed by the assistant: drop the test order\n{sql}"),
+        }]
+    );
+    assert_eq!(
+        call(&ctx, "propose_sql", json!({"sql": " "})).await,
+        Err(ToolError::BadInput("sql is empty".into()))
+    );
+    // Nothing ran.
+    assert_eq!(
+        call(
+            &ctx,
+            "run_readonly",
+            json!({"sql": "SELECT count(*) AS n FROM orders"})
+        )
+        .await
+        .unwrap(),
+        "n\n4\n(1 row)"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

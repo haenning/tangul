@@ -147,6 +147,7 @@ fn exposed(name: &str, user: &str) -> Exposed {
     Exposed {
         name: name.into(),
         user: user.into(),
+        conn: ConnId(1),
         driver: DriverKind::Postgres,
         values: ValueAccess::None,
     }
@@ -203,7 +204,8 @@ async fn every_tool_has_a_schema_and_a_description() {
             "column_profile",
             "list_enums",
             "view_definition",
-            "run_readonly"
+            "run_readonly",
+            "propose_sql"
         ]
     );
     for s in &specs {
@@ -494,5 +496,58 @@ async fn column_values_only_with_the_users_consent() {
              statistics or values in the AI menu of the title bar"
                 .into()
         )
+    );
+}
+
+#[tokio::test]
+async fn every_call_is_recorded() {
+    use std::sync::{Arc, Mutex};
+    use tangul_ai::ToolCall;
+    let calls: Arc<Mutex<Vec<ToolCall>>> = Arc::default();
+    let sink = {
+        let calls = calls.clone();
+        Arc::new(move |c: ToolCall| calls.lock().unwrap().push(c))
+    };
+    let ctx = ctx(false).with_audit("mcp", sink);
+    let registry = Registry::standard();
+    registry
+        .call(&ctx, "describe_table", json!({"table": "orders"}))
+        .await
+        .unwrap();
+    let _ = registry
+        .call(
+            &ctx,
+            "column_profile",
+            json!({"table": "orders", "column": "status"}),
+        )
+        .await;
+    let _ = registry.call(&ctx, "drop_table", json!({})).await;
+    let calls = calls.lock().unwrap();
+    let seen: Vec<_> = calls
+        .iter()
+        .map(|c| {
+            (
+                c.caller,
+                c.tool.as_str(),
+                c.connection.as_deref(),
+                c.outcome,
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("mcp", "describe_table", Some("shop"), "ran"),
+            ("mcp", "column_profile", Some("shop"), "refused"),
+            ("mcp", "drop_table", Some("shop"), "failed"),
+        ]
+    );
+    assert_eq!(calls[0].input, r#"{"table":"orders"}"#);
+    assert!(
+        calls[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("not allowed")
     );
 }
