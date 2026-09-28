@@ -461,17 +461,22 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
             cx.notify();
         })
     });
-    // Not checked yet, or read-only on the server: no warning.
+    // Not checked yet: no warning, the note on your own user instead.
     step(handle, cx, |window, cx| {
         assert!(window.try_find("ai-user-warning").is_none());
+        assert!(window.find("ai-user-note").visible());
         workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 3, cx));
     });
+    // One piece of advice: the red one replaces the note.
     step(handle, cx, |window, cx| {
         assert!(window.find("ai-user-warning").visible());
+        assert!(window.try_find("ai-user-note").is_none());
         workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 0, cx));
     });
+    // Read-only on the server: no advice.
     step(handle, cx, |window, _| {
-        assert!(window.try_find("ai-user-warning").is_none())
+        assert!(window.try_find("ai-user-warning").is_none());
+        assert!(window.try_find("ai-user-note").is_none());
     });
 }
 

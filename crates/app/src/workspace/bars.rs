@@ -50,7 +50,9 @@ impl Workspace {
                     .map_or("No user".into(), |u| u.user.clone()),
             };
             let (db_id, values, weak) = (db.id.clone(), db.ai_values, weak.clone());
-            let writable = self.knowledge.ai_writable(&db.id).filter(|n| *n > 0);
+            // How many tables the AI's user may change; `None` until checked.
+            let checked = self.knowledge.ai_writable(&db.id);
+            let writable = checked.filter(|n| *n > 0);
             let problem = match missing {
                 Some(id) => Some(format!(
                     "The AI's user {id} no longer exists, so the AI can't use this \
@@ -63,8 +65,10 @@ impl Workspace {
                 .chain(writable.map(ai_user_warning))
                 .collect();
             let warning = (!alerts.is_empty()).then(|| alerts.join("\n\n"));
-            // Allowed, but the user should know what it means.
-            let note = ai_user.is_none().then(|| SAME_USER_NOTE.to_string());
+            // One piece of advice: red when the AI's user may write, none when it
+            // is read-only on the server, and on your own user, until that is
+            // known, what it means.
+            let note = (ai_user.is_none() && checked.is_none()).then(|| SAME_USER_NOTE.to_string());
             let (color, tooltip): (Hsla, SharedString) = match (&warning, &note) {
                 (Some(w), _) => (theme.danger, w.clone().into()),
                 (None, Some(n)) => (theme.warning, n.clone().into()),
