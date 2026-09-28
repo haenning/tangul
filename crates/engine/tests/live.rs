@@ -661,6 +661,15 @@ async fn assistant_checks(h: &mut Harness, sneak: Option<(&str, &str)>) {
             assert!(error.proposal.is_some(), "{write} is proposed");
         }
     }
+    // Hidden in a comment the server runs (MySQL `/*! … */`) or behind a string the
+    // server ends earlier than the guard's tokens: at most the one read reaches it.
+    for hidden in [
+        "SELECT 1; /*! COMMIT */; /*! SET SESSION TRANSACTION READ WRITE */; \
+         /*! DELETE FROM tangul_ai_test */",
+        "SELECT '\\'; COMMIT; DELETE FROM tangul_ai_test; --'",
+    ] {
+        let _ = ask(h, hidden, Approval::None).await;
+    }
     // Nothing the assistant sent changed data.
     let out = ask(h, count, Approval::None).await.unwrap();
     assert_eq!(out.results[0].cell(0, 0), Some("1"));

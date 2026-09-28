@@ -4,14 +4,18 @@
 use std::time::Duration;
 
 use tangul_assist::guard;
+use tangul_assist::lexer::Lexing;
 use tangul_data::local::Bookmark;
 
 /// Whether a bookmark may run on a schedule: it is flagged, belongs to one database
-/// and doesn't change data.
+/// and is one statement that doesn't change data (as the engine's gate checks it,
+/// roughly: without the database's lexical rules).
 pub fn schedulable(bookmark: &Bookmark) -> bool {
+    let text = guard::read_text(&bookmark.sql, Lexing::default());
     bookmark.scheduled
         && bookmark.database_id.is_some()
-        && guard::not_reads(&bookmark.sql).is_empty()
+        && guard::not_reads(&text).is_empty()
+        && guard::not_one_read(&text).is_none()
 }
 
 /// The scheduled bookmark that waited longest past `interval` since its last run
@@ -95,7 +99,8 @@ mod tests {
             global,
             off,
             bookmark("writes", "delete from t where id = 1"),
-            bookmark("reads", "select * from t"),
+            bookmark("two", "select 1; select 2"),
+            bookmark("reads", "select * from t; -- all"),
         ];
         assert_eq!(due(&list, |_| None, 0, hour).unwrap().id, "reads");
     }

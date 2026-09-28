@@ -163,6 +163,10 @@ impl Dialect for Mysql {
     fn side_effect_functions(&self) -> &'static [&'static str] {
         &[
             "load_file",
+            // `SELECT … INTO OUTFILE / DUMPFILE` writes a file on the server; also
+            // found where a string hides it from the tokens.
+            "outfile",
+            "dumpfile",
             "get_lock",
             "release_lock",
             "sys_exec",

@@ -93,7 +93,9 @@ explicit OK, and keep them covered by tests.
   anything else is refused. Reads run like the assistant's.
 - **Assistant reads.** Only allow-listed reads run, through
   `EngineHandle::query` (never on a tab's session), in `Mode::RolledBack`: session
-  read-only, inside `START TRANSACTION READ ONLY`, always rolled back.
+  read-only, inside `START TRANSACTION READ ONLY`, always rolled back. One statement
+  (no `;`, no `U&` escapes), checked with the database's lexical rules and sent without
+  its comments, so the server runs exactly what was checked (same for schedules).
 - **Assistant writes** (anything not on the allow-list) never run for the assistant,
   whatever approval comes along. The gate returns them as a `Proposal`; `propose_sql`
   opens statements in a new tab, unrun, on the user's own connection, where the user
