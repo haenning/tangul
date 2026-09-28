@@ -4,7 +4,7 @@
 #   scripts/bundle-macos.sh              # this Mac's architecture
 #   scripts/bundle-macos.sh --universal  # Apple Silicon + Intel in one app
 #
-# Uses only tools that ship with macOS (sips, iconutil, lipo, codesign, hdiutil), plus
+# Uses only tools that ship with macOS (sips, iconutil, lipo, codesign, diskutil), plus
 # Xcode 26's actool for the icon when available.
 # The app is ad-hoc signed: fine on your own Macs, but a downloaded copy has to be
 # allowed once in System Settings → Privacy & Security (see INSTALL.md). Real signing + notarization needs
@@ -81,7 +81,12 @@ staging="$out/dmg"
 rm -rf "$staging" "$dmg" && mkdir -p "$staging"
 cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
-hdiutil create -volname "tangul $version" -srcfolder "$staging" -ov -format UDZO "$dmg" >/dev/null
+# Its progress goes to the terminal; shown only when it fails.
+if ! log=$(diskutil image create from --format UDZO --volumeName "tangul $version" \
+    "$staging" "$dmg" 2>&1); then
+    echo "$log" >&2
+    exit 1
+fi
 rm -rf "$staging"
 
 echo "app: $app"
