@@ -2,7 +2,7 @@ use tangul_core::DriverKind;
 
 use crate::lexer::Lexing;
 
-use super::{Dialect, Namespace, Syntax, Upsert, quote_ident};
+use super::{AI_CONNECTION_LIMIT, Dialect, Namespace, Syntax, Upsert, quote_ident};
 
 pub(super) struct Postgres;
 
@@ -115,7 +115,9 @@ impl Dialect for Postgres {
         )
     }
 
-    /// Read-only by grants, and by default for its sessions as a second line.
+    /// Read-only by grants, and by default for its sessions as a second line; its
+    /// sessions stop a statement after 5 minutes and an idle transaction after one
+    /// (tangul sets its own statement limit per session).
     fn readonly_account_sql(
         &self,
         user: &str,
@@ -126,10 +128,12 @@ impl Dialect for Postgres {
         let role = quote_ident(self, user);
         let mut sql = vec![
             format!(
-                "CREATE ROLE {role} LOGIN PASSWORD {}",
+                "CREATE ROLE {role} LOGIN PASSWORD {} CONNECTION LIMIT {AI_CONNECTION_LIMIT}",
                 self.string(password)
             ),
             format!("ALTER ROLE {role} SET default_transaction_read_only = on"),
+            format!("ALTER ROLE {role} SET statement_timeout = '5min'"),
+            format!("ALTER ROLE {role} SET idle_in_transaction_session_timeout = '1min'"),
             format!(
                 "GRANT CONNECT ON DATABASE {} TO {role}",
                 quote_ident(self, database)

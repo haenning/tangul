@@ -549,6 +549,16 @@ async fn writable_checks(driver: DriverKind, cfg: ConnectConfig) {
         "it can see the tables"
     );
     drop_harness(ro).await;
+    let limit = match driver {
+        DriverKind::Postgres => {
+            "SELECT rolconnlimit FROM pg_roles WHERE rolname = 'tangul_ro_live'"
+        }
+        _ => "SELECT max_user_connections FROM mysql.user WHERE user = 'tangul_ro_live'",
+    };
+    assert_eq!(
+        writable_count(&mut admin, limit).await,
+        u64::from(tangul_assist::dialect::AI_CONNECTION_LIMIT)
+    );
     assert_eq!(admin.run(TabId(1), drop).await.error, None);
 }
 

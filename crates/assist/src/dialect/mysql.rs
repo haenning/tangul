@@ -2,7 +2,7 @@ use tangul_core::DriverKind;
 
 use crate::lexer::Lexing;
 
-use super::{Dialect, Namespace, Syntax, Upsert, quote_ident};
+use super::{AI_CONNECTION_LIMIT, Dialect, Namespace, Syntax, Upsert, quote_ident};
 
 pub(super) struct Mysql;
 
@@ -137,7 +137,8 @@ impl Dialect for Mysql {
     ) -> Option<Vec<String>> {
         let account = format!("{}@'%'", self.string(user));
         let mut sql = vec![format!(
-            "CREATE USER {account} IDENTIFIED BY {}",
+            "CREATE USER {account} IDENTIFIED BY {} WITH MAX_USER_CONNECTIONS \
+             {AI_CONNECTION_LIMIT}",
             self.string(password)
         )];
         for schema in schemas {
