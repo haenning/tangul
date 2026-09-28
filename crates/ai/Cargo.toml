@@ -15,10 +15,10 @@ tokio-util = "0.7"
 getrandom = "0.3"
 serde.workspace = true
 serde_json = "1.0.151"
-tangul-assist = { version = "0.1.0", path = "../assist" }
-tangul-core = { version = "0.1.0", path = "../core" }
-tangul-engine = { version = "0.1.0", path = "../engine" }
-tangul-service = { version = "0.1.0", path = "../service" }
+tangul-assist = { path = "../assist" }
+tangul-core = { path = "../core" }
+tangul-engine = { path = "../engine" }
+tangul-service = { path = "../service" }
 
 [dev-dependencies]
 async-channel.workspace = true

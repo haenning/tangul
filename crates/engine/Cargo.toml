@@ -8,11 +8,11 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
-tangul-assist = { version = "0.1.0", path = "../assist" }
-tangul-core = { version = "0.1.0", path = "../core" }
-tangul-data = { version = "0.1.0", path = "../data" }
-tangul-drivers = { version = "0.1.0", path = "../drivers" }
-tangul-tunnel = { version = "0.1.0", path = "../tunnel" }
+tangul-assist = { path = "../assist" }
+tangul-core = { path = "../core" }
+tangul-data = { path = "../data" }
+tangul-drivers = { path = "../drivers" }
+tangul-tunnel = { path = "../tunnel" }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 
 [dev-dependencies]

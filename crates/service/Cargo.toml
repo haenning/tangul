@@ -6,10 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-tangul-assist = { version = "0.1.0", path = "../assist" }
-tangul-core = { version = "0.1.0", path = "../core" }
-tangul-data = { version = "0.1.0", path = "../data" }
-tangul-engine = { version = "0.1.0", path = "../engine" }
+tangul-assist = { path = "../assist" }
+tangul-core = { path = "../core" }
+tangul-data = { path = "../data" }
+tangul-engine = { path = "../engine" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
