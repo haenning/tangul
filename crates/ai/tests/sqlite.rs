@@ -367,8 +367,40 @@ async fn proposals_open_for_the_user_and_never_run() {
             connection: "shop".into(),
             user: "u1".into(),
             sql: format!("-- Proposed by the assistant: drop the test order\n{sql}"),
+            chart: None,
         }]
     );
+    // A query to look at as a chart; not for changes.
+    assert_eq!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": "SELECT status, count(*) FROM orders GROUP BY status", "chart": "bars"})
+        )
+        .await
+        .unwrap(),
+        "Opened in tangul in a new tab on shop, set to show bars side by side once the user \
+         runs it. It was not run."
+    );
+    assert_eq!(
+        proposed.lock().unwrap()[1].chart,
+        Some(tangul_core::chart::ChartStyle::Bars)
+    );
+    assert_eq!(
+        call(&ctx, "propose_sql", json!({"sql": sql, "chart": "line"})).await,
+        Err(ToolError::BadInput(
+            "a chart shows a query that reads; leave out chart for changes".into()
+        ))
+    );
+    assert!(matches!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": "SELECT 1", "chart": "pie"})
+        )
+        .await,
+        Err(ToolError::BadInput(_))
+    ));
     assert_eq!(
         call(&ctx, "propose_sql", json!({"sql": " "})).await,
         Err(ToolError::BadInput("sql is empty".into()))

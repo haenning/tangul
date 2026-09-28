@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tangul_assist::schema::SchemaIndex;
 use tangul_assist::slice::KnownValues;
 use tangul_assist::usage::Usage;
+use tangul_core::chart::ChartStyle;
 use tangul_core::{ConnId, DriverKind, ValueAccess};
 use tangul_engine::EngineHandle;
 use tangul_service::knowledge::Knowledge;
@@ -52,6 +53,8 @@ pub struct SqlProposal {
     /// The database user whose tab connection gets it (see [`Exposed::user`]).
     pub user: String,
     pub sql: String,
+    /// Show the result as this chart once the user runs it.
+    pub chart: Option<ChartStyle>,
 }
 
 /// Where proposals go.

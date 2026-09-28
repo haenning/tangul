@@ -14,6 +14,7 @@
 
 mod audit;
 mod ctx;
+pub mod features;
 pub mod mcp;
 mod results;
 mod tool;

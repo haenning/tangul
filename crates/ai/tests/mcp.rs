@@ -264,6 +264,7 @@ async fn a_client_lists_and_calls_the_tools() {
             names,
             [
                 "list_connections",
+                "tangul_features",
                 "search_schema",
                 "describe_table",
                 "find_join_path",
@@ -355,7 +356,7 @@ async fn the_latest_protocol_gets_a_cacheable_list() {
         let result = &reply.json()["result"];
         assert_eq!(result["ttlMs"], 0, "{result}");
         assert_eq!(result["cacheScope"], "private");
-        assert_eq!(result["tools"].as_array().unwrap().len(), 11);
+        assert_eq!(result["tools"].as_array().unwrap().len(), 12);
         let reply = post(
             addr,
             &[

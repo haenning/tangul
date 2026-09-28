@@ -204,6 +204,16 @@ async fn error(ctx: &Ctx, tool: &str, input: serde_json::Value) -> ToolError {
 }
 
 #[tokio::test]
+async fn says_what_the_app_can_do() {
+    let text = text(&ctx(false), "tangul_features", json!({})).await;
+    assert_eq!(text, tangul_ai::features::text());
+    assert!(
+        text.contains("propose_sql with the query and \"chart\""),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn every_tool_has_a_schema_and_a_description() {
     let specs = Registry::standard().specs();
     let names: Vec<_> = specs.iter().map(|s| s.name).collect();
@@ -211,6 +221,7 @@ async fn every_tool_has_a_schema_and_a_description() {
         names,
         [
             "list_connections",
+            "tangul_features",
             "search_schema",
             "describe_table",
             "find_join_path",
@@ -227,7 +238,11 @@ async fn every_tool_has_a_schema_and_a_description() {
         assert!(s.description.len() > 40, "{}", s.name);
         assert_eq!(s.input_schema["type"], "object", "{}", s.name);
     }
-    let describe = &specs[2].input_schema;
+    let describe = &specs
+        .iter()
+        .find(|s| s.name == "describe_table")
+        .unwrap()
+        .input_schema;
     assert_eq!(describe["required"], json!(["table"]));
     assert!(
         describe["properties"]["table"]["description"]

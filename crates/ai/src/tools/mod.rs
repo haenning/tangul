@@ -4,6 +4,7 @@ mod catalog;
 mod cells;
 mod connections;
 mod describe;
+mod features;
 mod joins;
 mod profile;
 mod propose;
@@ -19,6 +20,7 @@ use crate::tool::{Tool, ToolError};
 pub(crate) fn all() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(connections::ListConnections),
+        Box::new(features::TangulFeatures),
         Box::new(search::SearchSchema),
         Box::new(describe::DescribeTable),
         Box::new(joins::FindJoinPath),
