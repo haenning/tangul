@@ -744,6 +744,45 @@ fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    let (handle, workspace) = open(cx);
+    let sql = "# select * from t\nselect 1 /* b /* c */";
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles.databases.push(Database {
+                id: "db".into(),
+                name: "shop".into(),
+                driver: DriverKind::Mysql,
+                host: "localhost".into(),
+                port: 3306,
+                database: "shop".into(),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: "app".into(),
+                    user: "app".into(),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: Default::default(),
+                ai_tools: true,
+            });
+            ws.connect("app", cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.open_sql("Comments", sql, window, cx);
+        })
+    });
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.active_query().expect("opened").read(cx);
+        // MySQL: `#` starts a comment, `/* */` doesn't nest.
+        let comments: Vec<_> = tab.comments(cx).into_iter().map(|r| &sql[r]).collect();
+        assert_eq!(comments, ["# select * from t", "/* b /* c */"]);
+    });
+}
+
+#[gpui_kit::test]
 fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     use tangul_core::{Database, DbUser, DriverKind, TlsMode};
     let (handle, workspace) = open(cx);

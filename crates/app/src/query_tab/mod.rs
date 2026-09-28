@@ -120,6 +120,7 @@ impl QueryTab {
         if let Some(conn) = &conn {
             let dialect = conn.read(cx).dialect();
             results.update(cx, |r, _| r.set_dialect(dialect));
+            editor.update(cx, |e, cx| e.set_lexing(dialect.lexing(), cx));
         }
         let subscriptions = vec![
             cx.subscribe(&editor, |_, _, event: &EditorEvent, cx| match event {
@@ -270,6 +271,8 @@ impl QueryTab {
         }
         let dialect = conn.read(cx).dialect();
         self.results.update(cx, |r, _| r.set_dialect(dialect));
+        self.editor
+            .update(cx, |e, cx| e.set_lexing(dialect.lexing(), cx));
         self._conn_changes = Some(cx.observe(&conn, |_, _, cx| cx.notify()));
         self.conn = Some(conn);
         cx.notify();
@@ -372,6 +375,12 @@ impl QueryTab {
     /// What the result is shown as, if it is shown as a chart.
     pub fn chart_shown(&self, cx: &App) -> Option<ChartView> {
         self.results.read(cx).chart_shown()
+    }
+
+    /// The editor's ranges shown as comments (tests).
+    #[cfg(test)]
+    pub fn comments(&self, cx: &App) -> Vec<std::ops::Range<usize>> {
+        self.editor.read(cx).comments(cx)
     }
 
     /// The view the result is set to, even before a run (tests).
