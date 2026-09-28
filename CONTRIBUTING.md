@@ -78,10 +78,17 @@ releases run `make license-check` (`.github/workflows/licenses.yml`).
 
 ## Releases
 
-1. Bump `version` in the workspace `Cargo.toml`, commit, merge.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-3. The Release workflow builds the universal DMG and publishes it as a GitHub release
-   with generated notes. The tag has to match the `Cargo.toml` version.
+Merge `dev` into `main` first (its pull request), then run `make release`. It
+1. switches to `main` if you aren't on it (after asking) and pulls,
+2. asks for the version: higher than the current one, with its tag and release free,
+3. bumps `version` in the workspace `Cargo.toml` on `main`, commits, tags it
+   `vX.Y.Z` and pushes both,
+4. merges `main` into `dev`, so `dev` has the version too.
+
+The tag starts the Release workflow: it builds the universal DMG and publishes it as a
+GitHub release with generated notes. It checks that the tag matches the `Cargo.toml`
+version. The internal crates depend on each other by path only, so the workspace
+version is the one place it is set.
 
 The app icon is `packaging/macos/tangul.icon`, an Icon Composer document (open it with
 Icon Composer from Xcode 26). macOS draws the glass and the light/dark background itself.

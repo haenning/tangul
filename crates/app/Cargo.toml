@@ -12,12 +12,12 @@ async-channel.workspace = true
 gpui-kit = { version = "=0.6.6", features = ["tree-sitter-sql"] }
 lsp-types = { version = "0.97.0", features = ["proposed"] }
 serde_json = "1.0.151"
-tangul-ai = { version = "0.1.0", path = "../ai" }
-tangul-assist = { version = "0.1.0", path = "../assist" }
-tangul-core = { version = "0.1.0", path = "../core" }
-tangul-data = { version = "0.1.0", path = "../data" }
-tangul-engine = { version = "0.1.0", path = "../engine" }
-tangul-service = { version = "0.1.0", path = "../service" }
+tangul-ai = { path = "../ai" }
+tangul-assist = { path = "../assist" }
+tangul-core = { path = "../core" }
+tangul-data = { path = "../data" }
+tangul-engine = { path = "../engine" }
+tangul-service = { path = "../service" }
 
 [dev-dependencies]
 # UI tests: headless windows driven by clicks and keys (see workspace/ui_tests.rs).

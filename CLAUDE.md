@@ -133,7 +133,8 @@ explicit OK, and keep them covered by tests.
 ## Git
 
 - All code goes through `dev`. Branch off `dev`, and open pull requests against `dev`,
-  never against `main`. Only `dev` → `main` targets `main`.
+  never against `main`. Only `dev` → `main` targets `main`, and the version bump that
+  `make release` commits on `main` (it merges `main` back into `dev`).
 - **One branch and one pull request per feature or feature set**, not per commit.
   Commits make the branch reviewable step by step: one per finished part (an issue,
   a refactor), each passing `make test` and `make lint`, pushed as it is done. Don't
