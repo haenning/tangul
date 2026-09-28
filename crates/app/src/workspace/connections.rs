@@ -473,12 +473,15 @@ impl Workspace {
             self.connect(&admin, cx);
             self.select_user(db_id.to_string(), admin, window, cx);
         }
-        let sql = format!(
+        let mut sql = format!(
             "-- Creates {name}, the AI's user, that may only read. Run it as a user that \
              may create users and grant rights.\n\
              -- The password is in the Keychain; history keeps it hidden.\n{};\n",
             statements.join(";\n")
         );
+        if let Some(note) = dialect.readonly_account_note() {
+            sql.push_str(&format!("\n{note}\n"));
+        }
         self.open_sql("Read-only AI user", &sql, window, cx);
     }
 

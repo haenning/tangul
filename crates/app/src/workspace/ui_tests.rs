@@ -733,6 +733,11 @@ fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext)
             "{sql}"
         );
         assert!(sql.contains("GRANT SELECT ON ALL TABLES IN SCHEMA public TO tangul_ai"));
+        // Offered, commented out: it changes the rights of every role.
+        assert!(
+            sql.contains("\n-- REVOKE CREATE ON SCHEMA public FROM PUBLIC;"),
+            "{sql}"
+        );
         // Not run: nothing went to the engine for it.
         assert!(!t.is_running(cx));
     });
