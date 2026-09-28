@@ -50,7 +50,9 @@ impl Workspace {
                     .map_or("No user".into(), |u| u.user.clone()),
             };
             let (db_id, values, weak) = (db.id.clone(), db.ai_values, weak.clone());
-            let writable = self.knowledge.ai_writable(&db.id).filter(|n| *n > 0);
+            // How many tables the AI's user may change; `None` until checked.
+            let checked = self.knowledge.ai_writable(&db.id);
+            let writable = checked.filter(|n| *n > 0);
             let problem = match missing {
                 Some(id) => Some(format!(
                     "The AI's user {id} no longer exists, so the AI can't use this \
@@ -63,8 +65,10 @@ impl Workspace {
                 .chain(writable.map(ai_user_warning))
                 .collect();
             let warning = (!alerts.is_empty()).then(|| alerts.join("\n\n"));
-            // Allowed, but the user should know what it means.
-            let note = ai_user.is_none().then(|| SAME_USER_NOTE.to_string());
+            // One piece of advice: red when the AI's user may write, none when it
+            // is read-only on the server, and on your own user, until that is
+            // known, what it means.
+            let note = (ai_user.is_none() && checked.is_none()).then(|| SAME_USER_NOTE.to_string());
             let (color, tooltip): (Hsla, SharedString) = match (&warning, &note) {
                 (Some(w), _) => (theme.danger, w.clone().into()),
                 (None, Some(n)) => (theme.warning, n.clone().into()),
@@ -561,13 +565,20 @@ pub(super) fn ai_menu(
         menu = menu
             .item(PopupMenuItem::element(move |_, cx| {
                 let theme = cx.theme();
+                // A fixed width: a flex row doesn't shrink its text to a max width.
                 h_flex()
-                    .max_w(px(TEXT_WIDTH))
+                    .w(px(TEXT_WIDTH))
                     .gap_2()
                     .items_start()
                     .text_color(if danger { theme.danger } else { theme.warning })
                     .child(Icon::new(IconName::TriangleAlert).xsmall().mt_0p5())
-                    .child(div().flex_1().whitespace_normal().child(text.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(text.clone()),
+                    )
             }))
             .separator();
     }

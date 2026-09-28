@@ -1,20 +1,21 @@
 //! The SQL editor: what a run takes (the selection, the statement under the cursor or
-//! everything), the server's check of the statements while typing, and error
-//! underlines.
+//! everything), the server's check of the statements while typing, error underlines,
+//! and comments as the database reads them.
 
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::input::{
-    Diagnostic, DiagnosticSeverity, TextDecoration, TextDecorationCollection,
+    Diagnostic, DiagnosticSeverity, HighlightStyleResolver as _, TextDecoration,
+    TextDecorationCollection,
 };
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{CompletionProvider, EditorState, InputEvent, RopeExt as _};
 use gpui_kit::*;
 use tangul_assist::analyze::statements;
 use tangul_assist::dialect::Dialect;
-use tangul_assist::lexer::tokenize;
+use tangul_assist::lexer::{Lexing, TokenKind, tokenize, tokenize_with};
 use tangul_assist::statement::statement_at;
 use tangul_engine::Problem;
 
@@ -56,6 +57,11 @@ pub struct SqlEditor {
     pending_mark: Option<Range<usize>>,
     /// Marks the text the current result came from, until the next run.
     ran: Option<TextDecorationCollection>,
+    /// How the connection's database reads comments.
+    lexing: Lexing,
+    /// Comments in the comment color, also those the highlighter's grammar doesn't
+    /// know (`#` on MySQL, nested and unclosed `/* */`).
+    comments: TextDecorationCollection,
     _flash: Task<()>,
     /// Bumped on every edit; check results for older text are dropped.
     edit_generation: u64,
@@ -78,21 +84,57 @@ impl SqlEditor {
         });
         let changes = cx.subscribe(&state, |this: &mut Self, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
+                this.color_comments(cx);
                 this.revalidate(cx);
             }
         });
-        Self {
+        let comments = state.update(cx, |e, cx| e.create_decorations_collection(Vec::new(), cx));
+        let mut editor = Self {
             state,
             pending_origin: None,
             run_origin: None,
             pending_mark: None,
             ran: None,
+            lexing: Lexing::default(),
+            comments,
             _flash: Task::ready(()),
             edit_generation: 0,
             validating: Vec::new(),
             _validation: Task::ready(()),
             _changes: changes,
+        };
+        editor.color_comments(cx);
+        editor
+    }
+
+    /// The connection's database changed: its comments may be spelled differently.
+    pub fn set_lexing(&mut self, lexing: Lexing, cx: &mut Context<Self>) {
+        if self.lexing != lexing {
+            self.lexing = lexing;
+            self.color_comments(cx);
         }
+    }
+
+    /// The ranges shown as comments (tests).
+    #[cfg(test)]
+    pub fn comments(&self, cx: &App) -> Vec<Range<usize>> {
+        self.comments.get_ranges(cx)
+    }
+
+    fn color_comments(&mut self, cx: &mut Context<Self>) {
+        let style = cx
+            .theme()
+            .highlight_theme
+            .style("comment")
+            .unwrap_or_else(|| HighlightStyle {
+                color: Some(cx.theme().muted_foreground),
+                ..Default::default()
+            });
+        let decorations = comment_ranges(&self.text(cx), self.lexing)
+            .into_iter()
+            .map(|range| TextDecoration::new(range, style))
+            .collect();
+        self.comments.set(decorations, cx);
     }
 
     pub fn state(&self) -> &Entity<EditorState> {
@@ -308,6 +350,15 @@ fn is_incomplete(sql: &str, problem: &Problem) -> bool {
         || message.contains("unterminated")
 }
 
+/// Byte ranges of the comments in `sql`.
+fn comment_ranges(sql: &str, lexing: Lexing) -> Vec<Range<usize>> {
+    tokenize_with(sql, lexing)
+        .into_iter()
+        .filter(|t| t.kind == TokenKind::Comment)
+        .map(|t| t.start..t.end)
+        .collect()
+}
+
 /// The token an error position points at (or the last token if the error is at the
 /// end, e.g. an unfinished statement).
 fn error_span(sql: &str, position: usize) -> Option<Range<usize>> {
@@ -324,7 +375,8 @@ fn error_span(sql: &str, position: usize) -> Option<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Problem, error_span, is_incomplete};
+    use super::{Problem, comment_ranges, error_span, is_incomplete};
+    use tangul_assist::lexer::Lexing;
 
     #[test]
     fn incomplete_statements_are_not_errors() {
@@ -366,5 +418,51 @@ mod tests {
         // At the end: the last token.
         assert_eq!(error_span("select * from", 13), Some(9..13));
         assert_eq!(error_span("", 0), None);
+    }
+
+    #[test]
+    fn comments_as_the_database_reads_them() {
+        let mysql = Lexing {
+            hash_comments: true,
+            dollar_quotes: false,
+            ..Lexing::default()
+        };
+        let postgres = Lexing {
+            nested_comments: true,
+            ..Lexing::default()
+        };
+        let texts = |sql: &str, lexing| -> Vec<String> {
+            comment_ranges(sql, lexing)
+                .into_iter()
+                .map(|r| sql[r].to_string())
+                .collect()
+        };
+        assert_eq!(
+            texts("select 1 -- a\n/* b */ from t", Lexing::default()),
+            ["-- a", "/* b */"]
+        );
+        assert_eq!(
+            texts("# select * from t\nselect 1", mysql),
+            ["# select * from t"]
+        );
+        assert_eq!(
+            texts("# select 1", postgres),
+            Vec::<String>::new(),
+            "no # comments on Postgres"
+        );
+        assert_eq!(
+            texts("/* a /* b */ select 1 */ select 2", postgres),
+            ["/* a /* b */ select 1 */"]
+        );
+        // Unclosed: the rest is a comment.
+        assert_eq!(
+            texts("select 1 /* where a", Lexing::default()),
+            ["/* where a"]
+        );
+        // Not in strings.
+        assert_eq!(
+            texts("select '-- a', '/* b */'", Lexing::default()),
+            Vec::<String>::new()
+        );
     }
 }

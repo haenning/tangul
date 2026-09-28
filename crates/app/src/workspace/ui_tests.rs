@@ -461,17 +461,22 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
             cx.notify();
         })
     });
-    // Not checked yet, or read-only on the server: no warning.
+    // Not checked yet: no warning, the note on your own user instead.
     step(handle, cx, |window, cx| {
         assert!(window.try_find("ai-user-warning").is_none());
+        assert!(window.find("ai-user-note").visible());
         workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 3, cx));
     });
+    // One piece of advice: the red one replaces the note.
     step(handle, cx, |window, cx| {
         assert!(window.find("ai-user-warning").visible());
+        assert!(window.try_find("ai-user-note").is_none());
         workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 0, cx));
     });
+    // Read-only on the server: no advice.
     step(handle, cx, |window, _| {
-        assert!(window.try_find("ai-user-warning").is_none())
+        assert!(window.try_find("ai-user-warning").is_none());
+        assert!(window.try_find("ai-user-note").is_none());
     });
 }
 
@@ -740,6 +745,45 @@ fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext)
     workspace.update(cx, |ws, _| {
         let ai = ws.data.profiles.databases[0].users[1].id.clone();
         assert_eq!(ws.data.profiles.password(&ai).map(|p| p.len()), Some(24));
+    });
+}
+
+#[gpui_kit::test]
+fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    let (handle, workspace) = open(cx);
+    let sql = "# select * from t\nselect 1 /* b /* c */";
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles.databases.push(Database {
+                id: "db".into(),
+                name: "shop".into(),
+                driver: DriverKind::Mysql,
+                host: "localhost".into(),
+                port: 3306,
+                database: "shop".into(),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: "app".into(),
+                    user: "app".into(),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: Default::default(),
+                ai_tools: true,
+            });
+            ws.connect("app", cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.open_sql("Comments", sql, window, cx);
+        })
+    });
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.active_query().expect("opened").read(cx);
+        // MySQL: `#` starts a comment, `/* */` doesn't nest.
+        let comments: Vec<_> = tab.comments(cx).into_iter().map(|r| &sql[r]).collect();
+        assert_eq!(comments, ["# select * from t", "/* b /* c */"]);
     });
 }
 
