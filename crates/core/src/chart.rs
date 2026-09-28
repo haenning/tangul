@@ -55,8 +55,8 @@ impl ChartStyle {
         matches!(self, ChartStyle::StackedArea | ChartStyle::StackedBars)
     }
 
-    /// Stable name for storing a view.
-    fn key(self) -> &'static str {
+    /// Stable name for storing a view, and for the AI tools: `line`, `stacked_bars`, …
+    pub fn key(self) -> &'static str {
         match self {
             ChartStyle::Line => "line",
             ChartStyle::Area => "area",

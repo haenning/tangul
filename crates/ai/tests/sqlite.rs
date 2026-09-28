@@ -254,6 +254,88 @@ async fn writes_are_never_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_cut_cell_is_read_whole_from_tangul_s_copy() {
+    let (dir, ctx) = shop("cells").await;
+    // A JSON document of 256 characters: more than the text shows.
+    let sql = "SELECT 1 AS id, json_object('lots', json_array(json_object('name', 'A'), \
+               json_object('name', substr(hex(zeroblob(120)), 1, 220)))) AS doc";
+    let doc = format!(
+        r#"{{"lots":[{{"name":"A"}},{{"name":"{}"}}]}}"#,
+        "0".repeat(220)
+    );
+    let out = call(&ctx, "run_readonly", json!({"sql": sql}))
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        format!(
+            "id\tdoc\n1\t{}…[{} chars; get_cell r1 row 1 col doc]\n(1 row)",
+            doc.chars().take(200).collect::<String>(),
+            doc.len()
+        )
+    );
+    // The whole value, formatted; no query runs (the connection could be gone).
+    let whole = call(
+        &ctx,
+        "get_cell",
+        json!({"result": "r1", "row": 1, "column": "doc"}),
+    )
+    .await
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
+    assert_eq!(whole, serde_json::to_string_pretty(&parsed).unwrap());
+    // A part of it; the column by number.
+    assert_eq!(
+        call(
+            &ctx,
+            "get_cell",
+            json!({"result": "r1", "row": 1, "column": "2", "path": "lots.0.name"})
+        )
+        .await
+        .unwrap(),
+        "A"
+    );
+    // Short results aren't kept; wrong cells say what there is.
+    call(&ctx, "run_readonly", json!({"sql": "SELECT 1 AS n"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &ctx,
+            "get_cell",
+            json!({"result": "r2", "row": 1, "column": "n"})
+        )
+        .await,
+        Err(ToolError::NotFound(
+            "result r2 (kept about 10 minutes); run the query again".into()
+        ))
+    );
+    assert_eq!(
+        call(
+            &ctx,
+            "get_cell",
+            json!({"result": "r1", "row": 2, "column": "doc"})
+        )
+        .await,
+        Err(ToolError::NotFound(
+            "row 2, column doc in r1; it has rows 1–1 and columns id, doc".into()
+        ))
+    );
+    assert_eq!(
+        call(
+            &ctx,
+            "get_cell",
+            json!({"result": "r1", "row": 1, "column": "id", "path": "a"})
+        )
+        .await,
+        Err(ToolError::BadInput(
+            "the cell isn't JSON; leave out path".into()
+        ))
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn proposals_open_for_the_user_and_never_run() {
     let (dir, ctx) = shop("propose").await;
     let sql = "DELETE FROM orders WHERE id = 1";
@@ -285,8 +367,40 @@ async fn proposals_open_for_the_user_and_never_run() {
             connection: "shop".into(),
             user: "u1".into(),
             sql: format!("-- Proposed by the assistant: drop the test order\n{sql}"),
+            chart: None,
         }]
     );
+    // A query to look at as a chart; not for changes.
+    assert_eq!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": "SELECT status, count(*) FROM orders GROUP BY status", "chart": "bars"})
+        )
+        .await
+        .unwrap(),
+        "Opened in tangul in a new tab on shop, set to show bars side by side once the user \
+         runs it. It was not run."
+    );
+    assert_eq!(
+        proposed.lock().unwrap()[1].chart,
+        Some(tangul_core::chart::ChartStyle::Bars)
+    );
+    assert_eq!(
+        call(&ctx, "propose_sql", json!({"sql": sql, "chart": "line"})).await,
+        Err(ToolError::BadInput(
+            "a chart shows a query that reads; leave out chart for changes".into()
+        ))
+    );
+    assert!(matches!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": "SELECT 1", "chart": "pie"})
+        )
+        .await,
+        Err(ToolError::BadInput(_))
+    ));
     assert_eq!(
         call(&ctx, "propose_sql", json!({"sql": " "})).await,
         Err(ToolError::BadInput("sql is empty".into()))

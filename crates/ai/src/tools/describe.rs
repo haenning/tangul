@@ -13,6 +13,9 @@ use super::resolve_table;
 use crate::ctx::Ctx;
 use crate::tool::{Tool, ToolError, ToolOutput, input, schema_of};
 
+/// Longest generated-column expression shown; longer ones only say their length.
+const GENERATED_CHARS: usize = 120;
+
 pub(crate) struct DescribeTable;
 
 #[derive(Deserialize, JsonSchema)]
@@ -179,7 +182,13 @@ pub(crate) fn text(d: &Description) -> String {
             line.push_str(&format!(" → {r}"));
         }
         if let Some(g) = &c.generated {
-            line.push_str(&format!(" generated as {g}"));
+            // Enough to write a query; a long expression only costs reading time.
+            match g.chars().count() {
+                n if n > GENERATED_CHARS => {
+                    line.push_str(&format!(" generated (expression of {n} chars)"))
+                }
+                _ => line.push_str(&format!(" generated as {g}")),
+            }
         } else if let Some(v) = c.default.as_ref().filter(|_| !c.identity) {
             line.push_str(&format!(" default {v}"));
         }

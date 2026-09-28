@@ -674,8 +674,36 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         connection: "shop".into(),
         user: "app".into(),
         sql: sql.into(),
+        chart: None,
+    });
+    // A query to look at as a chart: set before it runs.
+    sink(tangul_ai::SqlProposal {
+        connection: "shop".into(),
+        user: "app".into(),
+        sql: "SELECT day, orders FROM daily".into(),
+        chart: Some(tangul_core::chart::ChartStyle::Bars),
     });
     cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.active_query().expect("opened").read(cx);
+        assert_eq!(tab.sql(cx), "SELECT day, orders FROM daily");
+        assert!(!tab.is_running(cx), "not run");
+        assert_eq!(
+            tab.chart_view(cx),
+            Some(tangul_core::chart::ChartView {
+                style: tangul_core::chart::ChartStyle::Bars,
+                series: None
+            })
+        );
+    });
+    // The first proposal's tab, before it.
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, _| {
+            let last = ws.tabs.active_index();
+            ws.tabs.set_active(last - 1);
+        })
+    });
     step(handle, cx, |_, cx| {
         let ws = workspace.read(cx);
         let tab = ws.tabs.active_query().expect("opened").read(cx);

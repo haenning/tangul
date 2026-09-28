@@ -264,6 +264,7 @@ async fn a_client_lists_and_calls_the_tools() {
             names,
             [
                 "list_connections",
+                "tangul_features",
                 "search_schema",
                 "describe_table",
                 "find_join_path",
@@ -272,6 +273,7 @@ async fn a_client_lists_and_calls_the_tools() {
                 "list_enums",
                 "view_definition",
                 "run_readonly",
+                "get_cell",
                 "propose_sql"
             ]
         );
@@ -364,7 +366,7 @@ async fn the_latest_protocol_gets_a_cacheable_list() {
         let result = &reply.json()["result"];
         assert_eq!(result["ttlMs"], 0, "{result}");
         assert_eq!(result["cacheScope"], "private");
-        assert_eq!(result["tools"].as_array().unwrap().len(), 10);
+        assert_eq!(result["tools"].as_array().unwrap().len(), 12);
         let reply = post(
             addr,
             &[
@@ -387,6 +389,44 @@ async fn the_latest_protocol_gets_a_cacheable_list() {
                 .as_str()
                 .unwrap()
                 .starts_with("users (table)")
+        );
+        // A cut cell, read whole in a later call (tangul kept the result).
+        let call = |id: u64, name: &str, arguments: Value| {
+            let reply = post(
+                addr,
+                &[
+                    headers[0],
+                    headers[1],
+                    ("Mcp-Method", "tools/call"),
+                    ("Mcp-Name", name),
+                ],
+                &rpc(
+                    id,
+                    "tools/call",
+                    json!({"name": name, "arguments": arguments, "_meta": meta}),
+                ),
+            );
+            reply.json()["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let cut = call(
+            3,
+            "run_readonly",
+            json!({"sql": "SELECT substr(hex(zeroblob(150)), 1, 300) AS v"}),
+        );
+        assert!(
+            cut.contains("…[300 chars; get_cell r1 row 1 col v]"),
+            "{cut}"
+        );
+        assert_eq!(
+            call(
+                4,
+                "get_cell",
+                json!({"result": "r1", "row": 1, "column": "v"})
+            ),
+            "0".repeat(300)
         );
     })
     .await

@@ -497,6 +497,12 @@ impl ResultView {
         self.chart_view.map(|v| data.view_or_default(Some(v)))
     }
 
+    /// The view it is set to, with or without a result yet (tests).
+    #[cfg(test)]
+    pub fn chart_view(&self) -> Option<ChartView> {
+        self.chart_view
+    }
+
     /// Shows the result as `view`, or as the grid (`None`).
     pub fn set_chart_view(&mut self, view: Option<ChartView>, cx: &mut Context<Self>) {
         self.chart_view = view;

@@ -1,8 +1,10 @@
 //! The tools, one module each, and what they share.
 
 mod catalog;
+mod cells;
 mod connections;
 mod describe;
+mod features;
 mod joins;
 mod profile;
 mod propose;
@@ -18,6 +20,7 @@ use crate::tool::{Tool, ToolError};
 pub(crate) fn all() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(connections::ListConnections),
+        Box::new(features::TangulFeatures),
         Box::new(search::SearchSchema),
         Box::new(describe::DescribeTable),
         Box::new(joins::FindJoinPath),
@@ -26,6 +29,7 @@ pub(crate) fn all() -> Vec<Box<dyn Tool>> {
         Box::new(catalog::ListEnums),
         Box::new(catalog::ViewDefinition),
         Box::new(query::RunReadonly),
+        Box::new(cells::GetCell),
         Box::new(propose::ProposeSql),
     ]
 }

@@ -92,6 +92,20 @@ fn shop() -> SchemaInfo {
                 comment: Some("Login; unique".into()),
                 ..col("users", "email", "text")
             },
+            ColumnMeta {
+                generated: Some("lower(email)".into()),
+                ..col("users", "email_key", "text")
+            },
+            ColumnMeta {
+                generated: Some(format!(
+                    "CASE {} ELSE to_tsvector('simple', email) END",
+                    (0..25)
+                        .map(|i| format!("WHEN lang = 'l{i}' THEN to_tsvector('c{i}', email)"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )),
+                ..col("users", "email_search", "tsvector")
+            },
         ],
         foreign_keys: vec![ForeignKey {
             name: "orders_user_id_fkey".into(),
@@ -190,6 +204,16 @@ async fn error(ctx: &Ctx, tool: &str, input: serde_json::Value) -> ToolError {
 }
 
 #[tokio::test]
+async fn says_what_the_app_can_do() {
+    let text = text(&ctx(false), "tangul_features", json!({})).await;
+    assert_eq!(text, tangul_ai::features::text());
+    assert!(
+        text.contains("propose_sql with the query and \"chart\""),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn every_tool_has_a_schema_and_a_description() {
     let specs = Registry::standard().specs();
     let names: Vec<_> = specs.iter().map(|s| s.name).collect();
@@ -197,6 +221,7 @@ async fn every_tool_has_a_schema_and_a_description() {
         names,
         [
             "list_connections",
+            "tangul_features",
             "search_schema",
             "describe_table",
             "find_join_path",
@@ -205,6 +230,7 @@ async fn every_tool_has_a_schema_and_a_description() {
             "list_enums",
             "view_definition",
             "run_readonly",
+            "get_cell",
             "propose_sql"
         ]
     );
@@ -212,7 +238,11 @@ async fn every_tool_has_a_schema_and_a_description() {
         assert!(s.description.len() > 40, "{}", s.name);
         assert_eq!(s.input_schema["type"], "object", "{}", s.name);
     }
-    let describe = &specs[2].input_schema;
+    let describe = &specs
+        .iter()
+        .find(|s| s.name == "describe_table")
+        .unwrap()
+        .input_schema;
     assert_eq!(describe["required"], json!(["table"]));
     assert!(
         describe["properties"]["table"]["description"]
@@ -277,6 +307,8 @@ app.users (table, ~100000 rows) — Registered customers
 columns:
   id integer pk identity
   email text not null — Login; unique
+  email_key text generated as lower(email)
+  email_search tsvector generated (expression of 1247 chars)
 referenced by:
   app.orders (user_id) → (id)"
     );
@@ -466,7 +498,7 @@ total numeric(10,2), ordered date \"Day the order was placed\"
   why: comment: \"Customer orders; totals in EUR\", name; status: value 'cancelled'; ordered: name
 
 app.users (~100000 rows) — Registered customers
-  id integer pk, email text \"Login; unique\"
+  id integer pk, email text \"Login; unique\", email_key text, email_search tsvector
   why: comment: \"Registered customers\""
     );
     assert_eq!(

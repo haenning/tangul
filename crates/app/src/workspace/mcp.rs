@@ -191,12 +191,25 @@ impl Workspace {
     ) {
         let title = format!("Proposed · {}", proposal.connection);
         self.open_sql(&title, &proposal.sql, window, cx);
-        if let (Some(conn), Some(tab)) = (
-            self.tab_conn(&proposal.user),
-            self.tabs.active_query().cloned(),
-        ) {
-            tab.update(cx, |t, cx| t.set_conn(conn, cx));
-        }
+        let Some(tab) = self.tabs.active_query().cloned() else {
+            return;
+        };
+        let conn = self.tab_conn(&proposal.user);
+        tab.update(cx, |t, cx| {
+            if let Some(conn) = conn {
+                t.set_conn(conn, cx);
+            }
+            // Shown as the chart once the user runs it.
+            if let Some(style) = proposal.chart {
+                t.set_chart_view(
+                    Some(ChartView {
+                        style,
+                        series: None,
+                    }),
+                    cx,
+                );
+            }
+        });
         cx.notify();
     }
 

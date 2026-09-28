@@ -34,13 +34,16 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::ctx::Ctx;
+use crate::results::Results;
 use crate::tool::Registry;
 
 /// What the server tells clients when they connect.
 const INSTRUCTIONS: &str = "tangul's databases, read-only. Start with list_connections, then \
     schema_slice for a question, describe_table and find_join_path for details, and \
-    run_readonly to query (keep results small). Nothing that changes data is run: \
-    propose_sql opens such statements in tangul for the user to review and run.";
+    run_readonly to query (keep results small); get_cell gives a cell it cut, whole. \
+    Nothing that changes data is run: propose_sql opens such statements in tangul for the \
+    user to review and run, and opens a query as a chart too. tangul_features says what \
+    else the app can do for the user.";
 
 /// Builds the [`Ctx`] for a call: the databases exposed right now, the knowledge
 /// pool, the engine and the audit sink.
@@ -51,6 +54,8 @@ pub type CtxSource = Arc<dyn Fn() -> Ctx + Send + Sync>;
 struct Tangul {
     registry: Arc<Registry>,
     ctx: CtxSource,
+    /// Results whose cells were cut, across calls (`get_cell`).
+    results: Results,
 }
 
 impl ServerHandler for Tangul {
@@ -90,7 +95,7 @@ impl ServerHandler for Tangul {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let ctx = (self.ctx)();
+        let ctx = (self.ctx)().with_results(self.results.clone());
         let input = request.arguments.map(Value::Object).unwrap_or(Value::Null);
         // A tool's error goes to the model as the result (it says what to do instead),
         // not as a protocol error.
@@ -171,6 +176,7 @@ async fn serve(
     let handler = Tangul {
         registry: Arc::new(Registry::standard()),
         ctx,
+        results: Results::default(),
     };
     let mut config = StreamableHttpServerConfig::default();
     config.cancellation_token = cancel.child_token();

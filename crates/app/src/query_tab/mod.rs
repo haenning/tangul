@@ -374,6 +374,12 @@ impl QueryTab {
         self.results.read(cx).chart_shown()
     }
 
+    /// The view the result is set to, even before a run (tests).
+    #[cfg(test)]
+    pub fn chart_view(&self, cx: &App) -> Option<ChartView> {
+        self.results.read(cx).chart_view()
+    }
+
     /// Shows the result as `view`, or as the grid (`None`).
     pub fn set_chart_view(&mut self, view: Option<ChartView>, cx: &mut Context<Self>) {
         self.results.update(cx, |r, cx| r.set_chart_view(view, cx));
