@@ -16,8 +16,9 @@ pub(crate) struct RunReadonly;
 
 const DEFAULT_ROWS: usize = 50;
 const MAX_ROWS: usize = 500;
-/// Longest cell in the text for the model; longer ones are cut.
-const CELL_CHARS: usize = 200;
+/// Longest cell in the text for the model; longer ones are cut, and the result is
+/// kept so `get_cell` can give the whole value.
+pub(crate) const CELL_CHARS: usize = 200;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -73,18 +74,39 @@ fn next_query() -> QueryId {
     QueryId(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
-fn text(r: &Rows) -> String {
-    let cell = |v: &Option<String>| match v {
+/// Whether any cell is longer than the text shows.
+fn has_long_cells(r: &Rows) -> bool {
+    r.rows
+        .iter()
+        .flatten()
+        .flatten()
+        .any(|v| v.chars().count() > CELL_CHARS)
+}
+
+/// The rows as tab-separated text; a cut cell says where to get the rest (`kept`:
+/// the id the result is kept under).
+fn text(r: &Rows, kept: Option<&str>) -> String {
+    let cell = |row: usize, col: usize, v: &Option<String>| match v {
         None => "NULL".to_string(),
-        Some(v) if v.chars().count() > CELL_CHARS => {
-            format!("{}…", v.chars().take(CELL_CHARS).collect::<String>())
+        Some(v) => {
+            let chars = v.chars().count();
+            let shown: String = v.chars().take(CELL_CHARS).collect();
+            let shown = shown.replace(['\t', '\n'], " ");
+            match kept {
+                Some(id) if chars > CELL_CHARS => format!(
+                    "{shown}…[{chars} chars; get_cell {id} row {} col {}]",
+                    row + 1,
+                    r.columns[col]
+                ),
+                _ => shown,
+            }
         }
-        Some(v) => v.replace(['\t', '\n'], " "),
     };
     let mut out = r.columns.join("\t");
-    for row in &r.rows {
+    for (i, row) in r.rows.iter().enumerate() {
         out.push('\n');
-        out.push_str(&row.iter().map(cell).collect::<Vec<_>>().join("\t"));
+        let cells: Vec<String> = row.iter().enumerate().map(|(c, v)| cell(i, c, v)).collect();
+        out.push_str(&cells.join("\t"));
     }
     let n = r.rows.len();
     out.push_str(&format!(
@@ -104,7 +126,9 @@ impl Tool for RunReadonly {
     fn description(&self) -> &'static str {
         "Run one read-only statement and get its rows (tab-separated). It runs in a \
          read-only transaction that is rolled back, with a time limit. Writes are never \
-         run: propose them to the user instead. Keep results small (LIMIT, aggregates)."
+         run: use propose_sql for them. Keep results small (LIMIT, aggregates). Cells \
+         longer than 200 characters are cut and say how to get the whole value with \
+         get_cell (no need to query again)."
     }
 
     fn input_schema(&self) -> Value {
@@ -141,7 +165,11 @@ impl Tool for RunReadonly {
                 truncated: false,
             },
         };
-        let text = text(&rows);
+        let kept = has_long_cells(&rows).then(|| {
+            ctx.results()
+                .keep(&conn.name, rows.columns.clone(), rows.rows.clone())
+        });
+        let text = text(&rows, kept.as_deref());
         Ok(ToolOutput::new(&rows, text))
     }
 }

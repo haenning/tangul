@@ -34,6 +34,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::ctx::Ctx;
+use crate::results::Results;
 use crate::tool::Registry;
 
 /// What the server tells clients when they connect.
@@ -51,6 +52,8 @@ pub type CtxSource = Arc<dyn Fn() -> Ctx + Send + Sync>;
 struct Tangul {
     registry: Arc<Registry>,
     ctx: CtxSource,
+    /// Results whose cells were cut, across calls (`get_cell`).
+    results: Results,
 }
 
 impl ServerHandler for Tangul {
@@ -90,7 +93,7 @@ impl ServerHandler for Tangul {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let ctx = (self.ctx)();
+        let ctx = (self.ctx)().with_results(self.results.clone());
         let input = request.arguments.map(Value::Object).unwrap_or(Value::Null);
         // A tool's error goes to the model as the result (it says what to do instead),
         // not as a protocol error.
@@ -171,6 +174,7 @@ async fn serve(
     let handler = Tangul {
         registry: Arc::new(Registry::standard()),
         ctx,
+        results: Results::default(),
     };
     let mut config = StreamableHttpServerConfig::default();
     config.cancellation_token = cancel.child_token();

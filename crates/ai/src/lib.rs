@@ -15,9 +15,11 @@
 mod audit;
 mod ctx;
 pub mod mcp;
+mod results;
 mod tool;
 mod tools;
 
 pub use audit::{AuditSink, ToolCall};
 pub use ctx::{Ctx, Exposed, ProposalSink, SqlProposal};
+pub use results::Results;
 pub use tool::{Registry, Tool, ToolError, ToolOutput, ToolSpec};

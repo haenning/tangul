@@ -1,6 +1,7 @@
 //! The tools, one module each, and what they share.
 
 mod catalog;
+mod cells;
 mod connections;
 mod describe;
 mod joins;
@@ -26,6 +27,7 @@ pub(crate) fn all() -> Vec<Box<dyn Tool>> {
         Box::new(catalog::ListEnums),
         Box::new(catalog::ViewDefinition),
         Box::new(query::RunReadonly),
+        Box::new(cells::GetCell),
         Box::new(propose::ProposeSql),
     ]
 }

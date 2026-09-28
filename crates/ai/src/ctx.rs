@@ -9,6 +9,7 @@ use tangul_engine::EngineHandle;
 use tangul_service::knowledge::Knowledge;
 
 use crate::audit::AuditSink;
+use crate::results::Results;
 use crate::tool::ToolError;
 
 /// A database the user makes available to the assistant.
@@ -38,6 +39,8 @@ pub struct Ctx {
     audit: Option<(&'static str, AuditSink)>,
     /// Where `propose_sql` sends statements for the user; none: it can't.
     proposals: Option<ProposalSink>,
+    /// Results whose cells the text cut, for `get_cell`.
+    results: Results,
 }
 
 /// Statements the assistant proposes: the app opens them in a new tab, unrun, on
@@ -56,6 +59,8 @@ pub type ProposalSink = Arc<dyn Fn(SqlProposal) + Send + Sync>;
 
 /// A connection resolved for a call.
 pub(crate) struct Conn {
+    /// How the client names it.
+    pub name: String,
     pub conn: ConnId,
     pub schema: Arc<SchemaIndex>,
     /// What the user's queries on this database used (learned joins, …).
@@ -76,6 +81,7 @@ impl Ctx {
             exposed,
             audit: None,
             proposals: None,
+            results: Results::default(),
         }
     }
 
@@ -97,6 +103,16 @@ impl Ctx {
 
     pub(crate) fn proposals(&self) -> Option<&ProposalSink> {
         self.proposals.as_ref()
+    }
+
+    /// Keeps results in `results` (shared by the calls of one client).
+    pub fn with_results(mut self, results: Results) -> Self {
+        self.results = results;
+        self
+    }
+
+    pub(crate) fn results(&self) -> &Results {
+        &self.results
     }
 
     pub fn exposed(&self) -> &[Exposed] {
@@ -149,6 +165,7 @@ impl Ctx {
             KnownValues::new()
         };
         Ok(Conn {
+            name: exposed.name.clone(),
             conn: exposed.conn,
             known_values,
             user: exposed.user.clone(),

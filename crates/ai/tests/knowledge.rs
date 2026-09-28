@@ -92,6 +92,20 @@ fn shop() -> SchemaInfo {
                 comment: Some("Login; unique".into()),
                 ..col("users", "email", "text")
             },
+            ColumnMeta {
+                generated: Some("lower(email)".into()),
+                ..col("users", "email_key", "text")
+            },
+            ColumnMeta {
+                generated: Some(format!(
+                    "CASE {} ELSE to_tsvector('simple', email) END",
+                    (0..25)
+                        .map(|i| format!("WHEN lang = 'l{i}' THEN to_tsvector('c{i}', email)"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )),
+                ..col("users", "email_search", "tsvector")
+            },
         ],
         foreign_keys: vec![ForeignKey {
             name: "orders_user_id_fkey".into(),
@@ -205,6 +219,7 @@ async fn every_tool_has_a_schema_and_a_description() {
             "list_enums",
             "view_definition",
             "run_readonly",
+            "get_cell",
             "propose_sql"
         ]
     );
@@ -277,6 +292,8 @@ app.users (table, ~100000 rows) — Registered customers
 columns:
   id integer pk identity
   email text not null — Login; unique
+  email_key text generated as lower(email)
+  email_search tsvector generated (expression of 1247 chars)
 referenced by:
   app.orders (user_id) → (id)"
     );
@@ -466,7 +483,7 @@ total numeric(10,2), ordered date \"Day the order was placed\"
   why: comment: \"Customer orders; totals in EUR\", name; status: value 'cancelled'; ordered: name
 
 app.users (~100000 rows) — Registered customers
-  id integer pk, email text \"Login; unique\"
+  id integer pk, email text \"Login; unique\", email_key text, email_search tsvector
   why: comment: \"Registered customers\""
     );
     assert_eq!(
