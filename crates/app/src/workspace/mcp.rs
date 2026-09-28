@@ -238,12 +238,31 @@ impl Workspace {
     }
 
     /// The command that adds the server to Claude Code.
-    fn mcp_command(&mut self) -> Option<String> {
+    /// For every project (user scope), not only the directory it is run in.
+    pub(super) fn mcp_command(&mut self) -> Option<String> {
         let url = self.mcp.server.as_ref()?.url();
         let token = self.mcp_token();
         Some(format!(
-            "claude mcp add --transport http tangul {url} --header \"Authorization: Bearer {token}\""
+            "claude mcp add --scope user --transport http tangul {url} \
+             --header \"Authorization: Bearer {token}\""
         ))
+    }
+
+    /// The entry for `mcpServers` in Claude Desktop's `claude_desktop_config.json`.
+    /// Claude Desktop starts local servers as commands, so `mcp-remote` bridges to
+    /// the HTTP server; the header comes from the environment (no space in the
+    /// arguments).
+    pub(super) fn mcp_desktop_config(&mut self) -> Option<String> {
+        let url = self.mcp.server.as_ref()?.url();
+        let token = self.mcp_token();
+        let entry = serde_json::json!({
+            "tangul": {
+                "command": "npx",
+                "args": ["-y", "mcp-remote", url, "--header", "Authorization:${TANGUL_AUTH}"],
+                "env": { "TANGUL_AUTH": format!("Bearer {token}") }
+            }
+        });
+        serde_json::to_string_pretty(&entry).ok()
     }
 
     /// The status bar's plug: whether MCP clients can use tangul, and its menu.
@@ -304,7 +323,7 @@ fn mcp_menu(
     if !on {
         return menu;
     }
-    let (copy, renew) = (workspace.clone(), workspace.clone());
+    let (copy, desktop, renew) = (workspace.clone(), workspace.clone(), workspace.clone());
     menu.separator()
         .item(
             PopupMenuItem::new("Copy the command for Claude Code").on_click(
@@ -314,6 +333,27 @@ fn mcp_menu(
                         cx.write_to_clipboard(ClipboardItem::new_string(command));
                         window.push_notification(
                             Notification::info("Copied: run it in a terminal to add tangul"),
+                            cx,
+                        );
+                    }
+                },
+            ),
+        )
+        .item(
+            PopupMenuItem::new("Copy the config for Claude Desktop").on_click(
+                move |_, window, cx| {
+                    let config = desktop
+                        .update(cx, |ws, _| ws.mcp_desktop_config())
+                        .ok()
+                        .flatten();
+                    if let Some(config) = config {
+                        cx.write_to_clipboard(ClipboardItem::new_string(config));
+                        window.push_notification(
+                            Notification::info(
+                                "Copied: add it to \"mcpServers\" in Claude Desktop's \
+                                 claude_desktop_config.json (Settings → Developer → Edit \
+                                 Config), then restart Claude Desktop",
+                            ),
                             cx,
                         );
                     }
