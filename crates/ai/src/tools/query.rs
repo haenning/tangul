@@ -174,6 +174,7 @@ impl Tool for RunReadonly {
                 .keep(&conn.name, rows.columns.clone(), rows.rows.clone())
         });
         let text = text(&rows, kept.as_deref());
-        Ok(ToolOutput::new(&rows, text))
+        let n = rows.rows.len() as u64;
+        Ok(ToolOutput::new(&rows, text).with_rows(n))
     }
 }

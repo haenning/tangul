@@ -9,7 +9,9 @@
 //!   dialog's go-ahead ([`Approval::Confirmed`]). Read-only mode is lifted only in
 //!   the settings, never by a go-ahead.
 //! - **Schedule**: only statements on the read allow-list, in a read-only transaction
-//!   that is rolled back afterwards.
+//!   that is rolled back afterwards. One statement at a time, checked with the
+//!   database's lexical rules and sent without its comments, so the server runs
+//!   exactly what was checked.
 //! - **Assistant**: reads on the allow-list run like a schedule's. Anything else never
 //!   runs for it: it comes back as a [`Proposal`], which the user may open in a tab
 //!   and run as themselves (`Caller::User`, with the user's rules).
@@ -18,6 +20,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use tangul_assist::guard;
+use tangul_assist::lexer::Lexing;
 use tangul_assist::suggest::one_line;
 use tangul_data::settings::Settings;
 
@@ -114,14 +117,29 @@ const STATEMENT_LEN: usize = 160;
 /// name, which read-only mode goes by). Used by the engine, and by front ends to
 /// show a dialog before sending.
 pub fn decide(settings: &Settings, db_user: Option<&str>, sql: &str, caller: Caller) -> Decision {
+    decide_with(settings, db_user, sql, Lexing::default(), caller)
+}
+
+/// [`decide`] with the database's lexical rules. For the schedule and the assistant,
+/// `sql` is the text they send ([`guard::read_text`]).
+fn decide_with(
+    settings: &Settings,
+    db_user: Option<&str>,
+    sql: &str,
+    lexing: Lexing,
+    caller: Caller,
+) -> Decision {
     let run = user_run(settings, db_user);
     match caller {
         Caller::Schedule | Caller::Assistant => {
-            let not_reads: Vec<(String, String)> = guard::not_reads(sql)
+            let not_reads: Vec<(String, String)> = guard::not_reads_with(sql, lexing)
                 .into_iter()
                 .map(|(keyword, statement)| (keyword, one_line(&statement, STATEMENT_LEN)))
                 .collect();
             if not_reads.is_empty() {
+                if let Some(reason) = guard::not_one_read(sql) {
+                    return Decision::Refuse(reason.to_string());
+                }
                 return Decision::Run(Run {
                     read_only: true,
                     timeout: run.timeout,
@@ -196,7 +214,11 @@ pub enum SettingsSource {
 /// What the gate decided for one statement.
 #[derive(Debug)]
 pub(crate) enum Enforced {
-    Run(Run),
+    /// Run `sql`: the user's as sent, a reader's without comments.
+    Run {
+        run: Run,
+        sql: String,
+    },
     Proposed(Proposal),
     Refused(String),
 }
@@ -247,15 +269,25 @@ impl Gate {
         self.reload();
     }
 
+    /// `lexing`: the database's lexical rules.
     pub(crate) fn enforce(
         &self,
         db_user: &str,
         sql: &str,
+        lexing: Lexing,
         caller: Caller,
         approval: Approval,
     ) -> Enforced {
-        match decide(&self.settings, Some(db_user), sql, caller) {
-            Decision::Run(run) => Enforced::Run(run),
+        let sql = match caller {
+            Caller::User => sql.to_string(),
+            Caller::Schedule | Caller::Assistant => guard::read_text(sql, lexing),
+        };
+        let run = |run| Enforced::Run {
+            run,
+            sql: sql.clone(),
+        };
+        match decide_with(&self.settings, Some(db_user), &sql, lexing, caller) {
+            Decision::Run(r) => run(r),
             Decision::Refuse(reason) => Enforced::Refused(reason),
             Decision::Propose(proposal) => Enforced::Proposed(proposal),
             Decision::Confirm {
@@ -268,7 +300,7 @@ impl Gate {
                 guard: Guard::Unfiltered { .. },
                 then,
             } => match (caller, approval) {
-                (Caller::User, Approval::Confirmed) => Enforced::Run(then),
+                (Caller::User, Approval::Confirmed) => run(then),
                 _ => Enforced::Refused(
                     "UPDATE or DELETE without WHERE needs to be confirmed first".into(),
                 ),
@@ -292,6 +324,100 @@ mod tests {
 
     fn gate(json: &str) -> Gate {
         Gate::new(SettingsSource::Fixed(Box::new(settings(json))))
+    }
+
+    impl Gate {
+        /// [`Gate::enforce`] with the default lexical rules.
+        fn enforce_default(
+            &self,
+            db_user: &str,
+            sql: &str,
+            caller: Caller,
+            approval: Approval,
+        ) -> Enforced {
+            self.enforce(db_user, sql, Lexing::default(), caller, approval)
+        }
+    }
+
+    /// The text a reader's statement is sent as, or why it isn't.
+    fn sent(sql: &str, lexing: Lexing) -> Result<String, String> {
+        match gate("{}").enforce("rw", sql, lexing, Caller::Assistant, Approval::None) {
+            Enforced::Run { sql, .. } => Ok(sql),
+            Enforced::Refused(reason) => Err(reason),
+            Enforced::Proposed(p) => Err(format!("proposed {}", p.statements[0].0)),
+        }
+    }
+
+    fn lexing(kind: tangul_core::DriverKind) -> Lexing {
+        tangul_assist::dialect::dialect_for(kind).lexing()
+    }
+
+    #[test]
+    fn readers_send_what_was_checked() {
+        use tangul_core::DriverKind::{Mysql, Postgres};
+        // Comments are blanked out (same length) and a trailing `;` dropped.
+        assert_eq!(
+            sent("select 1 -- why\n/* note */ + 2;\n", lexing(Postgres)),
+            Ok("select 1       \n           + 2".into())
+        );
+        // MySQL runs `/*! … */`: it never reaches the server.
+        assert_eq!(
+            sent("SELECT 1 /*! INTO OUTFILE '/tmp/x' */", lexing(Mysql)),
+            Ok("SELECT 1".into())
+        );
+        assert_eq!(
+            sent(
+                "SELECT 1; /*! COMMIT */; /*! SET SESSION TRANSACTION READ WRITE */; \
+                 /*! DELETE FROM t */",
+                lexing(Mysql)
+            ),
+            Ok("SELECT 1".into())
+        );
+        // `#` is a comment on MySQL: what follows the line is checked as the server
+        // reads it.
+        assert_eq!(
+            sent("SELECT 1 # '\n INTO OUTFILE '/tmp/x'", lexing(Mysql)),
+            Err("proposed SELECT INTO".into())
+        );
+    }
+
+    #[test]
+    fn readers_send_one_statement() {
+        use tangul_core::DriverKind::Postgres;
+        for sql in [
+            "select 1; select 2",
+            // Postgres ends the string at `\'`; the guard's tokens may not.
+            "SELECT '\\'; COMMIT; SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; \
+             DELETE FROM t; --'",
+            "select ';'",
+        ] {
+            let reason = sent(sql, lexing(Postgres)).unwrap_err();
+            assert!(reason.starts_with("only one statement"), "{sql}: {reason}");
+        }
+        for sql in [
+            "SELECT U&\"d\\0062link_exec\"('x', 'drop table t')",
+            "select u&'\\0041'",
+        ] {
+            let reason = sent(sql, lexing(Postgres)).unwrap_err();
+            assert!(reason.starts_with("U& escapes"), "{sql}: {reason}");
+        }
+        // Schedules too.
+        assert!(matches!(
+            gate("{}").enforce_default(
+                "rw",
+                "select 1; select 2",
+                Caller::Schedule,
+                Approval::None
+            ),
+            Enforced::Refused(_)
+        ));
+        // The user's statements are sent as they are.
+        let Enforced::Run { sql, .. } =
+            gate("{}").enforce_default("rw", "select 1; -- x", Caller::User, Approval::None)
+        else {
+            panic!("runs");
+        };
+        assert_eq!(sql, "select 1; -- x");
     }
 
     #[test]
@@ -339,29 +465,32 @@ mod tests {
     fn the_gate_enforces_for_users() {
         let g = gate(r#"{"safety": {"read_only_users": ["ro"]}}"#);
         assert!(matches!(
-            g.enforce(
+            g.enforce_default(
                 "rw",
                 "delete from t where id = 1",
                 Caller::User,
                 Approval::None
             ),
-            Enforced::Run(Run {
-                read_only: false,
+            Enforced::Run {
+                run: Run {
+                    read_only: false,
+                    ..
+                },
                 ..
-            })
+            }
         ));
         // Without WHERE: only after the dialog.
         assert!(matches!(
-            g.enforce("rw", "delete from t", Caller::User, Approval::None),
+            g.enforce_default("rw", "delete from t", Caller::User, Approval::None),
             Enforced::Refused(_)
         ));
         assert!(matches!(
-            g.enforce("rw", "delete from t", Caller::User, Approval::Confirmed),
-            Enforced::Run(_)
+            g.enforce_default("rw", "delete from t", Caller::User, Approval::Confirmed),
+            Enforced::Run { .. }
         ));
         // Read-only mode: a go-ahead doesn't lift it.
         assert!(matches!(
-            g.enforce(
+            g.enforce_default(
                 "ro",
                 "delete from t where id = 1",
                 Caller::User,
@@ -375,12 +504,15 @@ mod tests {
     fn schedules_only_read() {
         let g = gate("{}");
         assert!(matches!(
-            g.enforce("rw", "select * from t", Caller::Schedule, Approval::None),
-            Enforced::Run(Run {
-                read_only: true,
-                mode: Mode::RolledBack,
+            g.enforce_default("rw", "select * from t", Caller::Schedule, Approval::None),
+            Enforced::Run {
+                run: Run {
+                    read_only: true,
+                    mode: Mode::RolledBack,
+                    ..
+                },
                 ..
-            })
+            }
         ));
         for sql in [
             "delete from t where id = 1",
@@ -389,7 +521,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    g.enforce("rw", sql, Caller::Schedule, Approval::Confirmed),
+                    g.enforce_default("rw", sql, Caller::Schedule, Approval::Confirmed),
                     Enforced::Refused(_)
                 ),
                 "{sql}"
@@ -401,12 +533,15 @@ mod tests {
     fn assistant_writes_are_proposals() {
         let g = gate(r#"{"safety": {"read_only_users": ["ro"]}}"#);
         assert!(matches!(
-            g.enforce("rw", "select * from t", Caller::Assistant, Approval::None),
-            Enforced::Run(Run {
-                read_only: true,
-                mode: Mode::RolledBack,
+            g.enforce_default("rw", "select * from t", Caller::Assistant, Approval::None),
+            Enforced::Run {
+                run: Run {
+                    read_only: true,
+                    mode: Mode::RolledBack,
+                    ..
+                },
                 ..
-            })
+            }
         ));
         // Anything that isn't a plain read, however it is dressed up, and whatever
         // approval comes along.
@@ -419,14 +554,14 @@ mod tests {
         ] {
             for user in ["rw", "ro"] {
                 let Enforced::Proposed(p) =
-                    g.enforce(user, sql, Caller::Assistant, Approval::Confirmed)
+                    g.enforce_default(user, sql, Caller::Assistant, Approval::Confirmed)
                 else {
                     panic!("{sql} is proposed");
                 };
                 assert!(!p.statements.is_empty(), "{sql}");
             }
         }
-        let Enforced::Proposed(p) = g.enforce(
+        let Enforced::Proposed(p) = g.enforce_default(
             "rw",
             "select 1; delete from t where id = 1; insert into t values (1)",
             Caller::Assistant,
@@ -447,30 +582,39 @@ mod tests {
         let mut g = Gate::new(SettingsSource::File(Some(path.clone())));
         // No file: defaults (write mode, 60s).
         assert!(matches!(
-            g.enforce("u", "select 1", Caller::User, Approval::None),
-            Enforced::Run(Run {
-                read_only: false,
+            g.enforce_default("u", "select 1", Caller::User, Approval::None),
+            Enforced::Run {
+                run: Run {
+                    read_only: false,
+                    ..
+                },
                 ..
-            })
+            }
         ));
         std::fs::write(&path, r#"{"safety": {"read_only_users": ["u"]}}"#).unwrap();
         g.reload_now();
         assert!(matches!(
-            g.enforce("u", "select 1", Caller::User, Approval::None),
-            Enforced::Run(Run {
-                read_only: true,
+            g.enforce_default("u", "select 1", Caller::User, Approval::None),
+            Enforced::Run {
+                run: Run {
+                    read_only: true,
+                    ..
+                },
                 ..
-            })
+            }
         ));
         // A broken file keeps what was in effect.
         std::fs::write(&path, "{broken").unwrap();
         g.reload_now();
         assert!(matches!(
-            g.enforce("u", "select 1", Caller::User, Approval::None),
-            Enforced::Run(Run {
-                read_only: true,
+            g.enforce_default("u", "select 1", Caller::User, Approval::None),
+            Enforced::Run {
+                run: Run {
+                    read_only: true,
+                    ..
+                },
                 ..
-            })
+            }
         ));
         std::fs::remove_dir_all(&dir).unwrap();
     }

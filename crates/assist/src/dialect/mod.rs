@@ -86,8 +86,9 @@ pub trait Dialect: Sync {
 
     /// Statements an admin runs to create a login that may only read: `user` with
     /// `password` may connect to `database` and select from the tables of `schemas`
-    /// (for Postgres also from tables created there later by the admin). `None`
-    /// where the database has no users (SQLite).
+    /// (for Postgres also from tables created there later by the admin), with at
+    /// most [`AI_CONNECTION_LIMIT`] connections (and, on Postgres, time limits for
+    /// sessions outside tangul too). `None` where the database has no users (SQLite).
     fn readonly_account_sql(
         &self,
         _user: &str,
@@ -115,6 +116,11 @@ impl PartialEq for dyn Dialect {
         self.kind() == other.kind()
     }
 }
+
+/// Connections the read-only AI user may have at once: its own pool, and tabs if
+/// someone opens it as their user too. Limits the load a runaway client can put on
+/// the server.
+pub const AI_CONNECTION_LIMIT: u32 = 10;
 
 /// What a dialect calls the level above tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,8 +334,10 @@ mod tests {
                 .readonly_account_sql("tangul_ai", "p'w", "shop", &schemas)
                 .unwrap(),
             [
-                "CREATE ROLE tangul_ai LOGIN PASSWORD 'p''w'",
+                "CREATE ROLE tangul_ai LOGIN PASSWORD 'p''w' CONNECTION LIMIT 10",
                 "ALTER ROLE tangul_ai SET default_transaction_read_only = on",
+                "ALTER ROLE tangul_ai SET statement_timeout = '5min'",
+                "ALTER ROLE tangul_ai SET idle_in_transaction_session_timeout = '1min'",
                 "GRANT CONNECT ON DATABASE shop TO tangul_ai",
                 "GRANT USAGE ON SCHEMA public TO tangul_ai",
                 "GRANT SELECT ON ALL TABLES IN SCHEMA public TO tangul_ai",
@@ -344,7 +352,7 @@ mod tests {
                 .readonly_account_sql("tangul_ai", "pw", "shop", &["shop".to_string()])
                 .unwrap(),
             [
-                "CREATE USER 'tangul_ai'@'%' IDENTIFIED BY 'pw'",
+                "CREATE USER 'tangul_ai'@'%' IDENTIFIED BY 'pw' WITH MAX_USER_CONNECTIONS 10",
                 "GRANT SELECT, SHOW VIEW ON shop.* TO 'tangul_ai'@'%'",
             ]
         );

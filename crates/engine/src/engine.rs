@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tangul_assist::dialect::dialect_for;
 use tangul_core::{ConnId, ConnectConfig, DriverKind, QueryId, SchemaInfo, SshTarget, TabId};
 use tangul_data::local::Local;
 use tangul_drivers::driver_for;
@@ -106,6 +107,7 @@ impl Engine {
         cfg: ConnectConfig,
         ssh: Option<SshTarget>,
     ) {
+        let lexing = dialect_for(driver).lexing();
         let Some(driver) = driver_for(driver) else {
             send(
                 &self.events,
@@ -117,7 +119,7 @@ impl Engine {
             return;
         };
         let tunnel = ssh.map(|ssh| Tunnel::new(ssh, cfg.host.clone(), cfg.port));
-        let pool = Arc::new(Pool::new(driver, cfg, tunnel, MAX_CONNECTIONS));
+        let pool = Arc::new(Pool::new(driver, lexing, cfg, tunnel, MAX_CONNECTIONS));
         if let Some(old) = self.pools.insert(conn, pool.clone()) {
             close_all(old.take_all(), None);
         }
@@ -224,8 +226,11 @@ impl Engine {
             caller,
             target: pool.target(),
         };
-        let run = match self.gate.enforce(pool.user(), &sql, caller, approval) {
-            Enforced::Run(run) => run,
+        let (run, sql) = match self
+            .gate
+            .enforce(pool.user(), &sql, pool.lexing(), caller, approval)
+        {
+            Enforced::Run { run, sql } => (run, sql),
             refused => {
                 // Only the assistant's statements are proposed, never the user's.
                 let reason = match refused {
@@ -276,11 +281,15 @@ impl Engine {
             caller: options.caller,
             target: pool.target(),
         };
-        let run = match self
-            .gate
-            .enforce(pool.user(), &sql, options.caller, options.approval)
-        {
-            Enforced::Run(run) => run,
+        let (run, text) = match self.gate.enforce(
+            pool.user(),
+            &sql,
+            pool.lexing(),
+            options.caller,
+            options.approval,
+        ) {
+            // The audit keeps what was asked; the server gets what the gate passed.
+            Enforced::Run { run, sql: text } => (run, text),
             Enforced::Proposed(proposal) => {
                 trace.record(&sql, "proposed", None, None, None);
                 let _ = reply.send(Err(QueryError {
@@ -297,7 +306,7 @@ impl Engine {
         };
         let (events, running) = (self.events.clone(), self.running.clone());
         tokio::spawn(async move {
-            let output = run_query(&pool, &running, query, &sql, run, options.row_limit).await;
+            let output = run_query(&pool, &running, query, &text, run, options.row_limit).await;
             match &output {
                 Ok(out) => trace.record(&sql, "ran", None, Some(out.elapsed), out.rows),
                 Err(e) => trace.record(&sql, "ran", Some(e.message.clone()), None, None),

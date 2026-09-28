@@ -475,6 +475,110 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
     });
 }
 
+/// A database `shop` with the users `app` (yours) and `reader`, the AI's as given.
+fn shop_with_ai_user(workspace: &Entity<Workspace>, ai: Option<&str>, cx: &mut App) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    let user = |id: &str| DbUser {
+        id: id.into(),
+        user: id.into(),
+    };
+    workspace.update(cx, |ws, cx| {
+        ws.data.profiles.databases.push(Database {
+            id: "db".into(),
+            name: "shop".into(),
+            driver: DriverKind::Postgres,
+            host: "localhost".into(),
+            port: 5432,
+            database: "shop".into(),
+            tls: TlsMode::Disable,
+            users: vec![user("app"), user("reader")],
+            ssh: None,
+            assistant_user: ai.map(Into::into),
+            ai_values: Default::default(),
+            ai_tools: true,
+        });
+        ws.active_db = Some("db".into());
+        ws.active_user = Some("app".into());
+        cx.notify();
+    });
+}
+
+#[gpui_kit::test]
+fn the_ai_on_your_own_user_is_allowed_with_a_note(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| shop_with_ai_user(&workspace, None, cx));
+    step(handle, cx, |window, cx| {
+        assert!(window.find("ai-user-note").visible());
+        assert!(window.try_find("ai-user-warning").is_none());
+        workspace.update(cx, |ws, cx| {
+            ws.set_assistant_user("db", Some("reader".into()), window, cx)
+        });
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("ai-user-note").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn a_missing_ai_user_is_shown_never_replaced_by_yours(cx: &mut TestAppContext) {
+    use tangul_service::connections::Purpose;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        shop_with_ai_user(&workspace, Some("gone"), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("ai-user-warning").visible());
+        workspace.update(cx, |ws, _| {
+            let ws = &mut *ws;
+            let connected =
+                ws.connections
+                    .connect_assistant(&ws.engine, &mut ws.data.profiles, "app");
+            assert!(connected.is_err());
+            assert_eq!(ws.connections.get(Purpose::Assistant, "app"), None);
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn a_failed_ai_connection_is_shown_never_switched(cx: &mut TestAppContext) {
+    use tangul_service::connections::Purpose;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        shop_with_ai_user(&workspace, Some("reader"), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("ai-user-warning").is_none());
+        workspace.update(cx, |ws, cx| {
+            let conn = ws
+                .connections
+                .connect_assistant(&ws.engine, &mut ws.data.profiles, "app")
+                .unwrap();
+            ws.ai_connect_failed(conn, "password authentication failed", window, cx);
+            assert_eq!(
+                ws.ai_problems.get("db").map(String::as_str),
+                Some("The AI could not connect as reader: password authentication failed")
+            );
+            // Forgotten, and not connected as your user instead.
+            assert_eq!(ws.connections.get(Purpose::Assistant, "reader"), None);
+            assert_eq!(ws.connections.get(Purpose::Assistant, "app"), None);
+        });
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("ai-user-warning").visible());
+        // Connected as the AI's user again: nothing to report.
+        workspace.update(cx, |ws, cx| {
+            let conn = ws
+                .connections
+                .connect_assistant(&ws.engine, &mut ws.data.profiles, "app")
+                .unwrap();
+            ws.ai_connected(conn, cx);
+        });
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("ai-user-warning").is_none());
+    });
+}
+
 #[gpui_kit::test]
 fn long_comments_show_three_lines_until_asked(cx: &mut TestAppContext) {
     use crate::ui::TextCard;

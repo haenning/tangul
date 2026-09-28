@@ -93,7 +93,9 @@ explicit OK, and keep them covered by tests.
   anything else is refused. Reads run like the assistant's.
 - **Assistant reads.** Only allow-listed reads run, through
   `EngineHandle::query` (never on a tab's session), in `Mode::RolledBack`: session
-  read-only, inside `START TRANSACTION READ ONLY`, always rolled back.
+  read-only, inside `START TRANSACTION READ ONLY`, always rolled back. One statement
+  (no `;`, no `U&` escapes), checked with the database's lexical rules and sent without
+  its comments, so the server runs exactly what was checked (same for schedules).
 - **Assistant writes** (anything not on the allow-list) never run for the assistant,
   whatever approval comes along. The gate returns them as a `Proposal`; `propose_sql`
   opens statements in a new tab, unrun, on the user's own connection, where the user
@@ -102,7 +104,10 @@ explicit OK, and keep them covered by tests.
 - **Assistant database user.** A database may name its own user for the assistant
   (recommended: the SELECT-only role the database form sets up). The assistant's reads
   run on its own connection as that user. On MySQL some statements commit implicitly,
-  so the role's grants are the real protection there.
+  so the role's grants are the real protection there. Without one it uses the tab's
+  user (allowed; the title bar says what that means). A chosen user that is gone or
+  can't connect is shown to the user, and the AI has no connection: it never connects
+  as anyone else instead.
 - **Secrets.** Passwords in SQL (`… PASSWORD '…'`, `IDENTIFIED BY '…'`) are replaced by
   `assist::redact` before history, bookmarks and the audit log.
 - **Everyone.** `safety.max_query_time` applies to every caller, set on the server and

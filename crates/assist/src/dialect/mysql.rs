@@ -2,7 +2,7 @@ use tangul_core::DriverKind;
 
 use crate::lexer::Lexing;
 
-use super::{Dialect, Namespace, Syntax, Upsert, quote_ident};
+use super::{AI_CONNECTION_LIMIT, Dialect, Namespace, Syntax, Upsert, quote_ident};
 
 pub(super) struct Mysql;
 
@@ -137,7 +137,8 @@ impl Dialect for Mysql {
     ) -> Option<Vec<String>> {
         let account = format!("{}@'%'", self.string(user));
         let mut sql = vec![format!(
-            "CREATE USER {account} IDENTIFIED BY {}",
+            "CREATE USER {account} IDENTIFIED BY {} WITH MAX_USER_CONNECTIONS \
+             {AI_CONNECTION_LIMIT}",
             self.string(password)
         )];
         for schema in schemas {
@@ -163,6 +164,10 @@ impl Dialect for Mysql {
     fn side_effect_functions(&self) -> &'static [&'static str] {
         &[
             "load_file",
+            // `SELECT … INTO OUTFILE / DUMPFILE` writes a file on the server; also
+            // found where a string hides it from the tokens.
+            "outfile",
+            "dumpfile",
             "get_lock",
             "release_lock",
             "sys_exec",

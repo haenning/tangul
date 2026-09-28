@@ -3,9 +3,9 @@
 //! parse, so it is a guardrail and not a guarantee (a function called from a
 //! `SELECT` can still write).
 
-use crate::analyze::{significant, statements};
+use crate::analyze::{significant_with, statements_with};
 use crate::dialect;
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::{Lexing, Token, TokenKind, tokenize_with};
 
 /// A statement the guard has something to say about.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,14 +40,58 @@ pub type NotRead = (String, String);
 /// every statement only reads (as far as tokens can tell; the server's read-only
 /// transaction is the guarantee).
 pub fn not_reads(sql: &str) -> Vec<NotRead> {
-    statements(sql)
+    not_reads_with(sql, Lexing::default())
+}
+
+/// [`not_reads`] with a database's lexical rules: the ones the gate uses, so the
+/// statements are split and read as the server will.
+pub fn not_reads_with(sql: &str, lexing: Lexing) -> Vec<NotRead> {
+    statements_with(sql, lexing)
         .into_iter()
-        .filter_map(|(start, end)| not_read(&sql[start..end]))
+        .filter_map(|(start, end)| not_read(&sql[start..end], lexing))
         .collect()
 }
 
-fn not_read(sql: &str) -> Option<NotRead> {
-    let tokens = significant(sql);
+/// The text a caller that may only read sends instead of `sql`: comments blanked out
+/// by the database's rules (same length, so error positions stay) and trailing `;`
+/// dropped. What the server runs is then what was checked: nothing hides in a
+/// comment the server reads differently (MySQL runs `/*! … */`).
+pub fn read_text(sql: &str, lexing: Lexing) -> String {
+    let mut text = String::with_capacity(sql.len());
+    for t in tokenize_with(sql, lexing) {
+        match t.kind {
+            TokenKind::Comment => text.extend(std::iter::repeat_n(' ', t.end - t.start)),
+            _ => text.push_str(t.text(sql)),
+        }
+    }
+    let end = text
+        .trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+        .len();
+    text.truncate(end);
+    text
+}
+
+/// Why `text` (from [`read_text`]) can't be sent as one read, if it can't:
+/// - a `;` anywhere, even in a string: databases don't all agree where a string ends
+///   (backslashes, server settings), and a second statement could end the read-only
+///   transaction;
+/// - a `U&` escape, which can spell any name (`U&"d\0062link"` is `dblink`) past the
+///   check for functions with side effects.
+pub fn not_one_read(text: &str) -> Option<&'static str> {
+    if text.contains(';') {
+        return Some(
+            "only one statement at a time, and no ';' in it (not even in a string; \
+             use chr(59) or CHAR(59))",
+        );
+    }
+    if text.to_ascii_lowercase().contains("u&") {
+        return Some("U& escapes are not allowed here; write names and strings plainly");
+    }
+    None
+}
+
+fn not_read(sql: &str, lexing: Lexing) -> Option<NotRead> {
+    let tokens = significant_with(sql, lexing);
     let first = tokens.first()?;
     let words: Vec<String> = tokens
         .iter()
@@ -60,7 +104,7 @@ fn not_read(sql: &str) -> Option<NotRead> {
         first.text(sql).to_string()
     };
     let statement = text_of(sql, &tokens);
-    if let Some(check) = check_statement(sql).filter(|c| c.writes) {
+    if let Some(check) = check_statement(sql, lexing).filter(|c| c.writes) {
         return Some((check.keyword, statement));
     }
     if !READS.contains(&lead.as_str()) {
@@ -90,14 +134,15 @@ const DML: &[&str] = &["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE
 
 /// The statements of `sql` that write or are unfiltered; harmless ones are left out.
 pub fn check(sql: &str) -> Vec<Check> {
-    statements(sql)
+    let lexing = Lexing::default();
+    statements_with(sql, lexing)
         .into_iter()
-        .filter_map(|(start, end)| check_statement(&sql[start..end]))
+        .filter_map(|(start, end)| check_statement(&sql[start..end], lexing))
         .collect()
 }
 
-fn check_statement(sql: &str) -> Option<Check> {
-    let tokens = significant(sql);
+fn check_statement(sql: &str, lexing: Lexing) -> Option<Check> {
+    let tokens = significant_with(sql, lexing);
     // Words outside any parentheses, with their position among the tokens.
     let mut depth = 0usize;
     let mut top: Vec<(usize, String)> = Vec::new();
@@ -202,6 +247,31 @@ fn text_of(sql: &str, tokens: &[Token]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_text_blanks_comments_by_the_rules() {
+        let mysql = dialect::dialect_for(tangul_core::DriverKind::Mysql).lexing();
+        // Same length: error positions stay.
+        assert_eq!(
+            read_text("select 1 /* x */ # y\n+ 2 ;; \n", mysql),
+            format!("select 1{}\n+ 2", " ".repeat(12))
+        );
+        // Without MySQL's rules `#` is no comment.
+        assert_eq!(read_text("select 1 # y", Lexing::default()), "select 1 # y");
+        assert_eq!(read_text("select /*! 1 */ 2", mysql), "select          2");
+    }
+
+    #[test]
+    fn one_read_at_a_time() {
+        assert_eq!(not_one_read("select * from t where a = 'x'"), None);
+        for (text, why) in [
+            ("select 1; select 2", "only one statement"),
+            ("select ';'", "only one statement"),
+            ("select U&\"d\\0062link\"('x')", "U& escapes"),
+        ] {
+            assert!(not_one_read(text).unwrap().starts_with(why), "{text}");
+        }
+    }
 
     #[test]
     fn reads_on_the_allow_list() {

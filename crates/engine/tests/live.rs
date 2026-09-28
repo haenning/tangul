@@ -549,6 +549,16 @@ async fn writable_checks(driver: DriverKind, cfg: ConnectConfig) {
         "it can see the tables"
     );
     drop_harness(ro).await;
+    let limit = match driver {
+        DriverKind::Postgres => {
+            "SELECT rolconnlimit FROM pg_roles WHERE rolname = 'tangul_ro_live'"
+        }
+        _ => "SELECT max_user_connections FROM mysql.user WHERE user = 'tangul_ro_live'",
+    };
+    assert_eq!(
+        writable_count(&mut admin, limit).await,
+        u64::from(tangul_assist::dialect::AI_CONNECTION_LIMIT)
+    );
     assert_eq!(admin.run(TabId(1), drop).await.error, None);
 }
 
@@ -660,6 +670,15 @@ async fn assistant_checks(h: &mut Harness, sneak: Option<(&str, &str)>) {
             let error = ask(h, write, approval).await.unwrap_err();
             assert!(error.proposal.is_some(), "{write} is proposed");
         }
+    }
+    // Hidden in a comment the server runs (MySQL `/*! … */`) or behind a string the
+    // server ends earlier than the guard's tokens: at most the one read reaches it.
+    for hidden in [
+        "SELECT 1; /*! COMMIT */; /*! SET SESSION TRANSACTION READ WRITE */; \
+         /*! DELETE FROM tangul_ai_test */",
+        "SELECT '\\'; COMMIT; DELETE FROM tangul_ai_test; --'",
+    ] {
+        let _ = ask(h, hidden, Approval::None).await;
     }
     // Nothing the assistant sent changed data.
     let out = ask(h, count, Approval::None).await.unwrap();

@@ -86,7 +86,7 @@ impl Tool for ColumnProfileTool {
         let conn = ctx.conn(connection.as_deref())?;
         if !conn.values.statistics() {
             return Err(ToolError::NotAllowed(
-                "reading from the rows is off for this database; the user can allow \
+                "value profiles are off for this database; the user can allow \
                  statistics or values in the AI menu of the title bar"
                     .into(),
             ));

@@ -42,7 +42,8 @@ const INSTRUCTIONS: &str = "tangul's databases, read-only. Start with list_conne
     schema_slice for a question, describe_table and find_join_path for details, and \
     run_readonly to query (keep results small); get_cell gives a cell it cut, whole. \
     Nothing that changes data is run: propose_sql opens such statements in tangul for the \
-    user to review and run, and opens a query as a chart too. tangul_features says what \
+    user to review and run (only changes the user asked for themselves), and opens a query \
+    as a chart too. tangul_features says what \
     else the app can do for the user.";
 
 /// Builds the [`Ctx`] for a call: the databases exposed right now, the knowledge

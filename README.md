@@ -52,12 +52,20 @@ Not built yet; follow along in [#37](https://github.com/haenning/tangul/issues/3
 
 - **Ask in plain language.** The AI writes the SQL, runs it, follows your foreign keys
   and explains what it finds.
-- **It can only read.** Its queries run in a read-only transaction that is always
-  rolled back, so nothing it runs can change your data.
+- **It can only read.** Its queries run one statement at a time, exactly as tangul
+  checked them, in a read-only transaction that is always rolled back, so nothing it
+  runs can change your data.
 - **You approve every change.** Anything that would change data stops and waits for
   your click, exactly as written. The AI can't approve itself.
-- **Coming soon: its own database account** that can only read
-  ([#95](https://github.com/haenning/tangul/issues/95)).
+- **Its own database account.** Give the AI a user that may only read (the database
+  form sets one up). The AI connects only as that user: if it can't, tangul tells you
+  and never uses your account instead. Using your own account is allowed; the title
+  bar says what that means.
+- **Your grants are the boundary.** Whatever the AI's database user may select can
+  reach the AI model you use, so limit that user to what the AI should see. An AI tool
+  that can run commands or edit files on your Mac (Claude Code, for one) could also
+  change tangul's `settings.json` and switch off read-only mode for your own users;
+  only the database's grants hold against that.
 - **You can see what it ran.** Every AI query is logged locally.
 
 ## Safe on production

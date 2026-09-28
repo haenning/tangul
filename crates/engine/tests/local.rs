@@ -124,15 +124,24 @@ async fn query_returns_the_whole_result() {
         .query(
             QueryId(1),
             ConnId(1),
-            "SELECT x FROM t ORDER BY x; SELECT 42",
+            "SELECT x FROM t ORDER BY x -- all of them\n;",
             options(10),
         )
         .await
         .unwrap();
-    assert_eq!(out.results.len(), 2);
+    assert_eq!(out.results.len(), 1);
     assert_eq!(out.results[0].row_count(), 3);
-    assert_eq!(out.results[1].cell(0, 0), Some("42"));
     assert!(!out.truncated);
+    // Readers send one statement at a time.
+    let error = engine
+        .query(QueryId(5), ConnId(1), "SELECT 1; SELECT 42", options(10))
+        .await
+        .unwrap_err();
+    assert!(
+        error.message.starts_with("only one statement"),
+        "{}",
+        error.message
+    );
 
     let out = engine
         .query(QueryId(2), ConnId(1), "SELECT x FROM t", options(2))

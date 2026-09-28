@@ -151,11 +151,15 @@ impl Workspace {
                     cx,
                 );
             }
-            // Connected again the next time the AI's databases are offered.
             (Some(Purpose::Assistant), Event::ConnectFailed { error, .. }) => {
-                eprintln!("the AI's connection failed: {error}");
-                self.connections.forget(conn);
+                self.ai_connect_failed(conn, &error, window, cx);
             }
+            (Some(Purpose::Assistant), Event::HostKeyUnknown { .. }) => {
+                let error = "the SSH server's host key is not trusted yet; connect as \
+                             your user once to trust it";
+                self.ai_connect_failed(conn, error, window, cx);
+            }
+            (Some(Purpose::Assistant), Event::Connected { .. }) => self.ai_connected(conn, cx),
             // A scheduled run on it fails by itself and forgets it.
             (Some(_), _) => {}
         }
