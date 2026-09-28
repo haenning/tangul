@@ -542,6 +542,24 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
         workspace.update(cx, |ws, _| {
             let url = ws.mcp_url().expect("running");
             assert!(url.starts_with("http://127.0.0.1:") && url.ends_with("/mcp"));
+            // For Claude Code in every project, and for Claude Desktop.
+            let command = ws.mcp_command().unwrap();
+            assert!(
+                command.starts_with(&format!(
+                    "claude mcp add --scope user --transport http tangul {url} --header \"Authorization: Bearer "
+                )),
+                "{command}"
+            );
+            let desktop: serde_json::Value =
+                serde_json::from_str(&ws.mcp_desktop_config().unwrap()).unwrap();
+            assert_eq!(desktop["tangul"]["command"], "npx");
+            assert_eq!(desktop["tangul"]["args"][2], url.as_str());
+            assert!(
+                desktop["tangul"]["env"]["TANGUL_AUTH"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Bearer ")
+            );
             assert_eq!(ws.mcp_offered(), ["shop"]);
             // Turned off for AI tools: no longer offered.
             ws.data.profiles.databases[0].ai_tools = false;

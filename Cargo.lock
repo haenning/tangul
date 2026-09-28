@@ -8172,6 +8172,7 @@ dependencies = [
  "chrono",
  "gpui-kit",
  "lsp-types",
+ "serde_json",
  "tangul-ai",
  "tangul-assist",
  "tangul-core",

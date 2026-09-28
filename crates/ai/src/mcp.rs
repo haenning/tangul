@@ -23,8 +23,9 @@ use axum::response::Response;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
+    Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -77,7 +78,11 @@ impl ServerHandler for Tangul {
                 Tool::new(spec.name, spec.description, Arc::new(schema))
             })
             .collect();
-        Ok(ListToolsResult::with_all_items(tools))
+        // Required by protocol 2026-07-28 (Claude Code rejects the list without
+        // them): never cached, and for this client only (it is bound to the token).
+        Ok(ListToolsResult::with_all_items(tools)
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn call_tool(

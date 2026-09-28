@@ -20,6 +20,14 @@ const TOKEN: &str = "test-token";
 
 /// A shop in a SQLite file, connected; a server exposing it, recording calls.
 async fn server(name: &str) -> (std::path::PathBuf, McpServer, Arc<Mutex<Vec<ToolCall>>>) {
+    server_on(name, 0).await
+}
+
+/// [`server`] on `port`.
+async fn server_on(
+    name: &str,
+    port: u16,
+) -> (std::path::PathBuf, McpServer, Arc<Mutex<Vec<ToolCall>>>) {
     let dir = std::env::temp_dir().join(format!("tangul-mcp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -80,7 +88,7 @@ async fn server(name: &str) -> (std::path::PathBuf, McpServer, Arc<Mutex<Vec<Too
         Ctx::new(knowledge.clone(), Some(engine.clone()), exposed.clone())
             .with_audit("mcp", sink.clone())
     });
-    let server = McpServer::start(0, TOKEN.into(), source).unwrap();
+    let server = McpServer::start(port, TOKEN.into(), source).unwrap();
     (dir, server, calls)
 }
 
@@ -181,8 +189,8 @@ fn rpc(id: u64, method: &str, params: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 }
 
-/// A client's handshake; the headers to send along afterwards.
-fn initialize(addr: SocketAddr) -> Vec<(String, String)> {
+/// A client's handshake in `version`; the headers to send along afterwards.
+fn initialize(addr: SocketAddr, version: &str) -> Vec<(String, String)> {
     let auth = format!("Bearer {TOKEN}");
     let reply = post(
         addr,
@@ -191,7 +199,7 @@ fn initialize(addr: SocketAddr) -> Vec<(String, String)> {
             1,
             "initialize",
             json!({
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": version,
                 "capabilities": {},
                 "clientInfo": {"name": "test", "version": "1"}
             }),
@@ -247,7 +255,7 @@ async fn a_client_lists_and_calls_the_tools() {
     let (dir, server, calls) = server("calls").await;
     let addr = server.addr();
     let headers = tokio::task::spawn_blocking(move || {
-        let headers = initialize(addr);
+        let headers = initialize(addr, "2025-06-18");
         let reply = post(addr, &as_refs(&headers), &rpc(2, "tools/list", json!({})));
         assert_eq!(reply.status, 200, "{}", reply.body);
         let tools = reply.json()["result"]["tools"].as_array().unwrap().clone();
@@ -316,6 +324,63 @@ async fn a_client_lists_and_calls_the_tools() {
         ]
     );
     drop(calls);
+    server.stop();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// What Claude Code speaks: no handshake, the version in every request, and a list
+/// that says how long it may be cached and for whom (else the client drops it).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_latest_protocol_gets_a_cacheable_list() {
+    let (dir, server, _) = server("latest").await;
+    let addr = server.addr();
+    tokio::task::spawn_blocking(move || {
+        let auth = format!("Bearer {TOKEN}");
+        let headers = [
+            ("Authorization", auth.as_str()),
+            ("MCP-Protocol-Version", "2026-07-28"),
+        ];
+        let meta = json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "1"}
+        });
+        let reply = post(
+            addr,
+            &[headers[0], headers[1], ("Mcp-Method", "tools/list")],
+            &rpc(1, "tools/list", json!({"_meta": meta})),
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let result = &reply.json()["result"];
+        assert_eq!(result["ttlMs"], 0, "{result}");
+        assert_eq!(result["cacheScope"], "private");
+        assert_eq!(result["tools"].as_array().unwrap().len(), 10);
+        let reply = post(
+            addr,
+            &[
+                headers[0],
+                headers[1],
+                ("Mcp-Method", "tools/call"),
+                ("Mcp-Name", "describe_table"),
+            ],
+            &rpc(
+                2,
+                "tools/call",
+                json!({"name": "describe_table", "arguments": {"table": "users"}, "_meta": meta}),
+            ),
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let result = &reply.json()["result"];
+        assert!(!result["isError"].as_bool().unwrap_or(false), "{result}");
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("users (table)")
+        );
+    })
+    .await
+    .unwrap();
     server.stop();
     std::fs::remove_dir_all(&dir).unwrap();
 }
