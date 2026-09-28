@@ -561,13 +561,20 @@ pub(super) fn ai_menu(
         menu = menu
             .item(PopupMenuItem::element(move |_, cx| {
                 let theme = cx.theme();
+                // A fixed width: a flex row doesn't shrink its text to a max width.
                 h_flex()
-                    .max_w(px(TEXT_WIDTH))
+                    .w(px(TEXT_WIDTH))
                     .gap_2()
                     .items_start()
                     .text_color(if danger { theme.danger } else { theme.warning })
                     .child(Icon::new(IconName::TriangleAlert).xsmall().mt_0p5())
-                    .child(div().flex_1().whitespace_normal().child(text.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(text.clone()),
+                    )
             }))
             .separator();
     }
