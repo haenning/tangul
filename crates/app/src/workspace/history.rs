@@ -203,7 +203,7 @@ impl Workspace {
             )
     }
 
-    /// Whose runs to show: you (app), the assistant (ai), MCP clients (mcp). None
+    /// Whose runs to show: you, the assistant (AI), MCP clients. None
     /// chosen shows everyone's.
     fn render_history_sources(&self, cx: &mut Context<Self>) -> AnyElement {
         let chosen = &self.panels.history.sources;
@@ -213,7 +213,7 @@ impl Workspace {
             .gap_1()
             .children(Source::ALL.map(|source| {
                 let (label, tooltip) = match source {
-                    Source::App => ("App", "Queries you ran"),
+                    Source::App => ("You", "Queries you ran"),
                     Source::Ai => ("AI", "Queries the assistant ran"),
                     Source::Mcp => ("MCP", "Queries MCP clients (Claude Code, …) ran"),
                 };
