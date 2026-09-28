@@ -6,13 +6,14 @@ use mysql_async::{
     Conn, Opts, OptsBuilder, Row, SslOpts, Value, consts::StatusFlags, prelude::Queryable,
 };
 use tangul_core::{
-    ColumnInfo, ColumnMeta, ConnectConfig, ForeignKey, RowBatch, TableInfo, TableKind, TlsMode,
+    CatalogExtras, CheckInfo, ColumnInfo, ColumnMeta, ConnectConfig, EnumInfo, ForeignKey,
+    IndexInfo, RoutineInfo, RowBatch, TableInfo, TableKind, TlsMode, ViewDef,
 };
 
-use crate::{
-    BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError, mysql_near,
-    quoted_name_position,
-};
+use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError, catalog_part};
+
+/// The server's own schemas, left out of the catalog.
+const SYSTEM_SCHEMAS: &str = "('mysql','information_schema','performance_schema','sys')";
 
 pub struct MysqlDriver;
 
@@ -143,42 +144,101 @@ impl Session for MysqlSession {
     }
 
     async fn list_tables(&mut self) -> Result<Vec<TableInfo>> {
-        const SQL: &str = "SELECT table_schema, table_name, table_type \
-            FROM information_schema.tables \
-            WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys') \
-            ORDER BY 1, 2";
-        let rows: Vec<(String, String, String)> = self.conn()?.query(SQL).await?;
+        let sql = format!(
+            "SELECT table_schema, table_name, table_type, table_comment, table_rows, \
+               data_length + index_length, create_options \
+             FROM information_schema.tables \
+             WHERE table_schema NOT IN {SYSTEM_SCHEMAS} \
+             ORDER BY 1, 2"
+        );
+        type Row = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<u64>,
+            Option<u64>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = self.conn()?.query(sql).await?;
         Ok(rows
             .into_iter()
-            .map(|(schema, name, kind)| TableInfo {
-                schema,
-                name,
-                kind: if kind.contains("VIEW") {
-                    TableKind::View
-                } else {
-                    TableKind::Table
-                },
+            .map(|(schema, name, kind, comment, rows, size, options)| {
+                let view = kind.contains("VIEW");
+                TableInfo {
+                    schema,
+                    name,
+                    kind: if view {
+                        TableKind::View
+                    } else if options.is_some_and(|o| o.contains("partitioned")) {
+                        TableKind::Partitioned
+                    } else {
+                        TableKind::Table
+                    },
+                    // A view's comment is always the word VIEW.
+                    comment: comment.filter(|c| !c.is_empty() && !view),
+                    row_estimate: rows.filter(|_| !view),
+                    size_bytes: size.filter(|_| !view),
+                }
             })
             .collect())
     }
 
     async fn list_columns(&mut self) -> Result<Vec<ColumnMeta>> {
-        const SQL: &str = "SELECT table_schema, table_name, column_name, column_type, \
-              is_nullable = 'YES', column_key = 'PRI' \
-            FROM information_schema.columns \
-            WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys') \
-            ORDER BY table_schema, table_name, ordinal_position";
-        let rows: Vec<(String, String, String, String, i64, i64)> = self.conn()?.query(SQL).await?;
+        let sql = format!(
+            "SELECT table_schema, table_name, column_name, column_type, \
+               is_nullable = 'YES', column_key = 'PRI', column_comment, column_default, \
+               generation_expression, extra, data_type \
+             FROM information_schema.columns \
+             WHERE table_schema NOT IN {SYSTEM_SCHEMAS} \
+             ORDER BY table_schema, table_name, ordinal_position"
+        );
+        type Row = (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        );
+        let rows: Vec<Row> = self.conn()?.query(sql).await?;
+        let some = |s: Option<String>| s.filter(|s| !s.is_empty());
         Ok(rows
             .into_iter()
             .map(
-                |(schema, table, name, data_type, nullable, pk)| ColumnMeta {
+                |(
                     schema,
                     table,
                     name,
                     data_type,
-                    nullable: nullable != 0,
-                    primary_key: pk != 0,
+                    nullable,
+                    pk,
+                    comment,
+                    default,
+                    generated,
+                    extra,
+                    base,
+                )| {
+                    let enum_type = (base == "enum").then(|| format!("{table}.{name}"));
+                    let generated = some(generated);
+                    ColumnMeta {
+                        schema,
+                        table,
+                        name,
+                        data_type,
+                        nullable: nullable != 0,
+                        primary_key: pk != 0,
+                        comment: some(comment),
+                        default: some(default).filter(|_| generated.is_none()),
+                        generated,
+                        identity: extra.is_some_and(|e| e.contains("auto_increment")),
+                        enum_type,
+                    }
                 },
             )
             .collect())
@@ -213,6 +273,16 @@ impl Session for MysqlSession {
                 },
             )
             .collect())
+    }
+
+    async fn catalog_extras(&mut self) -> Result<CatalogExtras> {
+        Ok(CatalogExtras {
+            indexes: catalog_part("indexes", self.indexes().await),
+            checks: catalog_part("check constraints", self.checks().await),
+            enums: catalog_part("enums", self.enums().await),
+            views: catalog_part("view definitions", self.views().await),
+            routines: catalog_part("routines", self.routines().await),
+        })
     }
 
     fn is_alive(&self) -> bool {
@@ -331,5 +401,270 @@ fn with_position(e: anyhow::Error, sql: &str) -> anyhow::Error {
             anyhow::anyhow!(SqlError { message, position })
         }
         _ => e,
+    }
+}
+
+/// For errors without a position that name an object in quotes (MySQL's
+/// `Table 'app.x' doesn't exist`, `Unknown column 'u.nme' in 'field list'`): where
+/// the last part of the first quoted name appears in `sql`.
+fn quoted_name_position(message: &str, sql: &str) -> Option<usize> {
+    let start = message.find('\'')? + 1;
+    let end = start + message[start..].find('\'')?;
+    let name = message[start..end].rsplit('.').next()?;
+    if name.is_empty() {
+        return None;
+    }
+    let lower = sql.to_lowercase();
+    let needle = name.to_lowercase();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(&needle) {
+        let at = from + i;
+        let before = lower[..at].chars().next_back();
+        let after = lower[at + needle.len()..].chars().next();
+        let boundary = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        if boundary(before) && boundary(after) {
+            return Some(at);
+        }
+        from = at + needle.len();
+    }
+    None
+}
+
+/// Locates MySQL's `… near '<rest of statement>' at line N` in `sql`. The quoted part
+/// is the (possibly cut) remainder of the statement from the error on; empty means
+/// the statement ended unexpectedly.
+fn mysql_near(message: &str, sql: &str) -> Option<usize> {
+    let start = message.find("near '")? + "near '".len();
+    let end = start + message[start..].rfind("' at line ")?;
+    let near = &message[start..end];
+    let line: usize = message[end + "' at line ".len()..]
+        .trim()
+        .trim_end_matches(|c: char| !c.is_ascii_digit())
+        .parse()
+        .ok()?;
+    if near.is_empty() {
+        return Some(sql.trim_end().trim_end_matches(';').trim_end().len());
+    }
+    // The server cuts long snippets; a short prefix is enough to find the spot.
+    let probe: String = near.chars().take(24).collect();
+    let line_start = sql
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1))
+        .map(str::len)
+        .sum::<usize>();
+    sql.get(line_start..)
+        .and_then(|rest| rest.find(&probe))
+        .map(|i| line_start + i)
+        .or_else(|| sql.find(&probe))
+}
+
+impl MysqlSession {
+    async fn indexes(&mut self) -> Result<Vec<IndexInfo>> {
+        let sql = format!(
+            "SELECT table_schema, table_name, index_name, non_unique, column_name, index_type \
+             FROM information_schema.statistics \
+             WHERE table_schema NOT IN {SYSTEM_SCHEMAS} \
+             ORDER BY 1, 2, 3, seq_in_index"
+        );
+        type Row = (String, String, String, i64, Option<String>, Option<String>);
+        let rows: Vec<Row> = self.conn()?.query(sql).await?;
+        let mut out: Vec<IndexInfo> = Vec::new();
+        for (schema, table, name, non_unique, column, method) in rows {
+            // An expression's key part has no column name.
+            let column = column.unwrap_or_else(|| "(expression)".into());
+            match out.last_mut() {
+                Some(i) if i.schema == schema && i.table == table && i.name == name => {
+                    i.columns.push(column)
+                }
+                _ => out.push(IndexInfo {
+                    primary: name == "PRIMARY",
+                    unique: non_unique == 0,
+                    schema,
+                    table,
+                    name,
+                    columns: vec![column],
+                    predicate: None,
+                    method: method.map(|m| m.to_lowercase()),
+                }),
+            }
+        }
+        Ok(out)
+    }
+
+    async fn checks(&mut self) -> Result<Vec<CheckInfo>> {
+        let sql = format!(
+            "SELECT tc.table_schema, tc.table_name, cc.constraint_name, cc.check_clause \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.check_constraints cc \
+               ON cc.constraint_schema = tc.constraint_schema \
+              AND cc.constraint_name = tc.constraint_name \
+             WHERE tc.constraint_type = 'CHECK' AND tc.table_schema NOT IN {SYSTEM_SCHEMAS} \
+             ORDER BY 1, 2, 3"
+        );
+        let rows: Vec<(String, String, String, String)> = self.conn()?.query(sql).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(schema, table, name, expression)| CheckInfo {
+                schema,
+                table,
+                name,
+                expression,
+            })
+            .collect())
+    }
+
+    /// MySQL enums belong to a column: named `table.column`.
+    async fn enums(&mut self) -> Result<Vec<EnumInfo>> {
+        let sql = format!(
+            "SELECT table_schema, table_name, column_name, column_type \
+             FROM information_schema.columns \
+             WHERE data_type = 'enum' AND table_schema NOT IN {SYSTEM_SCHEMAS} \
+             ORDER BY 1, 2, ordinal_position"
+        );
+        let rows: Vec<(String, String, String, String)> = self.conn()?.query(sql).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(schema, table, column, column_type)| EnumInfo {
+                schema,
+                name: format!("{table}.{column}"),
+                values: enum_values(&column_type),
+                comment: None,
+            })
+            .collect())
+    }
+
+    async fn views(&mut self) -> Result<Vec<ViewDef>> {
+        let sql = format!(
+            "SELECT table_schema, table_name, view_definition \
+             FROM information_schema.views \
+             WHERE table_schema NOT IN {SYSTEM_SCHEMAS} \
+             ORDER BY 1, 2"
+        );
+        let rows: Vec<(String, String, Option<String>)> = self.conn()?.query(sql).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(schema, name, definition)| ViewDef {
+                schema,
+                name,
+                definition: definition.unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    async fn routines(&mut self) -> Result<Vec<RoutineInfo>> {
+        let sql = format!(
+            "SELECT r.routine_schema, r.routine_name, LOWER(r.routine_type), \
+               (SELECT GROUP_CONCAT(CONCAT_WS(' ', p.parameter_mode, p.parameter_name, \
+                                              p.dtd_identifier) \
+                                    ORDER BY p.ordinal_position SEPARATOR ', ') \
+                  FROM information_schema.parameters p \
+                 WHERE p.specific_schema = r.routine_schema \
+                   AND p.specific_name = r.specific_name AND p.ordinal_position > 0), \
+               NULLIF(r.dtd_identifier, ''), r.routine_comment \
+             FROM information_schema.routines r \
+             WHERE r.routine_schema NOT IN {SYSTEM_SCHEMAS} \
+             ORDER BY 1, 2"
+        );
+        type Row = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = self.conn()?.query(sql).await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(schema, name, kind, arguments, returns, comment)| RoutineInfo {
+                    schema,
+                    name,
+                    kind,
+                    arguments: arguments.unwrap_or_default(),
+                    returns,
+                    comment: comment.filter(|c| !c.is_empty()),
+                },
+            )
+            .collect())
+    }
+}
+
+/// The values of a column type like `enum('open','it''s')`, in order.
+fn enum_values(column_type: &str) -> Vec<String> {
+    let Some(inner) = column_type
+        .strip_prefix("enum(")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        return Vec::new();
+    };
+    let mut values = Vec::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\'' {
+            continue;
+        }
+        let mut value = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' if chars.peek() == Some(&'\'') => {
+                    chars.next();
+                    value.push('\'');
+                }
+                '\'' => break,
+                '\\' => value.extend(chars.next()),
+                c => value.push(c),
+            }
+        }
+        values.push(value);
+    }
+    values
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn enum_values_in_order() {
+        use super::enum_values;
+        assert_eq!(
+            enum_values("enum('open','paid','shipped')"),
+            ["open", "paid", "shipped"]
+        );
+        // Quotes doubled or escaped, commas inside values.
+        assert_eq!(
+            enum_values(r"enum('it''s','a,b','c\'d')"),
+            ["it's", "a,b", "c'd"]
+        );
+        assert_eq!(enum_values("enum('')"), [""]);
+        assert!(enum_values("varchar(10)").is_empty());
+    }
+
+    use super::{mysql_near, quoted_name_position};
+
+    #[test]
+    fn error_positions() {
+        let msg = "ERROR 42000 (1064): You have an error in your SQL syntax; check the manual \
+                   that corresponds to your MySQL server version for the right syntax to use \
+                   near 'form users' at line 2";
+        let sql = "select 1;\nselect * form users";
+        assert_eq!(mysql_near(msg, sql), Some(sql.find("form").unwrap()));
+        let msg = "… to use near '' at line 1";
+        assert_eq!(mysql_near(msg, "select * from;"), Some(13));
+        assert_eq!(mysql_near("no position here", "x"), None);
+
+        let sql = "select nme from users u where u.idx = 1";
+        assert_eq!(
+            quoted_name_position("Unknown column 'u.idx' in 'where clause'", sql),
+            Some(sql.find("idx").unwrap())
+        );
+        assert_eq!(
+            quoted_name_position("Table 'app.users' doesn't exist", sql),
+            Some(sql.find("users").unwrap())
+        );
+        // Whole words only.
+        assert_eq!(
+            quoted_name_position("Unknown column 'u' in 'x'", "select users"),
+            None
+        );
     }
 }

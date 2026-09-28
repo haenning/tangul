@@ -3,7 +3,7 @@
 //! No full parser: the rules follow the clause keywords, which also works for
 //! half-typed SQL.
 
-use crate::lexer::{Token, TokenKind, tokenize, unquote};
+use crate::lexer::{Lexing, Token, TokenKind, tokenize_with, unquote};
 
 /// Words that end a table reference or can never be an alias.
 pub(crate) const RESERVED: &[&str] = &[
@@ -119,9 +119,14 @@ pub struct Analysis {
 
 /// Byte ranges of the statements in `sql`, split at top-level `;`.
 pub fn statements(sql: &str) -> Vec<(usize, usize)> {
+    statements_with(sql, Lexing::default())
+}
+
+/// [`statements`] with a database's lexical rules.
+pub fn statements_with(sql: &str, lexing: Lexing) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start = 0;
-    for t in tokenize(sql) {
+    for t in tokenize_with(sql, lexing) {
         if t.is_punct(sql, ';') {
             out.push((start, t.start));
             start = t.end;
@@ -133,7 +138,12 @@ pub fn statements(sql: &str) -> Vec<(usize, usize)> {
 
 /// Significant tokens only.
 pub(crate) fn significant(sql: &str) -> Vec<Token> {
-    tokenize(sql)
+    significant_with(sql, Lexing::default())
+}
+
+/// [`significant`] with a database's lexical rules.
+pub(crate) fn significant_with(sql: &str, lexing: Lexing) -> Vec<Token> {
+    tokenize_with(sql, lexing)
         .into_iter()
         .filter(|t| !t.is_trivia())
         .collect()

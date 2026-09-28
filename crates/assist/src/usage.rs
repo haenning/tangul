@@ -7,38 +7,7 @@ use crate::analyze::{analyze, is_reserved, significant, statements};
 use crate::lexer::{TokenKind, unquote};
 use crate::schema::SchemaIndex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum UsageKind {
-    Table,
-    Column,
-    Join,
-}
-
-impl UsageKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            UsageKind::Table => "table",
-            UsageKind::Column => "column",
-            UsageKind::Join => "join",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "table" => UsageKind::Table,
-            "column" => UsageKind::Column,
-            "join" => UsageKind::Join,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct UsageStat {
-    pub count: u32,
-    /// Unix seconds.
-    pub last_used: i64,
-}
+pub use tangul_core::usage::{UsageKind, UsageStat};
 
 /// Key parts are separated by the unit separator; join sides by the record separator.
 const SEP: char = '\u{1f}';
@@ -112,6 +81,18 @@ impl Usage {
     fn decay(&self, s: &UsageStat) -> f64 {
         let age_days = (self.now - s.last_used).max(0) as f64 / 86_400.0;
         f64::from(s.count) / (1.0 + age_days / 14.0)
+    }
+
+    /// Usage as stored (`tangul-data`), scored relative to `now` (unix seconds).
+    pub fn from_stats(
+        now: i64,
+        stats: impl IntoIterator<Item = (UsageKind, String, UsageStat)>,
+    ) -> Self {
+        let mut usage = Self::new(now);
+        for (kind, key, stat) in stats {
+            usage.insert(kind, key, stat);
+        }
+        usage
     }
 
     /// Learned join conditions with their scores.

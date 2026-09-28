@@ -25,3 +25,9 @@ target
 
 # App bundles/DMGs are built into target/bundle; never commit copies elsewhere.
 *.dmg
+
+# Python bytecode (scripts/analytics)
+__pycache__/
+
+# Local settings (see .env.example)
+.env

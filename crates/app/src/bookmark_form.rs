@@ -12,10 +12,10 @@ use gpui_kit::*;
 use tangul_assist::chart::ChartView;
 use tangul_assist::guard;
 
-use crate::local::Bookmark;
-use crate::monitor;
 use crate::settings;
-use crate::store::new_id;
+use tangul_data::local::Bookmark;
+use tangul_data::profiles::new_id;
+use tangul_service::schedule;
 
 pub struct BookmarkForm {
     id: Option<String>,
@@ -144,7 +144,7 @@ impl Render for BookmarkForm {
                 );
                 let label = format!(
                     "Run about every {} to track time and rows",
-                    monitor::human_duration(interval)
+                    schedule::human_duration(interval)
                 );
                 let checkbox = Checkbox::new("scheduled")
                     .label(label)

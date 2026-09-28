@@ -1,0 +1,76 @@
+name: Coverage
+
+# Test coverage of the backend crates, with the live tests against Postgres, MySQL and
+# the SSH bastion (docker-compose.yml). The run page shows a table per crate and file;
+# the HTML report is attached as an artifact; runs on dev publish a badge.
+#
+# Deactivated: the job is skipped unless the repository variable COVERAGE_ENABLED is
+# "true" (Settings → Secrets and variables → Actions → Variables). Then start it by
+# hand (Actions → Coverage → Run workflow), or add a trigger such as:
+#   push:
+#     branches: [dev]
+#
+# Badge for README.md (after the first run on dev has created the `badges` branch):
+#   ![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/haenning/rusdb/badges/coverage.json)
+#
+# The GPUI app (crates/app) isn't measured: it builds on macOS only.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    if: vars.COVERAGE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the badge branch
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dev databases and SSH bastion
+        run: docker compose up -d --wait
+      - name: Install toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests with coverage (incl. live tests)
+        env:
+          TANGUL_TEST_PG: postgres:@127.0.0.1:55432/postgres
+          TANGUL_TEST_MYSQL: root:@127.0.0.1:53306/app
+          TANGUL_TEST_SSH: tangul:tangul@127.0.0.1:52222
+        run: cargo llvm-cov --workspace --exclude tangul --no-report
+      - name: Reports
+        run: |
+          cargo llvm-cov report --json --summary-only --output-path coverage.json
+          cargo llvm-cov report --html --output-dir coverage-html
+          python3 scripts/coverage-summary.py coverage.json summary.md badge.json
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage-html/html
+      - name: Publish badge (dev only)
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          mkdir badge && cp badge.json badge/coverage.json && cd badge
+          git init -q -b badges
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add coverage.json
+          git commit -qm "Coverage badge for ${GITHUB_SHA::7}"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" badges
+      - name: Stop databases
+        if: always()
+        run: docker compose down -v

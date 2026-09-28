@@ -1,10 +1,16 @@
-//! The engine against a local SQLite file (no server needed): read-only, and the
-//! statement time limit.
+//! The engine against a local SQLite file (no server needed): the gate (who may run
+//! what), read-only files, the statement time limit, whole results and the audit log.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tangul_core::{ConnId, ConnectConfig, DriverKind, QueryId, TabId, TlsMode};
-use tangul_engine::{Command, Event, QueryEvent};
+use tangul_data::local::Local;
+use tangul_data::settings::Settings;
+use tangul_engine::{
+    Approval, Caller, Command, EngineConfig, EngineHandle, Event, QueryEvent, QueryOptions,
+    SettingsSource,
+};
 
 async fn next(events: &async_channel::Receiver<Event>) -> Event {
     tokio::time::timeout(Duration::from_secs(10), events.recv())
@@ -13,20 +19,64 @@ async fn next(events: &async_channel::Receiver<Event>) -> Event {
         .expect("engine running")
 }
 
-/// Runs `sql` and returns its error, if any.
+/// A fresh directory with `data.db` (table `t` with 1, 2, 3); the engine connected
+/// to it as `ConnId(1)`, a 300 ms time limit, and its audit log in the directory.
+async fn setup(name: &str) -> (PathBuf, EngineHandle, async_channel::Receiver<Event>) {
+    let dir = std::env::temp_dir().join(format!("tangul-engine-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("data.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2), (3);")
+        .unwrap();
+    let mut settings = Settings::default();
+    settings.safety.max_query_time = Some(Duration::from_millis(300));
+    let (engine, events) = tangul_engine::start_with(EngineConfig {
+        settings: SettingsSource::Fixed(Box::new(settings)),
+        audit_dir: Some(dir.clone()),
+    });
+    connect(&engine, &path, ConnId(1));
+    loop {
+        match next(&events).await {
+            Event::Connected { .. } => break,
+            Event::ConnectFailed { error, .. } => panic!("{error}"),
+            _ => {}
+        }
+    }
+    (dir, engine, events)
+}
+
+fn connect(engine: &EngineHandle, path: &Path, conn: ConnId) {
+    engine.send(Command::Connect {
+        conn,
+        driver: DriverKind::Sqlite,
+        cfg: ConnectConfig {
+            host: String::new(),
+            port: 0,
+            user: String::new(),
+            password: None,
+            database: path.to_string_lossy().into_owned(),
+            tls: TlsMode::Disable,
+        },
+        ssh: None,
+    });
+}
+
+/// Runs `sql` in a tab as the user and returns its error, if any.
 async fn run(
-    engine: &tangul_engine::EngineHandle,
+    engine: &EngineHandle,
     events: &async_channel::Receiver<Event>,
     query: u64,
     sql: &str,
+    approval: Approval,
 ) -> Option<String> {
     engine.send(Command::Execute {
         query: QueryId(query),
         tab: TabId(1),
         conn: ConnId(1),
         sql: sql.into(),
-        read_only: true,
-        timeout: Some(Duration::from_millis(300)),
+        approval,
     });
     loop {
         if let Event::Query {
@@ -40,46 +90,183 @@ async fn run(
     }
 }
 
+const FOREVER: &str = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c)
+                       SELECT count(*) FROM c";
+
 #[tokio::test(flavor = "multi_thread")]
-async fn local_file_is_read_only_and_time_limited() {
-    let dir = std::env::temp_dir().join(format!("tangul-engine-local-{}", std::process::id()));
+async fn tabs_pass_the_gate() {
+    let (dir, engine, events) = setup("tabs").await;
+    assert_eq!(
+        run(&engine, &events, 1, "SELECT x FROM t", Approval::None).await,
+        None
+    );
+    // Without WHERE: refused until the dialog was confirmed.
+    let refused = run(&engine, &events, 2, "DELETE FROM t", Approval::None).await;
+    assert!(refused.unwrap().contains("WHERE"));
+    // Confirmed, it reaches the file, which is read-only.
+    let error = run(&engine, &events, 3, "DELETE FROM t", Approval::Confirmed).await;
+    assert!(error.unwrap().contains("readonly"));
+    let error = run(&engine, &events, 4, FOREVER, Approval::None)
+        .await
+        .unwrap();
+    assert!(error.contains("time limit"), "{error}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn query_returns_the_whole_result() {
+    let (dir, engine, _events) = setup("query").await;
+    let options = |row_limit| QueryOptions {
+        row_limit,
+        ..QueryOptions::new(Caller::Schedule)
+    };
+    let out = engine
+        .query(
+            QueryId(1),
+            ConnId(1),
+            "SELECT x FROM t ORDER BY x -- all of them\n;",
+            options(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.results.len(), 1);
+    assert_eq!(out.results[0].row_count(), 3);
+    assert!(!out.truncated);
+    // Readers send one statement at a time.
+    let error = engine
+        .query(QueryId(5), ConnId(1), "SELECT 1; SELECT 42", options(10))
+        .await
+        .unwrap_err();
+    assert!(
+        error.message.starts_with("only one statement"),
+        "{}",
+        error.message
+    );
+
+    let out = engine
+        .query(QueryId(2), ConnId(1), "SELECT x FROM t", options(2))
+        .await
+        .unwrap();
+    assert!(out.truncated);
+    assert_eq!(out.results[0].row_count(), 2);
+
+    // Schedules only read.
+    let error = engine
+        .query(
+            QueryId(3),
+            ConnId(1),
+            "DELETE FROM t WHERE x = 1",
+            options(10),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("schedule"), "{error}");
+    assert_eq!(error.proposal, None);
+
+    let error = engine
+        .query(QueryId(4), ConnId(1), FOREVER, options(10))
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("time limit"), "{error}");
+
+    let error = engine
+        .query(QueryId(5), ConnId(9), "SELECT 1", options(10))
+        .await
+        .unwrap_err();
+    assert_eq!(error.message, "not connected");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assistant_writes_are_proposed_never_run_and_audited() {
+    let (dir, engine, _events) = setup("assistant").await;
+    let assistant = QueryOptions::new(Caller::Assistant);
+    let write = "DELETE FROM t WHERE x = 1";
+    let count = "SELECT count(*) FROM t";
+
+    let out = engine
+        .query(QueryId(1), ConnId(1), count, assistant.clone())
+        .await
+        .unwrap();
+    assert_eq!(out.results[0].cell(0, 0), Some("3"));
+
+    // Not run, whatever approval comes with it: a proposal of the statements.
+    for (id, approval) in [(2, Approval::None), (3, Approval::Confirmed)] {
+        let error = engine
+            .query(
+                QueryId(id),
+                ConnId(1),
+                write,
+                QueryOptions {
+                    approval,
+                    ..assistant.clone()
+                },
+            )
+            .await
+            .unwrap_err();
+        let proposal = error.proposal.clone().expect("proposed");
+        assert_eq!(proposal.statements[0].0, "DELETE");
+        assert!(error.message.contains("not run"), "{error}");
+    }
+    let out = engine
+        .query(QueryId(4), ConnId(1), count, assistant)
+        .await
+        .unwrap();
+    assert_eq!(out.results[0].cell(0, 0), Some("3"), "nothing changed");
+
+    let audit = Local::open(Some(&dir)).audit(10);
+    let outcomes: Vec<(&str, &str)> = audit
+        .iter()
+        .rev()
+        .map(|e| (e.caller.as_str(), e.outcome.as_str()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("assistant", "ran"),
+            ("assistant", "proposed"),
+            ("assistant", "proposed"),
+            ("assistant", "ran"),
+        ]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_detached_handle_drops_commands_and_sends_no_events() {
+    let (engine, events) = tangul_engine::detached();
+    engine.send(Command::Cancel { query: QueryId(1) });
+    assert!(events.is_closed());
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_schema_comes_first_then_the_rest() {
+    let dir = std::env::temp_dir().join(format!("tangul-engine-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("metrics.db");
-    let _ = std::fs::remove_file(&path);
+    let path = dir.join("data.db");
     rusqlite::Connection::open(&path)
         .unwrap()
-        .execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);")
+        .execute_batch("CREATE TABLE t (x INTEGER); CREATE INDEX t_x ON t (x);")
         .unwrap();
-
-    let (engine, events) = tangul_engine::start();
-    engine.send(Command::Connect {
-        conn: ConnId(1),
-        driver: DriverKind::Sqlite,
-        cfg: ConnectConfig {
-            host: String::new(),
-            port: 0,
-            user: String::new(),
-            password: None,
-            database: path.to_string_lossy().into_owned(),
-            tls: TlsMode::Disable,
-        },
-        ssh: None,
-    });
-    loop {
-        match next(&events).await {
-            Event::Connected { .. } => break,
-            Event::ConnectFailed { error, .. } => panic!("{error}"),
-            _ => {}
+    let (engine, events) = tangul_engine::start_with(EngineConfig::isolated());
+    connect(&engine, &path, ConnId(1));
+    let mut schemas = Vec::new();
+    while schemas.len() < 2 {
+        if let Event::Schema {
+            result, complete, ..
+        } = next(&events).await
+        {
+            schemas.push((complete, result.unwrap()));
         }
     }
-
-    assert_eq!(run(&engine, &events, 1, "SELECT x FROM t").await, None);
-    assert!(run(&engine, &events, 2, "DELETE FROM t").await.is_some());
-
-    // Never ends on its own.
-    let forever = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c)
-                   SELECT count(*) FROM c";
-    let error = run(&engine, &events, 3, forever).await.unwrap();
-    assert!(error.contains("time limit"), "{error}");
+    // What the tree needs, without waiting for indexes and the like …
+    assert!(!schemas[0].0);
+    assert_eq!(schemas[0].1.tables.len(), 1);
+    assert!(schemas[0].1.indexes.is_empty());
+    // … then all of it.
+    assert!(schemas[1].0);
+    assert_eq!(schemas[1].1.indexes[0].name, "t_x");
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -3,8 +3,9 @@
 //! parse, so it is a guardrail and not a guarantee (a function called from a
 //! `SELECT` can still write).
 
-use crate::analyze::{significant, statements};
-use crate::lexer::{Token, TokenKind};
+use crate::analyze::{significant_with, statements_with};
+use crate::dialect;
+use crate::lexer::{Lexing, Token, TokenKind, tokenize_with};
 
 /// A statement the guard has something to say about.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,19 +26,123 @@ const WRITES: &[&str] = &[
     "CREATE", "RENAME", "GRANT", "REVOKE", "COMMENT", "COPY", "CALL", "DO", "VACUUM", "REINDEX",
     "CLUSTER", "REFRESH", "LOAD", "IMPORT", "LOCK",
 ];
+/// Statements that only read, when nothing else in them writes. The allow-list for
+/// callers that may only read (the assistant, schedules): anything else needs a
+/// person's go-ahead or is refused.
+const READS: &[&str] = &[
+    "SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "DESC", "TABLE", "VALUES",
+];
+/// A statement that isn't plainly a read: (keyword, statement text).
+pub type NotRead = (String, String);
+
+/// The statements of `sql` that are not plainly reads: not on the read allow-list,
+/// or writing, locking rows or calling a function with side effects. Empty means
+/// every statement only reads (as far as tokens can tell; the server's read-only
+/// transaction is the guarantee).
+pub fn not_reads(sql: &str) -> Vec<NotRead> {
+    not_reads_with(sql, Lexing::default())
+}
+
+/// [`not_reads`] with a database's lexical rules: the ones the gate uses, so the
+/// statements are split and read as the server will.
+pub fn not_reads_with(sql: &str, lexing: Lexing) -> Vec<NotRead> {
+    statements_with(sql, lexing)
+        .into_iter()
+        .filter_map(|(start, end)| not_read(&sql[start..end], lexing))
+        .collect()
+}
+
+/// The text a caller that may only read sends instead of `sql`: comments blanked out
+/// by the database's rules (same length, so error positions stay) and trailing `;`
+/// dropped. What the server runs is then what was checked: nothing hides in a
+/// comment the server reads differently (MySQL runs `/*! … */`).
+pub fn read_text(sql: &str, lexing: Lexing) -> String {
+    let mut text = String::with_capacity(sql.len());
+    for t in tokenize_with(sql, lexing) {
+        match t.kind {
+            TokenKind::Comment => text.extend(std::iter::repeat_n(' ', t.end - t.start)),
+            _ => text.push_str(t.text(sql)),
+        }
+    }
+    let end = text
+        .trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+        .len();
+    text.truncate(end);
+    text
+}
+
+/// Why `text` (from [`read_text`]) can't be sent as one read, if it can't:
+/// - a `;` anywhere, even in a string: databases don't all agree where a string ends
+///   (backslashes, server settings), and a second statement could end the read-only
+///   transaction;
+/// - a `U&` escape, which can spell any name (`U&"d\0062link"` is `dblink`) past the
+///   check for functions with side effects.
+pub fn not_one_read(text: &str) -> Option<&'static str> {
+    if text.contains(';') {
+        return Some(
+            "only one statement at a time, and no ';' in it (not even in a string; \
+             use chr(59) or CHAR(59))",
+        );
+    }
+    if text.to_ascii_lowercase().contains("u&") {
+        return Some("U& escapes are not allowed here; write names and strings plainly");
+    }
+    None
+}
+
+fn not_read(sql: &str, lexing: Lexing) -> Option<NotRead> {
+    let tokens = significant_with(sql, lexing);
+    let first = tokens.first()?;
+    let words: Vec<String> = tokens
+        .iter()
+        .filter(|t| t.kind == TokenKind::Word)
+        .map(|t| t.text(sql).to_ascii_uppercase())
+        .collect();
+    let lead = if first.kind == TokenKind::Word {
+        first.text(sql).to_ascii_uppercase()
+    } else {
+        first.text(sql).to_string()
+    };
+    let statement = text_of(sql, &tokens);
+    if let Some(check) = check_statement(sql, lexing).filter(|c| c.writes) {
+        return Some((check.keyword, statement));
+    }
+    if !READS.contains(&lead.as_str()) {
+        return Some((lead, statement));
+    }
+    // `SELECT … FOR UPDATE / SHARE` locks rows.
+    if words
+        .windows(2)
+        .any(|w| w[0] == "FOR" && matches!(w[1].as_str(), "UPDATE" | "SHARE" | "NO" | "KEY"))
+    {
+        return Some(("FOR UPDATE".to_string(), statement));
+    }
+    let lower = sql.to_ascii_lowercase();
+    // Every dialect's, whichever database this goes to: stricter, and the guard
+    // needs no connection.
+    let side_effect = dialect::all()
+        .flat_map(|d| d.side_effect_functions())
+        .find(|name| lower.contains(*name));
+    if let Some(name) = side_effect {
+        return Some((name.to_uppercase(), statement));
+    }
+    None
+}
+
 /// What a `WITH` or `EXPLAIN ANALYZE` statement can be about.
 const DML: &[&str] = &["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE"];
 
 /// The statements of `sql` that write or are unfiltered; harmless ones are left out.
 pub fn check(sql: &str) -> Vec<Check> {
-    statements(sql)
+    let lexing = Lexing::default();
+    statements_with(sql, lexing)
         .into_iter()
-        .filter_map(|(start, end)| check_statement(&sql[start..end]))
+        .filter_map(|(start, end)| check_statement(&sql[start..end], lexing))
         .collect()
 }
 
-fn check_statement(sql: &str) -> Option<Check> {
-    let tokens = significant(sql);
+fn check_statement(sql: &str, lexing: Lexing) -> Option<Check> {
+    let tokens = significant_with(sql, lexing);
     // Words outside any parentheses, with their position among the tokens.
     let mut depth = 0usize;
     let mut top: Vec<(usize, String)> = Vec::new();
@@ -142,6 +247,68 @@ fn text_of(sql: &str, tokens: &[Token]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_text_blanks_comments_by_the_rules() {
+        let mysql = dialect::dialect_for(tangul_core::DriverKind::Mysql).lexing();
+        // Same length: error positions stay.
+        assert_eq!(
+            read_text("select 1 /* x */ # y\n+ 2 ;; \n", mysql),
+            format!("select 1{}\n+ 2", " ".repeat(12))
+        );
+        // Without MySQL's rules `#` is no comment.
+        assert_eq!(read_text("select 1 # y", Lexing::default()), "select 1 # y");
+        assert_eq!(read_text("select /*! 1 */ 2", mysql), "select          2");
+    }
+
+    #[test]
+    fn one_read_at_a_time() {
+        assert_eq!(not_one_read("select * from t where a = 'x'"), None);
+        for (text, why) in [
+            ("select 1; select 2", "only one statement"),
+            ("select ';'", "only one statement"),
+            ("select U&\"d\\0062link\"('x')", "U& escapes"),
+        ] {
+            assert!(not_one_read(text).unwrap().starts_with(why), "{text}");
+        }
+    }
+
+    #[test]
+    fn reads_on_the_allow_list() {
+        let keyword = |sql: &str| not_reads(sql).first().map(|(k, _)| k.clone());
+        for read in [
+            "select * from t",
+            "  SELECT 1; select 2",
+            "with a as (select 1) select * from a",
+            "explain select * from t",
+            "show tables",
+            "describe t",
+            "table t",
+            "values (1), (2)",
+            "select updated_at, lock_timeout from t where id = 1",
+        ] {
+            assert_eq!(keyword(read), None, "{read}");
+        }
+        for (sql, why) in [
+            ("delete from t where id = 1", "DELETE"),
+            ("select 1; update t set a = 1 where id = 1", "UPDATE"),
+            (
+                "with d as (delete from t returning *) select * from d",
+                "DELETE",
+            ),
+            ("explain analyze delete from t", "DELETE"),
+            ("select * into copy from t", "SELECT INTO"),
+            ("set search_path = x", "SET"),
+            ("call refresh()", "CALL"),
+            ("begin", "BEGIN"),
+            ("select * from t for update", "FOR UPDATE"),
+            ("select pg_terminate_backend(123)", "PG_TERMINATE_BACKEND"),
+            ("select nextval('s')", "NEXTVAL"),
+            ("SELECT LOAD_FILE('/etc/passwd')", "LOAD_FILE"),
+        ] {
+            assert_eq!(keyword(sql).as_deref(), Some(why), "{sql}");
+        }
+    }
 
     fn one(sql: &str) -> Option<Check> {
         let mut found = check(sql);

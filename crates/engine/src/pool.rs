@@ -15,6 +15,7 @@ use std::{
 };
 
 use anyhow::Result;
+use tangul_assist::lexer::Lexing;
 use tangul_core::{ConnectConfig, TabId};
 use tangul_drivers::{Driver, Session};
 use tangul_tunnel::Tunnel;
@@ -50,6 +51,8 @@ pub struct PoolStats {
 
 pub struct Pool {
     driver: Arc<dyn Driver>,
+    /// The database's lexical rules, for the gate.
+    lexing: Lexing,
     cfg: ConnectConfig,
     /// Sessions connect through this when set (`cfg` then targets the local end).
     tunnel: Option<Tunnel>,
@@ -62,12 +65,14 @@ pub struct Pool {
 impl Pool {
     pub fn new(
         driver: Arc<dyn Driver>,
+        lexing: Lexing,
         cfg: ConnectConfig,
         tunnel: Option<Tunnel>,
         max: usize,
     ) -> Self {
         Self {
             driver,
+            lexing,
             cfg,
             tunnel,
             max,
@@ -75,6 +80,21 @@ impl Pool {
             idle: Mutex::default(),
             pinned: Mutex::default(),
         }
+    }
+
+    /// The database user sessions log in as (read-only mode goes by it).
+    pub fn user(&self) -> &str {
+        &self.cfg.user
+    }
+
+    /// How the database reads SQL text (quotes, comments).
+    pub fn lexing(&self) -> Lexing {
+        self.lexing
+    }
+
+    /// `user@host/database`, for the audit log.
+    pub fn target(&self) -> String {
+        format!("{}@{}/{}", self.cfg.user, self.cfg.host, self.cfg.database)
     }
 
     /// Returns the tab's pinned session, an idle one, or opens a new one. Waits if
@@ -96,6 +116,10 @@ impl Pool {
                 None => break,
             }
         }
+        self.open(permit).await
+    }
+
+    async fn open(&self, permit: OwnedSemaphorePermit) -> Result<Lease> {
         let session = match &self.tunnel {
             Some(tunnel) => {
                 let cfg = ConnectConfig {

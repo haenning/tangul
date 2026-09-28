@@ -1,15 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/drivers", "crates/engine", "crates/assist", "crates/tunnel", "crates/app"]
+members = ["crates/core", "crates/drivers", "crates/engine", "crates/assist", "crates/tunnel", "crates/data", "crates/service", "crates/ai", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
+# Not published to crates.io; also keeps them out of the third-party license checks.
+publish = false
 
 [workspace.dependencies]
 tangul-core = { path = "crates/core" }
 tangul-drivers = { path = "crates/drivers" }
+tangul-data = { path = "crates/data" }
+tangul-service = { path = "crates/service" }
 tangul-engine = { path = "crates/engine" }
 tangul-assist = { path = "crates/assist" }
 

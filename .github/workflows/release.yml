@@ -31,6 +31,11 @@ jobs:
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1
           fi
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-about
+      - name: Licenses (the app ships THIRD_PARTY_LICENSES.md)
+        run: make license-check
       - name: Build universal app + DMG
         run: scripts/bundle-macos.sh --universal
       - name: Publish release

@@ -10,6 +10,8 @@ pub enum DriverKind {
 }
 
 impl DriverKind {
+    pub const ALL: [DriverKind; 3] = [DriverKind::Postgres, DriverKind::Mysql, DriverKind::Sqlite];
+
     pub fn default_port(self) -> u16 {
         match self {
             DriverKind::Postgres => 5432,
@@ -57,6 +59,18 @@ pub struct Database {
     /// from the SSH server).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshConfig>,
+    /// The user (id) the AI assistant connects as, e.g. one that may only read;
+    /// `None` uses the user selected in the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_user: Option<String>,
+    /// The value profiles the assistant may take (none unless the user allows them).
+    /// Its own queries return rows either way: the AI user's grants decide those.
+    #[serde(default, skip_serializing_if = "ValueAccess::is_none")]
+    pub ai_values: ValueAccess,
+    /// AI tools (MCP clients, the assistant) may use this database. On unless the
+    /// user turns it off; only written when off.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub ai_tools: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -161,4 +175,78 @@ impl ConnectConfig {
             tls: db.tls,
         }
     }
+}
+
+/// The value profiles the assistant may take of a database's columns. Not a limit on
+/// its queries, which return whatever rows its database user may read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ValueAccess {
+    /// No value profiles.
+    #[default]
+    None,
+    /// Counts only: rows looked at, NULLs, distinct values. No values.
+    Statistics,
+    /// Also values: the range (smallest, largest) and the most frequent values.
+    Values,
+}
+
+impl ValueAccess {
+    pub const ALL: [ValueAccess; 3] = [
+        ValueAccess::None,
+        ValueAccess::Statistics,
+        ValueAccess::Values,
+    ];
+
+    pub fn is_none(&self) -> bool {
+        *self == ValueAccess::None
+    }
+
+    /// Counts may be read.
+    pub fn statistics(self) -> bool {
+        self != ValueAccess::None
+    }
+
+    /// Values themselves may be read.
+    pub fn values(self) -> bool {
+        self == ValueAccess::Values
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ValueAccess::None => "No value profiles",
+            ValueAccess::Statistics => "Statistics: NULL share, distinct count",
+            ValueAccess::Values => "Values: range and most frequent values",
+        }
+    }
+}
+
+/// Reads the name, or `true` / `false` as saved before there were levels
+/// (`true` allowed values).
+impl<'de> Deserialize<'de> for ValueAccess {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Saved {
+            Bool(bool),
+            Name(String),
+        }
+        Ok(match Saved::deserialize(d)? {
+            Saved::Bool(true) => ValueAccess::Values,
+            Saved::Bool(false) => ValueAccess::None,
+            Saved::Name(n) => match n.as_str() {
+                "statistics" => ValueAccess::Statistics,
+                "values" => ValueAccess::Values,
+                _ => ValueAccess::None,
+            },
+        })
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }

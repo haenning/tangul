@@ -3,7 +3,7 @@
 
 use tangul_assist::suggest::one_line;
 
-use crate::local::{Bookmark, HistoryEntry};
+use tangul_data::local::{Bookmark, HistoryEntry};
 
 /// Length at which a history entry's SQL is cut in the list.
 const LABEL_LEN: usize = 120;
@@ -11,6 +11,8 @@ const LABEL_LEN: usize = 120;
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteAction {
     Settings,
+    /// Run everything in the active query tab's editor.
+    RunAll,
     /// Bookmark id.
     Bookmark(String),
     /// SQL of the history entry.
@@ -41,11 +43,18 @@ pub struct PaletteGroup {
 
 /// Groups in display order; groups without entries are left out.
 pub fn groups(bookmarks: &[Bookmark], history: &[HistoryEntry]) -> Vec<PaletteGroup> {
-    let commands = vec![PaletteItem {
-        label: "Open settings".into(),
-        search: "preferences settings.json font size editor".into(),
-        action: PaletteAction::Settings,
-    }];
+    let commands = vec![
+        PaletteItem {
+            label: "Open settings".into(),
+            search: "preferences settings.json font size editor".into(),
+            action: PaletteAction::Settings,
+        },
+        PaletteItem {
+            label: "Run all statements  ⌘⇧↵".into(),
+            search: "execute script whole editor".into(),
+            action: PaletteAction::RunAll,
+        },
+    ];
     let bookmarks = bookmarks
         .iter()
         .map(|b| PaletteItem {
@@ -92,6 +101,7 @@ mod tests {
 
     fn history(sql: &str) -> HistoryEntry {
         HistoryEntry {
+            source: Default::default(),
             sql: sql.into(),
             started_at: 0,
             duration_ms: 1,

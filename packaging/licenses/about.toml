@@ -1,0 +1,25 @@
+# cargo-about: generates THIRD_PARTY_LICENSES.md (`make license`).
+# Same license policy as deny.toml; build and dev dependencies aren't shipped.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "bzip2-1.0.6",
+]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# tangul's own crates (publish = false) aren't third-party.
+[private]
+ignore = true

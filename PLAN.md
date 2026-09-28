@@ -97,10 +97,12 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 - Pinned versions (`gpui-kit = "=0.6.6"`, Rust 1.98.1 = Zed's toolchain) — GPUI API
   churn is the main risk, upgrades are deliberate.
 
-### D8 — Open source, Apache-2.0
-- Not a product. License Apache-2.0 (same as GPUI and gpui-component). No dependency
-  forces a license: all are permissive; the only copyleft ones are MPL-2.0 (file-level,
-  fine to use).
+### D8 — Open source, AGPL-3.0-only with a CLA
+- License AGPL-3.0-only: forks must stay open. Contributors sign the [CLA](CLA.md), so
+  the maintainer keeps the right to ship under other terms too (e.g. the Mac App Store,
+  whose terms conflict with the GPL family for third parties).
+- Dependencies stay permissive (MPL-2.0 at most, file-level copyleft); `deny.toml` keeps
+  GPL-family crates out, since they would block shipping under other terms.
 - Zed's own editor/app crates are GPL-3.0: don't copy code from them.
 - Distribution: universal DMG via tag-based GitHub releases (ad-hoc signed); Developer ID signing, notarization and a Homebrew cask later.
 
@@ -110,12 +112,19 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
 
 ```
 crates/
-  core/     # ids, Database/DbUser, ResultSet arena, SchemaInfo — no I/O
-  drivers/  # Driver/Session traits, postgres.rs, mysql.rs
-  engine/   # tokio thread, Command/Event, pool (D3); live integration tests
-  assist/   # SQL lexer, analysis, completion, usage ranking, suggestions — no UI/I/O
+  core/     # ids, Database/DbUser, ResultSet arena, SchemaInfo, chart settings,
+            # learned usage — no I/O
+  drivers/  # Driver/Session traits, postgres.rs, mysql.rs, sqlite.rs (own data,
+            # read-only); a Cargo feature per database
+  engine/   # tokio thread, Command/Event, pool (D3), the gate (the one safety gate:
+            # callers, approvals, read-only, WHERE check, time limit, audit); live tests
+  assist/   # SQL lexer, dialects (one file per database), analysis, completion,
+            # usage ranking, suggestions — no UI/I/O
   tunnel/   # SSH tunnels (russh): lazy session, local listener, known_hosts checks
-  app/      # GPUI binary `tangul`: workspace, query tab, results grid, forms, local.db
+  data/     # everything on disk, no UI: profiles + Keychain, local.db, metrics.db,
+            # settings.json; `Data` opens it all (app now, MCP server later)
+  service/  # shared by front ends, no UI: connections by purpose, scheduled bookmarks
+  app/      # GPUI binary `tangul`: workspace, query tab, results grid, forms
 ```
 
 ---

@@ -8,9 +8,12 @@ use std::time::Duration;
 
 use tangul_core::{
     ConnId, ConnectConfig, DriverKind, QueryId, ResultSet, SshAuth, SshConfig, SshTarget, TabId,
-    TlsMode,
+    TableKind, TlsMode,
 };
-use tangul_engine::{Command, EngineHandle, Event, ExecEvent, QueryEvent};
+use tangul_engine::{
+    Approval, Caller, Command, EngineConfig, EngineHandle, Event, ExecEvent, QueryEvent,
+    QueryOptions, SettingsSource,
+};
 
 fn config(var: &str) -> Option<ConnectConfig> {
     let url = std::env::var(var).ok()?;
@@ -33,6 +36,11 @@ struct Harness {
     events: async_channel::Receiver<Event>,
     conn: ConnId,
     next_query: u64,
+    /// The engine's settings.json; read-only mode and the time limit are set there,
+    /// as in the app.
+    settings: std::path::PathBuf,
+    /// The database user the harness logs in as.
+    user: String,
 }
 
 struct Outcome {
@@ -46,7 +54,18 @@ struct Outcome {
 
 impl Harness {
     async fn connect(driver: DriverKind, cfg: ConnectConfig) -> Self {
-        let (engine, events) = tangul_engine::start();
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let settings = std::env::temp_dir().join(format!(
+            "tangul-live-settings-{}-{n}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&settings);
+        let (engine, events) = tangul_engine::start_with(EngineConfig {
+            settings: SettingsSource::File(Some(settings.clone())),
+            audit_dir: None,
+        });
+        let user = cfg.user.clone();
         let conn = ConnId(1);
         engine.send(Command::Connect {
             conn,
@@ -59,10 +78,14 @@ impl Harness {
             events,
             conn,
             next_query: 0,
+            settings,
+            user,
         };
+        // Connected, and the whole catalog loaded (it holds a session meanwhile), so
+        // the pool is idle when a test starts.
         loop {
             match h.next().await {
-                Event::Connected { .. } => break,
+                Event::Schema { complete: true, .. } => break,
                 Event::ConnectFailed { error, .. } => panic!("connect failed: {error}"),
                 _ => {}
             }
@@ -77,6 +100,7 @@ impl Harness {
             .expect("engine gone")
     }
 
+    /// Starts `sql` as the user in a tab, dialogs confirmed.
     fn start(&mut self, tab: TabId, sql: &str) -> QueryId {
         self.next_query += 1;
         let query = QueryId(self.next_query);
@@ -85,39 +109,40 @@ impl Harness {
             tab,
             conn: self.conn,
             sql: sql.into(),
-            read_only: false,
-            timeout: None,
+            approval: Approval::Confirmed,
         });
         query
     }
 
-    /// Runs `sql` with the server refusing writes.
-    async fn run_read_only(&mut self, tab: TabId, sql: &str) -> Outcome {
-        self.next_query += 1;
-        let query = QueryId(self.next_query);
-        self.engine.send(Command::Execute {
-            query,
-            tab,
-            conn: self.conn,
-            sql: sql.into(),
-            read_only: true,
-            timeout: None,
+    /// Writes the engine's settings: read-only mode for the harness's user, and the
+    /// time limit in seconds (none without).
+    fn set(&self, read_only: bool, limit_secs: Option<u64>) {
+        let users = if read_only {
+            vec![self.user.clone()]
+        } else {
+            vec![]
+        };
+        let limit = limit_secs.map(|s| format!("{s}s"));
+        let json = serde_json::json!({
+            "safety": { "read_only_users": users, "max_query_time": limit }
         });
-        self.wait(query).await
+        std::fs::write(&self.settings, json.to_string()).unwrap();
+        self.engine.send(Command::ReloadSettings);
     }
 
-    /// Runs `sql` with a statement time limit.
-    async fn run_limited(&mut self, tab: TabId, sql: &str, limit: Option<Duration>) -> Outcome {
-        self.next_query += 1;
-        let query = QueryId(self.next_query);
-        self.engine.send(Command::Execute {
-            query,
-            tab,
-            conn: self.conn,
-            sql: sql.into(),
-            read_only: false,
-            timeout: limit,
-        });
+    /// Runs `sql` with the user in read-only mode (the server refuses writes).
+    async fn run_read_only(&mut self, tab: TabId, sql: &str) -> Outcome {
+        self.set(true, None);
+        let query = self.start(tab, sql);
+        let out = self.wait(query).await;
+        self.set(false, None);
+        out
+    }
+
+    /// Runs `sql` with a statement time limit in seconds.
+    async fn run_limited(&mut self, tab: TabId, sql: &str, limit_secs: Option<u64>) -> Outcome {
+        self.set(false, limit_secs);
+        let query = self.start(tab, sql);
         self.wait(query).await
     }
 
@@ -279,9 +304,7 @@ async fn common_checks(driver: DriverKind, cfg: ConnectConfig, sleep_sql: &str) 
 async fn time_limit_checks(h: &mut Harness, sleep_sql: &str, short_sleep_sql: &str) {
     let tab = TabId(7);
     let started = std::time::Instant::now();
-    let out = h
-        .run_limited(tab, sleep_sql, Some(Duration::from_secs(1)))
-        .await;
+    let out = h.run_limited(tab, sleep_sql, Some(1)).await;
     assert!(out.error.is_some(), "a statement over the limit must fail");
     assert!(
         started.elapsed() < Duration::from_secs(10),
@@ -304,17 +327,58 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
     };
     let mut h = Harness::connect(driver, cfg).await;
     let tab = TabId(1);
-    let setup = format!(
-        "{drop}; CREATE SCHEMA tangul_fk_test; \
-         CREATE TABLE tangul_fk_test.parent (id INT PRIMARY KEY); \
-         CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, parent_id INT NOT NULL, \
-           FOREIGN KEY (parent_id) REFERENCES tangul_fk_test.parent (id))"
-    );
+    // The same objects on both: comments, an identity column, an enum, a default, a
+    // check, a generated column, a composite index, a view and a function. Postgres
+    // adds a partial index and a materialized view.
+    let objects = match driver {
+        DriverKind::Postgres => {
+            "CREATE TABLE tangul_fk_test.parent (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY); \
+             COMMENT ON TABLE tangul_fk_test.parent IS 'Parents'; \
+             CREATE TYPE tangul_fk_test.mood AS ENUM ('sad', 'ok', 'happy'); \
+             CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, parent_id INT NOT NULL \
+               REFERENCES tangul_fk_test.parent (id), \
+               mood tangul_fk_test.mood NOT NULL DEFAULT 'ok', \
+               amount numeric CHECK (amount >= 0), \
+               doubled numeric GENERATED ALWAYS AS (amount * 2) STORED); \
+             COMMENT ON COLUMN tangul_fk_test.child.parent_id IS 'Who it belongs to'; \
+             CREATE INDEX child_mood ON tangul_fk_test.child (parent_id, mood); \
+             CREATE INDEX child_happy ON tangul_fk_test.child (parent_id) WHERE mood = 'happy'; \
+             CREATE VIEW tangul_fk_test.happy AS \
+               SELECT id FROM tangul_fk_test.child WHERE mood = 'happy'; \
+             CREATE MATERIALIZED VIEW tangul_fk_test.counts AS \
+               SELECT parent_id, count(*) AS n FROM tangul_fk_test.child GROUP BY parent_id; \
+             CREATE FUNCTION tangul_fk_test.twice(x int) RETURNS int LANGUAGE sql \
+               AS 'SELECT x * 2'; \
+             COMMENT ON FUNCTION tangul_fk_test.twice(int) IS 'Doubles'"
+        }
+        DriverKind::Mysql => {
+            "CREATE TABLE tangul_fk_test.parent (id INT PRIMARY KEY AUTO_INCREMENT) \
+               COMMENT = 'Parents'; \
+             CREATE TABLE tangul_fk_test.child (id INT PRIMARY KEY, \
+               parent_id INT NOT NULL COMMENT 'Who it belongs to', \
+               mood ENUM('sad', 'ok', 'happy') NOT NULL DEFAULT 'ok', \
+               amount DECIMAL(10, 2) CHECK (amount >= 0), \
+               doubled DECIMAL(12, 2) GENERATED ALWAYS AS (amount * 2) STORED, \
+               FOREIGN KEY (parent_id) REFERENCES tangul_fk_test.parent (id), \
+               INDEX child_mood (parent_id, mood)); \
+             CREATE VIEW tangul_fk_test.happy AS \
+               SELECT id FROM tangul_fk_test.child WHERE mood = 'happy'; \
+             CREATE FUNCTION tangul_fk_test.twice(x INT) RETURNS INT DETERMINISTIC \
+               COMMENT 'Doubles' RETURN x * 2"
+        }
+        DriverKind::Sqlite => unreachable!(),
+    };
+    let setup = format!("{drop}; CREATE SCHEMA tangul_fk_test; {objects}");
     assert_eq!(h.run(tab, &setup).await.error, None);
 
     h.engine.send(Command::RefreshSchema { conn: h.conn });
     let info = loop {
-        if let Event::Schema { result, .. } = h.next().await {
+        if let Event::Schema {
+            result,
+            complete: true,
+            ..
+        } = h.next().await
+        {
             let info = result.expect("schema failed");
             // Skip a schema load that started before the tables existed.
             if info.tables.iter().any(|t| t.schema == "tangul_fk_test") {
@@ -346,7 +410,168 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
         ("tangul_fk_test", "parent", &["id".to_string()][..])
     );
 
+    // What the rich catalog (#112) adds.
+    let table = |name: &str| {
+        info.tables
+            .iter()
+            .find(|t| t.schema == "tangul_fk_test" && t.name == name)
+            .unwrap_or_else(|| panic!("table {name}"))
+    };
+    assert_eq!(table("parent").comment.as_deref(), Some("Parents"));
+    assert!(table("child").size_bytes.is_some());
+    assert_eq!(table("happy").kind, TableKind::View);
+    assert_eq!(
+        col("child", "parent_id").comment.as_deref(),
+        Some("Who it belongs to")
+    );
+    assert!(col("parent", "id").identity);
+    assert!(!col("child", "id").identity);
+    assert!(col("child", "mood").enum_type.is_some());
+    assert!(
+        col("child", "mood")
+            .default
+            .as_deref()
+            .unwrap()
+            .contains("ok")
+    );
+    assert!(
+        col("child", "doubled")
+            .generated
+            .as_deref()
+            .unwrap()
+            .contains("amount")
+    );
+    let index = |name: &str| {
+        info.indexes
+            .iter()
+            .find(|i| i.schema == "tangul_fk_test" && i.name == name)
+            .unwrap_or_else(|| panic!("index {name}"))
+    };
+    assert_eq!(index("child_mood").columns, ["parent_id", "mood"]);
+    assert!(!index("child_mood").unique);
+    assert!(
+        info.indexes
+            .iter()
+            .any(|i| i.table == "parent" && i.primary && i.unique)
+    );
+    let check = info
+        .checks
+        .iter()
+        .find(|c| c.schema == "tangul_fk_test" && c.table == "child")
+        .expect("check constraint");
+    assert!(check.expression.contains("amount"), "{}", check.expression);
+    let mood = info
+        .enums
+        .iter()
+        .find(|e| e.schema == "tangul_fk_test")
+        .expect("enum");
+    assert_eq!(mood.values, ["sad", "ok", "happy"]);
+    let view = info
+        .views
+        .iter()
+        .find(|v| v.schema == "tangul_fk_test" && v.name == "happy")
+        .expect("view definition");
+    assert!(view.definition.contains("happy"), "{}", view.definition);
+    let twice = info
+        .routines
+        .iter()
+        .find(|r| r.schema == "tangul_fk_test" && r.name == "twice")
+        .expect("function");
+    assert_eq!(
+        (twice.kind.as_str(), twice.comment.as_deref()),
+        ("function", Some("Doubles"))
+    );
+    assert!(twice.arguments.contains('x'), "{}", twice.arguments);
+    if driver == DriverKind::Postgres {
+        assert_eq!(table("counts").kind, TableKind::MaterializedView);
+        assert_eq!(
+            index("child_happy").predicate.as_deref(),
+            Some("mood = 'happy'::tangul_fk_test.mood")
+        );
+        assert_eq!(mood.name, "mood");
+        assert_eq!(
+            col("child", "mood").enum_type.as_deref(),
+            Some("tangul_fk_test.mood")
+        );
+    } else {
+        assert_eq!(mood.name, "child.mood");
+    }
+
     assert_eq!(h.run(tab, drop).await.error, None);
+}
+
+/// The dialect's count of tables the connected user may change or drop: all of
+/// them for the admin, none for the read-only account the dialect sets up (which
+/// can still read).
+async fn writable_checks(driver: DriverKind, cfg: ConnectConfig) {
+    let dialect = tangul_assist::dialect::dialect_for(driver);
+    let sql = dialect
+        .writable_tables_sql()
+        .expect("a count for this database");
+    let mut admin = Harness::connect(driver, cfg.clone()).await;
+    assert!(writable_count(&mut admin, sql).await > 0);
+    let (clear, schema, drop) = match driver {
+        DriverKind::Postgres => (
+            "DROP OWNED BY tangul_ro_live; DROP ROLE tangul_ro_live",
+            "public".to_string(),
+            "DROP OWNED BY tangul_ro_live; DROP ROLE tangul_ro_live",
+        ),
+        DriverKind::Mysql => (
+            "DROP USER IF EXISTS 'tangul_ro_live'@'%'",
+            cfg.database.clone(),
+            "DROP USER 'tangul_ro_live'@'%'",
+        ),
+        DriverKind::Sqlite => unreachable!(),
+    };
+    // Left over from an aborted run (fails harmlessly if there is none).
+    admin.run(TabId(1), clear).await;
+    let create = dialect
+        .readonly_account_sql("tangul_ro_live", "ro-pw", &cfg.database, &[schema])
+        .expect("account statements")
+        .join(";\n");
+    assert_eq!(admin.run(TabId(1), &create).await.error, None, "{create}");
+    let reader = ConnectConfig {
+        user: "tangul_ro_live".into(),
+        password: Some("ro-pw".into()),
+        ..cfg
+    };
+    let mut ro = Harness::connect(driver, reader).await;
+    assert_eq!(writable_count(&mut ro, sql).await, 0);
+    let tables = match driver {
+        DriverKind::Postgres => {
+            "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' \
+             AND has_table_privilege(format('%I.%I', schemaname, tablename), 'SELECT')"
+        }
+        _ => "SELECT count(*) FROM information_schema.tables WHERE table_schema = DATABASE()",
+    };
+    assert!(
+        writable_count(&mut ro, tables).await > 0,
+        "it can see the tables"
+    );
+    drop_harness(ro).await;
+    let limit = match driver {
+        DriverKind::Postgres => {
+            "SELECT rolconnlimit FROM pg_roles WHERE rolname = 'tangul_ro_live'"
+        }
+        _ => "SELECT max_user_connections FROM mysql.user WHERE user = 'tangul_ro_live'",
+    };
+    assert_eq!(
+        writable_count(&mut admin, limit).await,
+        u64::from(tangul_assist::dialect::AI_CONNECTION_LIMIT)
+    );
+    assert_eq!(admin.run(TabId(1), drop).await.error, None);
+}
+
+async fn writable_count(h: &mut Harness, sql: &str) -> u64 {
+    let out = h.run(TabId(1), sql).await;
+    assert_eq!(out.error, None, "{sql}");
+    out.result.unwrap().cell(0, 0).unwrap().parse().unwrap()
+}
+
+/// Closes a harness's connection (so its user can be dropped).
+async fn drop_harness(h: Harness) {
+    h.engine.send(Command::Disconnect { conn: h.conn });
+    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 /// Read-only mode is enforced by the server: writes fail, reads work, and a script
@@ -405,6 +630,62 @@ async fn read_only_checks(h: &mut Harness, switch_to_read_write: &str) {
     h.run(tab, "DROP TABLE tangul_ro_test").await;
 }
 
+/// The assistant through [`EngineHandle::query`]: reads run in a read-only
+/// transaction that is rolled back, so a write hidden in a read (`sneak`, a
+/// statement on the allow-list that writes) doesn't stay; a write is only proposed,
+/// never run.
+async fn assistant_checks(h: &mut Harness, sneak: Option<(&str, &str)>) {
+    let tab = TabId(11);
+    h.set(false, None);
+    h.run(tab, "DROP TABLE IF EXISTS tangul_ai_test").await;
+    h.run(tab, "CREATE TABLE tangul_ai_test (id INT)").await;
+    h.run(tab, "INSERT INTO tangul_ai_test VALUES (1)").await;
+    let mut query = 1000;
+    let mut ask = async |h: &mut Harness, sql: &str, approval: Approval| {
+        query += 1;
+        let options = QueryOptions {
+            approval,
+            ..QueryOptions::new(Caller::Assistant)
+        };
+        h.engine.query(QueryId(query), h.conn, sql, options).await
+    };
+    let count = "SELECT count(*) FROM tangul_ai_test";
+    let out = ask(h, count, Approval::None).await.unwrap();
+    assert_eq!(out.results[0].cell(0, 0), Some("1"));
+
+    if let Some((create, call)) = sneak {
+        assert_eq!(h.run(tab, create).await.error, None);
+        let error = ask(h, call, Approval::None).await.unwrap_err();
+        assert!(error.proposal.is_none(), "{call} passes the allow-list");
+        let message = error.message.to_lowercase().replace('-', " ");
+        assert!(message.contains("read only"), "{error}");
+    }
+
+    for write in [
+        "INSERT INTO tangul_ai_test VALUES (2)",
+        "SELECT 1; DELETE FROM tangul_ai_test",
+        "SELECT * FROM tangul_ai_test FOR UPDATE",
+    ] {
+        for approval in [Approval::None, Approval::Confirmed] {
+            let error = ask(h, write, approval).await.unwrap_err();
+            assert!(error.proposal.is_some(), "{write} is proposed");
+        }
+    }
+    // Hidden in a comment the server runs (MySQL `/*! … */`) or behind a string the
+    // server ends earlier than the guard's tokens: at most the one read reaches it.
+    for hidden in [
+        "SELECT 1; /*! COMMIT */; /*! SET SESSION TRANSACTION READ WRITE */; \
+         /*! DELETE FROM tangul_ai_test */",
+        "SELECT '\\'; COMMIT; DELETE FROM tangul_ai_test; --'",
+    ] {
+        let _ = ask(h, hidden, Approval::None).await;
+    }
+    // Nothing the assistant sent changed data.
+    let out = ask(h, count, Approval::None).await.unwrap();
+    assert_eq!(out.results[0].cell(0, 0), Some("1"));
+    h.run(tab, "DROP TABLE tangul_ai_test").await;
+}
+
 #[tokio::test]
 async fn postgres() {
     let Some(cfg) = config("TANGUL_TEST_PG") else {
@@ -413,6 +694,7 @@ async fn postgres() {
     };
     common_checks(DriverKind::Postgres, cfg.clone(), "SELECT pg_sleep(30)").await;
     schema_checks(DriverKind::Postgres, cfg.clone()).await;
+    writable_checks(DriverKind::Postgres, cfg.clone()).await;
 
     let mut h = Harness::connect(DriverKind::Postgres, cfg).await;
     let out = h
@@ -432,6 +714,16 @@ async fn postgres() {
     )
     .await;
     time_limit_checks(&mut h, "SELECT pg_sleep(30)", "SELECT pg_sleep(2)").await;
+    assistant_checks(
+        &mut h,
+        Some((
+            "CREATE OR REPLACE FUNCTION tangul_ai_sneak() RETURNS int LANGUAGE sql \
+             AS 'INSERT INTO tangul_ai_test VALUES (99) RETURNING id'",
+            "SELECT tangul_ai_sneak()",
+        )),
+    )
+    .await;
+    h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak()").await;
 }
 
 #[tokio::test]
@@ -442,6 +734,7 @@ async fn mysql() {
     };
     common_checks(DriverKind::Mysql, cfg.clone(), "SELECT SLEEP(30)").await;
     schema_checks(DriverKind::Mysql, cfg.clone()).await;
+    writable_checks(DriverKind::Mysql, cfg.clone()).await;
 
     let mut h = Harness::connect(DriverKind::Mysql, cfg).await;
     let out = h
@@ -459,6 +752,20 @@ async fn mysql() {
 
     read_only_checks(&mut h, "SET SESSION TRANSACTION READ WRITE").await;
     time_limit_checks(&mut h, "SELECT SLEEP(30)", "SELECT SLEEP(2)").await;
+    h.run(TabId(1), "DROP FUNCTION IF EXISTS tangul_ai_sneak")
+        .await;
+    // DETERMINISTIC: with binary logging on (MySQL 8 default) it can't be created
+    // otherwise.
+    assistant_checks(
+        &mut h,
+        Some((
+            "CREATE FUNCTION tangul_ai_sneak() RETURNS INT DETERMINISTIC MODIFIES SQL DATA \
+             BEGIN INSERT INTO tangul_ai_test VALUES (99); RETURN 1; END",
+            "SELECT tangul_ai_sneak()",
+        )),
+    )
+    .await;
+    h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak").await;
 }
 
 /// Through the SSH bastion to Postgres: an unknown host key is reported (not
@@ -499,7 +806,7 @@ async fn ssh_tunnel() {
         database: "postgres".into(),
         tls: TlsMode::Disable,
     };
-    let (engine, events) = tangul_engine::start();
+    let (engine, events) = tangul_engine::start_with(EngineConfig::isolated());
     let connect = |ssh: &SshTarget| Command::Connect {
         conn: ConnId(1),
         driver: DriverKind::Postgres,
@@ -546,8 +853,7 @@ async fn ssh_tunnel() {
         tab: TabId(1),
         conn: ConnId(1),
         sql: "SELECT 42".into(),
-        read_only: false,
-        timeout: None,
+        approval: Approval::None,
     });
     loop {
         if let Event::Query {

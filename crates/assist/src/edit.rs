@@ -5,9 +5,8 @@
 //! the query left a key column out) they are matched by all of their columns, and the
 //! statement starts with a warning comment.
 
-use tangul_core::DriverKind;
-
-use crate::related::{literal, numeric_type, result_table};
+use crate::dialect::{Dialect, literal};
+use crate::related::{numeric_type, result_table};
 use crate::schema::SchemaIndex;
 
 /// A table column shown in the result.
@@ -24,7 +23,7 @@ pub struct RowEdit {
     /// Short table name, for the tab title.
     pub table: String,
     table_sql: String,
-    driver: DriverKind,
+    dialect: &'static dyn Dialect,
     /// Per result column; `None` for expressions and repeated columns.
     columns: Vec<Option<EditColumn>>,
     /// Result columns that identify a row.
@@ -95,7 +94,7 @@ pub fn row_edit(sql: &str, columns: &[String], schema: &SchemaIndex) -> Option<R
     Some(RowEdit {
         table: table.clone(),
         table_sql: schema.sql_name(ix),
-        driver: schema.driver(),
+        dialect: schema.dialect(),
         columns: edit_cols,
         key,
         warning,
@@ -189,7 +188,7 @@ impl RowEdit {
 
     fn value(&self, column: &EditColumn, value: Option<&str>) -> String {
         match value {
-            Some(v) => literal(v, column.numeric, self.driver),
+            Some(v) => literal(self.dialect, v, column.numeric),
             None => "NULL".into(),
         }
     }
@@ -221,7 +220,7 @@ impl RowEdit {
             return None;
         }
         let column = |i: usize| self.columns[self.key[i]].as_ref().expect("key column");
-        let lit = |i: usize, v: &str| literal(v, column(i).numeric, self.driver);
+        let lit = |i: usize, v: &str| literal(self.dialect, v, column(i).numeric);
         let single_non_null = self.key.len() == 1 && keys.iter().all(|k| k[0].is_some());
         if single_non_null {
             let col = &column(0).sql;

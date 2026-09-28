@@ -3,9 +3,12 @@ name = "tangul-assist"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
-tangul-core = { version = "0.1.0", path = "../core" }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+similar = "3"
+tangul-core = { path = "../core" }
 
 [lints]
 workspace = true

@@ -1,0 +1,29 @@
+[package]
+name = "tangul-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+rmcp = { version = "3.4.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
+schemars = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time"] }
+tokio-util = "0.7"
+getrandom = "0.3"
+serde.workspace = true
+serde_json = "1.0.151"
+tangul-assist = { path = "../assist" }
+tangul-core = { path = "../core" }
+tangul-engine = { path = "../engine" }
+tangul-service = { path = "../service" }
+
+[dev-dependencies]
+async-channel.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

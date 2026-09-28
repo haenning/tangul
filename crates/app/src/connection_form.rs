@@ -10,9 +10,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode};
+use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode, ValueAccess};
 
-use crate::store::new_id;
+use tangul_assist::dialect::dialect_for;
+use tangul_data::profiles::{new_id, new_password};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum FormMode {
@@ -40,7 +41,14 @@ pub struct FormOutput {
     pub user: Option<(DbUser, Option<String>)>,
     /// New SSH password or key passphrase (`None` keeps the stored one).
     pub ssh_secret: Option<String>,
+    /// A read-only AI user to set up: already among the database's users and chosen
+    /// as the AI's; its password goes to the Keychain and the statements creating it
+    /// to a tab.
+    pub ai_account: Option<(DbUser, String)>,
 }
+
+/// Name of the read-only user tangul sets up for the AI.
+const AI_ACCOUNT: &str = "tangul_ai";
 
 pub struct ConnectionForm {
     mode: FormMode,
@@ -62,6 +70,14 @@ pub struct ConnectionForm {
     ssh_user: Entity<InputState>,
     ssh_key_path: Entity<InputState>,
     ssh_secret: Entity<InputState>,
+    /// The user the AI assistant connects as; `None` uses the selected one.
+    assistant_user: Option<String>,
+    /// What the assistant may read from the rows of this database.
+    ai_values: ValueAccess,
+    /// AI tools (MCP clients, the assistant) may use this database.
+    ai_tools: bool,
+    /// Set up by "Set up a read-only AI user…", saved with the form.
+    ai_account: Option<(DbUser, String)>,
     error: Option<SharedString>,
 }
 
@@ -167,6 +183,11 @@ impl ConnectionForm {
                         "optional"
                     })
             }),
+            assistant_user: db.and_then(|d| d.assistant_user.clone()),
+            ai_values: db.map(|d| d.ai_values).unwrap_or_default(),
+            // On for a new database too: the user turns it off.
+            ai_tools: db.is_none_or(|d| d.ai_tools),
+            ai_account: None,
             error: None,
         }
     }
@@ -180,6 +201,30 @@ impl ConnectionForm {
             });
         }
         self.driver = driver;
+        cx.notify();
+    }
+
+    /// Adds a new user for the AI (a free name, a random password) and makes it the
+    /// AI's; it is created on the server by the statements opened after saving.
+    fn set_up_ai_account(&mut self, cx: &mut Context<Self>) {
+        let Some(base) = self.base.as_mut() else {
+            return;
+        };
+        let taken = |name: &str| base.users.iter().any(|u| u.user == name);
+        let name = (1..)
+            .map(|n| match n {
+                1 => AI_ACCOUNT.to_string(),
+                n => format!("{AI_ACCOUNT}_{n}"),
+            })
+            .find(|name| !taken(name))
+            .unwrap_or_default();
+        let user = DbUser {
+            id: new_id(),
+            user: name,
+        };
+        base.users.push(user.clone());
+        self.assistant_user = Some(user.id.clone());
+        self.ai_account = Some((user, new_password()));
         cx.notify();
     }
 
@@ -225,6 +270,9 @@ impl ConnectionForm {
                 database: value(&self.database),
                 tls: self.tls,
                 users: base.as_ref().map(|b| b.users.clone()).unwrap_or_default(),
+                assistant_user: self.assistant_user.clone(),
+                ai_values: self.ai_values,
+                ai_tools: self.ai_tools,
                 ssh: ssh.then(|| SshConfig {
                     host: value(&self.ssh_host),
                     port: ssh_port.clone().unwrap_or(22),
@@ -252,6 +300,7 @@ impl ConnectionForm {
             database,
             user,
             ssh_secret,
+            ai_account: self.ai_account.clone(),
         })
     }
 }
@@ -377,6 +426,135 @@ impl Render for ConnectionForm {
                     })),
             )
             .when(self.ssh, |this| this.child(ssh_fields));
+        // Which user the AI assistant connects as; only once the database has users.
+        let users = self
+            .base
+            .as_ref()
+            .map(|b| b.users.clone())
+            .unwrap_or_default();
+        let assistant_button = |id: Option<String>,
+                                label: String,
+                                current: &Option<String>,
+                                cx: &mut Context<Self>| {
+            let key = format!("assistant-{}", id.as_deref().unwrap_or("-"));
+            let b = Button::new(SharedString::from(key)).label(label).xsmall();
+            let b = if &id == current {
+                b.primary()
+            } else {
+                b.ghost()
+            };
+            b.on_click(cx.listener(move |this, _, _, cx| {
+                this.assistant_user = id.clone();
+                cx.notify();
+            }))
+        };
+        // Also when setting up a new connection, before it has users.
+        let db_fields = db_fields.child(
+            Checkbox::new("ai-tools")
+                .label("Available to AI tools (MCP clients, the assistant)")
+                .checked(self.ai_tools)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                    this.ai_tools = *checked;
+                    cx.notify();
+                })),
+        );
+        let can_set_up = self.mode == FormMode::EditDatabase
+            && self.ai_account.is_none()
+            && dialect_for(self.driver)
+                .readonly_account_sql("", "", "", &[])
+                .is_some();
+        let db_fields = db_fields.when(!users.is_empty(), |this| {
+            let current = self.assistant_user.clone();
+            this.child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_wrap()
+                            .child(div().text_xs().child("AI uses"))
+                            .child(assistant_button(None, "Selected user".into(), &current, cx))
+                            .children(users.iter().map(|u| {
+                                assistant_button(Some(u.id.clone()), u.user.clone(), &current, cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if current.is_none() {
+                                "Selected user: the AI reads with your user's rights. A user \
+                                 that may only read on the server is the safer choice."
+                            } else {
+                                "The AI connects only as this user; if it can't, tangul says \
+                                 so and never uses yours instead."
+                            }),
+                    )
+                    .when(can_set_up, |this| {
+                        this.child(
+                            h_flex().child(
+                                Button::new("set-up-ai-account")
+                                    .label("Set up a read-only AI user…")
+                                    .xsmall()
+                                    .outline()
+                                    .tooltip(
+                                        "Adds a user that may only read, with a new password \
+                                         (Keychain), as the AI's. Saving opens the statements \
+                                         that create it; run them as an admin.",
+                                    )
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.set_up_ai_account(cx)),
+                                    ),
+                            ),
+                        )
+                    })
+                    .when_some(self.ai_account.as_ref(), |this, (user, _)| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().success)
+                                .child(format!(
+                                    "{} will be added as the AI's user. Save, then run the \
+                                 statements in the new tab as an admin.",
+                                    user.user
+                                )),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_wrap()
+                            .child(div().text_xs().child("Value profiles"))
+                            .children(ValueAccess::ALL.map(|access| {
+                                let b = Button::new(SharedString::from(format!(
+                                    "ai-values-{access:?}"
+                                )))
+                                .label(access.label())
+                                .xsmall();
+                                let b = if self.ai_values == access {
+                                    b.primary()
+                                } else {
+                                    b.ghost()
+                                };
+                                b.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ai_values = access;
+                                    cx.notify();
+                                }))
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                "From a sample of up to 10,000 rows per column. Columns that \
+                                 look like passwords, tokens or keys are never read.",
+                            ),
+                    ),
+            )
+        });
         let user_fields = h_flex()
             .gap_2()
             .child(field("User", Input::new(&self.user)).flex_1())

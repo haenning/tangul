@@ -1,0 +1,18 @@
+[package]
+name = "tangul-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tangul-assist = { path = "../assist" }
+tangul-core = { path = "../core" }
+tangul-data = { path = "../data" }
+tangul-engine = { path = "../engine" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

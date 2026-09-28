@@ -57,7 +57,37 @@ fn is_ident_continue(c: char) -> bool {
     c == '_' || c == '$' || c.is_alphanumeric()
 }
 
+/// Lexical rules that differ between databases. The default is what [`tokenize`]
+/// uses: no `#` comments, flat `/* */` comments and `$tag$` dollar quotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lexing {
+    /// `# …` comments to the end of the line (MySQL).
+    pub hash_comments: bool,
+    /// `/* /* … */ */` nests (Postgres).
+    pub nested_comments: bool,
+    /// `$tag$ … $tag$` string quoting (Postgres).
+    pub dollar_quotes: bool,
+    /// The client command `DELIMITER x` changes the statement terminator (MySQL).
+    pub delimiter_command: bool,
+}
+
+impl Default for Lexing {
+    fn default() -> Self {
+        Self {
+            hash_comments: false,
+            nested_comments: false,
+            dollar_quotes: true,
+            delimiter_command: false,
+        }
+    }
+}
+
 pub fn tokenize(src: &str) -> Vec<Token> {
+    tokenize_with(src, Lexing::default())
+}
+
+/// [`tokenize`] with a database's lexical rules.
+pub fn tokenize_with(src: &str, lexing: Lexing) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut chars = src.char_indices().peekable();
     while let Some(&(start, c)) = chars.peek() {
@@ -67,19 +97,19 @@ pub fn tokenize(src: &str) -> Vec<Token> {
                 .find(|c: char| !c.is_whitespace())
                 .unwrap_or(rest.len());
             (TokenKind::Space, len)
-        } else if rest.starts_with("--") {
+        } else if rest.starts_with("--") || (lexing.hash_comments && c == '#') {
             (TokenKind::Comment, rest.find('\n').unwrap_or(rest.len()))
         } else if rest.starts_with("/*") {
             (
                 TokenKind::Comment,
-                rest.find("*/").map_or(rest.len(), |i| i + 2),
+                block_comment_len(rest, lexing.nested_comments),
             )
         } else if c == '\'' {
             (TokenKind::String, quoted_len(rest, '\''))
         } else if c == '"' || c == '`' {
             (TokenKind::QuotedIdent, quoted_len(rest, c))
         } else if c == '$' {
-            dollar(rest)
+            dollar(rest, lexing.dollar_quotes)
         } else if c == '?' {
             (TokenKind::Param, 1)
         } else if c.is_ascii_digit()
@@ -124,13 +154,40 @@ fn quoted_len(rest: &str, quote: char) -> usize {
     rest.len()
 }
 
-/// `$1` parameters and `$tag$ … $tag$` dollar quoting (Postgres).
-fn dollar(rest: &str) -> (TokenKind, usize) {
+/// Length of a `/* … */` comment starting at `rest`; nested ones count when `nested`.
+fn block_comment_len(rest: &str, nested: bool) -> usize {
+    if !nested {
+        return rest.find("*/").map_or(rest.len(), |i| i + 2);
+    }
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i..].starts_with("/*") {
+            depth += 1;
+            i += 2;
+        } else if rest[i..].starts_with("*/") {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return i;
+            }
+        } else {
+            i += rest[i..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    rest.len()
+}
+
+/// `$1` parameters and, with `quotes`, `$tag$ … $tag$` dollar quoting (Postgres).
+fn dollar(rest: &str, quotes: bool) -> (TokenKind, usize) {
     let digits = rest[1..]
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len() - 1);
     if digits > 0 {
         return (TokenKind::Param, 1 + digits);
+    }
+    if !quotes {
+        return (TokenKind::Punct, 1);
     }
     let tag_len = rest[1..]
         .find(|c: char| !is_ident_continue(c) || c == '$')
@@ -284,6 +341,46 @@ mod tests {
         assert_eq!(kinds("'open"), [(String, "'open")]);
         assert_eq!(unquote(r#""a""b""#), r#"a"b"#);
         assert_eq!(unquote("`t`"), "t");
+    }
+
+    #[test]
+    fn dialect_rules() {
+        use TokenKind::*;
+        let kinds_with = |sql: &'static str, lexing| -> Vec<(TokenKind, &str)> {
+            tokenize_with(sql, lexing)
+                .into_iter()
+                .filter(|t| t.kind != Space)
+                .map(|t| (t.kind, t.text(sql)))
+                .collect()
+        };
+        let mysql = Lexing {
+            hash_comments: true,
+            dollar_quotes: false,
+            delimiter_command: true,
+            ..Lexing::default()
+        };
+        let postgres = Lexing {
+            nested_comments: true,
+            ..Lexing::default()
+        };
+        assert_eq!(
+            kinds_with("a # b;\nc", mysql),
+            [(Word, "a"), (Comment, "# b;"), (Word, "c")]
+        );
+        assert_eq!(kinds("a # b"), [(Word, "a"), (Punct, "#"), (Word, "b")]);
+        assert_eq!(
+            kinds_with("/* a /* b */ ; */ x", postgres),
+            [(Comment, "/* a /* b */ ; */"), (Word, "x")]
+        );
+        assert_eq!(
+            kinds_with("/* unclosed /* */", postgres),
+            [(Comment, "/* unclosed /* */")]
+        );
+        assert_eq!(
+            kinds_with("$$;", mysql),
+            [(Punct, "$"), (Punct, "$"), (Punct, ";")]
+        );
+        assert_eq!(kinds_with("$1", mysql), [(Param, "$1")]);
     }
 
     #[test]

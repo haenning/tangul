@@ -4,11 +4,13 @@
 #   scripts/bundle-macos.sh              # this Mac's architecture
 #   scripts/bundle-macos.sh --universal  # Apple Silicon + Intel in one app
 #
-# Uses only tools that ship with macOS (sips, iconutil, lipo, codesign, hdiutil), plus
+# Uses only tools that ship with macOS (sips, iconutil, lipo, codesign, diskutil), plus
 # Xcode 26's actool for the icon when available.
 # The app is ad-hoc signed: fine on your own Macs, but a downloaded copy has to be
 # allowed once in System Settings → Privacy & Security (see INSTALL.md). Real signing + notarization needs
-# an Apple Developer ID.
+# an Apple Developer ID. With TANGUL_SIGN_IDENTITY set (e.g. in .env, see
+# `make signing-cert`) it is signed with that certificate instead: the Keychain then
+# keeps "Always Allow" across builds.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -39,6 +41,8 @@ else
   cp target/release/tangul "$app/Contents/MacOS/tangul"
 fi
 sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+# License texts ship with the app (AGPL-3.0 and the dependencies' notices).
+cp LICENSE THIRD_PARTY_LICENSES.md "$app/Contents/Resources/"
 
 # Icon: the Icon Composer document (light/dark/clear variants and the system glass,
 # macOS 26+) compiled by actool into Assets.car plus tangul.icns for older macOS.
@@ -62,8 +66,14 @@ else
 fi
 rm -f "$out/icon-info.plist"
 
-# Ad-hoc signature (required on Apple Silicon; no developer account needed).
-codesign --force --sign - --timestamp=none "$app"
+# Ad-hoc signature (required on Apple Silicon; no developer account needed), or the
+# local certificate from TANGUL_SIGN_IDENTITY.
+identity="${TANGUL_SIGN_IDENTITY:--}"
+# make passes .env values as written: spaces (e.g. before a comment) and quotes
+# around the name would be part of it.
+identity=$(printf '%s' "$identity" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/')
+codesign --force --sign "$identity" --timestamp=none "$app"
+[[ "$identity" == "-" ]] || echo "signed with \"$identity\""
 
 # DMG with the app and an Applications shortcut to drag it onto.
 dmg="$out/tangul-$version-$arch.dmg"
@@ -71,7 +81,12 @@ staging="$out/dmg"
 rm -rf "$staging" "$dmg" && mkdir -p "$staging"
 cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
-hdiutil create -volname "tangul $version" -srcfolder "$staging" -ov -format UDZO "$dmg" >/dev/null
+# Its progress goes to the terminal; shown only when it fails.
+if ! log=$(diskutil image create from --format UDZO --volumeName "tangul $version" \
+    "$staging" "$dmg" 2>&1); then
+    echo "$log" >&2
+    exit 1
+fi
 rm -rf "$staging"
 
 echo "app: $app"

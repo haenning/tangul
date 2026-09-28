@@ -2,9 +2,8 @@
 //! its rows can open the rows they reference (outgoing keys) and the rows that
 //! reference them (incoming keys), filtered by the exact key values.
 
-use tangul_core::DriverKind;
-
 use crate::analyze::{analyze, statements};
+use crate::dialect::{Dialect, literal};
 use crate::schema::SchemaIndex;
 use crate::usage::{Usage, UsageKind, join_key, table_key};
 
@@ -29,7 +28,7 @@ pub struct RelatedLink {
     /// Result column index per key column.
     source_cols: Vec<usize>,
     numeric: Vec<bool>,
-    driver: DriverKind,
+    dialect: &'static dyn Dialect,
     /// Usage key of the target table.
     target_key: String,
     /// Usage key per key column pair (a join over the link).
@@ -60,7 +59,7 @@ impl RelatedLink {
         if keys.is_empty() {
             return None;
         }
-        let lit = |i: usize, v: &str| literal(v, self.numeric[i], self.driver);
+        let lit = |i: usize, v: &str| literal(self.dialect, v, self.numeric[i]);
         let filter = if let [col] = &self.target_cols[..] {
             match &keys[..] {
                 [key] => format!("{col} = {}", lit(0, key[0])),
@@ -107,7 +106,7 @@ pub fn related_links(sql: &str, columns: &[String], schema: &SchemaIndex) -> Vec
             .find(|c| c.name.eq_ignore_ascii_case(name))
             .is_some_and(|c| numeric_type(&c.data_type))
     };
-    let driver = schema.driver();
+    let dialect = schema.dialect();
     let own_table = schema.table(ix);
 
     let mut links = Vec::new();
@@ -155,7 +154,7 @@ pub fn related_links(sql: &str, columns: &[String], schema: &SchemaIndex) -> Vec
                 target_cols: theirs.iter().map(|c| schema.quote(c)).collect(),
                 source_cols,
                 numeric: own.iter().map(|c| is_numeric(c)).collect(),
-                driver,
+                dialect,
                 target_key: table_key(&target_table.schema, &target_table.name),
                 join_keys,
             };
@@ -221,24 +220,6 @@ pub(crate) fn numeric_type(data_type: &str) -> bool {
     ]
     .iter()
     .any(|p| t.starts_with(p))
-}
-
-/// A SQL literal for a text-protocol value: numbers as they are (for numeric
-/// columns), everything else as a quoted string.
-pub(crate) fn literal(value: &str, numeric: bool, driver: DriverKind) -> String {
-    let plain_number = !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E'))
-        && value.parse::<f64>().is_ok_and(f64::is_finite);
-    if numeric && plain_number {
-        return value.to_string();
-    }
-    let mut escaped = value.replace('\'', "''");
-    if driver == DriverKind::Mysql {
-        escaped = escaped.replace('\\', "\\\\");
-    }
-    format!("'{escaped}'")
 }
 
 #[cfg(test)]
@@ -319,6 +300,7 @@ mod tests {
             schema: "public".into(),
             name: name.into(),
             kind: TableKind::Table,
+            ..Default::default()
         };
         let col = |table: &str, name: &str| ColumnMeta {
             schema: "public".into(),
@@ -327,6 +309,7 @@ mod tests {
             data_type: "integer".into(),
             nullable: false,
             primary_key: name == "id",
+            ..Default::default()
         };
         let fk = |table: &str| ForeignKey {
             name: format!("{table}_fk"),
@@ -349,8 +332,9 @@ mod tests {
                     )
                     .collect(),
                 foreign_keys: names[1..].iter().map(|t| fk(t)).collect(),
+                ..Default::default()
             },
-            DriverKind::Postgres,
+            crate::dialect::dialect_for(tangul_core::DriverKind::Postgres),
             Some("public".into()),
         );
         let mut links = related_links("select * from users", &cols(&["id"]), &s);
@@ -376,13 +360,8 @@ mod tests {
     }
 
     #[test]
-    fn literals_per_type_and_dialect() {
-        assert_eq!(literal("12", true, DriverKind::Postgres), "12");
-        assert_eq!(literal("12", false, DriverKind::Postgres), "'12'");
-        assert_eq!(literal("1; drop", true, DriverKind::Postgres), "'1; drop'");
-        assert_eq!(literal("o'k\\", false, DriverKind::Postgres), "'o''k\\'");
-        assert_eq!(literal("o'k\\", false, DriverKind::Mysql), "'o''k\\\\'");
+    fn numeric_types() {
         assert!(numeric_type("bigint") && numeric_type("int(11)") && !numeric_type("text"));
-        let _ = sample_for(DriverKind::Mysql);
+        let _ = sample_for(tangul_core::DriverKind::Mysql);
     }
 }

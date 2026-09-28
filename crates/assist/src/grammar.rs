@@ -6,7 +6,7 @@
 //! This is a state machine over clause keywords, not a parser: it only needs to be
 //! right about the position in front of the cursor, and must cope with unfinished SQL.
 
-use tangul_core::DriverKind;
+use crate::dialect::{Syntax, Upsert};
 
 use crate::lexer::{Token, TokenKind};
 
@@ -495,50 +495,8 @@ fn keyword_step(st: &mut State, kw: &str, prev: Option<&str>, in_call: bool) {
 
 // ---- vocabulary ---------------------------------------------------------------------
 
-pub fn statement_keywords(d: DriverKind) -> &'static [&'static str] {
-    match d {
-        // Only the app's own data, read-only.
-        DriverKind::Sqlite => &["SELECT", "WITH", "EXPLAIN QUERY PLAN"],
-        DriverKind::Postgres => &[
-            "SELECT",
-            "WITH",
-            "INSERT INTO",
-            "UPDATE",
-            "DELETE FROM",
-            "EXPLAIN ANALYZE",
-            "BEGIN",
-            "COMMIT",
-            "ROLLBACK",
-            "TRUNCATE",
-            "CREATE TABLE",
-            "ALTER TABLE",
-            "DROP TABLE",
-            "VACUUM",
-        ],
-        DriverKind::Mysql => &[
-            "SELECT",
-            "WITH",
-            "INSERT INTO",
-            "UPDATE",
-            "DELETE FROM",
-            "EXPLAIN",
-            "SHOW",
-            "DESCRIBE",
-            "BEGIN",
-            "COMMIT",
-            "ROLLBACK",
-            "TRUNCATE TABLE",
-            "CREATE TABLE",
-            "ALTER TABLE",
-            "DROP TABLE",
-            "REPLACE INTO",
-        ],
-    }
-}
-
 /// Keywords that fit right after a complete operand in `clause`.
-pub fn after_operand_keywords(d: DriverKind, clause: Clause, star: bool) -> Vec<&'static str> {
-    let pg = d == DriverKind::Postgres;
+pub fn after_operand_keywords(x: Syntax, clause: Clause, star: bool) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     let condition = |out: &mut Vec<&'static str>| {
         out.extend([
@@ -552,10 +510,11 @@ pub fn after_operand_keywords(d: DriverKind, clause: Clause, star: bool) -> Vec<
             "IS NOT NULL",
             "BETWEEN",
         ]);
-        if pg {
+        if x.ilike {
             out.extend(["ILIKE", "NOT ILIKE"]);
-        } else {
-            out.extend(["REGEXP"]);
+        }
+        if x.regexp {
+            out.push("REGEXP");
         }
     };
     match clause {
@@ -564,7 +523,7 @@ pub fn after_operand_keywords(d: DriverKind, clause: Clause, star: bool) -> Vec<
         Clause::Where => {
             condition(&mut out);
             out.extend(["GROUP BY", "ORDER BY", "LIMIT"]);
-            if pg {
+            if x.returning {
                 out.push("RETURNING");
             }
         }
@@ -586,25 +545,35 @@ pub fn after_operand_keywords(d: DriverKind, clause: Clause, star: bool) -> Vec<
         }
         Clause::GroupBy => {
             out.extend(["HAVING", "ORDER BY", "LIMIT"]);
-            if !pg {
+            if x.rollup {
                 out.push("WITH ROLLUP");
             }
         }
         Clause::OrderBy => {
             out.extend(["ASC", "DESC", "LIMIT"]);
-            if pg {
+            if x.nulls_order {
                 out.extend(["NULLS FIRST", "NULLS LAST", "OFFSET"]);
             }
         }
         Clause::Limit => out.extend(["OFFSET", "FOR UPDATE"]),
         Clause::Set => {
             out.push("WHERE");
-            if pg {
-                out.extend(["FROM", "RETURNING"]);
+            if x.update_from {
+                out.push("FROM");
+            }
+            if x.returning {
+                out.push("RETURNING");
             }
         }
-        Clause::Values if pg => out.extend(["ON CONFLICT", "RETURNING"]),
-        Clause::Values => out.push("ON DUPLICATE KEY UPDATE"),
+        Clause::Values => {
+            out.push(match x.upsert {
+                Upsert::OnConflict => "ON CONFLICT",
+                Upsert::OnDuplicateKey => "ON DUPLICATE KEY UPDATE",
+            });
+            if x.returning {
+                out.push("RETURNING");
+            }
+        }
         Clause::Returning => out.push("AS"),
         _ => {}
     }
@@ -612,8 +581,7 @@ pub fn after_operand_keywords(d: DriverKind, clause: Clause, star: bool) -> Vec<
 }
 
 /// Keywords that fit right after a table reference in `clause`.
-pub fn after_table_keywords(d: DriverKind, clause: Clause, alias: bool) -> Vec<&'static str> {
-    let pg = d == DriverKind::Postgres;
+pub fn after_table_keywords(x: Syntax, clause: Clause, alias: bool) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     match clause {
         Clause::From | Clause::Join => {
@@ -628,7 +596,7 @@ pub fn after_table_keywords(d: DriverKind, clause: Clause, alias: bool) -> Vec<&
                 "RIGHT JOIN",
                 "CROSS JOIN",
             ]);
-            if pg {
+            if x.full_join {
                 out.push("FULL JOIN");
             }
             out.extend(["GROUP BY", "ORDER BY", "LIMIT"]);
@@ -636,16 +604,20 @@ pub fn after_table_keywords(d: DriverKind, clause: Clause, alias: bool) -> Vec<&
         Clause::Update => out.push("SET"),
         Clause::InsertInto => {
             out.extend(["VALUES", "SELECT"]);
-            if pg {
+            if x.default_values {
                 out.push("DEFAULT VALUES");
-            } else {
+            }
+            if x.insert_set {
                 out.push("SET");
             }
         }
         Clause::DeleteFrom => {
             out.push("WHERE");
-            if pg {
-                out.extend(["USING", "RETURNING"]);
+            if x.delete_using {
+                out.push("USING");
+            }
+            if x.returning {
+                out.push("RETURNING");
             }
         }
         _ => {}
@@ -664,79 +636,6 @@ pub fn operand_keywords(clause: Clause, first: bool) -> &'static [&'static str] 
         Clause::Where | Clause::On | Clause::Having => &["NOT", "EXISTS", "CASE", "NULL"],
         Clause::Set => &["NULL", "DEFAULT"],
         _ => &[],
-    }
-}
-
-/// Common functions; inserted with an opening parenthesis.
-pub fn functions(d: DriverKind) -> &'static [&'static str] {
-    match d {
-        DriverKind::Sqlite => &[
-            "count",
-            "sum",
-            "avg",
-            "min",
-            "max",
-            "coalesce",
-            "nullif",
-            "lower",
-            "upper",
-            "length",
-            "trim",
-            "round",
-            "datetime",
-            "date",
-            "strftime",
-            "group_concat",
-        ],
-        DriverKind::Postgres => &[
-            "count",
-            "sum",
-            "avg",
-            "min",
-            "max",
-            "coalesce",
-            "nullif",
-            "lower",
-            "upper",
-            "length",
-            "trim",
-            "now",
-            "date_trunc",
-            "extract",
-            "to_char",
-            "string_agg",
-            "array_agg",
-            "jsonb_build_object",
-            "jsonb_agg",
-            "generate_series",
-            "cast",
-            "round",
-            "concat",
-        ],
-        DriverKind::Mysql => &[
-            "count",
-            "sum",
-            "avg",
-            "min",
-            "max",
-            "coalesce",
-            "ifnull",
-            "nullif",
-            "lower",
-            "upper",
-            "length",
-            "trim",
-            "now",
-            "curdate",
-            "date_format",
-            "date_add",
-            "concat",
-            "group_concat",
-            "json_extract",
-            "json_object",
-            "cast",
-            "round",
-        ],
     }
 }
 

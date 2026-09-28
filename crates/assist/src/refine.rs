@@ -12,12 +12,10 @@
 //! none (Postgres keeps the order of a subquery scan; MySQL passes a derived table's
 //! ORDER BY on to an outer query without one), so pages follow the original order.
 
-use tangul_core::DriverKind;
-
 use crate::analyze::statements;
+use crate::dialect::{Dialect, literal, quote_ident};
 use crate::lexer::{TokenKind, tokenize};
-use crate::related::{literal, numeric_type};
-use crate::schema::quote_ident;
+use crate::related::numeric_type;
 
 const ALIAS: &str = "tangul_q";
 
@@ -130,6 +128,9 @@ pub enum FilterOp {
     IsFalse,
     /// From `value` to `to`, both included; either may be empty (open end).
     Between,
+    /// Anything but `value`, NULL included (`Ne` leaves NULLs out). Not offered in
+    /// the filter bar; the value viewer's "Different value" uses it.
+    Differs,
 }
 
 impl FilterOp {
@@ -150,6 +151,7 @@ impl FilterOp {
             Self::IsTrue => "is true",
             Self::IsFalse => "is false",
             Self::Between => "from … to",
+            Self::Differs => "is not",
         }
     }
 
@@ -264,25 +266,12 @@ pub fn refined_sql(
     columns: &[String],
     kinds: &[ColumnKind],
     refine: &Refine,
-    driver: DriverKind,
+    dialect: &dyn Dialect,
     offset: usize,
     limit: usize,
 ) -> String {
-    // Duplicate names (`a.id, b.id`) can't be told apart outside the subquery, and
-    // MySQL refuses them in a derived table: rename them there.
-    let names = unique_names(columns);
-    let renamed = names.iter().zip(columns).any(|(n, c)| n != c);
-    let col = |i: usize| {
-        format!(
-            "{ALIAS}.{}",
-            quote_ident(driver, names.get(i).map_or("", String::as_str))
-        )
-    };
-    let mut sql = format!("SELECT * FROM (\n{base}\n) AS {ALIAS}");
-    if renamed {
-        let list: Vec<String> = names.iter().map(|n| quote_ident(driver, n)).collect();
-        sql.push_str(&format!(" ({})", list.join(", ")));
-    }
+    let (from, col) = wrapped(base, columns, dialect);
+    let mut sql = format!("SELECT * FROM {from}");
     let conditions: Vec<String> = refine
         .filters
         .iter()
@@ -292,7 +281,7 @@ pub fn refined_sql(
                 &col(f.column),
                 f,
                 kinds.get(f.column).copied().unwrap_or(ColumnKind::Text),
-                driver,
+                dialect,
             )
         })
         .collect();
@@ -303,16 +292,56 @@ pub fn refined_sql(
         let dir = if sort.descending { "DESC" } else { "ASC" };
         sql.push_str(&format!("\nORDER BY {} {dir}", col(sort.column)));
     }
-    sql.push_str(&format!("\nLIMIT {limit}"));
-    if offset > 0 {
-        sql.push_str(&format!(" OFFSET {offset}"));
-    }
+    sql.push_str(&format!("\n{}", dialect.limit(limit, offset)));
     sql
 }
 
-fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, driver: DriverKind) -> String {
+/// The distinct values of result column `column` in `base` (from [`refinable`])
+/// with how often each occurs, most frequent first, at most `limit` of them.
+pub fn distinct_sql(
+    base: &str,
+    columns: &[String],
+    column: usize,
+    dialect: &dyn Dialect,
+    limit: usize,
+) -> String {
+    let (from, col) = wrapped(base, columns, dialect);
+    let c = col(column);
+    let name = quote_ident(dialect, columns.get(column).map_or("", String::as_str));
+    let count = quote_ident(dialect, "count");
+    format!(
+        "SELECT {c} AS {name}, COUNT(*) AS {count}\nFROM {from}\nGROUP BY {c}\n\
+         ORDER BY COUNT(*) DESC, {c}\n{}",
+        dialect.limit(limit, 0)
+    )
+}
+
+/// `base` as a derived table, and a column of it by result index. Duplicate names
+/// (`a.id, b.id`) can't be told apart outside the subquery, and MySQL refuses them
+/// in a derived table: they are renamed there.
+fn wrapped<'a>(
+    base: &str,
+    columns: &[String],
+    dialect: &'a dyn Dialect,
+) -> (String, impl Fn(usize) -> String + 'a) {
+    let names = unique_names(columns);
+    let mut from = format!("(\n{base}\n) AS {ALIAS}");
+    if names.iter().zip(columns).any(|(n, c)| n != c) {
+        let list: Vec<String> = names.iter().map(|n| quote_ident(dialect, n)).collect();
+        from.push_str(&format!(" ({})", list.join(", ")));
+    }
+    let col = move |i: usize| {
+        format!(
+            "{ALIAS}.{}",
+            quote_ident(dialect, names.get(i).map_or("", String::as_str))
+        )
+    };
+    (from, col)
+}
+
+fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, dialect: &dyn Dialect) -> String {
     let numeric = kind == ColumnKind::Number;
-    let compare = |op: &str| format!("{col} {op} {}", literal(&f.value, numeric, driver));
+    let compare = |op: &str| format!("{col} {op} {}", literal(dialect, &f.value, numeric));
     // LIKE on the text of any type, case-insensitive (MySQL's usual collations
     // already are). `!` escapes wildcards: no backslash rules to get wrong.
     let like = |not: bool, prefix: &str, suffix: &str| {
@@ -323,16 +352,11 @@ fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, driver: DriverKind) 
                 .replace('%', "!%")
                 .replace('_', "!_")
         );
-        let (text, op) = match driver {
-            DriverKind::Postgres => (format!("CAST({col} AS text)"), "ILIKE"),
-            DriverKind::Mysql => (format!("CAST({col} AS CHAR)"), "LIKE"),
-            // SQLite's LIKE ignores ASCII case already.
-            DriverKind::Sqlite => (format!("CAST({col} AS TEXT)"), "LIKE"),
-        };
+        let (text, op) = dialect.text_match(col);
         let not = if not { "NOT " } else { "" };
         format!(
             "{text} {not}{op} {} ESCAPE '!'",
-            literal(&pattern, false, driver)
+            literal(dialect, &pattern, false)
         )
     };
     match f.op {
@@ -350,22 +374,19 @@ fn condition(col: &str, f: &ColumnFilter, kind: ColumnKind, driver: DriverKind) 
         FilterOp::NotNull => format!("{col} IS NOT NULL"),
         FilterOp::IsTrue => format!("{col} IS TRUE"),
         FilterOp::IsFalse => format!("{col} IS FALSE"),
+        FilterOp::Differs => format!("({} OR {col} IS NULL)", compare("<>")),
         FilterOp::Between => {
             let mut parts = Vec::new();
             let from = f.value.trim();
             let to = f.to.trim();
             if !from.is_empty() {
-                parts.push(format!("{col} >= {}", literal(from, numeric, driver)));
+                parts.push(format!("{col} >= {}", literal(dialect, from, numeric)));
             }
             if !to.is_empty() {
-                let lit = literal(to, numeric, driver);
+                let lit = literal(dialect, to, numeric);
                 // A day as the end of a timestamp range means the whole day.
                 parts.push(if kind == ColumnKind::DateTime && to.len() == 10 {
-                    match driver {
-                        DriverKind::Postgres => format!("{col} < CAST({lit} AS date) + 1"),
-                        DriverKind::Mysql => format!("{col} < {lit} + INTERVAL 1 DAY"),
-                        DriverKind::Sqlite => format!("{col} < date({lit}, '+1 day')"),
-                    }
+                    dialect.before_next_day(col, &lit)
                 } else {
                     format!("{col} <= {lit}")
                 });
@@ -398,9 +419,57 @@ fn unique_names(columns: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dialect::dialect_for;
+    use tangul_core::DriverKind;
 
     fn cols(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn differs_keeps_nulls() {
+        let refine = Refine {
+            filters: vec![ColumnFilter {
+                column: 0,
+                op: FilterOp::Differs,
+                value: "a".into(),
+                to: String::new(),
+            }],
+            sort: None,
+        };
+        let pg = dialect_for(DriverKind::Postgres);
+        let sql = refined_sql(
+            "select x from t",
+            &cols(&["x"]),
+            &[ColumnKind::Text],
+            &refine,
+            pg,
+            0,
+            100,
+        );
+        assert!(
+            sql.contains("WHERE (tangul_q.x <> 'a' OR tangul_q.x IS NULL)"),
+            "{sql}"
+        );
+        assert!(sql.ends_with("LIMIT 100"), "{sql}");
+    }
+
+    #[test]
+    fn distinct_values_by_count() {
+        let my = dialect_for(DriverKind::Mysql);
+        assert_eq!(
+            distinct_sql(
+                "select a.id, b.id from a, b",
+                &cols(&["id", "id"]),
+                1,
+                my,
+                100
+            ),
+            "SELECT tangul_q.id_2 AS id, COUNT(*) AS count\n\
+             FROM (\nselect a.id, b.id from a, b\n) AS tangul_q (id, id_2)\n\
+             GROUP BY tangul_q.id_2\n\
+             ORDER BY COUNT(*) DESC, tangul_q.id_2\nLIMIT 100"
+        );
     }
 
     #[test]
@@ -453,7 +522,7 @@ mod tests {
             &cols(&["id", "Name", "note"]),
             &[ColumnKind::Number, ColumnKind::Text, ColumnKind::Text],
             &refine,
-            DriverKind::Postgres,
+            dialect_for(DriverKind::Postgres),
             10_000,
             10_001,
         );
@@ -483,7 +552,7 @@ mod tests {
             &cols(&["id", "id"]),
             &[ColumnKind::Number, ColumnKind::Text],
             &refine,
-            DriverKind::Mysql,
+            dialect_for(DriverKind::Mysql),
             0,
             100,
         );
@@ -500,7 +569,12 @@ mod tests {
             to: String::new(),
         };
         assert_eq!(
-            condition("c", &f, ColumnKind::Number, DriverKind::Postgres),
+            condition(
+                "c",
+                &f,
+                ColumnKind::Number,
+                dialect_for(DriverKind::Postgres)
+            ),
             "c < '1; drop'"
         );
         assert_eq!(unique_names(&cols(&["a", "a", "a_2"])), ["a", "a_3", "a_2"]);
@@ -538,7 +612,7 @@ mod tests {
                 "c",
                 &f("2024-01-01", "2024-01-31"),
                 ColumnKind::DateTime,
-                DriverKind::Postgres
+                dialect_for(DriverKind::Postgres)
             ),
             "c >= '2024-01-01' AND c < CAST('2024-01-31' AS date) + 1"
         );
@@ -547,7 +621,7 @@ mod tests {
                 "c",
                 &f("", "2024-01-31"),
                 ColumnKind::DateTime,
-                DriverKind::Mysql
+                dialect_for(DriverKind::Mysql)
             ),
             "c < '2024-01-31' + INTERVAL 1 DAY"
         );
@@ -556,12 +630,17 @@ mod tests {
                 "c",
                 &f("2024-01-01", "2024-01-31"),
                 ColumnKind::Date,
-                DriverKind::Postgres
+                dialect_for(DriverKind::Postgres)
             ),
             "c >= '2024-01-01' AND c <= '2024-01-31'"
         );
         assert_eq!(
-            condition("c", &f("5", ""), ColumnKind::Number, DriverKind::Mysql),
+            condition(
+                "c",
+                &f("5", ""),
+                ColumnKind::Number,
+                dialect_for(DriverKind::Mysql)
+            ),
             "c >= 5"
         );
         assert_eq!(f("", "").describe("d"), "d (any)");
