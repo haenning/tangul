@@ -15,20 +15,20 @@ pub fn text() -> String {
 tangul is the database app the user has open; these tools read its databases. What \
 it can do for the user, to suggest when it helps:
 
-- Charts: a result can be shown as a chart instead of the grid. The first column is \
-the x axis (dates or labels), then one or more number columns, one series each. \
-Styles: {styles}. Any number of rows; few rows and columns read best (GROUP BY). \
-To show one, call propose_sql with the query and \"view\": {{\"chart\": style}}, \
-plus \"column\" for one number column by name (the others are left out). It opens in \
-a tab set to that chart and the user runs it; if the result doesn't fit the chart, \
-tangul shows its default view.
-- Changes: statements that change data or schema are never run by you; propose_sql \
-opens them in a tab for the user to review and run as themselves.
+- Showing: run_readonly with \"show\" opens its result in tangul for the user, in a \
+new tab, whole (not cut to your limit) and without running it again: the grid, or a \
+chart. Use it to visualize data, draw a graph, or hand over a finished read query.
+- Charts: \"show\": {{\"chart\": style}}, plus \"column\" for one number column by name \
+(the others are left out). The first column is the x axis (dates or labels), then one \
+or more number columns, one series each. Styles: {styles}. Any number of rows; few \
+rows and columns read best (GROUP BY). If the result doesn't fit the chart, tangul \
+shows the grid.
 - Bookmarks: the user can save a query under a name, and schedule it to run now and \
 then; tangul then tracks its duration and row count over time. list_bookmarks lists \
-them; propose_sql with \"bookmark\" opens one (with a view, too).
-- Showing: propose_sql also opens a query you ran with run_readonly (\"result_id\", or \
-its sql) in a tab for the user, to see all of it in the grid or as a chart.
+them; run_readonly with \"bookmark\" runs one (with \"show\", for the user too).
+- Changes: statements that change data or schema are never run by you; propose_sql \
+opens them in a tab for the user to review and run as themselves. It is only for \
+changes.
 - Results: the user can filter, sort and page a result without writing SQL, follow \
 foreign keys to related rows, and compare two values side by side.
 - Safety: you only read, in a read-only transaction that is rolled back, as the \

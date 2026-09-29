@@ -1,11 +1,13 @@
 //! What a tool call may see and use: the one security layer below the registry.
 
 use std::sync::Arc;
+use std::time::Duration;
+
 use tangul_assist::schema::SchemaIndex;
 use tangul_assist::slice::KnownValues;
 use tangul_assist::usage::Usage;
 use tangul_core::chart::ChartStyle;
-use tangul_core::{ConnId, DriverKind, ValueAccess};
+use tangul_core::{ConnId, DriverKind, ResultSet, ValueAccess};
 use tangul_engine::EngineHandle;
 use tangul_service::knowledge::Knowledge;
 
@@ -27,7 +29,7 @@ pub struct Exposed {
     pub driver: DriverKind,
     /// What the assistant may read from the rows (value profiles).
     pub values: ValueAccess,
-    /// The user's bookmarks for this database (`list_bookmarks`, `propose_sql`).
+    /// The user's bookmarks for this database (`list_bookmarks`, `run_readonly`).
     pub bookmarks: Vec<SharedBookmark>,
 }
 
@@ -50,12 +52,14 @@ pub struct Ctx {
     audit: Option<(&'static str, AuditSink)>,
     /// Where `propose_sql` sends statements for the user; none: it can't.
     proposals: Option<ProposalSink>,
+    /// Where `run_readonly` sends results to show the user; none: it can't.
+    shows: Option<ShowSink>,
     /// Results whose cells the text cut, for `get_cell`.
     results: Results,
 }
 
 /// Statements the assistant proposes: the app opens them in a new tab, unrun, on
-/// the user's connection.
+/// the user's connection. Only changes: reads are shown with [`ShownResult`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlProposal {
     /// The exposed connection's name.
@@ -65,22 +69,45 @@ pub struct SqlProposal {
     pub sql: String,
     /// The tab's title; `None`: tangul names it.
     pub title: Option<String>,
-    /// Show the result as this chart once the user runs it.
-    pub view: Option<ProposedView>,
 }
 
-/// A chart asked for by the assistant. The column is a name: whether the result
-/// has it is only known once the user runs the query; if not, tangul shows its
-/// default view.
+/// Where proposals go.
+pub type ProposalSink = Arc<dyn Fn(SqlProposal) + Send + Sync>;
+
+/// A read the assistant ran (`run_readonly` with `show`): the app opens it in a new
+/// tab on the user's connection with this result already in it, so it isn't run
+/// again. Filtering, sorting and paging it later are the user's own runs.
+#[derive(Debug)]
+pub struct ShownResult {
+    /// The exposed connection's name.
+    pub connection: String,
+    /// The database user whose tab connection gets it (see [`Exposed::user`]).
+    pub user: String,
+    /// The statement as it ran.
+    pub sql: String,
+    /// The tab's title; `None`: tangul names it.
+    pub title: Option<String>,
+    /// One line on what it shows, above the SQL.
+    pub note: Option<String>,
+    /// Show it as this chart instead of the grid.
+    pub chart: Option<ChartRequest>,
+    pub result: ResultSet,
+    /// The result had more rows than tangul keeps.
+    pub truncated: bool,
+    pub elapsed: Duration,
+}
+
+/// A chart asked for by the assistant. If the result can't be one, tangul shows
+/// the grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProposedView {
+pub struct ChartRequest {
     pub style: ChartStyle,
     /// One value column; `None`: all of them.
     pub column: Option<String>,
 }
 
-/// Where proposals go.
-pub type ProposalSink = Arc<dyn Fn(SqlProposal) + Send + Sync>;
+/// Where results to show go.
+pub type ShowSink = Arc<dyn Fn(ShownResult) + Send + Sync>;
 
 /// A connection resolved for a call.
 pub(crate) struct Conn {
@@ -106,6 +133,7 @@ impl Ctx {
             exposed,
             audit: None,
             proposals: None,
+            shows: None,
             results: Results::default(),
         }
     }
@@ -128,6 +156,16 @@ impl Ctx {
 
     pub(crate) fn proposals(&self) -> Option<&ProposalSink> {
         self.proposals.as_ref()
+    }
+
+    /// Sends what `run_readonly` shows to `sink`.
+    pub fn with_shows(mut self, sink: ShowSink) -> Self {
+        self.shows = Some(sink);
+        self
+    }
+
+    pub(crate) fn shows(&self) -> Option<&ShowSink> {
+        self.shows.as_ref()
     }
 
     /// Keeps results in `results` (shared by the calls of one client).

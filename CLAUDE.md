@@ -96,6 +96,9 @@ explicit OK, and keep them covered by tests.
   read-only, inside `START TRANSACTION READ ONLY`, always rolled back. One statement
   (no `;`, no `U&` escapes), checked with the database's lexical rules and sent without
   its comments, so the server runs exactly what was checked (same for schedules).
+  `run_readonly` with `show` hands that result to the app, which opens it in a tab on
+  the user's connection without running it again; only what the user does there
+  afterwards (filter, sort, page, run) runs, as the user.
 - **Assistant writes** (anything not on the allow-list) never run for the assistant,
   whatever approval comes along. The gate returns them as a `Proposal`; `propose_sql`
   opens statements in a new tab, unrun, on the user's own connection, where the user

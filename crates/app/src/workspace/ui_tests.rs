@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
@@ -479,8 +480,7 @@ async fn a_long_hover_shows_the_value(cx: &mut TestAppContext) {
         step(handle, cx, |window, cx| {
             window.within(("row", row)).hover(("cell", col), cx)
         });
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(3));
+        cx.executor().advance_clock(Duration::from_secs(3));
         step(handle, cx, |window, _| {
             assert!(window.try_find("peek-text").is_none())
         });
@@ -489,11 +489,9 @@ async fn a_long_hover_shows_the_value(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| {
         window.within(("row", 0usize)).hover(("cell", 0usize), cx)
     });
-    cx.wait_for(
-        handle.into(),
-        std::time::Duration::from_secs(3),
-        |window, _| window.try_find("peek-text").is_some(),
-    )
+    cx.wait_for(handle.into(), Duration::from_secs(3), |window, _| {
+        window.try_find("peek-text").is_some()
+    })
     .await;
 }
 
@@ -972,32 +970,37 @@ fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
     });
 }
 
+/// A connected Postgres database `shop` with user `app`, offered to the assistant.
+fn shop_for_the_assistant(ws: &mut Workspace, cx: &mut gpui_kit::Context<Workspace>) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    ws.data.profiles.databases.push(Database {
+        id: "db".into(),
+        name: "shop".into(),
+        driver: DriverKind::Postgres,
+        host: "localhost".into(),
+        port: 5432,
+        database: "shop".into(),
+        tls: TlsMode::Disable,
+        users: vec![DbUser {
+            id: "app".into(),
+            user: "app".into(),
+        }],
+        ssh: None,
+        assistant_user: None,
+        ai_values: Default::default(),
+        ai_tools: true,
+    });
+    ws.connect("app", cx);
+}
+
 #[gpui_kit::test]
 fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
-    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
     let (handle, workspace) = open(cx);
     let sql =
         "-- Proposed by the assistant: fix the total\nUPDATE orders SET total = 0 WHERE id = 1";
     let sink = step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| {
-            ws.data.profiles.databases.push(Database {
-                id: "db".into(),
-                name: "shop".into(),
-                driver: DriverKind::Postgres,
-                host: "localhost".into(),
-                port: 5432,
-                database: "shop".into(),
-                tls: TlsMode::Disable,
-                users: vec![DbUser {
-                    id: "app".into(),
-                    user: "app".into(),
-                }],
-                ssh: None,
-                assistant_user: None,
-                ai_values: Default::default(),
-                ai_tools: true,
-            });
-            ws.connect("app", cx);
+            shop_for_the_assistant(ws, cx);
             ws.mcp_proposals(cx)
         })
     });
@@ -1008,76 +1011,75 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         user: "app".into(),
         sql: sql.into(),
         title: None,
-        view: None,
-    });
-    // A query to look at as a chart of one column, named: set before it runs,
-    // resolved when the result arrives.
-    sink(tangul_ai::SqlProposal {
-        connection: "shop".into(),
-        user: "app".into(),
-        sql: "SELECT day, orders, revenue FROM daily".into(),
-        title: Some("Revenue per day".into()),
-        view: Some(tangul_ai::ProposedView {
-            style: tangul_core::chart::ChartStyle::Bars,
-            column: Some("revenue".into()),
-        }),
     });
     cx.run_until_parked();
-    let bars = |series| {
-        Some(tangul_core::chart::ChartView {
-            style: tangul_core::chart::ChartStyle::Bars,
-            series,
-        })
-    };
     step(handle, cx, |_, cx| {
         let ws = workspace.read(cx);
         let tab = ws.tabs.active_query().expect("opened").read(cx);
-        assert_eq!(tab.title.as_ref(), "Revenue per day");
-        assert_eq!(tab.sql(cx), "SELECT day, orders, revenue FROM daily");
+        assert_eq!(tab.title.as_ref(), "Proposed · shop");
+        assert_eq!(tab.sql(cx), sql);
         assert!(!tab.is_running(cx), "not run");
-        assert_eq!(tab.chart_view(cx), bars(None));
+        assert_eq!(tab.row_count(cx), None, "no result");
+        let conn = tab.conn.as_ref().expect("on a connection");
+        assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
     });
-    // The user runs it: the view shows the column asked for.
-    step(handle, cx, |_, cx| {
-        let tab = workspace.read(cx).tabs.active_query().unwrap().clone();
-        tab.update(cx, |t, cx| {
-            let sql = "SELECT day, orders, revenue FROM daily";
-            t.started(QueryId(7), sql, cx);
-            let col = |n: &str| ColumnInfo { name: n.into() };
-            t.on_query_event(
-                QueryEvent::Exec(ExecEvent::ResultStart(vec![
-                    col("day"),
-                    col("orders"),
-                    col("revenue"),
-                ])),
-                cx,
-            );
-            let mut batch = RowBatch::with_capacity(6);
-            for row in [["2024-01-01", "3", "10"], ["2024-01-02", "4", "12"]] {
-                for cell in row {
-                    batch.push_cell(Some(cell));
-                }
-                batch.finish_row();
-            }
-            t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
-            t.on_query_event(
-                QueryEvent::Finished {
-                    elapsed: Default::default(),
-                    error: None,
-                    error_position: None,
-                    in_transaction: false,
-                    cancelled: false,
-                },
-                cx,
-            );
-        });
+}
+
+#[gpui_kit::test]
+fn a_shown_result_opens_with_its_chart_and_isnt_run_again(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let sink = step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.mcp_shows(cx)
+        })
     });
+    let sql = "SELECT day, orders, revenue FROM daily";
+    let col = |n: &str| ColumnInfo { name: n.into() };
+    let mut result = tangul_core::ResultSet::new(vec![col("day"), col("orders"), col("revenue")]);
+    let mut batch = RowBatch::with_capacity(6);
+    for row in [["2024-01-01", "3", "10"], ["2024-01-02", "4", "12"]] {
+        for cell in row {
+            batch.push_cell(Some(cell));
+        }
+        batch.finish_row();
+    }
+    result.append(batch);
+    // A chart of one column, by name; and the grid, untitled.
+    sink(tangul_ai::ShownResult {
+        connection: "shop".into(),
+        user: "app".into(),
+        sql: sql.into(),
+        title: Some("Revenue per day".into()),
+        note: Some("last two days".into()),
+        chart: Some(tangul_ai::ChartRequest {
+            style: tangul_core::chart::ChartStyle::Bars,
+            column: Some("revenue".into()),
+        }),
+        result,
+        truncated: false,
+        elapsed: Duration::from_millis(12),
+    });
+    sink(tangul_ai::ShownResult {
+        connection: "shop".into(),
+        user: "app".into(),
+        sql: "SELECT 1 AS n".into(),
+        title: None,
+        note: None,
+        chart: None,
+        result: tangul_core::ResultSet::new(vec![col("n")]),
+        truncated: false,
+        elapsed: Duration::ZERO,
+    });
+    cx.run_until_parked();
     step(handle, cx, |_, cx| {
         let ws = workspace.read(cx);
-        let tab = ws.tabs.active_query().unwrap().read(cx);
-        assert_eq!(tab.chart_view(cx), bars(Some(1)));
+        let tab = ws.tabs.active_query().expect("opened").read(cx);
+        assert_eq!(tab.title.as_ref(), "Shown · shop");
+        assert_eq!(tab.sql(cx), "-- Shown by the assistant\nSELECT 1 AS n");
+        assert_eq!(tab.chart_view(cx), None);
+        assert_eq!(tab.row_count(cx), Some(0));
     });
-    // The first proposal's tab, before it.
     step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, _| {
             let last = ws.tabs.active_index();
@@ -1087,9 +1089,22 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     step(handle, cx, |_, cx| {
         let ws = workspace.read(cx);
         let tab = ws.tabs.active_query().expect("opened").read(cx);
-        assert_eq!(tab.title.as_ref(), "Proposed · shop");
-        assert_eq!(tab.sql(cx), sql);
-        assert!(!tab.is_running(cx), "not run");
+        assert_eq!(tab.title.as_ref(), "Revenue per day");
+        assert_eq!(
+            tab.sql(cx),
+            format!("-- Shown by the assistant: last two days\n{sql}")
+        );
+        // The result is there, not running: nothing was sent to the database.
+        assert!(!tab.is_running(cx));
+        assert_eq!(tab.result_columns(cx), ["day", "orders", "revenue"]);
+        assert_eq!(tab.row_count(cx), Some(2));
+        assert_eq!(
+            tab.chart_view(cx),
+            Some(tangul_core::chart::ChartView {
+                style: tangul_core::chart::ChartStyle::Bars,
+                series: Some(1),
+            })
+        );
         let conn = tab.conn.as_ref().expect("on a connection");
         assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
     });

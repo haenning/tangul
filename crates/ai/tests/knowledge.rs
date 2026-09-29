@@ -209,7 +209,7 @@ async fn says_what_the_app_can_do() {
     let text = text(&ctx(false), "tangul_features", json!({})).await;
     assert_eq!(text, tangul_ai::features::text());
     assert!(
-        text.contains("propose_sql with the query and \"view\": {\"chart\": style}"),
+        text.contains("run_readonly with \"show\" opens its result in tangul"),
         "{text}"
     );
 }

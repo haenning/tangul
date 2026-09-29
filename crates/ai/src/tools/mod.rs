@@ -36,6 +36,12 @@ pub(crate) fn all() -> Vec<Box<dyn Tool>> {
     ]
 }
 
+/// Collapses whitespace; `None` when nothing is left.
+pub(crate) fn one_line(text: Option<String>) -> Option<String> {
+    text.map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|t| !t.is_empty())
+}
+
 /// `orders`, `app.orders` or `"My Table"` → the table's index in `schema`.
 pub(crate) fn resolve_table(schema: &SchemaIndex, name: &str) -> Result<usize, ToolError> {
     let name = name.trim();

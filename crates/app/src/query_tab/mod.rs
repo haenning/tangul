@@ -5,6 +5,7 @@
 mod editor;
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
@@ -20,8 +21,8 @@ use gpui_kit::*;
 use tangul_assist::chart::{ChartData, ChartStyle, ChartView};
 use tangul_assist::columns::ColumnFacts;
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
-use tangul_core::{ConnId, QueryId, TabId};
-use tangul_engine::{Command, EngineHandle, Problem, QueryEvent};
+use tangul_core::{ConnId, QueryId, ResultSet, TabId};
+use tangul_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
 
 use crate::{
     BookmarkQuery, FormatQuery, RunAll, RunQuery,
@@ -334,6 +335,42 @@ impl QueryTab {
         self.editor.update(cx, |e, cx| e.started(sql, cx));
         self.results.update(cx, |r, cx| r.started(query, sql, cx));
         cx.notify();
+    }
+
+    /// Shows `result`, which `sql` returned elsewhere (an assistant's read), as if
+    /// it ran here as `query`: nothing runs. Filtering, sorting and paging it later
+    /// run in this tab.
+    pub fn show_result(
+        &mut self,
+        query: QueryId,
+        sql: &str,
+        result: ResultSet,
+        truncated: bool,
+        elapsed: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        self.started(query, sql, cx);
+        let rows = result.row_count() as u64;
+        let (columns, batch) = result.into_batch();
+        let mut events = Vec::new();
+        if !columns.is_empty() {
+            events.push(QueryEvent::Exec(ExecEvent::ResultStart(columns)));
+            events.push(QueryEvent::Exec(ExecEvent::Rows(batch)));
+        }
+        if truncated {
+            events.push(QueryEvent::Exec(ExecEvent::Truncated));
+        }
+        events.push(QueryEvent::Exec(ExecEvent::StatementDone { rows }));
+        events.push(QueryEvent::Finished {
+            elapsed,
+            error: None,
+            error_position: None,
+            in_transaction: false,
+            cancelled: false,
+        });
+        for event in events {
+            self.on_query_event(event, cx);
+        }
     }
 
     /// Called by the workspace once a derived query (filter, sort, next page) was

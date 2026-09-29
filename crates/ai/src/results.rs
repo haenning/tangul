@@ -29,9 +29,8 @@ struct Kept {
 struct Stored {
     id: String,
     at: Instant,
-    /// The exposed connection it ran on, and the statement.
+    /// The exposed connection it ran on.
     connection: String,
-    sql: String,
     columns: Vec<String>,
     rows: Vec<Vec<Cell>>,
     bytes: usize,
@@ -54,11 +53,10 @@ pub(crate) enum Missing {
 }
 
 impl Results {
-    /// Keeps `rows` of `sql` on `connection`; returns its id (`r1`, `r2`, …).
+    /// Keeps `rows` of a query on `connection`; returns its id (`r1`, `r2`, …).
     pub(crate) fn keep(
         &self,
         connection: &str,
-        sql: &str,
         columns: Vec<String>,
         rows: Vec<Vec<Option<String>>>,
     ) -> String {
@@ -86,23 +84,12 @@ impl Results {
             id: id.clone(),
             at: Instant::now(),
             connection: connection.to_string(),
-            sql: sql.to_string(),
             columns,
             rows,
             bytes,
         });
         kept.prune();
         id
-    }
-
-    /// The connection and statement of result `id`, while it is kept.
-    pub(crate) fn query(&self, id: &str) -> Option<(String, String)> {
-        let mut kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        kept.prune();
-        kept.results
-            .iter()
-            .find(|r| r.id.eq_ignore_ascii_case(id.trim()))
-            .map(|r| (r.connection.clone(), r.sql.clone()))
     }
 
     /// Cell `row` (from 1) of `column` (its name, or its number from 1) in result
@@ -190,11 +177,9 @@ mod tests {
     fn keeps_results_by_id_and_connection() {
         let r = Results::default();
         let cols = vec!["doc".to_string(), "Note".to_string()];
-        let a = r.keep("shop", "select 1", cols.clone(), rows(&["one", "two"]));
-        let b = r.keep("shop", "select 1", cols.clone(), rows(&["three"]));
+        let a = r.keep("shop", cols.clone(), rows(&["one", "two"]));
+        let b = r.keep("shop", cols.clone(), rows(&["three"]));
         assert_eq!((a.as_str(), b.as_str()), ("r1", "r2"));
-        assert_eq!(r.query(" R2 "), Some(("shop".into(), "select 1".into())));
-        assert_eq!(r.query("r9"), None);
         let cell = |id: &str, conn: &str, row: usize, col: &str| r.cell(id, conn, row, col);
         assert_eq!(
             cell("r1", "shop", 2, "doc"),
@@ -227,13 +212,13 @@ mod tests {
     fn keeps_the_latest_within_limits() {
         let r = Results::default();
         for _ in 0..KEEP + 2 {
-            r.keep("shop", "select 1", vec!["a".into()], rows(&["x"]));
+            r.keep("shop", vec!["a".into()], rows(&["x"]));
         }
         assert_eq!(r.cell("r2", "shop", 1, "a"), Err(Missing::Result));
         assert!(r.cell("r3", "shop", 1, "a").is_ok());
         // A huge cell is kept cut, on a character boundary, knowing its length.
         let big = "é".repeat(CELL_BYTES);
-        let id = r.keep("shop", "select 1", vec!["a".into()], vec![vec![Some(big)]]);
+        let id = r.keep("shop", vec!["a".into()], vec![vec![Some(big)]]);
         let cell = r.cell(&id, "shop", 1, "a").unwrap();
         assert!(cell.value.unwrap().len() <= CELL_BYTES);
         assert_eq!(cell.chars, CELL_BYTES);
