@@ -80,8 +80,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
         KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("alt-secondary-b", ToggleRightSidebar, Some("Workspace")),
-        // On a result: show the selected cell in the value viewer, or open and close
-        // it (like Quick Look).
+        // On a result: open the value viewer on the selected cell, or close it (like
+        // Quick Look).
         KeyBinding::new("space", InspectValue, Some("DataTable")),
         // Before the table's own Esc (clears the selection), which runs when the
         // viewer is closed. Popovers, inputs and dialogs inside are deeper and

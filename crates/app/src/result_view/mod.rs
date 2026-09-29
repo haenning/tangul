@@ -50,7 +50,8 @@ pub enum ResultEvent {
     Failed { message: String, position: usize },
     /// The inspected cell (A) changed; `open` asks to show the value viewer.
     Inspect { cell: CellValue, open: bool },
-    /// Space on the cell the viewer already has (or on none): open or close it.
+    /// Space: open or close the viewer (opening shows the selected cell, see
+    /// [`ResultView::inspect_selected`]).
     ToggleViewer,
     /// A cell to compare with the inspected one (B).
     Compare(CellValue),
@@ -185,16 +186,18 @@ impl ResultView {
         }
     }
 
-    /// Space: shows the selected cell in the value viewer; on the cell it already
-    /// has (or without a selection) opens or closes the viewer.
+    /// Space: opens or closes the value viewer (like Quick Look).
     fn inspect_action(&mut self, _: &InspectValue, _: &mut Window, cx: &mut Context<Self>) {
-        let table = self.table.read(cx);
-        match table.selected_cell() {
-            Some((row, col)) if table.delegate().inspected != Some((row, col)) => {
-                self.inspect(row, col, true, cx)
-            }
-            _ => cx.emit(ResultEvent::ToggleViewer),
-        }
+        cx.emit(ResultEvent::ToggleViewer);
+    }
+
+    /// The viewer opens on Space: the selected cell becomes A. False without one.
+    pub fn inspect_selected(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((row, col)) = self.table.read(cx).selected_cell() else {
+            return false;
+        };
+        self.inspect(row, col, true, cx);
+        true
     }
 
     /// The grid's focus (Esc in the value viewer returns to it).

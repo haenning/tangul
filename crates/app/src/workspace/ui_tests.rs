@@ -265,7 +265,13 @@ fn a_click_selects_and_a_double_click_inspects(cx: &mut TestAppContext) {
     });
     step(handle, cx, |window, cx| {
         assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
-        // Space shows the selected cell.
+        // Space closes the open viewer, whatever is selected …
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
+        // … and opens it on the selected cell.
         window.press("space", cx);
     });
     step(handle, cx, |window, cx| {
@@ -310,6 +316,26 @@ fn space_opens_and_closes_the_viewer(cx: &mut TestAppContext) {
     });
     step(handle, cx, |window, cx| {
         assert!(!viewer_open(&workspace, cx));
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        // In the viewer's text too, where the editor would take Space as text.
+        window.click("value-panel", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(
+            workspace
+                .read(cx)
+                .panels
+                .value_focus
+                .contains_focused(window, cx)
+        );
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        // The focus is back in the grid.
         window.press("space", cx);
     });
     step(handle, cx, |_, cx| assert!(viewer_open(&workspace, cx)));

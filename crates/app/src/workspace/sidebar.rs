@@ -227,7 +227,7 @@ impl Workspace {
     }
 
     /// The sidebar that hosts `panel`.
-    fn host(&mut self, panel: Panel) -> &mut Sidebar {
+    pub(super) fn host(&mut self, panel: Panel) -> &mut Sidebar {
         if self.right.hosts(panel) {
             &mut self.right
         } else {
@@ -275,6 +275,15 @@ impl Workspace {
             .test_support()
             .key_context("ValueViewer")
             .track_focus(&self.panels.value_focus)
+            // Space closes it here too; the viewer's (read-only) editor would take
+            // it as text before any key binding.
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                let k = &e.keystroke;
+                if k.key == "space" && !k.modifiers.modified() {
+                    cx.stop_propagation();
+                    this.close_value_viewer(&CloseValueViewer, window, cx);
+                }
+            }))
             .size_full()
             .child(
                 h_flex()
@@ -319,11 +328,24 @@ impl Workspace {
             return;
         }
         host.open = false;
+        self.focus_grid(window, cx);
+        cx.notify();
+    }
+
+    /// Back to the active tab's grid (the viewer closed, maybe with the focus in it).
+    fn focus_grid(&self, window: &mut Window, cx: &mut App) {
         if let Some(tab) = self.tabs.active().and_then(TabItem::query) {
             let grid = tab.read(cx).results_focus(cx);
             window.focus(&grid, cx);
         }
-        cx.notify();
+    }
+
+    /// Before a sidebar closes: the focus must not stay in it (keys would go
+    /// nowhere), so a focused value viewer hands it to the grid.
+    pub(super) fn release_viewer_focus(&self, window: &mut Window, cx: &mut App) {
+        if self.panels.value_focus.contains_focused(window, cx) {
+            self.focus_grid(window, cx);
+        }
     }
 
     /// Status bar button: shows that panel, or hides its sidebar if it is the one
@@ -370,9 +392,10 @@ impl Workspace {
     pub(super) fn toggle_right_sidebar(
         &mut self,
         _: &ToggleRightSidebar,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.release_viewer_focus(window, cx);
         self.right.toggle_open();
         cx.notify();
     }

@@ -365,6 +365,11 @@ impl QueryTab {
             .update(cx, |e, cx| e.apply_validation(generation, problems, cx));
     }
 
+    /// See [`ResultView::inspect_selected`].
+    pub fn inspect_selected(&mut self, cx: &mut Context<Self>) -> bool {
+        self.results.update(cx, |r, cx| r.inspect_selected(cx))
+    }
+
     /// See [`ResultView::grid_focus`].
     pub fn results_focus(&self, cx: &App) -> FocusHandle {
         self.results.read(cx).grid_focus(cx)

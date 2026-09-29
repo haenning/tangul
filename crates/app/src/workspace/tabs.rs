@@ -247,7 +247,13 @@ impl Workspace {
                     self.show_panel(Panel::Value, cx);
                 }
             }
-            TabEvent::ToggleViewer => self.toggle_panel(Panel::Value, cx),
+            TabEvent::ToggleViewer => {
+                if self.host(Panel::Value).shows(Panel::Value) {
+                    self.close_value_viewer(&CloseValueViewer, window, cx);
+                } else if !tab.update(cx, |t, cx| t.inspect_selected(cx)) {
+                    self.show_panel(Panel::Value, cx);
+                }
+            }
             TabEvent::Compare(cell) => {
                 let picked = self.picked(tab, cell, cx);
                 let old = self
