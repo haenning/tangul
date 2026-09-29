@@ -15,6 +15,7 @@ use gpui_kit::component::input::{CompletionProvider, EditorState, InputEvent, Ro
 use gpui_kit::*;
 use tangul_assist::analyze::statements;
 use tangul_assist::dialect::Dialect;
+use tangul_assist::format::format_sql;
 use tangul_assist::lexer::{Lexing, TokenKind, tokenize, tokenize_with};
 use tangul_assist::statement::statement_at;
 use tangul_engine::Problem;
@@ -160,11 +161,17 @@ impl SqlEditor {
     }
 
     /// What ⌘↵ takes: the selection if there is one, otherwise the statement under
-    /// the cursor (see [`statement_at`]).
-    pub fn take_run(&mut self, dialect: &dyn Dialect, cx: &App) -> RunTake {
+    /// the cursor (see [`statement_at`]). Formatted in place first (see
+    /// [`Self::format_for_run`]).
+    pub fn take_run(
+        &mut self,
+        dialect: &dyn Dialect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> RunTake {
         let editor = self.state.read(cx);
         if !editor.selected_value().trim().is_empty() {
-            return self.take_run_all(cx);
+            return self.take_run_all(window, cx);
         }
         let text = editor.value().to_string();
         if text.trim().is_empty() {
@@ -173,26 +180,61 @@ impl SqlEditor {
         let Some(statement) = statement_at(&text, editor.cursor(), dialect) else {
             return RunTake::NoStatement;
         };
-        self.pending_origin = Some(statement.body.start);
-        self.pending_mark = Some(statement.range.clone());
-        RunTake::Sql(statement.text(&text).to_string())
+        let body = statement.body.clone();
+        let sql = self.format_for_run(body.clone(), statement.text(&text), false, window, cx);
+        self.pending_origin = Some(body.start);
+        // The terminator moved with the end of the body.
+        let end = statement.range.end + sql.len() - body.len();
+        self.pending_mark = Some(statement.range.start..end);
+        RunTake::Sql(sql)
     }
 
     /// What "Run all" takes: the selection if there is one, otherwise everything.
-    pub fn take_run_all(&mut self, cx: &App) -> RunTake {
+    /// Formatted in place first.
+    pub fn take_run_all(&mut self, window: &mut Window, cx: &mut Context<Self>) -> RunTake {
         let editor = self.state.read(cx);
-        let selected = editor.selected_value();
-        let (sql, mark) = if selected.trim().is_empty() {
-            (editor.value(), None)
+        let selected = editor.selected_value().to_string();
+        let (sql, range, mark) = if selected.trim().is_empty() {
+            let all = editor.value().to_string();
+            let range = 0..all.len();
+            (all, range, false)
         } else {
-            (selected, Some(editor.selected_range()))
+            (selected, editor.selected_range(), true)
         };
         if sql.trim().is_empty() {
             return RunTake::Empty;
         }
-        self.pending_origin = Some(mark.as_ref().map_or(0, |m| m.start));
-        self.pending_mark = mark;
-        RunTake::Sql(sql.to_string())
+        let start = range.start;
+        let sql = self.format_for_run(range, &sql, mark, window, cx);
+        self.pending_origin = Some(start);
+        self.pending_mark = mark.then(|| start..start + sql.len());
+        RunTake::Sql(sql)
+    }
+
+    /// Formats `range` (holding `sql`) in place before it runs, as one undo step;
+    /// `select`: keep it selected, so the next run takes it again. What runs: the
+    /// formatted SQL, or `sql` when formatting would change more than whitespace
+    /// (see `tangul_assist::format`).
+    fn format_for_run(
+        &mut self,
+        range: Range<usize>,
+        sql: &str,
+        select: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let Some(formatted) = format_sql(sql, self.lexing) else {
+            return sql.to_string();
+        };
+        let start = range.start;
+        self.state.update(cx, |e, cx| {
+            e.set_selected_range(range, cx);
+            e.replace(formatted.clone(), window, cx);
+            if select {
+                e.set_selected_range(start..start + formatted.len(), cx);
+            }
+        });
+        formatted
     }
 
     /// `sql` was sent: locates it in the editor (to put error underlines in place),

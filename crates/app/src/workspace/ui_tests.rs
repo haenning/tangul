@@ -1223,3 +1223,25 @@ fn a_large_result_gets_a_chart_that_says_it_is_cut(cx: &mut TestAppContext) {
         assert!(window.find("chart-truncated").visible())
     });
 }
+
+#[gpui_kit::test]
+fn running_formats_the_query_first(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.add_tab("select id, name from users where id = 1", window, cx)
+        })
+    });
+    step(handle, cx, |window, cx| {
+        tab.update(cx, |t, cx| t.run_all(&crate::RunAll, window, cx))
+    });
+    let formatted = "select\n  id,\n  name\nfrom\n  users\nwhere\n  id = 1";
+    step(handle, cx, |window, cx| {
+        assert_eq!(tab.read(cx).sql(cx), formatted);
+        // Formatted already: a second run leaves the text as it is.
+        tab.update(cx, |t, cx| t.run_all(&crate::RunAll, window, cx))
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(tab.read(cx).sql(cx), formatted)
+    });
+}

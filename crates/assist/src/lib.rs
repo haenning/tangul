@@ -8,6 +8,7 @@ pub mod complete;
 pub mod dialect;
 pub mod digest;
 pub mod edit;
+pub mod format;
 pub mod grammar;
 pub mod guard;
 pub mod join_graph;

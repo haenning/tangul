@@ -289,8 +289,8 @@ impl QueryTab {
         // Without a connection nothing runs; the workspace says so.
         let dialect = self.conn.as_ref().map(|c| c.read(cx).dialect());
         let take = self.editor.update(cx, |e, cx| match dialect {
-            Some(d) => e.take_run(d, cx),
-            None => e.take_run_all(cx),
+            Some(d) => e.take_run(d, window, cx),
+            None => e.take_run_all(window, cx),
         });
         self.emit_run(take, window, cx);
     }
@@ -300,7 +300,7 @@ impl QueryTab {
         if self.is_running(cx) {
             return;
         }
-        let take = self.editor.update(cx, |e, cx| e.take_run_all(cx));
+        let take = self.editor.update(cx, |e, cx| e.take_run_all(window, cx));
         self.emit_run(take, window, cx);
     }
 
