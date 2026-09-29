@@ -24,7 +24,7 @@ use tangul_core::{ConnId, QueryId, TabId};
 use tangul_engine::{Command, EngineHandle, Problem, QueryEvent};
 
 use crate::{
-    BookmarkQuery, RunAll, RunQuery,
+    BookmarkQuery, FormatQuery, RunAll, RunQuery,
     assets::Lucide,
     connection::{ConnStatus, Connection},
     result_view::{CellValue, ResultEvent, ResultView},
@@ -122,7 +122,7 @@ impl QueryTab {
         if let Some(conn) = &conn {
             let dialect = conn.read(cx).dialect();
             results.update(cx, |r, _| r.set_dialect(dialect));
-            editor.update(cx, |e, cx| e.set_lexing(dialect.lexing(), cx));
+            editor.update(cx, |e, cx| e.set_dialect(dialect, cx));
         }
         let subscriptions = vec![
             cx.subscribe(&editor, |_, _, event: &EditorEvent, cx| match event {
@@ -274,8 +274,7 @@ impl QueryTab {
         }
         let dialect = conn.read(cx).dialect();
         self.results.update(cx, |r, _| r.set_dialect(dialect));
-        self.editor
-            .update(cx, |e, cx| e.set_lexing(dialect.lexing(), cx));
+        self.editor.update(cx, |e, cx| e.set_dialect(dialect, cx));
         self._conn_changes = Some(cx.observe(&conn, |_, _, cx| cx.notify()));
         self.conn = Some(conn);
         cx.notify();
@@ -316,6 +315,11 @@ impl QueryTab {
             ),
             RunTake::Empty => {}
         }
+    }
+
+    /// ⌥⌘L: formats the selection or the editor without running it.
+    pub fn format(&mut self, _: &FormatQuery, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.format(window, cx));
     }
 
     fn bookmark(&mut self, _: &BookmarkQuery, _: &mut Window, cx: &mut Context<Self>) {
@@ -520,6 +524,7 @@ impl Render for QueryTab {
             .on_action(cx.listener(Self::run))
             .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::bookmark))
+            .on_action(cx.listener(Self::format))
             .child(self.render_toolbar(cx))
             .child(
                 div().flex_1().min_h_0().child(

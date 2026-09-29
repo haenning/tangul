@@ -15,7 +15,7 @@ use gpui_kit::component::input::{CompletionProvider, EditorState, InputEvent, Ro
 use gpui_kit::*;
 use tangul_assist::analyze::statements;
 use tangul_assist::dialect::Dialect;
-use tangul_assist::format::format_sql;
+use tangul_assist::format::{FormatRules, format_sql, map_offset};
 use tangul_assist::lexer::{Lexing, TokenKind, tokenize, tokenize_with};
 use tangul_assist::statement::statement_at;
 use tangul_engine::Problem;
@@ -60,6 +60,8 @@ pub struct SqlEditor {
     ran: Option<TextDecorationCollection>,
     /// How the connection's database reads comments.
     lexing: Lexing,
+    /// How its SQL is formatted.
+    format: FormatRules,
     /// Comments in the comment color, also those the highlighter's grammar doesn't
     /// know (`#` on MySQL, nested and unclosed `/* */`).
     comments: TextDecorationCollection,
@@ -97,6 +99,7 @@ impl SqlEditor {
             pending_mark: None,
             ran: None,
             lexing: Lexing::default(),
+            format: FormatRules::default(),
             comments,
             _flash: Task::ready(()),
             edit_generation: 0,
@@ -108,8 +111,11 @@ impl SqlEditor {
         editor
     }
 
-    /// The connection's database changed: its comments may be spelled differently.
-    pub fn set_lexing(&mut self, lexing: Lexing, cx: &mut Context<Self>) {
+    /// The connection's database changed: its comments may be spelled differently,
+    /// and its SQL formatted differently.
+    pub fn set_dialect(&mut self, dialect: &dyn Dialect, cx: &mut Context<Self>) {
+        self.format = FormatRules::of(dialect);
+        let lexing = dialect.lexing();
         if self.lexing != lexing {
             self.lexing = lexing;
             self.color_comments(cx);
@@ -211,6 +217,34 @@ impl SqlEditor {
         RunTake::Sql(sql)
     }
 
+    /// ⌥⌘L: formats the selection, or everything, without running it. The cursor
+    /// stays on its character.
+    pub fn format(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.state.read(cx);
+        let range = if editor.selected_value().trim().is_empty() {
+            0..editor.value().len()
+        } else {
+            editor.selected_range()
+        };
+        let cursor = editor.cursor();
+        let text = editor.value().to_string();
+        let Some(formatted) = format_sql(&text[range.clone()], self.format) else {
+            return;
+        };
+        let selected = range != (0..text.len());
+        let start = range.start;
+        self.state.update(cx, |e, cx| {
+            e.set_selected_range(range.clone(), cx);
+            e.replace(formatted.clone(), window, cx);
+            if selected {
+                e.set_selected_range(start..start + formatted.len(), cx);
+            } else {
+                let at = map_offset(&text, &formatted, cursor);
+                e.set_selected_range(at..at, cx);
+            }
+        });
+    }
+
     /// Formats `range` (holding `sql`) in place before it runs, as one undo step;
     /// `select`: keep it selected, so the next run takes it again. What runs: the
     /// formatted SQL, or `sql` when formatting would change more than whitespace
@@ -223,7 +257,7 @@ impl SqlEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> String {
-        let Some(formatted) = format_sql(sql, self.lexing) else {
+        let Some(formatted) = format_sql(sql, self.format) else {
             return sql.to_string();
         };
         let start = range.start;

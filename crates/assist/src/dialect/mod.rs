@@ -77,6 +77,12 @@ pub trait Dialect: Sync {
         Lexing::default()
     }
 
+    /// `[…]` arrays and their operators (`@>`, `&&`), which the formatter must
+    /// know not to break apart.
+    fn array_syntax(&self) -> bool {
+        false
+    }
+
     /// A query answering with one number: how many tables the connected user may
     /// change (insert, update, delete, truncate) or drop. `None` where the database
     /// has no users to ask about (SQLite).

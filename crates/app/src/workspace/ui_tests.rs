@@ -1245,3 +1245,19 @@ fn running_formats_the_query_first(cx: &mut TestAppContext) {
         assert_eq!(tab.read(cx).sql(cx), formatted)
     });
 }
+
+#[gpui_kit::test]
+fn format_formats_without_running(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab("select a, b from t", window, cx))
+    });
+    step(handle, cx, |window, cx| {
+        tab.update(cx, |t, cx| t.format(&crate::FormatQuery, window, cx))
+    });
+    step(handle, cx, |_, cx| {
+        let t = tab.read(cx);
+        assert_eq!(t.sql(cx), "select\n  a,\n  b\nfrom\n  t");
+        assert!(!t.is_running(cx));
+    });
+}

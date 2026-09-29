@@ -81,7 +81,7 @@ use tangul_service::knowledge::Knowledge;
 use tangul_service::schedule;
 
 use crate::{
-    CloseTab, CloseValueViewer, NewTab, NextSidebarPanel, OpenPalette, OpenSettings,
+    CloseTab, CloseValueViewer, FormatQuery, NewTab, NextSidebarPanel, OpenPalette, OpenSettings,
     PrevSidebarPanel, RunAll, ToggleRightSidebar, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,

@@ -101,6 +101,11 @@ impl Workspace {
     ) {
         match action {
             PaletteAction::Settings => self.open_settings(window, cx),
+            PaletteAction::Format => {
+                if let Some(tab) = self.tabs.active_query().cloned() {
+                    tab.update(cx, |t, cx| t.format(&FormatQuery, window, cx));
+                }
+            }
             PaletteAction::RunAll => {
                 if let Some(tab) = self.tabs.active_query().cloned() {
                     tab.update(cx, |t, cx| t.run_all(&RunAll, window, cx));

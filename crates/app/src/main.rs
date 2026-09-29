@@ -23,6 +23,7 @@ actions!(
     [
         RunQuery,
         RunAll,
+        FormatQuery,
         InspectValue,
         CloseValueViewer,
         ToggleRightSidebar,
@@ -75,6 +76,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
         KeyBinding::new("secondary-shift-enter", RunAll, Some("QueryEditor > Input")),
         KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
+        // DataGrip's "Reformat code".
+        KeyBinding::new("alt-secondary-l", FormatQuery, Some("QueryEditor > Input")),
         KeyBinding::new("secondary-s", SaveFile, Some("QueryEditor > Input")),
         KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
         KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),

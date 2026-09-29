@@ -13,6 +13,8 @@ pub enum PaletteAction {
     Settings,
     /// Run everything in the active query tab's editor.
     RunAll,
+    /// Format the active query tab's editor.
+    Format,
     /// Bookmark id.
     Bookmark(String),
     /// SQL of the history entry.
@@ -53,6 +55,11 @@ pub fn groups(bookmarks: &[Bookmark], history: &[HistoryEntry]) -> Vec<PaletteGr
             label: "Run all statements  ⌘⇧↵".into(),
             search: "execute script whole editor".into(),
             action: PaletteAction::RunAll,
+        },
+        PaletteItem {
+            label: "Format SQL  ⌥⌘L".into(),
+            search: "format beautify indent pretty print".into(),
+            action: PaletteAction::Format,
         },
     ];
     let bookmarks = bookmarks

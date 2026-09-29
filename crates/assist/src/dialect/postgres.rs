@@ -159,6 +159,10 @@ impl Dialect for Postgres {
         }
     }
 
+    fn array_syntax(&self) -> bool {
+        true
+    }
+
     fn side_effect_functions(&self) -> &'static [&'static str] {
         &[
             "pg_terminate_backend",
