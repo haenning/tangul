@@ -2,7 +2,7 @@
 //! user. Built from what the app supports (chart styles and limits), so it can't
 //! promise more.
 
-use tangul_assist::chart::{ChartStyle, MAX_BARS, MAX_POINTS, MAX_SERIES};
+use tangul_assist::chart::ChartStyle;
 
 /// The text `tangul_features` gives.
 pub fn text() -> String {
@@ -16,8 +16,8 @@ tangul is the database app the user has open; these tools read its databases. Wh
 it can do for the user, to suggest when it helps:
 
 - Charts: a result can be shown as a chart instead of the grid. The first column is \
-the x axis (dates or labels), then 1–{MAX_SERIES} number columns, one series each. \
-Styles: {styles}. Bars show up to {MAX_BARS} rows, lines up to {MAX_POINTS} points. \
+the x axis (dates or labels), then one or more number columns, one series each. \
+Styles: {styles}. Any number of rows; few rows and columns read best (GROUP BY). \
 To show one, call propose_sql with the query and \"chart\": it opens in a tab set to \
 that chart, and the user runs it.
 - Changes: statements that change data or schema are never run by you; propose_sql \

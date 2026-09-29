@@ -401,7 +401,7 @@ impl ResultView {
                 }
                 if error.is_none() && self.has_result_set {
                     let result = &self.table.read(cx).delegate().result;
-                    self.chart = chart_data(&self.sql, result)
+                    self.chart = chart_data(&self.sql, result, self.truncated)
                         .map(Rc::new)
                         .map_err(Into::into);
                 }
@@ -602,18 +602,25 @@ impl ResultView {
                 .child(option("smooth-lines", "Smooth", true))
         });
         let theme = cx.theme();
-        let legend = (data.series.len() > 1).then(|| {
-            h_flex()
-                .gap_3()
-                .flex_wrap()
-                .children(data.series.iter().enumerate().map(|(i, s)| {
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .child(div().size_2().rounded_sm().bg(colors[i % colors.len()]))
-                        .child(s.name.clone())
-                }))
-        });
+        // Capped: many columns would push the chart off the view (one column at a
+        // time is in the status bar's chart menu).
+        let legend =
+            (data.series.len() > 1).then(|| {
+                let hidden = data.series.len().saturating_sub(chart::MAX_LISTED);
+                h_flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .children(data.series.iter().take(chart::MAX_LISTED).enumerate().map(
+                        |(i, s)| {
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(div().size_2().rounded_sm().bg(colors[i % colors.len()]))
+                                .child(s.name.clone())
+                        },
+                    ))
+                    .when(hidden > 0, |this| this.child(format!("+{hidden} more")))
+            });
         let settings = settings::current(cx);
         let label_size = settings.chart_font_size();
         v_flex()
@@ -633,6 +640,15 @@ impl ResultView {
                         .items_center()
                         .children(curve_switch)
                         .children(legend),
+                )
+            })
+            // A fact about the data, like the grid's "loaded rows".
+            .when(data.truncated, |this| {
+                this.child(
+                    div()
+                        .id("chart-truncated")
+                        .test_support()
+                        .child(format!("First {} rows only", data.x.len())),
                 )
             })
             .when(data.unsorted && !style.is_bars(), |this| {

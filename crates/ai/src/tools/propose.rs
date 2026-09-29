@@ -24,7 +24,7 @@ struct Input {
     /// One line on what it does and why, shown above it.
     note: Option<String>,
     /// For a query that reads: show its result as this chart (first column the x
-    /// axis, then 1–5 number columns).
+    /// axis, then number columns).
     chart: Option<Chart>,
 }
 

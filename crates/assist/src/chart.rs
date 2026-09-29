@@ -1,6 +1,7 @@
-//! Whether a result can be shown as a chart, and the numbers to draw it. Deliberately
-//! strict, like a spreadsheet's default chart: column 0 is the x axis, every other
-//! column is a numeric series named by its header, all in one chart.
+//! Whether a result can be shown as a chart, and the numbers to draw it. Strict about
+//! the shape, like a spreadsheet's default chart: column 0 is the x axis, every other
+//! column is a numeric series named by its header, all in one chart. Not about the
+//! size: how many rows or columns are readable is the user's call.
 //!
 //! Charts are a view of the result, never stored data.
 
@@ -8,13 +9,6 @@ use tangul_core::ResultSet;
 pub use tangul_core::chart::{ChartStyle, ChartView};
 
 use crate::analyze::{significant, statements};
-
-/// Most series (value columns); more are hard to tell apart.
-pub const MAX_SERIES: usize = 5;
-/// Most rows for bar styles; beyond that the bars are unreadable.
-pub const MAX_BARS: usize = 50;
-/// Most points per line chart.
-pub const MAX_POINTS: usize = 1000;
 
 /// One value column.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,19 +34,18 @@ pub struct ChartData {
     pub grouped: bool,
     /// Line chart whose dates are not ascending (the query decides the order).
     pub unsorted: bool,
+    /// The result has more rows than the chart got (the row limit, or pages not
+    /// loaded): the chart shows only the first ones.
+    pub truncated: bool,
 }
 
 /// The chart for a result, or why there is none (shown as the button's tooltip).
-pub fn chart_data(sql: &str, result: &ResultSet) -> Result<ChartData, String> {
+/// `truncated`: the result has more rows than `result` holds.
+pub fn chart_data(sql: &str, result: &ResultSet, truncated: bool) -> Result<ChartData, String> {
     let columns = result.columns();
     let rows = result.row_count();
     if columns.len() < 2 {
         return Err("A chart needs a label column followed by number columns".into());
-    }
-    if columns.len() - 1 > MAX_SERIES {
-        return Err(format!(
-            "A chart shows at most {MAX_SERIES} number columns (after the label column)"
-        ));
     }
     if rows < 2 {
         return Err("A chart needs at least 2 rows".into());
@@ -84,13 +77,6 @@ pub fn chart_data(sql: &str, result: &ResultSet) -> Result<ChartData, String> {
 
     let x: Vec<Option<&str>> = (0..rows).map(|r| result.cell(r, 0)).collect();
     let dates = x.iter().flatten().all(|v| is_date(v)) && x.iter().any(Option::is_some);
-    // Dates may be many points on a line; categories are read bar by bar.
-    let limit = if dates { MAX_POINTS } else { MAX_BARS };
-    if rows > limit {
-        return Err(format!(
-            "{rows} rows are too many for a chart (at most {limit}); group them with GROUP BY"
-        ));
-    }
     let unsorted = dates && !x.iter().flatten().is_sorted();
 
     Ok(ChartData {
@@ -100,6 +86,7 @@ pub fn chart_data(sql: &str, result: &ResultSet) -> Result<ChartData, String> {
         series,
         grouped: groups(sql),
         unsorted,
+        truncated,
     })
 }
 
@@ -110,21 +97,12 @@ impl ChartData {
         if self.series.len() < 2 {
             return Vec::new();
         }
-        self.fitting(&ChartStyle::ALL)
+        ChartStyle::ALL.to_vec()
     }
 
     /// Styles for one value column.
     pub fn single_styles(&self) -> Vec<ChartStyle> {
-        self.fitting(&ChartStyle::SINGLE)
-    }
-
-    /// Bars only for up to [`MAX_BARS`] rows.
-    fn fitting(&self, styles: &[ChartStyle]) -> Vec<ChartStyle> {
-        styles
-            .iter()
-            .copied()
-            .filter(|s| !s.is_bars() || self.x.len() <= MAX_BARS)
-            .collect()
+        ChartStyle::SINGLE.to_vec()
     }
 
     pub fn fits(&self, view: ChartView) -> bool {
@@ -211,6 +189,32 @@ impl ChartData {
             .into_iter()
             .fold((0.0, 0.0), |(lo, hi), v| (f64::min(lo, v), f64::max(hi, v)))
     }
+}
+
+/// Points of a line (x in pixels, ascending) reduced to at most two per pixel
+/// column: its lowest and highest, in their order. The line looks the same, and
+/// painting it costs the width, not the row count. Few points stay as they are.
+pub fn min_max_per_pixel(points: &[(f32, f32)], width: f32) -> Vec<(f32, f32)> {
+    if points.len() as f32 <= 2. * width.max(1.) {
+        return points.to_vec();
+    }
+    let mut out = Vec::with_capacity(2 * width as usize + 2);
+    for column in points.chunk_by(|a, b| a.0.floor() == b.0.floor()) {
+        let (mut lo, mut hi) = (0, 0);
+        for (i, p) in column.iter().enumerate() {
+            if p.1 < column[lo].1 {
+                lo = i;
+            }
+            if p.1 > column[hi].1 {
+                hi = i;
+            }
+        }
+        out.push(column[lo.min(hi)]);
+        if lo != hi {
+            out.push(column[lo.max(hi)]);
+        }
+    }
+    out
 }
 
 /// About `count` round axis values covering `min..=max` (steps of 1, 2 or 5 times a
@@ -330,6 +334,7 @@ mod tests {
         let c = chart_data(
             "select status, count(*) orders, sum(total) revenue from app.orders group by 1",
             &r,
+            false,
         )
         .unwrap();
         assert!(!c.dates);
@@ -367,7 +372,7 @@ mod tests {
                 &[Some("2024-01-01 00:00:00+00"), Some("7")],
             ],
         );
-        let c = chart_data("select * from app.revenue_by_day", &r).unwrap();
+        let c = chart_data("select * from app.revenue_by_day", &r, false).unwrap();
         assert!(c.dates);
         // One value column: only the single-column styles.
         assert!(c.multi_styles().is_empty());
@@ -391,32 +396,86 @@ mod tests {
             &["year", "n"],
             &[&[Some("2023"), Some("1")], &[Some("2024"), Some("2")]],
         );
-        assert!(!chart_data("", &r).unwrap().dates);
+        assert!(!chart_data("", &r, false).unwrap().dates);
     }
 
     #[test]
     fn refuses_other_shapes() {
         let one_col = result(&["n"], &[&[Some("1")], &[Some("2")]]);
-        assert!(chart_data("", &one_col).is_err());
+        assert!(chart_data("", &one_col, false).is_err());
         let text_value = result(
             &["a", "b"],
             &[&[Some("x"), Some("1")], &[Some("y"), Some("n/a")]],
         );
         assert_eq!(
-            chart_data("", &text_value).unwrap_err(),
+            chart_data("", &text_value, false).unwrap_err(),
             "Only the first column may hold text; b has “n/a”"
         );
         let one_row = result(&["a", "b"], &[&[Some("x"), Some("1")]]);
-        assert!(chart_data("", &one_row).is_err());
+        assert!(chart_data("", &one_row, false).is_err());
         let nulls = result(&["a", "b"], &[&[Some("x"), None], &[Some("y"), None]]);
-        assert!(chart_data("", &nulls).is_err());
-        let many: Vec<[Option<&str>; 2]> = (0..=MAX_BARS).map(|_| [Some("x"), Some("1")]).collect();
-        let many: Vec<&[Option<&str>]> = many.iter().map(|r| &r[..]).collect();
-        assert!(
-            chart_data("", &result(&["a", "b"], &many))
-                .unwrap_err()
-                .contains("GROUP BY")
+        assert!(chart_data("", &nulls, false).is_err());
+    }
+
+    #[test]
+    fn size_is_no_reason_to_refuse() {
+        // 10 000 rows and 12 number columns: a chart, with all styles.
+        let cols: Vec<String> = (0..13).map(|c| format!("c{c}")).collect();
+        let cols: Vec<&str> = cols.iter().map(String::as_str).collect();
+        let labels: Vec<String> = (0..10_000).map(|r| format!("r{r}")).collect();
+        let rows: Vec<Vec<Option<&str>>> = labels
+            .iter()
+            .map(|l| {
+                std::iter::once(Some(l.as_str()))
+                    .chain([Some("1"); 12])
+                    .collect()
+            })
+            .collect();
+        let rows: Vec<&[Option<&str>]> = rows.iter().map(Vec::as_slice).collect();
+        let c = chart_data("", &result(&cols, &rows), false).unwrap();
+        assert_eq!((c.x.len(), c.series.len()), (10_000, 12));
+        assert_eq!(c.multi_styles(), ChartStyle::ALL);
+        assert!(c.fits(ChartView {
+            style: ChartStyle::Bars,
+            series: Some(11)
+        }));
+        assert!(!c.truncated);
+        // A result cut at the row limit says so.
+        let r = result(
+            &["a", "b"],
+            &[&[Some("x"), Some("1")], &[Some("y"), Some("2")]],
         );
+        assert!(chart_data("", &r, true).unwrap().truncated);
+    }
+
+    #[test]
+    fn many_points_keep_each_pixel_s_min_and_max() {
+        // 10 points per pixel column over 100 px.
+        let points: Vec<(f32, f32)> = (0..1000)
+            .map(|i| (i as f32 / 10., ((i * 7919) % 101) as f32))
+            .collect();
+        let reduced = min_max_per_pixel(&points, 100.);
+        assert!(reduced.len() <= 200);
+        for px in 0..100 {
+            let column: Vec<f32> = points
+                .iter()
+                .filter(|p| p.0.floor() == px as f32)
+                .map(|p| p.1)
+                .collect();
+            let kept: Vec<f32> = reduced
+                .iter()
+                .filter(|p| p.0.floor() == px as f32)
+                .map(|p| p.1)
+                .collect();
+            let min = column.iter().copied().fold(f32::MAX, f32::min);
+            let max = column.iter().copied().fold(f32::MIN, f32::max);
+            assert!(kept.contains(&min) && kept.contains(&max), "column {px}");
+        }
+        // In x order, so the line is drawn left to right.
+        assert!(reduced.is_sorted_by(|a, b| a.0 <= b.0));
+        // Few points stay as they are.
+        let few = [(0., 1.), (0.5, 3.), (1., 2.)];
+        assert_eq!(min_max_per_pixel(&few, 100.), few);
     }
 
     #[test]
@@ -429,7 +488,7 @@ mod tests {
                 &[Some("r"), Some("4"), Some("-2")],
             ],
         );
-        let c = chart_data("", &r).unwrap();
+        let c = chart_data("", &r, false).unwrap();
         assert_eq!(
             c.stacks(),
             [

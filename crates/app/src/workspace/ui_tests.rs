@@ -117,6 +117,17 @@ fn tab_with_rows(
     rows: &[[Option<&str>; 2]],
     cx: &mut TestAppContext,
 ) -> Entity<QueryTab> {
+    tab_with_result(handle, workspace, rows, false, cx)
+}
+
+/// Like [`tab_with_rows`]; `truncated`: the engine stopped at its row limit.
+fn tab_with_result(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    rows: &[[Option<&str>; 2]],
+    truncated: bool,
+    cx: &mut TestAppContext,
+) -> Entity<QueryTab> {
     cx.update_window(handle.into(), |_, window, cx| {
         let tab = workspace.update(cx, |ws, cx| ws.add_tab("select id, doc from t", window, cx));
         tab.update(cx, |t, cx| {
@@ -134,6 +145,9 @@ fn tab_with_rows(
                 batch.finish_row();
             }
             t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+            if truncated {
+                t.on_query_event(QueryEvent::Exec(ExecEvent::Truncated), cx);
+            }
             t.on_query_event(
                 QueryEvent::Finished {
                     elapsed: Default::default(),
@@ -1180,5 +1194,32 @@ fn a_text_column_shows_its_counts(cx: &mut TestAppContext) {
     });
     step(handle, cx, |window, _| {
         assert!(window.find("column-stats").visible())
+    });
+}
+
+#[gpui_kit::test]
+fn a_large_result_gets_a_chart_that_says_it_is_cut(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    // More rows than bars used to allow.
+    let labels: Vec<String> = (0..200).map(|i| format!("r{i}")).collect();
+    let rows: Vec<[Option<&str>; 2]> = labels
+        .iter()
+        .map(|l| [Some(l.as_str()), Some("1")])
+        .collect();
+    let tab = tab_with_result(handle, &workspace, &rows, true, cx);
+    step(handle, cx, |_, cx| {
+        assert!(tab.read(cx).chart(cx).is_ok());
+        tab.update(cx, |t, cx| {
+            t.set_chart_view(
+                Some(tangul_core::chart::ChartView {
+                    style: tangul_core::chart::ChartStyle::Bars,
+                    series: Some(0),
+                }),
+                cx,
+            )
+        });
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("chart-truncated").visible())
     });
 }
