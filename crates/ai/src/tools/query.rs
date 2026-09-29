@@ -150,6 +150,7 @@ impl Tool for RunReadonly {
         }
         let conn = ctx.conn(connection.as_deref())?;
         let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
+        let statement = sql.trim().to_string();
         let out = read(ctx, conn.conn, sql, limit).await?;
         let rows = match out.results.last() {
             Some(set) => Rows {
@@ -170,8 +171,12 @@ impl Tool for RunReadonly {
             },
         };
         let kept = has_long_cells(&rows).then(|| {
-            ctx.results()
-                .keep(&conn.name, rows.columns.clone(), rows.rows.clone())
+            ctx.results().keep(
+                &conn.name,
+                &statement,
+                rows.columns.clone(),
+                rows.rows.clone(),
+            )
         });
         let text = text(&rows, kept.as_deref());
         let n = rows.rows.len() as u64;

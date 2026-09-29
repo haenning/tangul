@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Mutex, PoisonError, RwLock};
 
 use tangul_ai::mcp::{CtxSource, McpServer, new_token};
-use tangul_ai::{AuditSink, Ctx, Exposed, ProposalSink, SqlProposal, ToolCall};
+use tangul_ai::{AuditSink, Ctx, Exposed, ProposalSink, SharedBookmark, SqlProposal, ToolCall};
 use tangul_data::local::{AuditEntry, Source};
 
 use super::*;
@@ -189,7 +189,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Proposed · {}", proposal.connection);
+        let title = proposal
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Proposed · {}", proposal.connection));
         self.open_sql(&title, &proposal.sql, window, cx);
         let Some(tab) = self.tabs.active_query().cloned() else {
             return;
@@ -200,14 +203,8 @@ impl Workspace {
                 t.set_conn(conn, cx);
             }
             // Shown as the chart once the user runs it.
-            if let Some(style) = proposal.chart {
-                t.set_chart_view(
-                    Some(ChartView {
-                        style,
-                        series: None,
-                    }),
-                    cx,
-                );
+            if let Some(view) = proposal.view {
+                t.request_chart(view.style, view.column, cx);
             }
         });
         cx.notify();
@@ -309,6 +306,7 @@ impl Workspace {
                 conn,
                 driver: db.driver,
                 values: db.ai_values,
+                bookmarks: self.mcp_bookmarks(&db.id),
             });
         }
         *self
@@ -318,10 +316,47 @@ impl Workspace {
             .unwrap_or_else(PoisonError::into_inner) = exposed;
     }
 
+    /// The bookmarks of database `db_id` as the assistant sees them.
+    fn mcp_bookmarks(&self, db_id: &str) -> Vec<SharedBookmark> {
+        self.data
+            .local
+            .bookmarks_for(Some(db_id))
+            .into_iter()
+            .map(|b| SharedBookmark {
+                name: b.name,
+                sql: b.sql,
+            })
+            .collect()
+    }
+
+    /// A bookmark was saved or deleted: the server offers the bookmarks as they are.
+    pub(super) fn refresh_mcp_bookmarks(&mut self) {
+        let mut exposed = self
+            .mcp
+            .exposed
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        for e in exposed.iter_mut() {
+            if let Some((db, _)) = self.find_user(&e.user) {
+                e.bookmarks = self.mcp_bookmarks(&db.id.clone());
+            }
+        }
+    }
+
     /// Where the server listens, if it runs.
     #[cfg(test)]
     pub(super) fn mcp_url(&self) -> Option<String> {
         self.mcp.server.as_ref().map(McpServer::url)
+    }
+
+    /// The bookmarks offered for the first database (tests).
+    #[cfg(test)]
+    pub(super) fn mcp_offered_bookmarks(&self) -> Vec<SharedBookmark> {
+        let exposed = self.mcp.exposed.read().unwrap();
+        exposed
+            .first()
+            .map(|e| e.bookmarks.clone())
+            .unwrap_or_default()
     }
 
     /// The names of the databases offered now.

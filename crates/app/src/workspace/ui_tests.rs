@@ -824,6 +824,37 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
                     .starts_with("Bearer ")
             );
             assert_eq!(ws.mcp_offered(), ["shop"]);
+        });
+    });
+    // Bookmarks are offered as they are saved and deleted, passwords redacted.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            let bookmarks = |ws: &Workspace| ws.mcp_offered_bookmarks();
+            assert!(bookmarks(ws).is_empty());
+            ws.save_bookmark(
+                tangul_data::local::Bookmark {
+                    id: "b1".into(),
+                    name: "Reader".into(),
+                    sql: "CREATE ROLE r LOGIN PASSWORD 'hunter2'".into(),
+                    database_id: Some("db".into()),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            assert_eq!(
+                bookmarks(ws),
+                [tangul_ai::SharedBookmark {
+                    name: "Reader".into(),
+                    sql: "CREATE ROLE r LOGIN PASSWORD '***'".into(),
+                }]
+            );
+            ws.delete_bookmark("b1", window, cx);
+            assert!(bookmarks(ws).is_empty());
+        });
+    });
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, _| {
             // Turned off for AI tools: no longer offered.
             ws.data.profiles.databases[0].ai_tools = false;
             ws.expose_to_mcp();
@@ -976,28 +1007,75 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         connection: "shop".into(),
         user: "app".into(),
         sql: sql.into(),
-        chart: None,
+        title: None,
+        view: None,
     });
-    // A query to look at as a chart: set before it runs.
+    // A query to look at as a chart of one column, named: set before it runs,
+    // resolved when the result arrives.
     sink(tangul_ai::SqlProposal {
         connection: "shop".into(),
         user: "app".into(),
-        sql: "SELECT day, orders FROM daily".into(),
-        chart: Some(tangul_core::chart::ChartStyle::Bars),
+        sql: "SELECT day, orders, revenue FROM daily".into(),
+        title: Some("Revenue per day".into()),
+        view: Some(tangul_ai::ProposedView {
+            style: tangul_core::chart::ChartStyle::Bars,
+            column: Some("revenue".into()),
+        }),
     });
     cx.run_until_parked();
+    let bars = |series| {
+        Some(tangul_core::chart::ChartView {
+            style: tangul_core::chart::ChartStyle::Bars,
+            series,
+        })
+    };
     step(handle, cx, |_, cx| {
         let ws = workspace.read(cx);
         let tab = ws.tabs.active_query().expect("opened").read(cx);
-        assert_eq!(tab.sql(cx), "SELECT day, orders FROM daily");
+        assert_eq!(tab.title.as_ref(), "Revenue per day");
+        assert_eq!(tab.sql(cx), "SELECT day, orders, revenue FROM daily");
         assert!(!tab.is_running(cx), "not run");
-        assert_eq!(
-            tab.chart_view(cx),
-            Some(tangul_core::chart::ChartView {
-                style: tangul_core::chart::ChartStyle::Bars,
-                series: None
-            })
-        );
+        assert_eq!(tab.chart_view(cx), bars(None));
+    });
+    // The user runs it: the view shows the column asked for.
+    step(handle, cx, |_, cx| {
+        let tab = workspace.read(cx).tabs.active_query().unwrap().clone();
+        tab.update(cx, |t, cx| {
+            let sql = "SELECT day, orders, revenue FROM daily";
+            t.started(QueryId(7), sql, cx);
+            let col = |n: &str| ColumnInfo { name: n.into() };
+            t.on_query_event(
+                QueryEvent::Exec(ExecEvent::ResultStart(vec![
+                    col("day"),
+                    col("orders"),
+                    col("revenue"),
+                ])),
+                cx,
+            );
+            let mut batch = RowBatch::with_capacity(6);
+            for row in [["2024-01-01", "3", "10"], ["2024-01-02", "4", "12"]] {
+                for cell in row {
+                    batch.push_cell(Some(cell));
+                }
+                batch.finish_row();
+            }
+            t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+            t.on_query_event(
+                QueryEvent::Finished {
+                    elapsed: Default::default(),
+                    error: None,
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+                cx,
+            );
+        });
+    });
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.active_query().unwrap().read(cx);
+        assert_eq!(tab.chart_view(cx), bars(Some(1)));
     });
     // The first proposal's tab, before it.
     step(handle, cx, |_, cx| {

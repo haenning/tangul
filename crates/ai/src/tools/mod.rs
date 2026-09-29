@@ -1,5 +1,6 @@
 //! The tools, one module each, and what they share.
 
+mod bookmarks;
 mod catalog;
 mod cells;
 mod connections;
@@ -30,6 +31,7 @@ pub(crate) fn all() -> Vec<Box<dyn Tool>> {
         Box::new(catalog::ViewDefinition),
         Box::new(query::RunReadonly),
         Box::new(cells::GetCell),
+        Box::new(bookmarks::ListBookmarks),
         Box::new(propose::ProposeSql),
     ]
 }

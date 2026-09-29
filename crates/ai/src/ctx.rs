@@ -27,6 +27,16 @@ pub struct Exposed {
     pub driver: DriverKind,
     /// What the assistant may read from the rows (value profiles).
     pub values: ValueAccess,
+    /// The user's bookmarks for this database (`list_bookmarks`, `propose_sql`).
+    pub bookmarks: Vec<SharedBookmark>,
+}
+
+/// A bookmark as the assistant sees it: its name and SQL (passwords are redacted
+/// before bookmarks are saved).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedBookmark {
+    pub name: String,
+    pub sql: String,
 }
 
 /// The context of every tool call: the knowledge pool, the engine for queries, and
@@ -53,8 +63,20 @@ pub struct SqlProposal {
     /// The database user whose tab connection gets it (see [`Exposed::user`]).
     pub user: String,
     pub sql: String,
+    /// The tab's title; `None`: tangul names it.
+    pub title: Option<String>,
     /// Show the result as this chart once the user runs it.
-    pub chart: Option<ChartStyle>,
+    pub view: Option<ProposedView>,
+}
+
+/// A chart asked for by the assistant. The column is a name: whether the result
+/// has it is only known once the user runs the query; if not, tangul shows its
+/// default view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposedView {
+    pub style: ChartStyle,
+    /// One value column; `None`: all of them.
+    pub column: Option<String>,
 }
 
 /// Where proposals go.
@@ -127,7 +149,9 @@ impl Ctx {
     }
 
     /// The exposed connection called `name`, or the only one when it is left out.
-    pub(crate) fn conn(&self, name: Option<&str>) -> Result<Conn, ToolError> {
+    /// The exposed connection called `name`, or the only one, without what the
+    /// knowledge pool holds (for tools that need no schema).
+    pub(crate) fn exposed_one(&self, name: Option<&str>) -> Result<&Exposed, ToolError> {
         let names = || {
             self.exposed
                 .iter()
@@ -135,29 +159,29 @@ impl Ctx {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let exposed = match name {
+        match name {
             Some(name) => self
                 .exposed
                 .iter()
                 .find(|e| e.name.eq_ignore_ascii_case(name))
                 .ok_or_else(|| {
                     ToolError::NotFound(format!("connection {name}; available: {}", names()))
-                })?,
+                }),
             None => match self.exposed.as_slice() {
-                [only] => only,
-                [] => {
-                    return Err(ToolError::NotAllowed(
-                        "no connection is enabled for the assistant".into(),
-                    ));
-                }
-                _ => {
-                    return Err(ToolError::BadInput(format!(
-                        "several connections; name one of: {}",
-                        names()
-                    )));
-                }
+                [only] => Ok(only),
+                [] => Err(ToolError::NotAllowed(
+                    "no connection is enabled for the assistant".into(),
+                )),
+                _ => Err(ToolError::BadInput(format!(
+                    "several connections; name one of: {}",
+                    names()
+                ))),
             },
-        };
+        }
+    }
+
+    pub(crate) fn conn(&self, name: Option<&str>) -> Result<Conn, ToolError> {
+        let exposed = self.exposed_one(name)?;
         let known = self
             .knowledge
             .user(&exposed.user)

@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::json;
-use tangul_ai::{Ctx, Exposed, Registry, SqlProposal, ToolError};
+use tangul_ai::{Ctx, Exposed, ProposedView, Registry, SharedBookmark, SqlProposal, ToolError};
 use tangul_assist::dialect::dialect_for;
 use tangul_assist::schema::SchemaIndex;
+use tangul_core::chart::ChartStyle;
 use tangul_core::{ConnId, ConnectConfig, DriverKind, TlsMode, ValueAccess};
 use tangul_engine::{Command, EngineConfig, Event};
 use tangul_service::knowledge::Knowledge;
@@ -94,6 +95,16 @@ async fn shop_with(name: &str, values: ValueAccess) -> (PathBuf, Ctx) {
         conn,
         driver: DriverKind::Sqlite,
         values,
+        bookmarks: vec![
+            SharedBookmark {
+                name: "Paid orders".into(),
+                sql: "SELECT id FROM orders WHERE status = 'paid'".into(),
+            },
+            SharedBookmark {
+                name: "Clean up".into(),
+                sql: "DELETE FROM orders WHERE status = 'cancelled'".into(),
+            },
+        ],
     };
     (dir, Ctx::new(knowledge, Some(engine), vec![exposed]))
 }
@@ -367,40 +378,148 @@ async fn proposals_open_for_the_user_and_never_run() {
             connection: "shop".into(),
             user: "u1".into(),
             sql: format!("-- Proposed by the assistant: drop the test order\n{sql}"),
-            chart: None,
+            title: None,
+            view: None,
         }]
     );
-    // A query to look at as a chart; not for changes.
+    // A query to look at as a chart: all columns, or one by name. Whether the
+    // result has it is only known once the user runs it.
+    let by_status = "SELECT status, count(*) AS n FROM orders GROUP BY status";
     assert_eq!(
         call(
             &ctx,
             "propose_sql",
-            json!({"sql": "SELECT status, count(*) FROM orders GROUP BY status", "chart": "bars"})
+            json!({"sql": by_status, "view": {"chart": "bars"}, "title": " Orders\nby status "})
         )
         .await
         .unwrap(),
         "Opened in tangul in a new tab on shop, set to show bars side by side once the user \
-         runs it. It was not run."
+         runs it (tangul's default view if the result doesn't fit). It was not run."
     );
     assert_eq!(
-        proposed.lock().unwrap()[1].chart,
-        Some(tangul_core::chart::ChartStyle::Bars)
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": by_status, "view": {"chart": "line", "column": "missing"}})
+        )
+        .await
+        .unwrap(),
+        "Opened in tangul in a new tab on shop, set to show lines of missing once the user \
+         runs it (tangul's default view if the result doesn't fit). It was not run."
     );
+    {
+        let p = proposed.lock().unwrap();
+        assert_eq!(p[1].title.as_deref(), Some("Orders by status"));
+        assert_eq!(
+            p[1].view,
+            Some(ProposedView {
+                style: ChartStyle::Bars,
+                column: None
+            })
+        );
+        assert_eq!(
+            p[2].view,
+            Some(ProposedView {
+                style: ChartStyle::Line,
+                column: Some("missing".into())
+            })
+        );
+    }
+    // Every style can be asked for.
+    for style in ChartStyle::ALL {
+        let view = json!({"chart": style.key(), "column": "n"});
+        assert!(
+            call(&ctx, "propose_sql", json!({"sql": by_status, "view": view}))
+                .await
+                .is_ok(),
+            "{}",
+            style.key()
+        );
+    }
+    // A write with a view: refused, like a view of a bookmark that writes.
     assert_eq!(
-        call(&ctx, "propose_sql", json!({"sql": sql, "chart": "line"})).await,
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": sql, "view": {"chart": "line"}})
+        )
+        .await,
         Err(ToolError::BadInput(
-            "a chart shows a query that reads; leave out chart for changes".into()
+            "a view shows a query that reads; leave out view for changes".into()
         ))
     );
     assert!(matches!(
         call(
             &ctx,
             "propose_sql",
-            json!({"sql": "SELECT 1", "chart": "pie"})
+            json!({"sql": "SELECT 1", "view": {"chart": "pie"}})
         )
         .await,
         Err(ToolError::BadInput(_))
     ));
+    // The old `chart` field is gone.
+    assert!(matches!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": "SELECT 1", "chart": "bars"})
+        )
+        .await,
+        Err(ToolError::BadInput(_))
+    ));
+    // A bookmark by name (any case), titled after it.
+    let before = proposed.lock().unwrap().len();
+    call(
+        &ctx,
+        "propose_sql",
+        json!({"bookmark": "paid ORDERS", "view": {"chart": "bars"}}),
+    )
+    .await
+    .unwrap();
+    {
+        let p = proposed.lock().unwrap();
+        let opened = &p[before];
+        assert_eq!(opened.title.as_deref(), Some("Paid orders"));
+        assert_eq!(
+            opened.sql,
+            "-- Proposed by the assistant\nSELECT id FROM orders WHERE status = 'paid'"
+        );
+    }
+    assert_eq!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"bookmark": "Clean up", "view": {"chart": "bars"}})
+        )
+        .await,
+        Err(ToolError::BadInput(
+            "a view shows a query that reads; leave out view for changes".into()
+        ))
+    );
+    assert_eq!(
+        call(&ctx, "propose_sql", json!({"bookmark": "Nope"})).await,
+        Err(ToolError::NotFound(
+            "bookmark Nope on shop; list_bookmarks lists them".into()
+        ))
+    );
+    // One source at a time.
+    assert_eq!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": "SELECT 1", "bookmark": "Paid orders"})
+        )
+        .await,
+        Err(ToolError::BadInput(
+            "give one of sql, bookmark or result_id".into()
+        ))
+    );
+    assert_eq!(
+        call(&ctx, "propose_sql", json!({"result_id": "r7"})).await,
+        Err(ToolError::NotFound(
+            "result r7 (results are kept for 10 minutes); give its sql instead".into()
+        ))
+    );
     assert_eq!(
         call(&ctx, "propose_sql", json!({"sql": " "})).await,
         Err(ToolError::BadInput("sql is empty".into()))
@@ -534,6 +653,58 @@ async fn statistics_only_read_no_values() {
             .await
             .unwrap(),
         "Nothing matches \"cancelled\"."
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bookmarks_are_listed_with_their_sql() {
+    let (dir, ctx) = shop("bookmarks").await;
+    assert_eq!(
+        call(&ctx, "list_bookmarks", json!({})).await.unwrap(),
+        "Bookmarks on shop:\n\nPaid orders:\nSELECT id FROM orders WHERE status = 'paid'\n\n\
+         Clean up:\nDELETE FROM orders WHERE status = 'cancelled'"
+    );
+    assert_eq!(
+        call(&ctx, "list_bookmarks", json!({"connection": "other"})).await,
+        Err(ToolError::NotFound(
+            "connection other; available: shop".into()
+        ))
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_result_opens_as_its_query() {
+    let (dir, ctx) = shop("kept").await;
+    let proposed: Arc<Mutex<Vec<SqlProposal>>> = Arc::default();
+    let ctx = ctx.with_proposals({
+        let proposed = proposed.clone();
+        Arc::new(move |p| proposed.lock().unwrap().push(p))
+    });
+    // Kept because a cell was cut.
+    let sql = "SELECT 1 AS id, hex(zeroblob(200)) AS doc";
+    let out = call(&ctx, "run_readonly", json!({"sql": sql}))
+        .await
+        .unwrap();
+    assert!(out.contains("get_cell r1"), "{out}");
+    call(&ctx, "propose_sql", json!({"result_id": "r1"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        proposed.lock().unwrap()[0].sql,
+        format!("-- Proposed by the assistant\n{sql}")
+    );
+    assert_eq!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"result_id": "r1", "connection": "elsewhere"})
+        )
+        .await,
+        Err(ToolError::BadInput(
+            "result r1 is from shop; leave out connection".into()
+        ))
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }

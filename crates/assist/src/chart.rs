@@ -129,6 +129,27 @@ impl ChartData {
             .unwrap_or_else(|| self.default_view())
     }
 
+    /// The view asked for as a style and a column name (`None`: all columns,
+    /// or the only one); the default view when the result has no such column or
+    /// the style doesn't fit it.
+    pub fn view_for(&self, style: ChartStyle, column: Option<&str>) -> ChartView {
+        let series = match column {
+            Some(name) => {
+                let name = name.trim();
+                match self.series.iter().position(|s| s.name == name).or_else(|| {
+                    self.series
+                        .iter()
+                        .position(|s| s.name.eq_ignore_ascii_case(name))
+                }) {
+                    Some(i) => Some(i),
+                    None => return self.default_view(),
+                }
+            }
+            None => (self.series.len() < 2).then_some(0),
+        };
+        self.view_or_default(Some(ChartView { style, series }))
+    }
+
     /// Name of a view for the status bar: `Stacked bars`, or `Line · revenue`.
     pub fn view_label(&self, view: ChartView) -> String {
         match view.series.and_then(|i| self.series.get(i)) {
@@ -415,6 +436,46 @@ mod tests {
         assert!(chart_data("", &one_row, false).is_err());
         let nulls = result(&["a", "b"], &[&[Some("x"), None], &[Some("y"), None]]);
         assert!(chart_data("", &nulls, false).is_err());
+    }
+
+    #[test]
+    fn views_asked_for_by_column_name() {
+        let r = result(
+            &["day", "orders", "Revenue"],
+            &[
+                &[Some("2024-01-01"), Some("3"), Some("10")],
+                &[Some("2024-01-02"), Some("4"), Some("12")],
+            ],
+        );
+        let c = chart_data("", &r, false).unwrap();
+        let view = |style, series| ChartView { style, series };
+        // A column by name, in any case.
+        assert_eq!(
+            c.view_for(ChartStyle::Area, Some("revenue")),
+            view(ChartStyle::Area, Some(1))
+        );
+        // All columns.
+        assert_eq!(
+            c.view_for(ChartStyle::StackedBars, None),
+            view(ChartStyle::StackedBars, None)
+        );
+        // A column the result doesn't have, or a style that doesn't fit one
+        // column: the default view.
+        assert_eq!(c.view_for(ChartStyle::Bars, Some("nope")), c.default_view());
+        assert_eq!(
+            c.view_for(ChartStyle::StackedArea, Some("orders")),
+            c.default_view()
+        );
+        // With one value column, no column means that one.
+        let one = result(
+            &["a", "n"],
+            &[&[Some("x"), Some("1")], &[Some("y"), Some("2")]],
+        );
+        let c = chart_data("", &one, false).unwrap();
+        assert_eq!(
+            c.view_for(ChartStyle::Line, None),
+            view(ChartStyle::Line, Some(0))
+        );
     }
 
     #[test]

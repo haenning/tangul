@@ -17,7 +17,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_assist::chart::{ChartData, ChartView};
+use tangul_assist::chart::{ChartData, ChartStyle, ChartView};
 use tangul_assist::columns::ColumnFacts;
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::{ConnId, QueryId, TabId};
@@ -409,6 +409,17 @@ impl QueryTab {
     /// Shows the result as `view`, or as the grid (`None`).
     pub fn set_chart_view(&mut self, view: Option<ChartView>, cx: &mut Context<Self>) {
         self.results.update(cx, |r, cx| r.set_chart_view(view, cx));
+    }
+
+    /// See [`ResultView::request_chart`].
+    pub fn request_chart(
+        &mut self,
+        style: ChartStyle,
+        column: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.results
+            .update(cx, |r, cx| r.request_chart(style, column, cx));
     }
 
     /// Timing and row count of the last run, shown in the workspace status bar.

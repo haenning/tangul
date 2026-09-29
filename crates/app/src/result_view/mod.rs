@@ -18,7 +18,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_assist::chart::{ChartData, ChartView, chart_data};
+use tangul_assist::chart::{ChartData, ChartStyle, ChartView, chart_data};
 use tangul_assist::columns::ColumnFacts;
 use tangul_assist::dialect::Dialect;
 use tangul_assist::refine::{ColumnFilter, ColumnKind, Refine, Sort, refinable, refined_sql};
@@ -109,6 +109,10 @@ pub struct ResultView {
     /// The chart picked in the status bar, shown instead of the grid when the result
     /// can be charted; `None` shows the grid. Kept across runs.
     chart_view: Option<ChartView>,
+    /// A chart asked for by style and column name before the result is known (a
+    /// proposal from the assistant): resolved against the next result, then
+    /// dropped (see `ChartData::view_for`).
+    chart_request: Option<(ChartStyle, Option<String>)>,
     /// Curved instead of straight lines; starts straight, which is exact.
     smooth_lines: bool,
     /// The last run's statement, when its result can be filtered, sorted and paged.
@@ -153,6 +157,7 @@ impl ResultView {
             last_rows: None,
             chart: Err(NO_RESULT.into()),
             chart_view: None,
+            chart_request: None,
             smooth_lines: false,
             base_sql: None,
             derived: None,
@@ -404,6 +409,14 @@ impl ResultView {
                     self.chart = chart_data(&self.sql, result, self.truncated)
                         .map(Rc::new)
                         .map_err(Into::into);
+                    if let Some((style, column)) = self.chart_request.take() {
+                        // A result that can't be a chart shows the grid.
+                        self.chart_view = self
+                            .chart
+                            .as_ref()
+                            .ok()
+                            .map(|data| data.view_for(style, column.as_deref()));
+                    }
                 }
                 self.status = Status::Done {
                     elapsed,
@@ -521,6 +534,24 @@ impl ResultView {
     /// Shows the result as `view`, or as the grid (`None`).
     pub fn set_chart_view(&mut self, view: Option<ChartView>, cx: &mut Context<Self>) {
         self.chart_view = view;
+        self.chart_request = None;
+        cx.notify();
+    }
+
+    /// Shows the next result as `style`, of one value column by name or all of
+    /// them; the default view when the result doesn't fit.
+    pub fn request_chart(
+        &mut self,
+        style: ChartStyle,
+        column: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        // Set already, so the status bar says a chart is coming.
+        self.chart_view = Some(ChartView {
+            style,
+            series: None,
+        });
+        self.chart_request = Some((style, column));
         cx.notify();
     }
 

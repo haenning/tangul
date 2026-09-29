@@ -78,6 +78,7 @@ async fn server_on(
         conn,
         driver: DriverKind::Sqlite,
         values: ValueAccess::None,
+        bookmarks: Vec::new(),
     }];
     let calls: Arc<Mutex<Vec<ToolCall>>> = Arc::default();
     let sink = {
@@ -274,6 +275,7 @@ async fn a_client_lists_and_calls_the_tools() {
                 "view_definition",
                 "run_readonly",
                 "get_cell",
+                "list_bookmarks",
                 "propose_sql"
             ]
         );
@@ -366,7 +368,7 @@ async fn the_latest_protocol_gets_a_cacheable_list() {
         let result = &reply.json()["result"];
         assert_eq!(result["ttlMs"], 0, "{result}");
         assert_eq!(result["cacheScope"], "private");
-        assert_eq!(result["tools"].as_array().unwrap().len(), 12);
+        assert_eq!(result["tools"].as_array().unwrap().len(), 13);
         let reply = post(
             addr,
             &[
