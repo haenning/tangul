@@ -87,6 +87,18 @@ impl ResultSet {
         self.rows += batch.rows;
     }
 
+    /// Its columns and all its rows as one batch, e.g. to replay a finished result
+    /// as a driver's events.
+    pub fn into_batch(self) -> (Vec<ColumnInfo>, RowBatch) {
+        let batch = RowBatch {
+            text: self.text,
+            ends: self.ends,
+            nulls: self.nulls,
+            rows: self.rows,
+        };
+        (self.columns, batch)
+    }
+
     /// Returns `None` for SQL NULL.
     pub fn cell(&self, row: usize, col: usize) -> Option<&str> {
         let ix = row * self.columns.len() + col;
@@ -128,5 +140,14 @@ mod tests {
         assert_eq!(rs.cell(0, 1), None);
         assert_eq!(rs.cell(1, 0), Some(""));
         assert_eq!(rs.cell(1, 1), Some("héllo"));
+
+        // Replayed as one batch, it reads the same.
+        let (columns, batch) = rs.into_batch();
+        assert_eq!(batch.rows(), 2);
+        let mut again = ResultSet::new(columns);
+        again.append(batch);
+        assert_eq!(again.row_count(), 2);
+        assert_eq!(again.cell(0, 1), None);
+        assert_eq!(again.cell(1, 1), Some("héllo"));
     }
 }

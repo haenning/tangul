@@ -80,10 +80,10 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     /// JSON Schema of the input (see [`schema_of`]).
     fn input_schema(&self) -> Value;
-    /// Whether its input's `sql` is a statement it runs on the database (recorded
-    /// with the call, for the database's history).
-    fn runs_sql(&self) -> bool {
-        false
+    /// The statement a call with `input` runs on the database, if any (recorded with
+    /// the call, for the database's history).
+    fn statement(&self, _ctx: &Ctx, _input: &Value) -> Option<String> {
+        None
     }
     async fn call(&self, ctx: &Ctx, input: Value) -> Result<ToolOutput, ToolError>;
 }
@@ -149,10 +149,8 @@ impl Registry {
         });
         let tool = self.tools.iter().find(|t| t.name() == name);
         let sql = tool
-            .filter(|t| t.runs_sql())
-            .and_then(|_| input.get("sql"))
-            .and_then(Value::as_str)
-            .map(|sql| redact(sql).into_owned());
+            .and_then(|t| t.statement(ctx, &input))
+            .map(|sql| redact(&sql).into_owned());
         let result = match tool {
             Some(tool) => tool.call(ctx, input).await,
             None => Err(ToolError::NotFound(format!("no tool named {name}"))),

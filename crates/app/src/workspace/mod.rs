@@ -81,8 +81,8 @@ use tangul_service::knowledge::Knowledge;
 use tangul_service::schedule;
 
 use crate::{
-    CloseTab, NewTab, NextSidebarPanel, OpenPalette, OpenSettings, PrevSidebarPanel, RunAll,
-    ToggleRightSidebar, ToggleSidebar,
+    CloseTab, CloseValueViewer, FormatQuery, NewTab, NextSidebarPanel, OpenPalette, OpenSettings,
+    PrevSidebarPanel, RunAll, ToggleRightSidebar, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::SqlCompletion,
@@ -248,6 +248,7 @@ impl Workspace {
             right,
             panels: Panels {
                 value,
+                value_focus: cx.focus_handle(),
                 schema: SchemaTree::new(schema_search),
                 bookmark_search,
                 history: HistoryList {
@@ -409,6 +410,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_right_sidebar))
+            .on_action(cx.listener(Self::close_value_viewer))
             .on_action(cx.listener(Self::open_palette))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),

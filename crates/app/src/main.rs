@@ -23,7 +23,9 @@ actions!(
     [
         RunQuery,
         RunAll,
+        FormatQuery,
         InspectValue,
+        CloseValueViewer,
         ToggleRightSidebar,
         BookmarkQuery,
         SaveFile,
@@ -74,13 +76,21 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
         KeyBinding::new("secondary-shift-enter", RunAll, Some("QueryEditor > Input")),
         KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
+        // DataGrip's "Reformat code".
+        KeyBinding::new("alt-secondary-l", FormatQuery, Some("QueryEditor > Input")),
         KeyBinding::new("secondary-s", SaveFile, Some("QueryEditor > Input")),
         KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
         KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
         KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("alt-secondary-b", ToggleRightSidebar, Some("Workspace")),
-        // On a result: show the inspected cell in the value viewer.
+        // On a result: open the value viewer on the selected cell, or close it (like
+        // Quick Look).
         KeyBinding::new("space", InspectValue, Some("DataTable")),
+        // Before the table's own Esc (clears the selection), which runs when the
+        // viewer is closed. Popovers, inputs and dialogs inside are deeper and
+        // close first.
+        KeyBinding::new("escape", CloseValueViewer, Some("DataTable")),
+        KeyBinding::new("escape", CloseValueViewer, Some("ValueViewer")),
         KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
         KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
         // In the command palette: switch the sidebar panel.

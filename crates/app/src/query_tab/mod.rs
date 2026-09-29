@@ -5,6 +5,7 @@
 mod editor;
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
@@ -17,14 +18,14 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_assist::chart::{ChartData, ChartView};
+use tangul_assist::chart::{ChartData, ChartStyle, ChartView};
 use tangul_assist::columns::ColumnFacts;
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
-use tangul_core::{ConnId, QueryId, TabId};
-use tangul_engine::{Command, EngineHandle, Problem, QueryEvent};
+use tangul_core::{ConnId, QueryId, ResultSet, TabId};
+use tangul_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
 
 use crate::{
-    BookmarkQuery, RunAll, RunQuery,
+    BookmarkQuery, FormatQuery, RunAll, RunQuery,
     assets::Lucide,
     connection::{ConnStatus, Connection},
     result_view::{CellValue, ResultEvent, ResultView},
@@ -79,6 +80,8 @@ pub enum TabEvent {
         open: bool,
     },
     Compare(CellValue),
+    /// See [`ResultEvent::ToggleViewer`].
+    ToggleViewer,
 }
 
 pub struct QueryTab {
@@ -120,7 +123,7 @@ impl QueryTab {
         if let Some(conn) = &conn {
             let dialect = conn.read(cx).dialect();
             results.update(cx, |r, _| r.set_dialect(dialect));
-            editor.update(cx, |e, cx| e.set_lexing(dialect.lexing(), cx));
+            editor.update(cx, |e, cx| e.set_dialect(dialect, cx));
         }
         let subscriptions = vec![
             cx.subscribe(&editor, |_, _, event: &EditorEvent, cx| match event {
@@ -168,6 +171,7 @@ impl QueryTab {
             ResultEvent::OpenTable { schema, table } => TabEvent::OpenTable { schema, table },
             ResultEvent::Refine { sql, append } => TabEvent::Refine { sql, append },
             ResultEvent::Inspect { cell, open } => TabEvent::Inspect { cell, open },
+            ResultEvent::ToggleViewer => TabEvent::ToggleViewer,
             ResultEvent::Compare(cell) => TabEvent::Compare(cell),
         };
         cx.emit(event);
@@ -271,8 +275,7 @@ impl QueryTab {
         }
         let dialect = conn.read(cx).dialect();
         self.results.update(cx, |r, _| r.set_dialect(dialect));
-        self.editor
-            .update(cx, |e, cx| e.set_lexing(dialect.lexing(), cx));
+        self.editor.update(cx, |e, cx| e.set_dialect(dialect, cx));
         self._conn_changes = Some(cx.observe(&conn, |_, _, cx| cx.notify()));
         self.conn = Some(conn);
         cx.notify();
@@ -286,8 +289,8 @@ impl QueryTab {
         // Without a connection nothing runs; the workspace says so.
         let dialect = self.conn.as_ref().map(|c| c.read(cx).dialect());
         let take = self.editor.update(cx, |e, cx| match dialect {
-            Some(d) => e.take_run(d, cx),
-            None => e.take_run_all(cx),
+            Some(d) => e.take_run(d, window, cx),
+            None => e.take_run_all(window, cx),
         });
         self.emit_run(take, window, cx);
     }
@@ -297,7 +300,7 @@ impl QueryTab {
         if self.is_running(cx) {
             return;
         }
-        let take = self.editor.update(cx, |e, cx| e.take_run_all(cx));
+        let take = self.editor.update(cx, |e, cx| e.take_run_all(window, cx));
         self.emit_run(take, window, cx);
     }
 
@@ -315,6 +318,11 @@ impl QueryTab {
         }
     }
 
+    /// ⌥⌘L: formats the selection or the editor without running it.
+    pub fn format(&mut self, _: &FormatQuery, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.format(window, cx));
+    }
+
     fn bookmark(&mut self, _: &BookmarkQuery, _: &mut Window, cx: &mut Context<Self>) {
         let sql = self.sql(cx);
         if !sql.trim().is_empty() {
@@ -327,6 +335,42 @@ impl QueryTab {
         self.editor.update(cx, |e, cx| e.started(sql, cx));
         self.results.update(cx, |r, cx| r.started(query, sql, cx));
         cx.notify();
+    }
+
+    /// Shows `result`, which `sql` returned elsewhere (an assistant's read), as if
+    /// it ran here as `query`: nothing runs. Filtering, sorting and paging it later
+    /// run in this tab.
+    pub fn show_result(
+        &mut self,
+        query: QueryId,
+        sql: &str,
+        result: ResultSet,
+        truncated: bool,
+        elapsed: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        self.started(query, sql, cx);
+        let rows = result.row_count() as u64;
+        let (columns, batch) = result.into_batch();
+        let mut events = Vec::new();
+        if !columns.is_empty() {
+            events.push(QueryEvent::Exec(ExecEvent::ResultStart(columns)));
+            events.push(QueryEvent::Exec(ExecEvent::Rows(batch)));
+        }
+        if truncated {
+            events.push(QueryEvent::Exec(ExecEvent::Truncated));
+        }
+        events.push(QueryEvent::Exec(ExecEvent::StatementDone { rows }));
+        events.push(QueryEvent::Finished {
+            elapsed,
+            error: None,
+            error_position: None,
+            in_transaction: false,
+            cancelled: false,
+        });
+        for event in events {
+            self.on_query_event(event, cx);
+        }
     }
 
     /// Called by the workspace once a derived query (filter, sort, next page) was
@@ -362,6 +406,16 @@ impl QueryTab {
             .update(cx, |e, cx| e.apply_validation(generation, problems, cx));
     }
 
+    /// See [`ResultView::inspect_selected`].
+    pub fn inspect_selected(&mut self, cx: &mut Context<Self>) -> bool {
+        self.results.update(cx, |r, cx| r.inspect_selected(cx))
+    }
+
+    /// See [`ResultView::grid_focus`].
+    pub fn results_focus(&self, cx: &App) -> FocusHandle {
+        self.results.read(cx).grid_focus(cx)
+    }
+
     /// See [`ResultView::clear_mark`].
     pub fn clear_value_mark(&mut self, compared: bool, cx: &mut Context<Self>) {
         self.results.update(cx, |r, cx| r.clear_mark(compared, cx));
@@ -392,6 +446,17 @@ impl QueryTab {
     /// Shows the result as `view`, or as the grid (`None`).
     pub fn set_chart_view(&mut self, view: Option<ChartView>, cx: &mut Context<Self>) {
         self.results.update(cx, |r, cx| r.set_chart_view(view, cx));
+    }
+
+    /// See [`ResultView::request_chart`].
+    pub fn request_chart(
+        &mut self,
+        style: ChartStyle,
+        column: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.results
+            .update(cx, |r, cx| r.request_chart(style, column, cx));
     }
 
     /// Timing and row count of the last run, shown in the workspace status bar.
@@ -507,6 +572,7 @@ impl Render for QueryTab {
             .on_action(cx.listener(Self::run))
             .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::bookmark))
+            .on_action(cx.listener(Self::format))
             .child(self.render_toolbar(cx))
             .child(
                 div().flex_1().min_h_0().child(

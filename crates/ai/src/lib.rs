@@ -21,6 +21,8 @@ mod tool;
 mod tools;
 
 pub use audit::{AuditSink, ToolCall};
-pub use ctx::{Ctx, Exposed, ProposalSink, SqlProposal};
+pub use ctx::{
+    ChartRequest, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink, ShownResult, SqlProposal,
+};
 pub use results::Results;
 pub use tool::{Registry, Tool, ToolError, ToolOutput, ToolSpec};

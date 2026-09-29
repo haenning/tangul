@@ -80,6 +80,7 @@ impl Workspace {
                 cx,
             );
         }
+        self.refresh_mcp_bookmarks();
         cx.notify();
     }
 
@@ -95,6 +96,7 @@ impl Workspace {
                 cx,
             );
         }
+        self.refresh_mcp_bookmarks();
         for tab in self.tabs.queries() {
             if tab.read(cx).bookmark_id.as_deref() == Some(id) {
                 tab.update(cx, |t, _| t.bookmark_id = None);

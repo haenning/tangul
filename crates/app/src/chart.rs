@@ -13,7 +13,7 @@ use gpui_kit::component::{
     },
 };
 use gpui_kit::*;
-use tangul_assist::chart::{ChartData, ChartStyle, format_value, ticks};
+use tangul_assist::chart::{ChartData, ChartStyle, format_value, min_max_per_pixel, ticks};
 
 /// Room left of the plot for the value labels, at the default label size.
 const VALUE_GUTTER: f32 = 44.;
@@ -25,6 +25,8 @@ const TOP_PAD: f32 = 8.;
 const RIGHT_PAD: f32 = 8.;
 /// Share of a row's width the bars of that row take.
 const BAR_GROUP: f32 = 0.7;
+/// Most series named in the legend and the tooltip; the rest as "+N more".
+pub const MAX_LISTED: usize = 8;
 
 #[derive(IntoPlot)]
 pub struct ResultChart {
@@ -102,6 +104,12 @@ impl Layout {
     /// Center of a row's slot.
     fn x(&self, row: usize) -> f32 {
         self.left + self.step * (row as f32 + 0.5)
+    }
+
+    /// A line's points, reduced to each pixel column's lowest and highest when
+    /// there are many more rows than pixels (see `min_max_per_pixel`).
+    fn line(&self, points: Vec<(f32, f32)>, bounds: &Bounds<Pixels>) -> Vec<(f32, f32)> {
+        min_max_per_pixel(&points, bounds.size.width.as_f32() - self.left)
     }
 
     fn y(&self, v: f64) -> f32 {
@@ -234,6 +242,7 @@ impl ResultChart {
                     let points: Vec<(f32, f32)> = (0..rows)
                         .map(|row| (l.x(row), l.y(stacks[s][row].1)))
                         .collect();
+                    let points = l.line(points, bounds);
                     Area::new()
                         .data(points)
                         .x(|p: &(f32, f32)| Some(p.0))
@@ -252,6 +261,7 @@ impl ResultChart {
                     let points: Vec<(f32, f32)> = (0..rows)
                         .filter_map(|row| Some((l.x(row), l.y(series.values[row]?))))
                         .collect();
+                    let points = l.line(points, bounds);
                     if self.style == ChartStyle::Area {
                         Area::new()
                             .data(points.clone())
@@ -329,9 +339,13 @@ impl Plot for ResultChart {
             .gap(px(8.))
             .cross_line(cross)
             .title(self.data.x.get(row)?.clone());
-        for (s, series) in self.data.series.iter().enumerate() {
+        for (s, series) in self.data.series.iter().enumerate().take(MAX_LISTED) {
             let value = series.values[row].map_or("NULL".into(), format_value);
             tooltip = tooltip.row(self.color(s), series.name.clone(), value);
+        }
+        let hidden = self.data.series.len().saturating_sub(MAX_LISTED);
+        if hidden > 0 {
+            tooltip = tooltip.row(transparent_black(), format!("+{hidden} more"), "");
         }
         if self.style.is_stacked() {
             let total: f64 = self.data.series.iter().filter_map(|s| s.values[row]).sum();

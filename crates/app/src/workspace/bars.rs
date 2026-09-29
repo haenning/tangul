@@ -242,7 +242,12 @@ impl Workspace {
                         .xsmall()
                         .selected(sidebar.shows(panel))
                         .tooltip(panel.label())
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(panel, cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if panel == Panel::Value {
+                                this.release_viewer_focus(window, cx);
+                            }
+                            this.toggle_panel(panel, cx)
+                        }))
                 })
                 .collect::<Vec<_>>()
         };

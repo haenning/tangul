@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
@@ -117,6 +118,17 @@ fn tab_with_rows(
     rows: &[[Option<&str>; 2]],
     cx: &mut TestAppContext,
 ) -> Entity<QueryTab> {
+    tab_with_result(handle, workspace, rows, false, cx)
+}
+
+/// Like [`tab_with_rows`]; `truncated`: the engine stopped at its row limit.
+fn tab_with_result(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    rows: &[[Option<&str>; 2]],
+    truncated: bool,
+    cx: &mut TestAppContext,
+) -> Entity<QueryTab> {
     cx.update_window(handle.into(), |_, window, cx| {
         let tab = workspace.update(cx, |ws, cx| ws.add_tab("select id, doc from t", window, cx));
         tab.update(cx, |t, cx| {
@@ -134,6 +146,9 @@ fn tab_with_rows(
                 batch.finish_row();
             }
             t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+            if truncated {
+                t.on_query_event(QueryEvent::Exec(ExecEvent::Truncated), cx);
+            }
             t.on_query_event(
                 QueryEvent::Finished {
                     elapsed: Default::default(),
@@ -230,8 +245,62 @@ fn step<R>(
     out
 }
 
+/// Double-clicks cell `col` of row `row` (from 0).
+fn double_click_cell(window: &mut Window, row: usize, col: usize, cx: &mut App) {
+    window.render_frame(cx);
+    window.within(("row", row)).double_click(("cell", col), cx);
+    window.render_frame(cx);
+}
+
+fn viewer_open(workspace: &Entity<Workspace>, cx: &App) -> bool {
+    shows(workspace, Panel::Value, cx)
+}
+
 #[gpui_kit::test]
-fn space_shows_the_clicked_cell(cx: &mut TestAppContext) {
+fn a_click_selects_and_a_double_click_inspects(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let rows = [
+        [Some("1"), Some("one")],
+        [Some("2"), Some("two")],
+        [Some("3"), Some("three")],
+    ];
+    tab_with_rows(handle, &workspace, &rows, cx);
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        // A double click opens the viewer on the cell …
+        assert!(viewer_open(&workspace, cx));
+        assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
+        click_cell(window, 1, 1, Modifiers::default(), cx);
+    });
+    step(handle, cx, |window, cx| {
+        // … a click only selects …
+        assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
+        // … and so do the arrow keys.
+        window.press("down", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
+        // Space closes the open viewer, whatever is selected …
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
+        // … and opens it on the selected cell.
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        assert_eq!(value_a(&workspace, cx), Some(Some("three".into())));
+        double_click_cell(window, 1, 1, cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(value_a(&workspace, cx), Some(Some("two".into())))
+    });
+}
+
+#[gpui_kit::test]
+fn space_opens_and_closes_the_viewer(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let doc = r#"{"b": 1, "a": [1, 2]}"#;
     tab_with_rows(
@@ -244,22 +313,112 @@ fn space_shows_the_clicked_cell(cx: &mut TestAppContext) {
         click_cell(window, 0, 1, Modifiers::default(), cx)
     });
     step(handle, cx, |window, cx| {
-        // A click picks A without opening the viewer …
-        assert_eq!(value_a(&workspace, cx), Some(Some(doc.to_string())));
+        // A click neither picks A nor opens the viewer …
+        assert_eq!(value_a(&workspace, cx), None);
         assert!(window.try_find(RIGHT).is_none());
-        // … Space opens it.
+        // … Space does both.
         window.press("space", cx);
     });
     step(handle, cx, |window, cx| {
         assert!(window.find(RIGHT).visible());
         assert!(window.find("value-panel").visible());
+        assert!(window.find("value-viewer-header").visible());
+        assert_eq!(value_a(&workspace, cx), Some(Some(doc.to_string())));
         // With only A, the B row says how to pick one.
         assert!(window.find("value-b-hint").visible());
-        // The arrow keys move A.
-        window.press("down", cx);
+        // Space again closes it (like Quick Look), and opens it again.
+        window.press("space", cx);
     });
-    step(handle, cx, |_, cx| {
-        assert_eq!(value_a(&workspace, cx), Some(None))
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        // In the viewer's text too, where the editor would take Space as text.
+        window.click("value-panel", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(
+            workspace
+                .read(cx)
+                .panels
+                .value_focus
+                .contains_focused(window, cx)
+        );
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        // The focus is back in the grid.
+        window.press("space", cx);
+    });
+    step(handle, cx, |_, cx| assert!(viewer_open(&workspace, cx)));
+}
+
+#[gpui_kit::test]
+fn the_x_and_esc_close_the_viewer(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(handle, &workspace, &[[Some("1"), Some("one")]], cx);
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        window.click("close-value-viewer", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        // Esc in the grid.
+        double_click_cell(window, 0, 1, cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        // Esc in the viewer.
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        window.click("value-viewer-header", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(
+            workspace
+                .read(cx)
+                .panels
+                .value_focus
+                .contains_focused(window, cx)
+        );
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        // The focus is back in the grid: Space opens the viewer again.
+        window.press("space", cx);
+    });
+    step(handle, cx, |_, cx| assert!(viewer_open(&workspace, cx)));
+}
+
+#[gpui_kit::test]
+fn esc_closes_a_filter_popover_before_the_viewer(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(handle, &workspace, &[[Some("1"), Some("one")]], cx);
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("col-filter-button", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("filter-apply").visible());
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("filter-apply").is_none());
+        assert!(viewer_open(&workspace, cx));
     });
 }
 
@@ -275,9 +434,7 @@ fn alt_click_compares_and_the_x_stops_it(cx: &mut TestAppContext) {
         alt: true,
         ..Default::default()
     };
-    step(handle, cx, |window, cx| {
-        click_cell(window, 0, 1, Modifiers::default(), cx)
-    });
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
     step(handle, cx, |window, cx| click_cell(window, 1, 1, alt, cx));
     step(handle, cx, |window, cx| {
         assert_eq!(
@@ -323,8 +480,7 @@ async fn a_long_hover_shows_the_value(cx: &mut TestAppContext) {
         step(handle, cx, |window, cx| {
             window.within(("row", row)).hover(("cell", col), cx)
         });
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(3));
+        cx.executor().advance_clock(Duration::from_secs(3));
         step(handle, cx, |window, _| {
             assert!(window.try_find("peek-text").is_none())
         });
@@ -333,11 +489,9 @@ async fn a_long_hover_shows_the_value(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| {
         window.within(("row", 0usize)).hover(("cell", 0usize), cx)
     });
-    cx.wait_for(
-        handle.into(),
-        std::time::Duration::from_secs(3),
-        |window, _| window.try_find("peek-text").is_some(),
-    )
+    cx.wait_for(handle.into(), Duration::from_secs(3), |window, _| {
+        window.try_find("peek-text").is_some()
+    })
     .await;
 }
 
@@ -349,9 +503,7 @@ fn comparing_different_columns_warns(cx: &mut TestAppContext) {
         alt: true,
         ..Default::default()
     };
-    step(handle, cx, |window, cx| {
-        click_cell(window, 0, 1, Modifiers::default(), cx)
-    });
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
     step(handle, cx, |window, cx| click_cell(window, 0, 0, alt, cx));
     step(handle, cx, |window, _| {
         // Still compared: the user decides.
@@ -670,6 +822,37 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
                     .starts_with("Bearer ")
             );
             assert_eq!(ws.mcp_offered(), ["shop"]);
+        });
+    });
+    // Bookmarks are offered as they are saved and deleted, passwords redacted.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            let bookmarks = |ws: &Workspace| ws.mcp_offered_bookmarks();
+            assert!(bookmarks(ws).is_empty());
+            ws.save_bookmark(
+                tangul_data::local::Bookmark {
+                    id: "b1".into(),
+                    name: "Reader".into(),
+                    sql: "CREATE ROLE r LOGIN PASSWORD 'hunter2'".into(),
+                    database_id: Some("db".into()),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            assert_eq!(
+                bookmarks(ws),
+                [tangul_ai::SharedBookmark {
+                    name: "Reader".into(),
+                    sql: "CREATE ROLE r LOGIN PASSWORD '***'".into(),
+                }]
+            );
+            ws.delete_bookmark("b1", window, cx);
+            assert!(bookmarks(ws).is_empty());
+        });
+    });
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, _| {
             // Turned off for AI tools: no longer offered.
             ws.data.profiles.databases[0].ai_tools = false;
             ws.expose_to_mcp();
@@ -787,32 +970,37 @@ fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
     });
 }
 
+/// A connected Postgres database `shop` with user `app`, offered to the assistant.
+fn shop_for_the_assistant(ws: &mut Workspace, cx: &mut gpui_kit::Context<Workspace>) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    ws.data.profiles.databases.push(Database {
+        id: "db".into(),
+        name: "shop".into(),
+        driver: DriverKind::Postgres,
+        host: "localhost".into(),
+        port: 5432,
+        database: "shop".into(),
+        tls: TlsMode::Disable,
+        users: vec![DbUser {
+            id: "app".into(),
+            user: "app".into(),
+        }],
+        ssh: None,
+        assistant_user: None,
+        ai_values: Default::default(),
+        ai_tools: true,
+    });
+    ws.connect("app", cx);
+}
+
 #[gpui_kit::test]
 fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
-    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
     let (handle, workspace) = open(cx);
     let sql =
         "-- Proposed by the assistant: fix the total\nUPDATE orders SET total = 0 WHERE id = 1";
     let sink = step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| {
-            ws.data.profiles.databases.push(Database {
-                id: "db".into(),
-                name: "shop".into(),
-                driver: DriverKind::Postgres,
-                host: "localhost".into(),
-                port: 5432,
-                database: "shop".into(),
-                tls: TlsMode::Disable,
-                users: vec![DbUser {
-                    id: "app".into(),
-                    user: "app".into(),
-                }],
-                ssh: None,
-                assistant_user: None,
-                ai_values: Default::default(),
-                ai_tools: true,
-            });
-            ws.connect("app", cx);
+            shop_for_the_assistant(ws, cx);
             ws.mcp_proposals(cx)
         })
     });
@@ -822,30 +1010,76 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         connection: "shop".into(),
         user: "app".into(),
         sql: sql.into(),
-        chart: None,
-    });
-    // A query to look at as a chart: set before it runs.
-    sink(tangul_ai::SqlProposal {
-        connection: "shop".into(),
-        user: "app".into(),
-        sql: "SELECT day, orders FROM daily".into(),
-        chart: Some(tangul_core::chart::ChartStyle::Bars),
+        title: None,
     });
     cx.run_until_parked();
     step(handle, cx, |_, cx| {
         let ws = workspace.read(cx);
         let tab = ws.tabs.active_query().expect("opened").read(cx);
-        assert_eq!(tab.sql(cx), "SELECT day, orders FROM daily");
+        assert_eq!(tab.title.as_ref(), "Proposed · shop");
+        assert_eq!(tab.sql(cx), sql);
         assert!(!tab.is_running(cx), "not run");
-        assert_eq!(
-            tab.chart_view(cx),
-            Some(tangul_core::chart::ChartView {
-                style: tangul_core::chart::ChartStyle::Bars,
-                series: None
-            })
-        );
+        assert_eq!(tab.row_count(cx), None, "no result");
+        let conn = tab.conn.as_ref().expect("on a connection");
+        assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
     });
-    // The first proposal's tab, before it.
+}
+
+#[gpui_kit::test]
+fn a_shown_result_opens_with_its_chart_and_isnt_run_again(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let sink = step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.mcp_shows(cx)
+        })
+    });
+    let sql = "SELECT day, orders, revenue FROM daily";
+    let col = |n: &str| ColumnInfo { name: n.into() };
+    let mut result = tangul_core::ResultSet::new(vec![col("day"), col("orders"), col("revenue")]);
+    let mut batch = RowBatch::with_capacity(6);
+    for row in [["2024-01-01", "3", "10"], ["2024-01-02", "4", "12"]] {
+        for cell in row {
+            batch.push_cell(Some(cell));
+        }
+        batch.finish_row();
+    }
+    result.append(batch);
+    // A chart of one column, by name; and the grid, untitled.
+    sink(tangul_ai::ShownResult {
+        connection: "shop".into(),
+        user: "app".into(),
+        sql: sql.into(),
+        title: Some("Revenue per day".into()),
+        note: Some("last two days".into()),
+        chart: Some(tangul_ai::ChartRequest {
+            style: tangul_core::chart::ChartStyle::Bars,
+            column: Some("revenue".into()),
+        }),
+        result,
+        truncated: false,
+        elapsed: Duration::from_millis(12),
+    });
+    sink(tangul_ai::ShownResult {
+        connection: "shop".into(),
+        user: "app".into(),
+        sql: "SELECT 1 AS n".into(),
+        title: None,
+        note: None,
+        chart: None,
+        result: tangul_core::ResultSet::new(vec![col("n")]),
+        truncated: false,
+        elapsed: Duration::ZERO,
+    });
+    cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.active_query().expect("opened").read(cx);
+        assert_eq!(tab.title.as_ref(), "Shown · shop");
+        assert_eq!(tab.sql(cx), "-- Shown by the assistant\nSELECT 1 AS n");
+        assert_eq!(tab.chart_view(cx), None);
+        assert_eq!(tab.row_count(cx), Some(0));
+    });
     step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, _| {
             let last = ws.tabs.active_index();
@@ -855,9 +1089,22 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     step(handle, cx, |_, cx| {
         let ws = workspace.read(cx);
         let tab = ws.tabs.active_query().expect("opened").read(cx);
-        assert_eq!(tab.title.as_ref(), "Proposed · shop");
-        assert_eq!(tab.sql(cx), sql);
-        assert!(!tab.is_running(cx), "not run");
+        assert_eq!(tab.title.as_ref(), "Revenue per day");
+        assert_eq!(
+            tab.sql(cx),
+            format!("-- Shown by the assistant: last two days\n{sql}")
+        );
+        // The result is there, not running: nothing was sent to the database.
+        assert!(!tab.is_running(cx));
+        assert_eq!(tab.result_columns(cx), ["day", "orders", "revenue"]);
+        assert_eq!(tab.row_count(cx), Some(2));
+        assert_eq!(
+            tab.chart_view(cx),
+            Some(tangul_core::chart::ChartView {
+                style: tangul_core::chart::ChartStyle::Bars,
+                series: Some(1),
+            })
+        );
         let conn = tab.conn.as_ref().expect("on a connection");
         assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
     });
@@ -976,4 +1223,134 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
         window.click(("history-source", Source::Ai as usize), cx)
     });
     assert!(shown(cx).is_empty(), "the assistant ran nothing yet");
+}
+
+#[gpui_kit::test]
+fn hovering_a_number_column_shows_its_summary(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(
+        handle,
+        &workspace,
+        &[[Some("1"), Some("a")], [Some("2"), None]],
+        cx,
+    );
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats").visible())
+    });
+}
+
+#[gpui_kit::test]
+fn the_summary_comes_back_after_the_filter_closes(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(
+        handle,
+        &workspace,
+        &[[Some("1"), Some("a")], [Some("2"), None]],
+        cx,
+    );
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("col-filter-button", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("filter-apply").visible());
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("filter-apply").is_none());
+        assert!(window.find("column-stats").visible())
+    });
+}
+
+#[gpui_kit::test]
+fn a_text_column_shows_its_counts(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(
+        handle,
+        &workspace,
+        &[[Some("1"), Some("a")], [Some("2"), None]],
+        cx,
+    );
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats").visible())
+    });
+}
+
+#[gpui_kit::test]
+fn a_large_result_gets_a_chart_that_says_it_is_cut(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    // More rows than bars used to allow.
+    let labels: Vec<String> = (0..200).map(|i| format!("r{i}")).collect();
+    let rows: Vec<[Option<&str>; 2]> = labels
+        .iter()
+        .map(|l| [Some(l.as_str()), Some("1")])
+        .collect();
+    let tab = tab_with_result(handle, &workspace, &rows, true, cx);
+    step(handle, cx, |_, cx| {
+        assert!(tab.read(cx).chart(cx).is_ok());
+        tab.update(cx, |t, cx| {
+            t.set_chart_view(
+                Some(tangul_core::chart::ChartView {
+                    style: tangul_core::chart::ChartStyle::Bars,
+                    series: Some(0),
+                }),
+                cx,
+            )
+        });
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("chart-truncated").visible())
+    });
+}
+
+#[gpui_kit::test]
+fn running_formats_the_query_first(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.add_tab("select id, name from users where id = 1", window, cx)
+        })
+    });
+    step(handle, cx, |window, cx| {
+        tab.update(cx, |t, cx| t.run_all(&crate::RunAll, window, cx))
+    });
+    let formatted = "select\n  id,\n  name\nfrom\n  users\nwhere\n  id = 1";
+    step(handle, cx, |window, cx| {
+        assert_eq!(tab.read(cx).sql(cx), formatted);
+        // Formatted already: a second run leaves the text as it is.
+        tab.update(cx, |t, cx| t.run_all(&crate::RunAll, window, cx))
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(tab.read(cx).sql(cx), formatted)
+    });
+}
+
+#[gpui_kit::test]
+fn format_formats_without_running(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab("select a, b from t", window, cx))
+    });
+    step(handle, cx, |window, cx| {
+        tab.update(cx, |t, cx| t.format(&crate::FormatQuery, window, cx))
+    });
+    step(handle, cx, |_, cx| {
+        let t = tab.read(cx);
+        assert_eq!(t.sql(cx), "select\n  a,\n  b\nfrom\n  t");
+        assert!(!t.is_running(cx));
+    });
 }

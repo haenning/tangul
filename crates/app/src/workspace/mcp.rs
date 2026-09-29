@@ -8,7 +8,10 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Mutex, PoisonError, RwLock};
 
 use tangul_ai::mcp::{CtxSource, McpServer, new_token};
-use tangul_ai::{AuditSink, Ctx, Exposed, ProposalSink, SqlProposal, ToolCall};
+use tangul_ai::{
+    AuditSink, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink, ShownResult, SqlProposal,
+    ToolCall,
+};
 use tangul_data::local::{AuditEntry, Source};
 
 use super::*;
@@ -22,6 +25,8 @@ enum McpEvent {
     Ran(ToolCall),
     /// Statements to open in a tab (`propose_sql`).
     Proposed(SqlProposal),
+    /// A read's result to open in a tab (`run_readonly` with `show`).
+    Shown(ShownResult),
 }
 
 /// Fields drop in order: the event task goes before the server, so the server
@@ -75,8 +80,14 @@ impl Workspace {
         let (knowledge, engine) = (self.knowledge.clone(), self.engine.clone());
         let events = self.mcp_events(cx);
         let (exposed, sink) = (self.mcp.exposed.clone(), self.mcp_audit(events.clone()));
-        let proposals: ProposalSink = Arc::new(move |proposal| {
-            let _ = events.try_send(McpEvent::Proposed(proposal));
+        let proposals: ProposalSink = Arc::new({
+            let events = events.clone();
+            move |proposal| {
+                let _ = events.try_send(McpEvent::Proposed(proposal));
+            }
+        });
+        let shows: ShowSink = Arc::new(move |shown| {
+            let _ = events.try_send(McpEvent::Shown(shown));
         });
         let source: CtxSource = Arc::new(move || {
             let exposed = exposed
@@ -86,6 +97,7 @@ impl Workspace {
             Ctx::new(knowledge.clone(), Some(engine.clone()), exposed)
                 .with_audit("mcp", sink.clone())
                 .with_proposals(proposals.clone())
+                .with_shows(shows.clone())
         });
         match McpServer::start(port, token, source) {
             Ok(server) => {
@@ -111,6 +123,7 @@ impl Workspace {
                             this.update(cx, |ws, cx| match event {
                                 McpEvent::Ran(call) => ws.record_mcp_call(call, cx),
                                 McpEvent::Proposed(p) => ws.open_proposal(p, window, cx),
+                                McpEvent::Shown(s) => ws.open_shown(s, window, cx),
                             })
                             .ok()
                         })
@@ -131,6 +144,15 @@ impl Workspace {
         let events = self.mcp_events(cx);
         Arc::new(move |proposal| {
             let _ = events.try_send(McpEvent::Proposed(proposal));
+        })
+    }
+
+    /// A result to show from a client, as the server hands it over (tests).
+    #[cfg(test)]
+    pub(super) fn mcp_shows(&mut self, cx: &mut Context<Self>) -> ShowSink {
+        let events = self.mcp_events(cx);
+        Arc::new(move |shown| {
+            let _ = events.try_send(McpEvent::Shown(shown));
         })
     }
 
@@ -189,26 +211,57 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Proposed · {}", proposal.connection);
+        let title = proposal
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Proposed · {}", proposal.connection));
         self.open_sql(&title, &proposal.sql, window, cx);
         let Some(tab) = self.tabs.active_query().cloned() else {
             return;
         };
-        let conn = self.tab_conn(&proposal.user);
+        if let Some(conn) = self.tab_conn(&proposal.user) {
+            tab.update(cx, |t, cx| t.set_conn(conn, cx));
+        }
+        cx.notify();
+    }
+
+    /// Opens a read the assistant ran in a new tab on your connection to its
+    /// database, with its result (or chart) already there: it isn't run again.
+    pub(super) fn open_shown(
+        &mut self,
+        shown: ShownResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = shown
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Shown · {}", shown.connection));
+        let text = match &shown.note {
+            Some(note) => format!("-- Shown by the assistant: {note}\n{}", shown.sql),
+            None => format!("-- Shown by the assistant\n{}", shown.sql),
+        };
+        self.open_sql(&title, &text, window, cx);
+        let Some(tab) = self.tabs.active_query().cloned() else {
+            return;
+        };
+        let conn = self.tab_conn(&shown.user);
+        let query = QueryId(self.next_id());
         tab.update(cx, |t, cx| {
             if let Some(conn) = conn {
                 t.set_conn(conn, cx);
             }
-            // Shown as the chart once the user runs it.
-            if let Some(style) = proposal.chart {
-                t.set_chart_view(
-                    Some(ChartView {
-                        style,
-                        series: None,
-                    }),
-                    cx,
-                );
+            if let Some(chart) = shown.chart {
+                t.request_chart(chart.style, chart.column, cx);
             }
+            t.show_result(
+                query,
+                &shown.sql,
+                shown.result,
+                shown.truncated,
+                shown.elapsed,
+                cx,
+            );
         });
         cx.notify();
     }
@@ -309,6 +362,7 @@ impl Workspace {
                 conn,
                 driver: db.driver,
                 values: db.ai_values,
+                bookmarks: self.mcp_bookmarks(&db.id),
             });
         }
         *self
@@ -318,10 +372,47 @@ impl Workspace {
             .unwrap_or_else(PoisonError::into_inner) = exposed;
     }
 
+    /// The bookmarks of database `db_id` as the assistant sees them.
+    fn mcp_bookmarks(&self, db_id: &str) -> Vec<SharedBookmark> {
+        self.data
+            .local
+            .bookmarks_for(Some(db_id))
+            .into_iter()
+            .map(|b| SharedBookmark {
+                name: b.name,
+                sql: b.sql,
+            })
+            .collect()
+    }
+
+    /// A bookmark was saved or deleted: the server offers the bookmarks as they are.
+    pub(super) fn refresh_mcp_bookmarks(&mut self) {
+        let mut exposed = self
+            .mcp
+            .exposed
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        for e in exposed.iter_mut() {
+            if let Some((db, _)) = self.find_user(&e.user) {
+                e.bookmarks = self.mcp_bookmarks(&db.id.clone());
+            }
+        }
+    }
+
     /// Where the server listens, if it runs.
     #[cfg(test)]
     pub(super) fn mcp_url(&self) -> Option<String> {
         self.mcp.server.as_ref().map(McpServer::url)
+    }
+
+    /// The bookmarks offered for the first database (tests).
+    #[cfg(test)]
+    pub(super) fn mcp_offered_bookmarks(&self) -> Vec<SharedBookmark> {
+        let exposed = self.mcp.exposed.read().unwrap();
+        exposed
+            .first()
+            .map(|e| e.bookmarks.clone())
+            .unwrap_or_default()
     }
 
     /// The names of the databases offered now.

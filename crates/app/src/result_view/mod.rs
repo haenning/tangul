@@ -18,7 +18,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_assist::chart::{ChartData, ChartView, chart_data};
+use tangul_assist::chart::{ChartData, ChartStyle, ChartView, chart_data};
 use tangul_assist::columns::ColumnFacts;
 use tangul_assist::dialect::Dialect;
 use tangul_assist::refine::{ColumnFilter, ColumnKind, Refine, Sort, refinable, refined_sql};
@@ -50,6 +50,9 @@ pub enum ResultEvent {
     Failed { message: String, position: usize },
     /// The inspected cell (A) changed; `open` asks to show the value viewer.
     Inspect { cell: CellValue, open: bool },
+    /// Space: open or close the viewer (opening shows the selected cell, see
+    /// [`ResultView::inspect_selected`]).
+    ToggleViewer,
     /// A cell to compare with the inspected one (B).
     Compare(CellValue),
 }
@@ -106,6 +109,10 @@ pub struct ResultView {
     /// The chart picked in the status bar, shown instead of the grid when the result
     /// can be charted; `None` shows the grid. Kept across runs.
     chart_view: Option<ChartView>,
+    /// A chart asked for by style and column name before the result is known (a
+    /// proposal from the assistant): resolved against the next result, then
+    /// dropped (see `ChartData::view_for`).
+    chart_request: Option<(ChartStyle, Option<String>)>,
     /// Curved instead of straight lines; starts straight, which is exact.
     smooth_lines: bool,
     /// The last run's statement, when its result can be filtered, sorted and paged.
@@ -133,7 +140,8 @@ impl ResultView {
                 .col_movable(false)
                 .col_selectable(false)
                 // Rows are selected by the delegate (multi-selection); the table's
-                // own selection is a cell: the inspected one.
+                // own selection is a cell (the inspected one, A, is a mark of its
+                // own: see `inspect`).
                 .row_selectable(false)
                 .cell_selectable(true)
                 .row_header(false)
@@ -149,6 +157,7 @@ impl ResultView {
             last_rows: None,
             chart: Err(NO_RESULT.into()),
             chart_view: None,
+            chart_request: None,
             smooth_lines: false,
             base_sql: None,
             derived: None,
@@ -164,10 +173,10 @@ impl ResultView {
         event: &TableEvent,
         cx: &mut Context<Self>,
     ) {
-        match event {
-            TableEvent::SelectCell(row, col) => self.inspect(*row, *col, false, cx),
-            TableEvent::DoubleClickedCell(row, col) => self.inspect(*row, *col, true, cx),
-            _ => {}
+        // A click or the arrow keys only select; the viewer changes on a double
+        // click, Space or "Inspect value".
+        if let TableEvent::DoubleClickedCell(row, col) = event {
+            self.inspect(*row, *col, true, cx);
         }
     }
 
@@ -182,11 +191,23 @@ impl ResultView {
         }
     }
 
-    /// Space: shows the inspected cell in the value viewer.
+    /// Space: opens or closes the value viewer (like Quick Look).
     fn inspect_action(&mut self, _: &InspectValue, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some((row, col)) = self.table.read(cx).delegate().inspected {
-            self.inspect(row, col, true, cx);
-        }
+        cx.emit(ResultEvent::ToggleViewer);
+    }
+
+    /// The viewer opens on Space: the selected cell becomes A. False without one.
+    pub fn inspect_selected(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((row, col)) = self.table.read(cx).selected_cell() else {
+            return false;
+        };
+        self.inspect(row, col, true, cx);
+        true
+    }
+
+    /// The grid's focus (Esc in the value viewer returns to it).
+    pub fn grid_focus(&self, cx: &App) -> FocusHandle {
+        self.table.read(cx).focus_handle(cx)
     }
 
     /// "Inspect value" in the menu: selects the cell (A) and shows it.
@@ -216,7 +237,6 @@ impl ResultView {
                 d.compared = None;
             } else {
                 d.inspected = None;
-                t.clear_selection(cx);
             }
             cx.notify();
         });
@@ -386,9 +406,17 @@ impl ResultView {
                 }
                 if error.is_none() && self.has_result_set {
                     let result = &self.table.read(cx).delegate().result;
-                    self.chart = chart_data(&self.sql, result)
+                    self.chart = chart_data(&self.sql, result, self.truncated)
                         .map(Rc::new)
                         .map_err(Into::into);
+                    if let Some((style, column)) = self.chart_request.take() {
+                        // A result that can't be a chart shows the grid.
+                        self.chart_view = self
+                            .chart
+                            .as_ref()
+                            .ok()
+                            .map(|data| data.view_for(style, column.as_deref()));
+                    }
                 }
                 self.status = Status::Done {
                     elapsed,
@@ -506,6 +534,24 @@ impl ResultView {
     /// Shows the result as `view`, or as the grid (`None`).
     pub fn set_chart_view(&mut self, view: Option<ChartView>, cx: &mut Context<Self>) {
         self.chart_view = view;
+        self.chart_request = None;
+        cx.notify();
+    }
+
+    /// Shows the next result as `style`, of one value column by name or all of
+    /// them; the default view when the result doesn't fit.
+    pub fn request_chart(
+        &mut self,
+        style: ChartStyle,
+        column: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        // Set already, so the status bar says a chart is coming.
+        self.chart_view = Some(ChartView {
+            style,
+            series: None,
+        });
+        self.chart_request = Some((style, column));
         cx.notify();
     }
 
@@ -587,18 +633,25 @@ impl ResultView {
                 .child(option("smooth-lines", "Smooth", true))
         });
         let theme = cx.theme();
-        let legend = (data.series.len() > 1).then(|| {
-            h_flex()
-                .gap_3()
-                .flex_wrap()
-                .children(data.series.iter().enumerate().map(|(i, s)| {
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .child(div().size_2().rounded_sm().bg(colors[i % colors.len()]))
-                        .child(s.name.clone())
-                }))
-        });
+        // Capped: many columns would push the chart off the view (one column at a
+        // time is in the status bar's chart menu).
+        let legend =
+            (data.series.len() > 1).then(|| {
+                let hidden = data.series.len().saturating_sub(chart::MAX_LISTED);
+                h_flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .children(data.series.iter().take(chart::MAX_LISTED).enumerate().map(
+                        |(i, s)| {
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(div().size_2().rounded_sm().bg(colors[i % colors.len()]))
+                                .child(s.name.clone())
+                        },
+                    ))
+                    .when(hidden > 0, |this| this.child(format!("+{hidden} more")))
+            });
         let settings = settings::current(cx);
         let label_size = settings.chart_font_size();
         v_flex()
@@ -618,6 +671,15 @@ impl ResultView {
                         .items_center()
                         .children(curve_switch)
                         .children(legend),
+                )
+            })
+            // A fact about the data, like the grid's "loaded rows".
+            .when(data.truncated, |this| {
+                this.child(
+                    div()
+                        .id("chart-truncated")
+                        .test_support()
+                        .child(format!("First {} rows only", data.x.len())),
                 )
             })
             .when(data.unsorted && !style.is_bars(), |this| {

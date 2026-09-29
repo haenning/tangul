@@ -164,6 +164,7 @@ fn exposed(name: &str, user: &str) -> Exposed {
         conn: ConnId(1),
         driver: DriverKind::Postgres,
         values: ValueAccess::None,
+        bookmarks: Vec::new(),
     }
 }
 
@@ -208,7 +209,7 @@ async fn says_what_the_app_can_do() {
     let text = text(&ctx(false), "tangul_features", json!({})).await;
     assert_eq!(text, tangul_ai::features::text());
     assert!(
-        text.contains("propose_sql with the query and \"chart\""),
+        text.contains("run_readonly with \"show\" opens its result in tangul"),
         "{text}"
     );
 }
@@ -231,6 +232,7 @@ async fn every_tool_has_a_schema_and_a_description() {
             "view_definition",
             "run_readonly",
             "get_cell",
+            "list_bookmarks",
             "propose_sql"
         ]
     );
