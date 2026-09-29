@@ -230,8 +230,56 @@ fn step<R>(
     out
 }
 
+/// Double-clicks cell `col` of row `row` (from 0).
+fn double_click_cell(window: &mut Window, row: usize, col: usize, cx: &mut App) {
+    window.render_frame(cx);
+    window.within(("row", row)).double_click(("cell", col), cx);
+    window.render_frame(cx);
+}
+
+fn viewer_open(workspace: &Entity<Workspace>, cx: &App) -> bool {
+    shows(workspace, Panel::Value, cx)
+}
+
 #[gpui_kit::test]
-fn space_shows_the_clicked_cell(cx: &mut TestAppContext) {
+fn a_click_selects_and_a_double_click_inspects(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let rows = [
+        [Some("1"), Some("one")],
+        [Some("2"), Some("two")],
+        [Some("3"), Some("three")],
+    ];
+    tab_with_rows(handle, &workspace, &rows, cx);
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        // A double click opens the viewer on the cell …
+        assert!(viewer_open(&workspace, cx));
+        assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
+        click_cell(window, 1, 1, Modifiers::default(), cx);
+    });
+    step(handle, cx, |window, cx| {
+        // … a click only selects …
+        assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
+        // … and so do the arrow keys.
+        window.press("down", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
+        // Space shows the selected cell.
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        assert_eq!(value_a(&workspace, cx), Some(Some("three".into())));
+        double_click_cell(window, 1, 1, cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(value_a(&workspace, cx), Some(Some("two".into())))
+    });
+}
+
+#[gpui_kit::test]
+fn space_opens_and_closes_the_viewer(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let doc = r#"{"b": 1, "a": [1, 2]}"#;
     tab_with_rows(
@@ -244,22 +292,92 @@ fn space_shows_the_clicked_cell(cx: &mut TestAppContext) {
         click_cell(window, 0, 1, Modifiers::default(), cx)
     });
     step(handle, cx, |window, cx| {
-        // A click picks A without opening the viewer …
-        assert_eq!(value_a(&workspace, cx), Some(Some(doc.to_string())));
+        // A click neither picks A nor opens the viewer …
+        assert_eq!(value_a(&workspace, cx), None);
         assert!(window.try_find(RIGHT).is_none());
-        // … Space opens it.
+        // … Space does both.
         window.press("space", cx);
     });
     step(handle, cx, |window, cx| {
         assert!(window.find(RIGHT).visible());
         assert!(window.find("value-panel").visible());
+        assert!(window.find("value-viewer-header").visible());
+        assert_eq!(value_a(&workspace, cx), Some(Some(doc.to_string())));
         // With only A, the B row says how to pick one.
         assert!(window.find("value-b-hint").visible());
-        // The arrow keys move A.
-        window.press("down", cx);
+        // Space again closes it (like Quick Look), and opens it again.
+        window.press("space", cx);
     });
-    step(handle, cx, |_, cx| {
-        assert_eq!(value_a(&workspace, cx), Some(None))
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        window.press("space", cx);
+    });
+    step(handle, cx, |_, cx| assert!(viewer_open(&workspace, cx)));
+}
+
+#[gpui_kit::test]
+fn the_x_and_esc_close_the_viewer(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(handle, &workspace, &[[Some("1"), Some("one")]], cx);
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        window.click("close-value-viewer", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        // Esc in the grid.
+        double_click_cell(window, 0, 1, cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        // Esc in the viewer.
+        window.press("space", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(viewer_open(&workspace, cx));
+        window.click("value-viewer-header", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(
+            workspace
+                .read(cx)
+                .panels
+                .value_focus
+                .contains_focused(window, cx)
+        );
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        // The focus is back in the grid: Space opens the viewer again.
+        window.press("space", cx);
+    });
+    step(handle, cx, |_, cx| assert!(viewer_open(&workspace, cx)));
+}
+
+#[gpui_kit::test]
+fn esc_closes_a_filter_popover_before_the_viewer(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(handle, &workspace, &[[Some("1"), Some("one")]], cx);
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("col-filter-button", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("filter-apply").visible());
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("filter-apply").is_none());
+        assert!(viewer_open(&workspace, cx));
     });
 }
 
@@ -275,9 +393,7 @@ fn alt_click_compares_and_the_x_stops_it(cx: &mut TestAppContext) {
         alt: true,
         ..Default::default()
     };
-    step(handle, cx, |window, cx| {
-        click_cell(window, 0, 1, Modifiers::default(), cx)
-    });
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
     step(handle, cx, |window, cx| click_cell(window, 1, 1, alt, cx));
     step(handle, cx, |window, cx| {
         assert_eq!(
@@ -349,9 +465,7 @@ fn comparing_different_columns_warns(cx: &mut TestAppContext) {
         alt: true,
         ..Default::default()
     };
-    step(handle, cx, |window, cx| {
-        click_cell(window, 0, 1, Modifiers::default(), cx)
-    });
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
     step(handle, cx, |window, cx| click_cell(window, 0, 0, alt, cx));
     step(handle, cx, |window, _| {
         // Still compared: the user decides.

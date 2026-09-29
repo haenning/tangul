@@ -2,9 +2,10 @@
 //! straight from the ResultSet arena.
 //!
 //! Row selection is kept here rather than in the table (which knows a single row):
-//! click selects, ⇧-click extends, ⌘-click toggles. The table's own selection is the
-//! inspected cell (A, shown in the value viewer, moved with the arrow keys); ⌥-click
-//! picks a cell to compare with it (B). A long hover on a value shows all of it.
+//! click selects, ⇧-click extends, ⌘-click toggles. The table's own selection is a
+//! cell (moved with the arrow keys); a double click or Space makes it the inspected
+//! cell (A, shown in the value viewer), ⌥-click picks a cell to compare with it (B).
+//! A long hover on a value shows all of it.
 //! The right-click menu copies the
 //! selection, follows foreign keys to related rows and writes UPDATE / DELETE
 //! statements for the selected rows (to open elsewhere, not run).
@@ -949,14 +950,14 @@ impl TableDelegate for ResultsDelegate {
                         .bg(color.opacity(0.12)),
                 )
             })
-            // The table selects the cell (A) and stops the event, so the row
+            // The table selects the cell and stops the event, so the row
             // selection happens here, before it.
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |table, e: &MouseDownEvent, _, cx| {
                     let d = table.delegate_mut();
                     if e.modifiers.alt {
-                        // B, not A: the table must not select the cell.
+                        // B: the table must not select the cell.
                         cx.stop_propagation();
                         if let Some(view) = d.view.clone() {
                             cx.defer(move |cx| {

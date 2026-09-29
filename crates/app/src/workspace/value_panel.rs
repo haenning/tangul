@@ -283,7 +283,7 @@ impl ValuePanel {
                     .text_color(theme.foreground)
                     .child("Select a value to see it here"),
             )
-            .child("Click a cell in a result, then press Space or double-click it.")
+            .child("Double-click a cell in a result, or select it and press Space.")
             .child("⌥-click a second cell to compare the two.")
             .into_any_element()
     }

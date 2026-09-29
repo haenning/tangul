@@ -247,6 +247,7 @@ impl Workspace {
                     self.show_panel(Panel::Value, cx);
                 }
             }
+            TabEvent::ToggleViewer => self.toggle_panel(Panel::Value, cx),
             TabEvent::Compare(cell) => {
                 let picked = self.picked(tab, cell, cx);
                 let old = self

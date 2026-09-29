@@ -24,6 +24,7 @@ actions!(
         RunQuery,
         RunAll,
         InspectValue,
+        CloseValueViewer,
         ToggleRightSidebar,
         BookmarkQuery,
         SaveFile,
@@ -79,8 +80,14 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
         KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("alt-secondary-b", ToggleRightSidebar, Some("Workspace")),
-        // On a result: show the inspected cell in the value viewer.
+        // On a result: show the selected cell in the value viewer, or open and close
+        // it (like Quick Look).
         KeyBinding::new("space", InspectValue, Some("DataTable")),
+        // Before the table's own Esc (clears the selection), which runs when the
+        // viewer is closed. Popovers, inputs and dialogs inside are deeper and
+        // close first.
+        KeyBinding::new("escape", CloseValueViewer, Some("DataTable")),
+        KeyBinding::new("escape", CloseValueViewer, Some("ValueViewer")),
         KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
         KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
         // In the command palette: switch the sidebar panel.

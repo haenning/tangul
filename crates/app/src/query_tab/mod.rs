@@ -79,6 +79,8 @@ pub enum TabEvent {
         open: bool,
     },
     Compare(CellValue),
+    /// See [`ResultEvent::ToggleViewer`].
+    ToggleViewer,
 }
 
 pub struct QueryTab {
@@ -168,6 +170,7 @@ impl QueryTab {
             ResultEvent::OpenTable { schema, table } => TabEvent::OpenTable { schema, table },
             ResultEvent::Refine { sql, append } => TabEvent::Refine { sql, append },
             ResultEvent::Inspect { cell, open } => TabEvent::Inspect { cell, open },
+            ResultEvent::ToggleViewer => TabEvent::ToggleViewer,
             ResultEvent::Compare(cell) => TabEvent::Compare(cell),
         };
         cx.emit(event);
@@ -360,6 +363,11 @@ impl QueryTab {
     ) {
         self.editor
             .update(cx, |e, cx| e.apply_validation(generation, problems, cx));
+    }
+
+    /// See [`ResultView::grid_focus`].
+    pub fn results_focus(&self, cx: &App) -> FocusHandle {
+        self.results.read(cx).grid_focus(cx)
     }
 
     /// See [`ResultView::clear_mark`].

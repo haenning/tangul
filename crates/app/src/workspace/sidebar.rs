@@ -99,6 +99,8 @@ impl Sidebar {
 /// The panels' own state, whichever sidebar shows them.
 pub(super) struct Panels {
     pub(super) value: Entity<ValuePanel>,
+    /// The value viewer with its header (key context "ValueViewer": Esc closes it).
+    pub(super) value_focus: FocusHandle,
     pub(super) schema: SchemaTree,
     pub(super) bookmark_search: Entity<InputState>,
     pub(super) history: HistoryList,
@@ -251,7 +253,7 @@ impl Workspace {
             Some(Panel::Schema) => self.render_schema_panel(cx).into_any_element(),
             Some(Panel::Bookmarks) => self.render_bookmarks_panel(cx).into_any_element(),
             Some(Panel::History) => self.render_history_panel(cx).into_any_element(),
-            Some(Panel::Value) => self.panels.value.clone().into_any_element(),
+            Some(Panel::Value) => self.render_value_viewer(cx).into_any_element(),
             None => div().into_any_element(),
         };
         let theme = cx.theme();
@@ -263,6 +265,65 @@ impl Workspace {
             .overflow_hidden()
             .bg(theme.sidebar)
             .child(body)
+    }
+
+    /// The value viewer under a header with a close button.
+    fn render_value_viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        v_flex()
+            .id("value-viewer")
+            .test_support()
+            .key_context("ValueViewer")
+            .track_focus(&self.panels.value_focus)
+            .size_full()
+            .child(
+                h_flex()
+                    .id("value-viewer-header")
+                    .test_support()
+                    .h_9()
+                    .pl_3()
+                    .pr_1()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .tooltip(|window, cx| {
+                        Tooltip::new("Space opens and closes the viewer").build(window, cx)
+                    })
+                    .child("VALUE")
+                    .child(
+                        Button::new("close-value-viewer")
+                            .icon(IconName::Close)
+                            .xsmall()
+                            .ghost()
+                            .tooltip("Close (Esc)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_value_viewer(&CloseValueViewer, window, cx)
+                            })),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().child(self.panels.value.clone()))
+    }
+
+    /// Esc in the grid or the viewer, or its close button: closes the viewer and
+    /// returns to the grid. With the viewer closed, the grid's own Esc runs.
+    pub(super) fn close_value_viewer(
+        &mut self,
+        _: &CloseValueViewer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let host = self.host(Panel::Value);
+        if !host.shows(Panel::Value) {
+            cx.propagate();
+            return;
+        }
+        host.open = false;
+        if let Some(tab) = self.tabs.active().and_then(TabItem::query) {
+            let grid = tab.read(cx).results_focus(cx);
+            window.focus(&grid, cx);
+        }
+        cx.notify();
     }
 
     /// Status bar button: shows that panel, or hides its sidebar if it is the one

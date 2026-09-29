@@ -50,6 +50,8 @@ pub enum ResultEvent {
     Failed { message: String, position: usize },
     /// The inspected cell (A) changed; `open` asks to show the value viewer.
     Inspect { cell: CellValue, open: bool },
+    /// Space on the cell the viewer already has (or on none): open or close it.
+    ToggleViewer,
     /// A cell to compare with the inspected one (B).
     Compare(CellValue),
 }
@@ -133,7 +135,8 @@ impl ResultView {
                 .col_movable(false)
                 .col_selectable(false)
                 // Rows are selected by the delegate (multi-selection); the table's
-                // own selection is a cell: the inspected one.
+                // own selection is a cell (the inspected one, A, is a mark of its
+                // own: see `inspect`).
                 .row_selectable(false)
                 .cell_selectable(true)
                 .row_header(false)
@@ -164,10 +167,10 @@ impl ResultView {
         event: &TableEvent,
         cx: &mut Context<Self>,
     ) {
-        match event {
-            TableEvent::SelectCell(row, col) => self.inspect(*row, *col, false, cx),
-            TableEvent::DoubleClickedCell(row, col) => self.inspect(*row, *col, true, cx),
-            _ => {}
+        // A click or the arrow keys only select; the viewer changes on a double
+        // click, Space or "Inspect value".
+        if let TableEvent::DoubleClickedCell(row, col) = event {
+            self.inspect(*row, *col, true, cx);
         }
     }
 
@@ -182,11 +185,21 @@ impl ResultView {
         }
     }
 
-    /// Space: shows the inspected cell in the value viewer.
+    /// Space: shows the selected cell in the value viewer; on the cell it already
+    /// has (or without a selection) opens or closes the viewer.
     fn inspect_action(&mut self, _: &InspectValue, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some((row, col)) = self.table.read(cx).delegate().inspected {
-            self.inspect(row, col, true, cx);
+        let table = self.table.read(cx);
+        match table.selected_cell() {
+            Some((row, col)) if table.delegate().inspected != Some((row, col)) => {
+                self.inspect(row, col, true, cx)
+            }
+            _ => cx.emit(ResultEvent::ToggleViewer),
         }
+    }
+
+    /// The grid's focus (Esc in the value viewer returns to it).
+    pub fn grid_focus(&self, cx: &App) -> FocusHandle {
+        self.table.read(cx).focus_handle(cx)
     }
 
     /// "Inspect value" in the menu: selects the cell (A) and shows it.
@@ -216,7 +229,6 @@ impl ResultView {
                 d.compared = None;
             } else {
                 d.inspected = None;
-                t.clear_selection(cx);
             }
             cx.notify();
         });
