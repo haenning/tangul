@@ -1117,3 +1117,68 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
     });
     assert!(shown(cx).is_empty(), "the assistant ran nothing yet");
 }
+
+#[gpui_kit::test]
+fn hovering_a_number_column_shows_its_summary(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(
+        handle,
+        &workspace,
+        &[[Some("1"), Some("a")], [Some("2"), None]],
+        cx,
+    );
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats").visible())
+    });
+}
+
+#[gpui_kit::test]
+fn the_summary_comes_back_after_the_filter_closes(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(
+        handle,
+        &workspace,
+        &[[Some("1"), Some("a")], [Some("2"), None]],
+        cx,
+    );
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("col-filter-button", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("filter-apply").visible());
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("filter-apply").is_none());
+        assert!(window.find("column-stats").visible())
+    });
+}
+
+#[gpui_kit::test]
+fn a_text_column_shows_its_counts(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(
+        handle,
+        &workspace,
+        &[[Some("1"), Some("a")], [Some("2"), None]],
+        cx,
+    );
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats").visible())
+    });
+}

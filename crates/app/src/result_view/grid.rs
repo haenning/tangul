@@ -162,18 +162,24 @@ impl ResultsDelegate {
         }
     }
 
-    /// Aggregates of a numeric column over the selected rows, or all loaded rows.
+    /// Summary of a column over the selected rows, or all loaded rows.
     fn stats(&mut self, col: usize) -> Option<&ColumnStats> {
         let key = (col, self.result.row_count(), self.selection_gen);
         if self.stats.as_ref().is_none_or(|(k, _)| *k != key) {
-            let known_other = matches!(self.facts.get(col),
+            // A column the schema says is not a number gets no sums, even if its
+            // values look like numbers (codes, zip codes).
+            let numeric = !matches!(self.facts.get(col),
                 Some(Some(f)) if ColumnKind::from_type(&f.data_type) != ColumnKind::Number);
-            let stats = if known_other {
-                None
-            } else if self.selected.is_empty() {
-                column_stats((0..self.result.row_count()).map(|r| self.result.cell(r, col)))
+            let stats = if self.selected.is_empty() {
+                column_stats(
+                    (0..self.result.row_count()).map(|r| self.result.cell(r, col)),
+                    numeric,
+                )
             } else {
-                column_stats(self.selected.iter().map(|&r| self.result.cell(r, col)))
+                column_stats(
+                    self.selected.iter().map(|&r| self.result.cell(r, col)),
+                    numeric,
+                )
             };
             self.stats = Some((key, stats));
         }
@@ -451,6 +457,8 @@ fn stats_card(scope: String, stats: &ColumnStats, cx: &App) -> impl IntoElement 
             )
     };
     v_flex()
+        .id("column-stats")
+        .test_support()
         .min_w(px(160.))
         .max_w(px(320.))
         .p_2()
@@ -469,8 +477,14 @@ fn stats_card(scope: String, stats: &ColumnStats, cx: &App) -> impl IntoElement 
                 .child(row("nulls", stats.nulls.to_string().into()))
         })
         .when(stats.count > 0, |this| {
+            this.child(row("distinct", stats.distinct.to_string().into()))
+        })
+        .when(stats.numeric(), |this| {
+            let this = this.when(stats.other > 0, |this| {
+                this.child(row("not numbers", stats.other.to_string().into()))
+            });
             let this = this.child(row("sum", stats.sum.clone().into()));
-            let this = if stats.nulls > 0 {
+            let this = if stats.nulls > 0 && stats.other == 0 {
                 this.child(row("avg (all rows)", stats.avg_all.clone().into()))
                     .child(row("avg (non-null)", stats.avg.clone().into()))
             } else {
@@ -481,7 +495,7 @@ fn stats_card(scope: String, stats: &ColumnStats, cx: &App) -> impl IntoElement 
         })
 }
 
-/// Aggregates of a numeric column; values as the server wrote them.
+/// Summary of a column; numbers as the server wrote them.
 #[derive(Debug, Clone, PartialEq)]
 struct ColumnStats {
     /// All rows looked at.
@@ -489,6 +503,12 @@ struct ColumnStats {
     /// Non-NULL values.
     count: usize,
     nulls: usize,
+    /// Different non-NULL values.
+    distinct: usize,
+    /// Non-NULL values that are numbers (the sums are over these) …
+    numbers: usize,
+    /// … and those that are not.
+    other: usize,
     sum: String,
     /// Sum over all rows, NULL counting as 0.
     avg_all: String,
@@ -498,11 +518,24 @@ struct ColumnStats {
     max: String,
 }
 
-/// Aggregates over `values`, or `None` if one of them is not a number. Plain
-/// decimals are summed exactly (no float rounding in a sum of prices); anything
-/// else (exponents, huge values) in floating point.
-fn column_stats<'a>(values: impl Iterator<Item = Option<&'a str>>) -> Option<ColumnStats> {
+impl ColumnStats {
+    /// Whether to show sums: mostly numbers (one stray text value doesn't hide
+    /// them; a text column with a few number-like values doesn't get them).
+    fn numeric(&self) -> bool {
+        self.numbers > 0 && self.numbers > self.other
+    }
+}
+
+/// Summary of `values`, `None` without any. With `numeric`, the values that are
+/// numbers are summed: plain decimals exactly (no float rounding in a sum of
+/// prices), anything else (exponents, huge values) in floating point.
+fn column_stats<'a>(
+    values: impl Iterator<Item = Option<&'a str>>,
+    numeric: bool,
+) -> Option<ColumnStats> {
     let mut count = 0;
+    let mut numbers = 0;
+    let mut distinct = std::collections::HashSet::new();
     let mut nulls = 0;
     let mut float_sum = 0f64;
     // Sum as an integer of `scale` decimal places, while every value fits.
@@ -514,8 +547,17 @@ fn column_stats<'a>(values: impl Iterator<Item = Option<&'a str>>) -> Option<Col
             nulls += 1;
             continue;
         };
-        let x: f64 = value.parse().ok()?;
         count += 1;
+        distinct.insert(value);
+        // NaN and infinities parse, but would make every aggregate NaN / inf.
+        let Some(x) = numeric
+            .then(|| value.parse::<f64>().ok())
+            .flatten()
+            .filter(|x| x.is_finite())
+        else {
+            continue;
+        };
+        numbers += 1;
         float_sum += x;
         exact = exact.and_then(|(sum, scale)| {
             let (v, s) = decimal(value)?;
@@ -543,12 +585,15 @@ fn column_stats<'a>(values: impl Iterator<Item = Option<&'a str>>) -> Option<Col
         ),
         None => (format_float(float_sum, 6), float_sum, 6),
     };
-    let avg = format_float(sum_f / count.max(1) as f64, decimals);
+    let avg = format_float(sum_f / numbers.max(1) as f64, decimals);
     let avg_all = format_float(sum_f / rows.max(1) as f64, decimals);
     Some(ColumnStats {
         rows,
         count,
         nulls,
+        distinct: distinct.len(),
+        numbers,
+        other: count - numbers,
         sum,
         avg_all,
         avg,
@@ -1120,25 +1165,52 @@ mod tests {
 
     #[test]
     fn aggregates() {
-        let s =
-            column_stats([Some("0.1"), Some("0.2"), None, Some("-1.25"), Some("3")].into_iter())
-                .unwrap();
+        let s = column_stats(
+            [Some("0.1"), Some("0.2"), None, Some("-1.25"), Some("3")].into_iter(),
+            true,
+        )
+        .unwrap();
         assert_eq!((s.rows, s.count, s.nulls), (5, 4, 1));
         assert_eq!(s.sum, "2.05");
         assert_eq!(s.avg, "0.5125");
         assert_eq!(s.avg_all, "0.41");
         assert_eq!((s.min.as_str(), s.max.as_str()), ("-1.25", "3"));
-        let s = column_stats([Some("1e3"), Some("2")].into_iter()).unwrap();
+        let s = column_stats([Some("1e3"), Some("2")].into_iter(), true).unwrap();
         assert_eq!((s.sum.as_str(), s.avg.as_str()), ("1002", "501"));
-        assert!(column_stats([Some("1"), Some("abc")].into_iter()).is_none());
+        // A stray value that is not a number is counted, not a reason to drop
+        // the sums; NaN and infinities are not summed either.
+        let s = column_stats(
+            [Some("1"), Some("abc"), Some("2"), Some("NaN"), Some("3")].into_iter(),
+            true,
+        )
+        .unwrap();
+        assert!(s.numeric());
+        assert_eq!((s.numbers, s.other, s.distinct), (3, 2, 5));
+        assert_eq!((s.sum.as_str(), s.avg.as_str()), ("6", "2"));
+        assert_eq!((s.min.as_str(), s.max.as_str()), ("1", "3"));
         assert_eq!(format_decimal(-5, 2), "-0.05");
         assert_eq!(format_decimal(1234, 0), "1234");
     }
 
     #[test]
+    fn other_columns_get_counts() {
+        // Text: rows, nulls, distinct; no sums.
+        let s = column_stats([Some("a"), Some("b"), Some("a"), None].into_iter(), true).unwrap();
+        assert!(!s.numeric());
+        assert_eq!((s.rows, s.count, s.nulls, s.distinct), (4, 3, 1, 2));
+        // Mostly text with a number-like value: still no sums.
+        let s = column_stats([Some("a"), Some("12"), Some("b")].into_iter(), true).unwrap();
+        assert!(!s.numeric());
+        // A column the schema says is text: no sums, however it looks.
+        let s = column_stats([Some("1"), Some("2")].into_iter(), false).unwrap();
+        assert!(!s.numeric());
+        assert_eq!((s.count, s.distinct, s.other), (2, 2, 2));
+    }
+
+    #[test]
     fn averages_with_nulls() {
         // 10, NULL, 20, NULL: SQL's AVG is 15; over all four rows it is 7.5.
-        let s = column_stats([Some("10"), None, Some("20"), None].into_iter()).unwrap();
+        let s = column_stats([Some("10"), None, Some("20"), None].into_iter(), true).unwrap();
         assert_eq!((s.rows, s.count, s.nulls), (4, 2, 2));
         assert_eq!(
             (s.sum.as_str(), s.avg.as_str(), s.avg_all.as_str()),
@@ -1146,26 +1218,26 @@ mod tests {
         );
         assert_eq!((s.min.as_str(), s.max.as_str()), ("10", "20"));
         // No NULLs: both averages agree.
-        let s = column_stats([Some("1"), Some("2")].into_iter()).unwrap();
+        let s = column_stats([Some("1"), Some("2")].into_iter(), true).unwrap();
         assert_eq!((s.avg.as_str(), s.avg_all.as_str()), ("1.5", "1.5"));
         // Only NULLs: counted, nothing to sum.
-        let s = column_stats([None, None].into_iter()).unwrap();
+        let s = column_stats([None, None].into_iter(), true).unwrap();
         assert_eq!((s.rows, s.count, s.nulls), (2, 0, 2));
         // Nothing at all.
-        assert!(column_stats(std::iter::empty()).is_none());
+        assert!(column_stats(std::iter::empty(), true).is_none());
     }
 
     #[test]
     fn large_sums_stay_exact() {
         // 0.01 added 100 000 times drifts in floating point; the sum is exact.
-        let s = column_stats(std::iter::repeat_n(Some("0.01"), 100_000)).unwrap();
+        let s = column_stats(std::iter::repeat_n(Some("0.01"), 100_000), true).unwrap();
         assert_eq!(
             (s.rows, s.sum.as_str(), s.avg.as_str()),
             (100_000, "1000.00", "0.01")
         );
         // Integers beyond f64's exact range.
         let big = "9007199254740993";
-        let s = column_stats([Some(big), Some(big)].into_iter()).unwrap();
+        let s = column_stats([Some(big), Some(big)].into_iter(), true).unwrap();
         assert_eq!(s.sum, "18014398509481986");
         // 1..=10 000 plus as many NULLs.
         let values: Vec<String> = (1..=10_000).map(|i| i.to_string()).collect();
@@ -1174,6 +1246,7 @@ mod tests {
                 .iter()
                 .map(|v| Some(v.as_str()))
                 .chain(std::iter::repeat_n(None, 10_000)),
+            true,
         )
         .unwrap();
         assert_eq!((s.rows, s.count, s.nulls), (20_000, 10_000, 10_000));
@@ -1210,12 +1283,11 @@ mod tests {
         d.result.append(batch);
         assert_eq!(d.stats(0).unwrap().sum, "21");
 
-        // Once the schema says the column is text, there are no aggregates.
+        // Once the schema says the column is text, only counts.
         d.set_facts(vec![Some(facts("text", false, None))]);
-        assert!(d.stats(0).is_none());
-        // Numbers that are not all numbers: none either.
-        let mut d = numbers(&[Some("1"), Some("x")]);
-        assert!(d.stats(0).is_none());
+        let s = d.stats(0).unwrap();
+        assert!(!s.numeric());
+        assert_eq!((s.rows, s.distinct), (3, 1));
     }
 
     fn facts(data_type: &str, primary_key: bool, references: Option<&str>) -> ColumnFacts {
