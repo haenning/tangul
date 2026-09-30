@@ -172,7 +172,7 @@ impl Panel {
             Panel::Bookmarks => Lucide::Bookmark,
             Panel::History => Lucide::RotateCcwClock,
             Panel::Value => Lucide::Braces,
-            Panel::Assistant => Lucide::Sparkles,
+            Panel::Assistant => Lucide::Bot,
         }
     }
 

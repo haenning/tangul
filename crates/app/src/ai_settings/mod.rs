@@ -76,9 +76,43 @@ pub struct AiState {
     pub databases: Vec<DatabaseAi>,
     /// Providers with an API key in the Keychain.
     pub keys: HashSet<ProviderKind>,
-    /// The latest tool calls of the assistant and of MCP clients, newest first.
-    pub recent_calls: Vec<AuditEntry>,
+    /// The tool calls of the assistant and of MCP clients shown, as each page asks
+    /// for them ([`AiSettingsTab::calls_view`]).
+    pub assistant_calls: Calls,
+    pub mcp_calls: Calls,
 }
+
+/// Tool calls of one caller from the audit log: those shown, newest first, and
+/// how many there are.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Calls {
+    pub entries: Vec<AuditEntry>,
+    pub total: usize,
+}
+
+/// Which tool calls a page shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallsView {
+    /// The latest [`CALLS_COLLAPSED`], with "Show more".
+    Collapsed,
+    /// Page `n` (from 0) of [`CALLS_PAGE`] each.
+    Page(usize),
+}
+
+impl CallsView {
+    /// Where the calls shown start, and how many.
+    pub fn range(self) -> (usize, usize) {
+        match self {
+            CallsView::Collapsed => (0, CALLS_COLLAPSED),
+            CallsView::Page(n) => (n * CALLS_PAGE, CALLS_PAGE),
+        }
+    }
+}
+
+/// Tool calls shown before "Show more".
+pub const CALLS_COLLAPSED: usize = 5;
+/// Tool calls per page after it.
+pub const CALLS_PAGE: usize = 25;
 
 /// The models a provider offers, as far as they were asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +147,8 @@ pub enum AiSettingsEvent {
     },
     /// Open the database's connection settings.
     EditDatabase(String),
+    /// Another page of tool calls is shown (see [`AiSettingsTab::calls_view`]).
+    CallsPage,
 }
 
 pub struct AiSettingsTab {
@@ -121,6 +157,8 @@ pub struct AiSettingsTab {
     page: Page,
     state: AiState,
     models: HashMap<ProviderKind, Models>,
+    /// The tool calls each page shows, by caller.
+    calls: HashMap<&'static str, CallsView>,
     /// A new API key for the provider shown (never shows a saved one).
     key: Entity<InputState>,
     model: Entity<InputState>,
@@ -179,6 +217,7 @@ impl AiSettingsTab {
             page,
             state: AiState::default(),
             models: HashMap::new(),
+            calls: HashMap::new(),
             key,
             model,
             base_url,
@@ -206,6 +245,25 @@ impl AiSettingsTab {
             self.state = state;
             cx.notify();
         }
+    }
+
+    #[cfg(test)]
+    pub fn state(&self) -> &AiState {
+        &self.state
+    }
+
+    /// Which tool calls the page of `caller` (`assistant`, `mcp`) shows.
+    pub fn calls_view(&self, caller: &str) -> CallsView {
+        self.calls
+            .get(caller)
+            .copied()
+            .unwrap_or(CallsView::Collapsed)
+    }
+
+    fn show_calls(&mut self, caller: &'static str, view: CallsView, cx: &mut Context<Self>) {
+        self.calls.insert(caller, view);
+        cx.emit(AiSettingsEvent::CallsPage);
+        cx.notify();
     }
 
     pub fn set_models(&mut self, provider: ProviderKind, models: Models, cx: &mut Context<Self>) {
@@ -384,5 +442,17 @@ impl Render for AiSettingsTab {
                     .overflow_y_scroll()
                     .child(v_flex().max_w(px(720.)).p_6().gap_6().child(page)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CALLS_COLLAPSED, CALLS_PAGE, CallsView};
+
+    #[test]
+    fn calls_are_shown_a_few_then_by_page() {
+        assert_eq!(CallsView::Collapsed.range(), (0, CALLS_COLLAPSED));
+        assert_eq!(CallsView::Page(0).range(), (0, CALLS_PAGE));
+        assert_eq!(CallsView::Page(2).range(), (2 * CALLS_PAGE, CALLS_PAGE));
     }
 }

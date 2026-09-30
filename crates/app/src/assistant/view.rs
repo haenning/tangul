@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::Textarea,
@@ -253,54 +253,27 @@ impl ChatPanel {
             .collect()
     }
 
+    /// The question being typed (↵ sends it, ⇧↵ starts a new line), and Stop while
+    /// an answer is written.
     fn render_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let running = self.running.is_some();
         v_flex()
             .p_2()
             .gap_1()
             .border_t_1()
             .border_color(theme.border)
             .child(Textarea::new(&self.input))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(match &self.focus {
-                                Some(db) => format!("About {db}"),
-                                None => "No database available to AI tools".into(),
-                            }),
-                    )
-                    .map(|this| {
-                        if running {
-                            this.child(
-                                Button::new("assistant-stop")
-                                    .label("Stop")
-                                    .xsmall()
-                                    .outline()
-                                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
-                            )
-                        } else {
-                            this.child(
-                                Button::new("assistant-send")
-                                    .label("Send")
-                                    .xsmall()
-                                    .primary()
-                                    .disabled(!self.ready)
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                                    ),
-                            )
-                        }
-                    }),
-            )
+            .when(self.running.is_some(), |this| {
+                this.child(
+                    h_flex().justify_end().child(
+                        Button::new("assistant-stop")
+                            .label("Stop")
+                            .xsmall()
+                            .outline()
+                            .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
+                    ),
+                )
+            })
     }
 }
 

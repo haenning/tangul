@@ -1598,3 +1598,76 @@ fn a_question_run_in_the_editor_goes_to_the_assistant_once_it_is_set_up(cx: &mut
     run("select id from orders", cx);
     assert!(running(cx));
 }
+
+#[gpui_kit::test]
+fn tool_calls_show_a_few_then_pages_of_25(cx: &mut TestAppContext) {
+    use crate::ai_settings::{CallsView, Page};
+    use tangul_data::local::AuditEntry;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            for at in 0..32 {
+                ws.data
+                    .local
+                    .add_audit(&AuditEntry {
+                        at,
+                        caller: "mcp".into(),
+                        target: format!("tool:run_readonly shop {at}"),
+                        sql: "{}".into(),
+                        outcome: "ran".into(),
+                        error: None,
+                        duration_ms: Some(1),
+                        rows: None,
+                    })
+                    .unwrap();
+            }
+            ws.open_ai_settings(Page::Mcp, window, cx);
+        })
+    });
+    let shown = |cx: &mut TestAppContext| {
+        workspace.read_with(cx, |ws, cx| {
+            let tab = ws
+                .tabs
+                .active()
+                .and_then(|t| t.ai_settings())
+                .unwrap()
+                .read(cx);
+            let calls = &tab.state().mcp_calls;
+            (tab.calls_view("mcp"), calls.entries.len(), calls.total)
+        })
+    };
+    assert_eq!(shown(cx), (CallsView::Collapsed, 5, 32));
+    let down = || gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-5000.)));
+    step(handle, cx, |window, cx| {
+        window.scroll("ai-settings-body", down(), cx)
+    });
+    step(handle, cx, |window, cx| window.click("mcp-calls-more", cx));
+    assert_eq!(shown(cx), (CallsView::Page(0), 25, 32));
+    step(handle, cx, |window, cx| {
+        window.scroll("ai-settings-body", down(), cx)
+    });
+    step(handle, cx, |window, cx| window.click("mcp-calls-next", cx));
+    assert_eq!(shown(cx), (CallsView::Page(1), 7, 32));
+    step(handle, cx, |window, cx| {
+        window.scroll("ai-settings-body", down(), cx)
+    });
+    step(handle, cx, |window, cx| window.click("mcp-calls-less", cx));
+    assert_eq!(shown(cx), (CallsView::Collapsed, 5, 32));
+}
+
+#[gpui_kit::test]
+fn the_status_bar_ends_with_the_ai_then_the_value_viewer(cx: &mut TestAppContext) {
+    let (handle, _) = open(cx);
+    step(handle, cx, |window, _| {
+        let x = |id: gpui_kit::ElementId| window.find(id).bounds().origin.x;
+        let assistant = x(button(Panel::Assistant).into());
+        let mcp = x("mcp".into());
+        let value = x(button(Panel::Value).into());
+        assert!(
+            assistant < mcp && mcp < value,
+            "{assistant:?} {mcp:?} {value:?}"
+        );
+        // The ACP placeholder is gone.
+        assert!(window.try_find("ai-agent").is_none());
+    });
+}

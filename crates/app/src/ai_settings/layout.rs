@@ -2,7 +2,7 @@
 //! databases' AI settings, the latest tool calls).
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
@@ -13,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_core::ValueAccess;
 
-use super::{AiSettingsEvent, AiSettingsTab};
+use super::{AiSettingsEvent, AiSettingsTab, CALLS_COLLAPSED, CALLS_PAGE, CallsView};
 
 /// A titled group of rows.
 pub(super) fn section(
@@ -253,21 +253,25 @@ impl AiSettingsTab {
         )
     }
 
-    /// The latest tool calls of `caller` (`assistant`, `mcp`), from the audit log.
-    pub(super) fn render_calls(&self, caller: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let calls: Vec<_> = self
-            .state
-            .recent_calls
-            .iter()
-            .filter(|c| c.caller == caller)
-            .take(20)
-            .collect();
-        let rows: Vec<AnyElement> = if calls.is_empty() {
+    /// The tool calls of `caller` (`assistant`, `mcp`) from the audit log: the
+    /// latest few, then pages of [`CALLS_PAGE`] after "Show more".
+    pub(super) fn render_calls(
+        &self,
+        caller: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let calls = match caller {
+            "mcp" => &self.state.mcp_calls,
+            _ => &self.state.assistant_calls,
+        };
+        let view = self.calls_view(caller);
+        let mut rows: Vec<AnyElement> = if calls.entries.is_empty() {
             vec![note("No tool calls yet.", cx)]
         } else {
             calls
-                .into_iter()
+                .entries
+                .iter()
                 .map(|c| {
                     let color = match c.outcome.as_str() {
                         "ran" => theme.muted_foreground,
@@ -291,9 +295,72 @@ impl AiSettingsTab {
                 })
                 .collect()
         };
+        let id = |what: &str| SharedString::from(format!("{caller}-calls-{what}"));
+        match view {
+            CallsView::Collapsed if calls.total > CALLS_COLLAPSED => rows.push(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .child(
+                        Button::new(id("more"))
+                            .label("Show more")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.show_calls(caller, CallsView::Page(0), cx)
+                            })),
+                    )
+                    .into_any_element(),
+            ),
+            CallsView::Collapsed => {}
+            CallsView::Page(page) => {
+                let pages = calls.total.div_ceil(CALLS_PAGE).max(1);
+                rows.push(
+                    h_flex()
+                        .px_2()
+                        .py_1()
+                        .gap_2()
+                        .items_center()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            Button::new(id("less"))
+                                .label("Show less")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.show_calls(caller, CallsView::Collapsed, cx)
+                                })),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new(id("prev"))
+                                .icon(IconName::ChevronLeft)
+                                .ghost()
+                                .xsmall()
+                                .disabled(page == 0)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.show_calls(caller, CallsView::Page(page - 1), cx)
+                                })),
+                        )
+                        .child(format!("Page {} of {pages}", page + 1))
+                        .child(
+                            Button::new(id("next"))
+                                .icon(IconName::ChevronRight)
+                                .ghost()
+                                .xsmall()
+                                .disabled(page + 1 >= pages)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.show_calls(caller, CallsView::Page(page + 1), cx)
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
         section(
-            "Latest tool calls",
-            Some("Every call is kept in the audit log."),
+            "Tool calls",
+            Some("Newest first; every call is kept in the audit log."),
             rows,
             cx,
         )

@@ -148,13 +148,9 @@ impl Workspace {
             None => false,
         };
         self.assistant.ready.set(ready);
-        let focus = self
-            .active_database()
-            .filter(|db| db.ai_tools)
-            .map(Database::display_name);
         self.panels
             .assistant
-            .update(cx, |p, cx| p.set_context(ready, focus, cx));
+            .update(cx, |p, cx| p.set_ready(ready, cx));
     }
 
     fn refresh_chats(&mut self, cx: &mut Context<Self>) {

@@ -35,7 +35,6 @@ gpui_kit::assets::icon_assets!(
         Plug,
         RotateCcwClock,
         Rows3,
-        Sparkles,
         Star,
         StarFill,
         Table

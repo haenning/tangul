@@ -231,27 +231,25 @@ impl Workspace {
     /// Zed-style bottom bar: sidebar panels, then (planned) AI and schema-graph
     /// tools; the active query's timing on the right.
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let buttons = |sidebar: &Sidebar, cx: &mut Context<Self>| {
-            sidebar
-                .panels
-                .iter()
-                .map(|&panel| {
-                    Button::new(("panel", panel as usize))
-                        .icon(Icon::new(panel.icon()))
-                        .ghost()
-                        .xsmall()
-                        .selected(sidebar.shows(panel))
-                        .tooltip(panel.label())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if panel == Panel::Value {
-                                this.release_viewer_focus(window, cx);
-                            }
-                            this.toggle_panel(panel, cx)
-                        }))
-                })
-                .collect::<Vec<_>>()
+        let button = |panel: Panel, cx: &mut Context<Self>| {
+            let shown = self.left.shows(panel) || self.right.shows(panel);
+            Button::new(("panel", panel as usize))
+                .icon(Icon::new(panel.icon()))
+                .ghost()
+                .xsmall()
+                .selected(shown)
+                .tooltip(panel.label())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if panel == Panel::Value {
+                        this.release_viewer_focus(window, cx);
+                    }
+                    this.toggle_panel(panel, cx)
+                }))
         };
-        let (left, right) = (buttons(&self.left, cx), buttons(&self.right, cx));
+        let left: Vec<_> = self.left.panels.iter().map(|&p| button(p, cx)).collect();
+        // Right: the AI (the assistant, the MCP server), then the value viewer.
+        let (assistant, value) = (button(Panel::Assistant, cx), button(Panel::Value, cx));
+        let mcp = self.render_mcp_button(cx).into_any_element();
         let theme = cx.theme();
         // File tabs (settings) have no results to time or chart.
         let (query_text, running, chart) = self
@@ -292,9 +290,6 @@ impl Workspace {
             .text_color(theme.muted_foreground)
             .children(left)
             .child(separator())
-            .child(planned("ai-agent", Lucide::Bot, "Agent via ACP — planned"))
-            .child(separator())
-            .child(self.render_mcp_button(cx))
             .child(planned(
                 "schema-graph",
                 Lucide::Network,
@@ -304,7 +299,10 @@ impl Workspace {
             .when(running, |this| this.child(Spinner::new().xsmall()))
             .child(div().pr_1().child(query_text))
             .children(chart_button)
-            .children(right)
+            .child(assistant)
+            .child(mcp)
+            .child(separator())
+            .child(value)
             .child(div().w_1())
     }
 

@@ -7,10 +7,9 @@ use std::collections::HashSet;
 use tangul_ai::llm::{self, ProviderKind};
 
 use super::*;
-use crate::ai_settings::{AiSettingsEvent, AiSettingsTab, AiState, DatabaseAi, Models, Page};
-
-/// Tool calls read from the audit log for the tab.
-const RECENT_CALLS: usize = 100;
+use crate::ai_settings::{
+    AiSettingsEvent, AiSettingsTab, AiState, Calls, CallsView, DatabaseAi, Models, Page,
+};
 
 impl Workspace {
     /// Opens the AI settings on `page` (or switches the open tab to it).
@@ -51,11 +50,15 @@ impl Workspace {
         let Some(tab) = self.tabs.items().find_map(TabItem::ai_settings).cloned() else {
             return;
         };
-        let state = self.ai_state();
+        let views = {
+            let tab = tab.read(cx);
+            (tab.calls_view("assistant"), tab.calls_view("mcp"))
+        };
+        let state = self.ai_state(views);
         tab.update(cx, |t, cx| t.set_state(state, cx));
     }
 
-    fn ai_state(&mut self) -> AiState {
+    fn ai_state(&mut self, (assistant, mcp): (CallsView, CallsView)) -> AiState {
         let databases = self
             .data
             .profiles
@@ -94,13 +97,17 @@ impl Workspace {
             mcp: self.mcp_state(),
             databases,
             keys: self.ai_keys().clone(),
-            recent_calls: self
-                .data
-                .local
-                .audit(RECENT_CALLS)
-                .into_iter()
-                .filter(|e| e.target.starts_with("tool:"))
-                .collect(),
+            assistant_calls: self.tool_calls("assistant", assistant),
+            mcp_calls: self.tool_calls("mcp", mcp),
+        }
+    }
+
+    /// The tool calls of `caller` a page shows.
+    fn tool_calls(&self, caller: &str, view: CallsView) -> Calls {
+        let (offset, limit) = view.range();
+        Calls {
+            entries: self.data.local.tool_calls(caller, offset, limit),
+            total: self.data.local.tool_call_count(caller),
         }
     }
 
@@ -188,6 +195,8 @@ impl Workspace {
             AiSettingsEvent::EditDatabase(database) => {
                 self.open_form(FormMode::EditDatabase, Some(database), None, window, cx)
             }
+            // Read below, with the rest.
+            AiSettingsEvent::CallsPage => {}
         }
         self.push_ai_settings(cx);
         self.sync_assistant(cx);

@@ -64,8 +64,6 @@ pub struct ChatPanel {
     problem: Option<String>,
     /// Whether a provider is set up, so the panel can offer a question.
     ready: bool,
-    /// The tool-using database the next question is about, for the footer.
-    focus: Option<String>,
     chats: Vec<ChatSummary>,
     input: Entity<TextareaState>,
     scroll: ScrollHandle,
@@ -83,7 +81,7 @@ impl ChatPanel {
             TextareaState::new(window, cx)
                 .auto_grow(2, 10)
                 .submit_on_enter(true)
-                .placeholder("Ask about your data… (⇧↵ for a new line)")
+                .placeholder("Ask about your data")
         });
         let submit = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { shift: false, .. } = ev {
@@ -97,7 +95,6 @@ impl ChatPanel {
             streaming: None,
             problem: None,
             ready: false,
-            focus: None,
             chats: Vec::new(),
             input,
             scroll: ScrollHandle::new(),
@@ -125,11 +122,10 @@ impl ChatPanel {
         &self.messages
     }
 
-    /// Whether a provider is set up, and which database questions are about.
-    pub fn set_context(&mut self, ready: bool, focus: Option<String>, cx: &mut Context<Self>) {
-        if (self.ready, &self.focus) != (ready, &focus) {
+    /// Whether a provider is set up.
+    pub fn set_ready(&mut self, ready: bool, cx: &mut Context<Self>) {
+        if self.ready != ready {
             self.ready = ready;
-            self.focus = focus;
             cx.notify();
         }
     }
