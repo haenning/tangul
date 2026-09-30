@@ -14,13 +14,17 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/assist`: SQL logic without UI or I/O (lexer, dialects, analysis, completion,
   filters); put testable logic here
 - `crates/tunnel`: SSH tunnels
-- `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`,
-  `metrics.db`, `settings.json`)
+- `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
+  incl. the assistant's chats, `metrics.db`, `settings.json`)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
   and `knowledge`: the one pool of what is known about the databases (schema per
   user, usage per database). The editor, schema tree, results and the assistant all
   read it; don't keep copies elsewhere
+- `crates/llm`: model providers, no UI, nothing about databases or tangul's tools: one
+  `Provider` (a streamed answer with tool calls, the models on offer) with an adapter
+  per API (`anthropic.rs`, `openai.rs` for every OpenAI-compatible service, `gemini.rs`,
+  `ollama.rs`). The caller passes key, messages and tools (`ToolDef`)
 - `crates/ai`: the assistant's tools (`Tool`, `Registry`), each written once; MCP and
   provider adapters map the registry generically. `Ctx` is the one security layer
   for every caller: only exposed connections and their opt-ins; SQL only through the
@@ -28,15 +32,29 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   exact output (hand-built schemas, and SQLite files with the real engine).
   `mcp.rs`: the MCP server (rmcp, Streamable HTTP on `127.0.0.1`, bearer token,
   requests with an `Origin` refused); it builds a `Ctx` per call from a `CtxSource`
-  and records each call through an `AuditSink`
+  and records each call through an `AuditSink`.
+  `chat`: the in-app assistant's conversation (model via `llm`, re-exported as
+  `tangul_ai::llm`; tools through the registry with a `Ctx` as caller `assistant`),
+  prose/SQL segments of answers, what is kept of messages (redacted). `runtime`: the
+  tokio runtime this work runs on (the app's executor isn't tokio)
 - `crates/app`: the GPUI app
   - `workspace/`: layout and wiring; `sidebar.rs`: the sidebars left and right of the
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
     `value_panel.rs`: the value viewer (right sidebar): the inspected cell (A), the
     compared one (B) and their diff; logic in `assist::value`; `tabs.rs`: the kinds of tab (`TabItem`: query,
-    file; boards later) and the open ones; `mcp.rs`: runs the MCP server while
-    `mcp.enabled` is set, offers the connected databases with `ai_tools` on (each on
-    its assistant connection), its token in the Keychain, its status bar plug
+    file, AI settings; boards later) and the open ones; `ai.rs`: what the assistant
+    and MCP clients share: the connected databases with `ai_tools` on offered to AI
+    tools (each on its assistant connection), a `Ctx` per caller, and what their calls
+    hand back (history, proposals, shown results); `mcp.rs`: runs the MCP server while
+    `mcp.enabled` is set, its token in the Keychain, its status bar plug (green while
+    it runs; opens the MCP settings); `assistant.rs`: the chat's provider and model
+    from the settings, its chats in `local.db`, questions run in the editor;
+    `ai_settings.rs`: the AI settings tab's state and requests
+  - `ai_settings/`: the AI settings tab (pages AI and MCP); knows nothing about the
+    workspace: writes `settings.json` itself, asks for the rest with events
+  - `assistant/`: the assistant's chat (right sidebar); knows nothing about the
+    workspace: runs a conversation it is handed, asks for storage and SQL actions with
+    events
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
     nothing about tabs, so boards and the assistant can reuse it
@@ -51,10 +69,11 @@ assist   ← core
 drivers  ← core
 tunnel   ← core
 data     ← core
+llm      ← core
 engine   ← core, assist, data, drivers, tunnel
 service  ← core, assist, data, engine
-ai       ← core, assist, engine, service
-app      ← core, assist, data, engine, service, ai   (never drivers or tunnel)
+ai       ← core, assist, engine, service, llm
+app      ← core, assist, data, engine, service, ai   (never drivers, tunnel or llm)
 ```
 
 ## Databases
@@ -74,6 +93,15 @@ Adding one: a `DriverKind` variant, a driver (with its Cargo feature) and a dial
 each with tests, plus live tests in `crates/engine/tests/live.rs`. The compiler points
 to the rest. Check the **Safety rules** against it: the gate relies on a read-only
 transaction and a server-side time limit where the database has them.
+
+## Model providers
+
+Like databases, only a few places name a concrete provider: `core::llm::ProviderKind`
+(the list, label, default address and model, whether it needs a key), its adapter in
+`crates/llm/src/<provider>.rs` with its arm in `llm::provider`, and the AI settings
+page. API keys live in the Keychain (`ProviderKind::key_account`), never in
+`settings.json`. Adding one: a `ProviderKind` variant and an adapter with tests (the
+request it builds, a recorded stream, and `tests/http.rs` over HTTP).
 
 ## Safety rules (user and AI)
 
@@ -96,6 +124,8 @@ explicit OK, and keep them covered by tests.
   read-only, inside `START TRANSACTION READ ONLY`, always rolled back. One statement
   (no `;`, no `U&` escapes), checked with the database's lexical rules and sent without
   its comments, so the server runs exactly what was checked (same for schedules).
+  The in-app assistant (`ai::chat`) calls the same tools through the same `Ctx` as
+  MCP clients (caller `assistant`); it has no path of its own to the database.
   `run_readonly` with `show` hands that result to the app, which opens it in a tab on
   the user's connection without running it again; only what the user does there
   afterwards (filter, sort, page, run) runs, as the user.
@@ -112,7 +142,10 @@ explicit OK, and keep them covered by tests.
   can't connect is shown to the user, and the AI has no connection: it never connects
   as anyone else instead.
 - **Secrets.** Passwords in SQL (`… PASSWORD '…'`, `IDENTIFIED BY '…'`) are replaced by
-  `assist::redact` before history, bookmarks and the audit log.
+  `assist::redact` before history, bookmarks, the assistant's chats
+  (`ai::chat::for_storage`) and the audit log.
+- **Questions in the editor.** Run text goes to the assistant instead of the database
+  only when `assist::nl::is_question` is sure; anything unsure runs as SQL, as before.
 - **Everyone.** `safety.max_query_time` applies to every caller, set on the server and
   enforced by the engine's timer.
 - **Audit.** Assistant and schedule runs (ran, proposed, refused) and every AI tool
@@ -120,7 +153,7 @@ explicit OK, and keep them covered by tests.
 - **Tests.** Changes to the gate, guard, pool or drivers come with tests, including
   live ones (`crates/engine/tests/live.rs`, e.g. `assistant_checks`: a write hidden in
   a read must fail). Aim for ≥ 95% line coverage in core, drivers, engine, assist,
-  tunnel, data, service and ai (`.github/workflows/coverage.yml`).
+  tunnel, data, service, llm and ai (`.github/workflows/coverage.yml`).
 
 ## Commands
 

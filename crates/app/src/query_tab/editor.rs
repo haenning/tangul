@@ -181,6 +181,19 @@ impl SqlEditor {
         });
     }
 
+    /// What ⌘↵ would take, as typed (not formatted): the selection, else the
+    /// statement under the cursor.
+    pub fn run_text(&self, dialect: &dyn Dialect, cx: &App) -> Option<String> {
+        let editor = self.state.read(cx);
+        let selected = editor.selected_value();
+        if !selected.trim().is_empty() {
+            return Some(selected.to_string());
+        }
+        let text = editor.value().to_string();
+        let statement = statement_at(&text, editor.cursor(), dialect)?;
+        Some(statement.text(&text).to_string())
+    }
+
     /// What ⌘↵ takes: the selection if there is one, otherwise the statement under
     /// the cursor (see [`statement_at`]). Formatted in place first (see
     /// [`Self::format_for_run`]).

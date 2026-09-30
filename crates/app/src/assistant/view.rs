@@ -162,13 +162,32 @@ impl ChatPanel {
         }
         if let Some(problem) = &self.problem {
             items.push(
-                div()
-                    .id("assistant-problem")
-                    .test_support()
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .whitespace_normal()
-                    .child(problem.clone())
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("assistant-problem")
+                            .test_support()
+                            .text_xs()
+                            .text_color(theme.danger)
+                            .whitespace_normal()
+                            .child(problem.clone()),
+                    )
+                    .when(self.offer_sql, |this| {
+                        this.child(
+                            h_flex().child(
+                                Button::new("assistant-run-as-sql")
+                                    .label("Run as SQL anyway")
+                                    .small()
+                                    .outline()
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| {
+                                            cx.emit(ChatPanelEvent::RunAsSql)
+                                        }),
+                                    ),
+                            ),
+                        )
+                    })
                     .into_any_element(),
             );
         }

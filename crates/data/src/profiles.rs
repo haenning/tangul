@@ -288,6 +288,15 @@ pub fn new_password() -> String {
 mod tests {
 
     #[test]
+    fn secrets_of_the_app_are_kept_and_forgotten() {
+        let mut p = Profiles::in_memory(Vec::new());
+        p.set_secret("ai-key:anthropic", "sk".into());
+        assert_eq!(p.password("ai-key:anthropic").as_deref(), Some("sk"));
+        p.forget_secret("ai-key:anthropic");
+        assert_eq!(p.password("ai-key:anthropic"), None);
+    }
+
+    #[test]
     fn passwords_are_new_each_time() {
         let (a, b) = (new_password(), new_password());
         assert_eq!(a.len(), 24);

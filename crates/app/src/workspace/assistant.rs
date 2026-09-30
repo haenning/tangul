@@ -8,10 +8,13 @@ use std::sync::atomic::AtomicU64;
 use tangul_ai::chat::{ChatSettings, for_storage, title_for};
 use tangul_ai::llm::{self, Message};
 
+use tangul_assist::nl::is_question;
+
 use super::ai::AiEvent;
 use super::*;
 use crate::ai_settings::Page;
 use crate::assistant::{ChatPanel, ChatPanelEvent, ChatRun};
+use crate::query_tab::QuestionCheck;
 
 /// Conversations listed in the panel.
 const CHATS_LISTED: usize = 50;
@@ -20,6 +23,9 @@ const CHATS_LISTED: usize = 50;
 #[derive(Default)]
 pub(super) struct Assistant {
     events: Option<(Task<()>, async_channel::Sender<AiEvent>)>,
+    /// The tab the last question came from and the question, to run it as SQL
+    /// after all.
+    from_tab: Option<(WeakEntity<QueryTab>, String)>,
     calls: Arc<AtomicU64>,
     /// Answers instead of the provider in the settings (tests).
     #[cfg(test)]
@@ -41,13 +47,26 @@ impl Workspace {
         if new_chat {
             panel.update(cx, |p, cx| p.new_chat(cx));
         }
+        let from_editor = self
+            .assistant
+            .from_tab
+            .as_ref()
+            .is_some_and(|(_, q)| *q == question);
         let run = match self.chat_run(cx) {
             Ok(run) => run,
             Err(why) => {
-                panel.update(cx, |p, cx| p.cannot_start(&question, why, window, cx));
+                let why = if from_editor {
+                    format!("This looks like a question, so it went to the assistant. {why}")
+                } else {
+                    why
+                };
+                panel.update(cx, |p, cx| {
+                    p.cannot_start(&question, why, from_editor, window, cx)
+                });
                 return;
             }
         };
+        self.assistant.from_tab = None;
         let title = title_for(&question);
         let chat = match panel.read(cx).chat() {
             Some(chat) => chat,
@@ -59,13 +78,43 @@ impl Workspace {
                 Ok(chat) => chat,
                 Err(e) => {
                     let why = format!("Could not keep the chat: {e:#}");
-                    panel.update(cx, |p, cx| p.cannot_start(&question, why, window, cx));
+                    panel.update(cx, |p, cx| {
+                        p.cannot_start(&question, why, false, window, cx)
+                    });
                     return;
                 }
             },
         };
         panel.update(cx, |p, cx| p.start(chat, title, question, run, cx));
         self.refresh_chats(cx);
+    }
+
+    /// A question run in the editor: to the assistant, in a new chat. Without a
+    /// provider set up, the chat says so and offers to run it as SQL after all.
+    pub(super) fn ask_from_editor(
+        &mut self,
+        question: String,
+        tab: &Entity<QueryTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.assistant.from_tab = Some((tab.downgrade(), question.clone()));
+        self.ask_assistant(question, true, window, cx);
+    }
+
+    /// How a tab tells a question from SQL: surely not SQL for its connection's
+    /// database (words of its schema count as SQL), and only while the setting is on.
+    pub(super) fn question_check(&self) -> QuestionCheck {
+        let knowledge = self.knowledge.clone();
+        Rc::new(move |text, conn, dialect, cx| {
+            if !settings::current(cx).ai.questions_in_editor {
+                return false;
+            }
+            let schema = knowledge.for_conn(conn).map(|(schema, _)| schema);
+            is_question(text, dialect, |word| {
+                schema.as_ref().is_some_and(|s| s.knows_name(word))
+            })
+        })
     }
 
     /// The model and tools a question runs with, or why there are none.
@@ -184,6 +233,18 @@ impl Workspace {
                 None => self.open_sql("From the assistant", &sql, window, cx),
             },
             ChatPanelEvent::OpenSettings => self.open_ai_settings(Page::Assistant, window, cx),
+            ChatPanelEvent::RunAsSql => {
+                let Some((tab, sql)) = self.assistant.from_tab.take() else {
+                    return;
+                };
+                if let Some(tab) = tab.upgrade() {
+                    panel.update(cx, |p, cx| {
+                        p.new_chat(cx);
+                        p.set_question("", window, cx);
+                    });
+                    tab.update(cx, |_, cx| cx.emit(TabEvent::Run(sql)));
+                }
+            }
         }
     }
 }

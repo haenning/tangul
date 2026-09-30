@@ -1527,3 +1527,50 @@ fn the_assistant_answers_in_the_right_sidebar_and_keeps_the_chat(cx: &mut TestAp
         assert!(!tab.is_running(cx), "not run");
     });
 }
+
+#[gpui_kit::test]
+fn a_question_run_in_the_editor_goes_to_the_assistant_not_the_database(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let question = "which customers ordered twice last month?";
+    let run = |text: &'static str, cx: &mut TestAppContext| {
+        step(handle, cx, |window, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.open_sql("Q", text, window, cx);
+                let tab = ws.tabs.active_query().unwrap().clone();
+                QueryTab::focus_editor(&tab, window, cx);
+            });
+        });
+        step(handle, cx, |window, cx| {
+            window.dispatch_action(Box::new(crate::RunQuery), cx)
+        });
+    };
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+        })
+    });
+    run(question, cx);
+    step(handle, cx, |window, cx| {
+        let ws = workspace.read(cx);
+        // Not sent to the database; no provider yet, so it says so.
+        assert!(!ws.tabs.active_query().unwrap().read(cx).is_running(cx));
+        assert!(shows(&workspace, Panel::Assistant, cx));
+        assert!(window.find("assistant-problem").visible());
+        window.click("assistant-run-as-sql", cx);
+    });
+    step(handle, cx, |window, cx| {
+        // Run as SQL after all, as typed.
+        let ws = workspace.read(cx);
+        assert!(ws.tabs.active_query().unwrap().read(cx).is_running(cx));
+        assert!(window.try_find("assistant-problem").is_none());
+    });
+    // SQL runs as always.
+    run("select id from orders", cx);
+    step(handle, cx, |window, cx| {
+        let ws = workspace.read(cx);
+        assert!(ws.tabs.active_query().unwrap().read(cx).is_running(cx));
+        assert!(window.try_find("assistant-problem").is_none());
+    });
+}

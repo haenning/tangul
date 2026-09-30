@@ -43,6 +43,8 @@ pub enum ChatPanelEvent {
     OpenSql(String),
     InsertSql(String),
     OpenSettings,
+    /// Run the question that came from the editor as SQL after all.
+    RunAsSql,
 }
 
 /// The answer being written.
@@ -62,6 +64,9 @@ pub struct ChatPanel {
     streaming: Option<Streaming>,
     /// Why the last answer stopped early, or why it can't start.
     problem: Option<String>,
+    /// The question came from the editor and can't be answered: offer to run it
+    /// as SQL after all.
+    offer_sql: bool,
     /// Whether a provider is set up, so the panel can offer a question.
     ready: bool,
     /// The tool-using database the next question is about, for the footer.
@@ -96,6 +101,7 @@ impl ChatPanel {
             messages: Vec::new(),
             streaming: None,
             problem: None,
+            offer_sql: false,
             ready: false,
             focus: None,
             chats: Vec::new(),
@@ -147,6 +153,7 @@ impl ChatPanel {
         self.messages.clear();
         self.streaming = None;
         self.problem = None;
+        self.offer_sql = false;
         cx.notify();
     }
 
@@ -187,14 +194,17 @@ impl ChatPanel {
     }
 
     /// The question can't be answered: `why`, and the question stays in the input.
+    /// `offer_sql`: it came from the editor, so it may be run as SQL after all.
     pub fn cannot_start(
         &mut self,
         question: &str,
         why: String,
+        offer_sql: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.problem = Some(why);
+        self.offer_sql = offer_sql;
         self.set_question(question, window, cx);
         cx.notify();
     }
@@ -214,6 +224,7 @@ impl ChatPanel {
         }
         self.title.get_or_insert(title);
         self.problem = None;
+        self.offer_sql = false;
         let asked = Message::user(question);
         self.messages.push(asked.clone());
         cx.emit(ChatPanelEvent::Save {
