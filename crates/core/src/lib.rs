@@ -1,6 +1,7 @@
 //! Shared types between UI, engine and drivers. No I/O in here.
 
 pub mod chart;
+pub mod llm;
 mod profile;
 mod result;
 pub mod usage;
