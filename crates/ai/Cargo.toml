@@ -18,6 +18,7 @@ serde_json = "1.0.151"
 tangul-assist = { path = "../assist" }
 tangul-core = { path = "../core" }
 tangul-engine = { path = "../engine" }
+tangul-llm = { path = "../llm" }
 tangul-service = { path = "../service" }
 
 [dev-dependencies]

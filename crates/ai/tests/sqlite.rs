@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde_json::json;
+use tangul_ai::chat::{ChatEvent, ChatSettings, answer};
+use tangul_ai::llm::{self, Delta, Error, Message, Part, Provider, Reply, Request};
 use tangul_ai::{
     ChartRequest, Ctx, Exposed, Registry, SharedBookmark, ShownResult, SqlProposal, ToolCall,
     ToolError,
@@ -759,5 +762,117 @@ async fn bookmarks_are_listed_with_their_sql() {
             "connection other; available: shop".into()
         ))
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// The assistant's conversation: a scripted model calls the tools as a provider's
+// model would, through the same context and gate.
+
+/// Answers with the given replies in turn and keeps the requests it got.
+struct Script {
+    replies: Mutex<Vec<Message>>,
+    seen: Mutex<Vec<Request>>,
+}
+
+#[async_trait]
+impl Provider for Script {
+    async fn chat(&self, req: &Request, _: &mut (dyn FnMut(Delta) + Send)) -> Result<Reply, Error> {
+        self.seen.lock().unwrap().push(req.clone());
+        Ok(Reply {
+            message: self.replies.lock().unwrap().remove(0),
+            ..Reply::default()
+        })
+    }
+
+    async fn models(&self) -> Result<Vec<String>, Error> {
+        Ok(Vec::new())
+    }
+}
+
+fn calls(calls: &[(&str, serde_json::Value)]) -> Message {
+    Message::assistant(
+        calls
+            .iter()
+            .enumerate()
+            .map(|(i, (name, input))| {
+                Part::ToolCall(llm::ToolCall {
+                    id: format!("c{i}"),
+                    name: name.to_string(),
+                    input: input.clone(),
+                    signature: None,
+                })
+            })
+            .collect(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_asked_for_by_the_model_is_refused_and_nothing_changes() {
+    let (dir, ctx) = shop("chat-write").await;
+    let script = Script {
+        replies: Mutex::new(vec![
+            calls(&[
+                (
+                    "run_readonly",
+                    json!({"sql": "SELECT count(*) AS n FROM orders"}),
+                ),
+                (
+                    "run_readonly",
+                    json!({"sql": "SELECT 1; DELETE FROM orders"}),
+                ),
+            ]),
+            calls(&[(
+                "run_readonly",
+                json!({"sql": "SELECT count(*) AS n FROM orders"}),
+            )]),
+            Message::assistant(vec![Part::Text {
+                text: "There are 4 orders.".into(),
+            }]),
+        ]),
+        seen: Mutex::new(Vec::new()),
+    };
+    let settings = ChatSettings {
+        model: "m".into(),
+        max_rounds: 5,
+        focus: Some("shop".into()),
+    };
+    let mut ran = Vec::new();
+    answer(
+        &script,
+        &Registry::standard(),
+        &ctx,
+        &settings,
+        &[Message::user("How many orders?")],
+        &mut |e| {
+            if let ChatEvent::ToolRan { ok, summary, .. } = e {
+                ran.push((ok, summary));
+            }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ran,
+        [
+            (true, "n".to_string()),
+            (
+                false,
+                "not allowed: this statement changes something and was not run; use \
+                 propose_sql to open it for the user to review and run"
+                    .to_string()
+            ),
+            (true, "n".to_string()),
+        ]
+    );
+    // The model saw the count, and the same count after the refused write.
+    let seen = script.seen.lock().unwrap();
+    let results = |i: usize| serde_json::to_string(&seen[i].messages).unwrap();
+    assert!(
+        results(1).contains(r#""content":"n\n4\n(1 row)""#),
+        "{}",
+        results(1)
+    );
+    assert!(results(2).ends_with(r#""content":"n\n4\n(1 row)","is_error":false}]}]"#));
+    assert!(seen[0].system.contains("working on shop"));
     std::fs::remove_dir_all(&dir).unwrap();
 }

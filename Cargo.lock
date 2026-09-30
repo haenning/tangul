@@ -8267,6 +8267,7 @@ dependencies = [
  "tangul-assist",
  "tangul-core",
  "tangul-engine",
+ "tangul-llm",
  "tangul-service",
  "tokio",
  "tokio-util",

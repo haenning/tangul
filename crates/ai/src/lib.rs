@@ -11,14 +11,22 @@
 //! only add authentication of their caller.
 //!
 //! Outputs carry structured data (for tests and UI) and a compact text for models.
+//!
+//! [`chat`] runs the in-app assistant's conversation over the same registry and
+//! context, with a model from `tangul_llm` (re-exported as [`llm`], so front ends
+//! don't depend on it themselves).
 
 mod audit;
+pub mod chat;
 mod ctx;
 pub mod features;
 pub mod mcp;
 mod results;
+pub mod runtime;
 mod tool;
 mod tools;
+
+pub use tangul_llm as llm;
 
 pub use audit::{AuditSink, ToolCall};
 pub use ctx::{
