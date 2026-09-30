@@ -225,6 +225,11 @@ impl QueryTab {
         self.editor.read(cx).text(cx)
     }
 
+    /// Puts `sql` into the editor at the cursor.
+    pub fn insert_sql(&mut self, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.insert(sql, window, cx));
+    }
+
     pub fn result_columns(&self, cx: &App) -> Vec<String> {
         self.results.read(cx).columns(cx)
     }

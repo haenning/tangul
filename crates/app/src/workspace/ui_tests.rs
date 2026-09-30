@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::component::{Root, Theme, ThemeMode};
@@ -1419,5 +1420,110 @@ fn format_formats_without_running(cx: &mut TestAppContext) {
         let t = tab.read(cx);
         assert_eq!(t.sql(cx), "select\n  a,\n  b\nfrom\n  t");
         assert!(!t.is_running(cx));
+    });
+}
+
+/// A model that answers every question with the same text.
+struct Echo(String);
+
+#[async_trait::async_trait]
+impl tangul_ai::llm::Provider for Echo {
+    async fn chat(
+        &self,
+        _: &tangul_ai::llm::Request,
+        on: &mut (dyn FnMut(tangul_ai::llm::Delta) + Send),
+    ) -> Result<tangul_ai::llm::Reply, tangul_ai::llm::Error> {
+        on(tangul_ai::llm::Delta::Text(self.0.clone()));
+        Ok(tangul_ai::llm::Reply {
+            message: tangul_ai::llm::Message::assistant(vec![tangul_ai::llm::Part::Text {
+                text: self.0.clone(),
+            }]),
+            ..Default::default()
+        })
+    }
+
+    async fn models(&self) -> Result<Vec<String>, tangul_ai::llm::Error> {
+        Ok(Vec::new())
+    }
+}
+
+/// Runs the window until `done` holds: the assistant answers on its own runtime.
+fn wait_for(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) {
+    for _ in 0..500 {
+        cx.run_until_parked();
+        if done(cx) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("not in time");
+}
+
+#[gpui_kit::test]
+fn the_assistant_answers_in_the_right_sidebar_and_keeps_the_chat(cx: &mut TestAppContext) {
+    use tangul_ai::llm::ProviderKind;
+    let (handle, workspace) = open(cx);
+    // No provider yet: it says so, and the question stays.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.ask_assistant("which orders are open?".into(), true, window, cx)
+        })
+    });
+    step(handle, cx, |window, cx| {
+        assert!(shows(&workspace, Panel::Assistant, cx));
+        assert!(window.find("assistant-problem").visible());
+        assert!(window.find("assistant-set-up").visible());
+        let panel = workspace.read(cx).panels.assistant.clone();
+        assert!(panel.read(cx).messages().is_empty());
+    });
+    // With a model: the answer comes, its SQL opens in a tab.
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.assistant.provider = Some(Arc::new(Echo(
+                "Like this:\n```sql\nSELECT id FROM orders WHERE status = 'open'\n```\n".into(),
+            )));
+        });
+        let mut s = crate::settings::Settings::default();
+        s.ai.provider = Some(ProviderKind::Ollama);
+        s.ai.providers.insert(
+            ProviderKind::Ollama,
+            crate::settings::ProviderSettings {
+                model: Some("m".into()),
+                base_url: None,
+            },
+        );
+        crate::settings::set_for_test(s, cx);
+    });
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.ask_assistant("which orders are open?".into(), false, window, cx)
+        })
+    });
+    wait_for(cx, |cx| {
+        workspace.read_with(cx, |ws, cx| {
+            let panel = ws.panels.assistant.read(cx);
+            !panel.is_running() && panel.messages().len() == 2
+        })
+    });
+    step(handle, cx, |window, cx| {
+        let ws = workspace.read(cx);
+        // Kept in local.db, as the list shows it.
+        let chats = ws.data.local.chats(10);
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0].title, "which orders are open?");
+        assert_eq!(chats[0].database_id.as_deref(), Some("db"));
+        assert_eq!(ws.data.local.chat_messages(chats[0].id).len(), 2);
+        assert!(window.try_find("assistant-problem").is_none());
+        // The answer's text, then its SQL block (message 1, part 0, segment 1).
+        window.click(("sql-open", 100_001usize), cx);
+    });
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.active_query().expect("opened").read(cx);
+        assert_eq!(tab.sql(cx), "SELECT id FROM orders WHERE status = 'open'");
+        assert!(!tab.is_running(cx), "not run");
     });
 }

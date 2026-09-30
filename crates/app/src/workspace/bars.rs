@@ -293,11 +293,6 @@ impl Workspace {
             .children(left)
             .child(separator())
             .child(planned("ai-agent", Lucide::Bot, "Agent via ACP — planned"))
-            .child(planned(
-                "ai-assist",
-                Lucide::Sparkles,
-                "AI query help — planned",
-            ))
             .child(separator())
             .child(self.render_mcp_button(cx))
             .child(planned(

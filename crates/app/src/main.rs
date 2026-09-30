@@ -1,5 +1,6 @@
 mod ai_settings;
 mod assets;
+mod assistant;
 mod bookmark_form;
 mod chart;
 mod completion;

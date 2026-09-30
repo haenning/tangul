@@ -166,6 +166,21 @@ impl SqlEditor {
         state.update(cx, |e, _| e.lsp_mut().completion_provider = Some(provider));
     }
 
+    /// Puts `text` at the cursor, on a line of its own, and focuses the editor.
+    pub fn insert(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |e, cx| {
+            let value = e.value();
+            let before = &value[..e.cursor().min(value.len())];
+            let lead = if before.is_empty() || before.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            e.insert(format!("{lead}{text}\n"), window, cx);
+            e.focus(window, cx);
+        });
+    }
+
     /// What ⌘↵ takes: the selection if there is one, otherwise the statement under
     /// the cursor (see [`statement_at`]). Formatted in place first (see
     /// [`Self::format_for_run`]).

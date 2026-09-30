@@ -190,6 +190,7 @@ impl Workspace {
             }
         }
         self.push_ai_settings(cx);
+        self.sync_assistant(cx);
     }
 
     /// Asks provider `p` for its models and hands them to `tab`.

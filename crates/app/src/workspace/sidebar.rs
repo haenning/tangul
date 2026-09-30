@@ -99,6 +99,8 @@ impl Sidebar {
 /// The panels' own state, whichever sidebar shows them.
 pub(super) struct Panels {
     pub(super) value: Entity<ValuePanel>,
+    /// The assistant's chat.
+    pub(super) assistant: Entity<crate::assistant::ChatPanel>,
     /// The value viewer with its header (key context "ValueViewer": Esc closes it).
     pub(super) value_focus: FocusHandle,
     pub(super) schema: SchemaTree,
@@ -155,13 +157,14 @@ pub(super) enum Panel {
     Bookmarks,
     History,
     Value,
+    Assistant,
 }
 
 impl Panel {
     /// The left sidebar's panels.
     pub(super) const LEFT: &'static [Panel] = &[Panel::Schema, Panel::Bookmarks, Panel::History];
-    /// The right sidebar's panels (the agent, #37, goes here too).
-    pub(super) const RIGHT: &'static [Panel] = &[Panel::Value];
+    /// The right sidebar's panels: everything AI goes here too.
+    pub(super) const RIGHT: &'static [Panel] = &[Panel::Value, Panel::Assistant];
 
     pub(super) fn icon(self) -> Lucide {
         match self {
@@ -169,6 +172,7 @@ impl Panel {
             Panel::Bookmarks => Lucide::Bookmark,
             Panel::History => Lucide::RotateCcwClock,
             Panel::Value => Lucide::Braces,
+            Panel::Assistant => Lucide::Sparkles,
         }
     }
 
@@ -178,6 +182,7 @@ impl Panel {
             Panel::Bookmarks => "Bookmarks",
             Panel::History => "History",
             Panel::Value => "Value viewer",
+            Panel::Assistant => "Assistant",
         }
     }
 }
@@ -254,6 +259,7 @@ impl Workspace {
             Some(Panel::Bookmarks) => self.render_bookmarks_panel(cx).into_any_element(),
             Some(Panel::History) => self.render_history_panel(cx).into_any_element(),
             Some(Panel::Value) => self.render_value_viewer(cx).into_any_element(),
+            Some(Panel::Assistant) => self.panels.assistant.clone().into_any_element(),
             None => div().into_any_element(),
         };
         let theme = cx.theme();
@@ -365,8 +371,16 @@ impl Workspace {
 
     /// What a panel needs when it comes into view.
     fn panel_shown(&mut self, panel: Panel, cx: &mut Context<Self>) {
-        if panel == Panel::History {
-            self.refresh_history(cx);
+        match panel {
+            Panel::History => self.refresh_history(cx),
+            Panel::Assistant => {
+                self.sync_assistant(cx);
+                let chats = self.data.local.chats(50);
+                self.panels
+                    .assistant
+                    .update(cx, |p, cx| p.set_chats(chats, cx));
+            }
+            _ => {}
         }
     }
 

@@ -29,12 +29,44 @@ where
     runtime().spawn(work)
 }
 
+/// Work on the assistant's runtime that stops when this is dropped.
+pub struct Work(JoinHandle<()>);
+
+impl Drop for Work {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Runs `work` until it ends or the returned [`Work`] is dropped.
+pub fn start<F>(work: F) -> Work
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    Work(spawn(work))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn runs_work_awaited_elsewhere() {
         let handle = super::spawn(async { 1 + 1 });
         assert_eq!(await_elsewhere(handle), 2);
+    }
+
+    #[test]
+    fn dropped_work_stops() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let work = super::start(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let _ = tx.send(());
+        });
+        drop(work);
+        // The sender went with the aborted task, unsent.
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
     }
 
     /// Awaits on another thread and executor, as the app does.

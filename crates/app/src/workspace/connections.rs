@@ -221,6 +221,7 @@ impl Workspace {
         self.assign_active_tab(&user_id, window, cx);
         self.refresh_history(cx);
         self.check_ai_user(cx);
+        self.sync_assistant(cx);
         cx.notify();
     }
 
