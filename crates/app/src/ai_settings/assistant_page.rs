@@ -74,8 +74,9 @@ impl AiSettingsTab {
                 row(
                     "Questions in the editor",
                     Some(
-                        "Running text that is surely a question, not SQL, asks the assistant \
-                         instead of the database."
+                        "Once the assistant is set up, running text that is surely a \
+                         question, not SQL (comments aside), asks the assistant instead of \
+                         the database."
                             .into(),
                     ),
                     Switch::new("ai-questions-in-editor")

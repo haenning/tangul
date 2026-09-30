@@ -76,7 +76,8 @@ pub struct AiSettings {
     /// Most model answers with tool calls per question.
     pub max_tool_rounds: usize,
     /// A question typed into the editor and run goes to the assistant instead of the
-    /// database (only when it is surely not SQL).
+    /// database: only while the assistant is set up (provider, model, key), and only
+    /// when it is surely not SQL (comments aside).
     pub questions_in_editor: bool,
 }
 

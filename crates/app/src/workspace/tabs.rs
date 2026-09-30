@@ -256,7 +256,7 @@ impl Workspace {
                     self.show_panel(Panel::Value, cx);
                 }
             }
-            TabEvent::Ask(question) => self.ask_from_editor(question.clone(), tab, window, cx),
+            TabEvent::Ask(question) => self.ask_assistant(question.clone(), true, window, cx),
             TabEvent::Compare(cell) => {
                 let picked = self.picked(tab, cell, cx);
                 let old = self

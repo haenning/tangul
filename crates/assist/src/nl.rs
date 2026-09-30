@@ -1,10 +1,12 @@
 //! Telling a question typed into the editor ("which customers ordered twice last
 //! month?") from SQL, so running it can go to the assistant instead of the
 //! database. Only when it is sure: a wrong guess must never swallow real SQL, so
-//! anything unsure is SQL (and runs, or fails, as it always did).
+//! anything unsure is SQL (and runs, or fails, as it always did). Comments don't
+//! count: a question under a `-- note` is still a question.
 
 use crate::dialect::Dialect;
 use crate::grammar::KEYWORDS;
+use crate::lexer::{TokenKind, tokenize_with};
 
 /// Fewest words of a question.
 const MIN_WORDS: usize = 4;
@@ -101,6 +103,7 @@ const QUESTION_WORDS: &[&str] = &[
 /// tells whether a word (lower case) names a table or column of the connection:
 /// such words make it less sure.
 pub fn is_question(text: &str, dialect: &dyn Dialect, is_name: impl Fn(&str) -> bool) -> bool {
+    let text = without_comments(text, dialect);
     let text = text.trim();
     if has_sql_structure(text) {
         return false;
@@ -129,6 +132,19 @@ pub fn is_question(text: &str, dialect: &dyn Dialect, is_name: impl Fn(&str) -> 
     let sentence = question_word || text.ends_with('?') || words.len() >= 6;
     // Mostly words SQL doesn't know.
     sentence && unknown * 2 >= words.len()
+}
+
+/// `text` with its comments (as the database reads them) replaced by a space.
+/// A comment the lexer can't see (after an apostrophe it takes for a string)
+/// stays, and makes the text SQL.
+fn without_comments(text: &str, dialect: &dyn Dialect) -> String {
+    tokenize_with(text, dialect.lexing())
+        .iter()
+        .map(|t| match t.kind {
+            TokenKind::Comment => " ",
+            _ => t.text(text),
+        })
+        .collect()
 }
 
 /// Characters and shapes of SQL that a question hardly has: statement ends,
@@ -267,6 +283,9 @@ mod tests {
         "(SELECT 1) UNION (SELECT 2)",
         "-- which customers ordered twice?",
         "/* which customers ordered twice */",
+        "-- which customers ordered twice?\nselect * from orders",
+        "/* which customers ordered twice? */ select id from orders",
+        "which customers ordered twice /* note */ ; select 1",
         "SELCT * FROM x",
         "SELEC id FROM users WHERE id IN (1, 2)",
         "UDPATE orders SET x = 1",
@@ -328,6 +347,10 @@ mod tests {
         "quali clienti hanno ordinato due volte",
         "the customers that ordered twice last month, e.g. for a newsletter",
         "revenue per country for the last quarter please",
+        // Comments don't count.
+        "-- asked by Ann\nwhich customers ordered twice last month?",
+        "/* for the newsletter */ which customers ordered twice last month?",
+        "which customers ordered twice last month? -- not the cancelled ones",
     ];
 
     #[test]

@@ -3,6 +3,7 @@
 //! `assistant`), where its conversations are kept (`local.db`) and what its
 //! answers do in the workspace (SQL into a tab or the editor).
 
+use std::cell::Cell;
 use std::sync::atomic::AtomicU64;
 
 use tangul_ai::chat::{ChatSettings, for_storage, title_for};
@@ -23,9 +24,9 @@ const CHATS_LISTED: usize = 50;
 #[derive(Default)]
 pub(super) struct Assistant {
     events: Option<(Task<()>, async_channel::Sender<AiEvent>)>,
-    /// The tab the last question came from and the question, to run it as SQL
-    /// after all.
-    from_tab: Option<(WeakEntity<QueryTab>, String)>,
+    /// Whether a provider, model and key are set up for the chat; tabs only look
+    /// for questions then.
+    ready: Rc<Cell<bool>>,
     calls: Arc<AtomicU64>,
     /// Answers instead of the provider in the settings (tests).
     #[cfg(test)]
@@ -47,26 +48,13 @@ impl Workspace {
         if new_chat {
             panel.update(cx, |p, cx| p.new_chat(cx));
         }
-        let from_editor = self
-            .assistant
-            .from_tab
-            .as_ref()
-            .is_some_and(|(_, q)| *q == question);
         let run = match self.chat_run(cx) {
             Ok(run) => run,
             Err(why) => {
-                let why = if from_editor {
-                    format!("This looks like a question, so it went to the assistant. {why}")
-                } else {
-                    why
-                };
-                panel.update(cx, |p, cx| {
-                    p.cannot_start(&question, why, from_editor, window, cx)
-                });
+                panel.update(cx, |p, cx| p.cannot_start(&question, why, window, cx));
                 return;
             }
         };
-        self.assistant.from_tab = None;
         let title = title_for(&question);
         let chat = match panel.read(cx).chat() {
             Some(chat) => chat,
@@ -78,9 +66,7 @@ impl Workspace {
                 Ok(chat) => chat,
                 Err(e) => {
                     let why = format!("Could not keep the chat: {e:#}");
-                    panel.update(cx, |p, cx| {
-                        p.cannot_start(&question, why, false, window, cx)
-                    });
+                    panel.update(cx, |p, cx| p.cannot_start(&question, why, window, cx));
                     return;
                 }
             },
@@ -89,25 +75,13 @@ impl Workspace {
         self.refresh_chats(cx);
     }
 
-    /// A question run in the editor: to the assistant, in a new chat. Without a
-    /// provider set up, the chat says so and offers to run it as SQL after all.
-    pub(super) fn ask_from_editor(
-        &mut self,
-        question: String,
-        tab: &Entity<QueryTab>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.assistant.from_tab = Some((tab.downgrade(), question.clone()));
-        self.ask_assistant(question, true, window, cx);
-    }
-
     /// How a tab tells a question from SQL: surely not SQL for its connection's
-    /// database (words of its schema count as SQL), and only while the setting is on.
+    /// database (words of its schema count as SQL). Only while the chat is set up
+    /// (provider, model, key) and the setting is on; otherwise everything runs.
     pub(super) fn question_check(&self) -> QuestionCheck {
-        let knowledge = self.knowledge.clone();
+        let (knowledge, ready) = (self.knowledge.clone(), self.assistant.ready.clone());
         Rc::new(move |text, conn, dialect, cx| {
-            if !settings::current(cx).ai.questions_in_editor {
+            if !ready.get() || !settings::current(cx).ai.questions_in_editor {
                 return false;
             }
             let schema = knowledge.for_conn(conn).map(|(schema, _)| schema);
@@ -173,6 +147,7 @@ impl Workspace {
             Some(p) => ai.model(p).is_some() && (!p.needs_key() || self.ai_keys().contains(&p)),
             None => false,
         };
+        self.assistant.ready.set(ready);
         let focus = self
             .active_database()
             .filter(|db| db.ai_tools)
@@ -233,18 +208,6 @@ impl Workspace {
                 None => self.open_sql("From the assistant", &sql, window, cx),
             },
             ChatPanelEvent::OpenSettings => self.open_ai_settings(Page::Assistant, window, cx),
-            ChatPanelEvent::RunAsSql => {
-                let Some((tab, sql)) = self.assistant.from_tab.take() else {
-                    return;
-                };
-                if let Some(tab) = tab.upgrade() {
-                    panel.update(cx, |p, cx| {
-                        p.new_chat(cx);
-                        p.set_question("", window, cx);
-                    });
-                    tab.update(cx, |_, cx| cx.emit(TabEvent::Run(sql)));
-                }
-            }
         }
     }
 }

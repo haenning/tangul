@@ -144,8 +144,10 @@ explicit OK, and keep them covered by tests.
 - **Secrets.** Passwords in SQL (`… PASSWORD '…'`, `IDENTIFIED BY '…'`) are replaced by
   `assist::redact` before history, bookmarks, the assistant's chats
   (`ai::chat::for_storage`) and the audit log.
-- **Questions in the editor.** Run text goes to the assistant instead of the database
-  only when `assist::nl::is_question` is sure; anything unsure runs as SQL, as before.
+- **Questions in the editor.** Only while the assistant is set up (provider, model,
+  key), run text goes to the assistant instead of the database, and only when
+  `assist::nl::is_question` is sure (comments don't count); anything else runs as SQL,
+  as before.
 - **Everyone.** `safety.max_query_time` applies to every caller, set on the server and
   enforced by the engine's timer.
 - **Audit.** Assistant and schedule runs (ran, proposed, refused) and every AI tool

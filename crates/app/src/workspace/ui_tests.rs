@@ -1529,9 +1529,10 @@ fn the_assistant_answers_in_the_right_sidebar_and_keeps_the_chat(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
-fn a_question_run_in_the_editor_goes_to_the_assistant_not_the_database(cx: &mut TestAppContext) {
+fn a_question_run_in_the_editor_goes_to_the_assistant_once_it_is_set_up(cx: &mut TestAppContext) {
+    use tangul_ai::llm::ProviderKind;
     let (handle, workspace) = open(cx);
-    let question = "which customers ordered twice last month?";
+    let question = "-- asked by Ann\nwhich customers ordered twice last month?";
     let run = |text: &'static str, cx: &mut TestAppContext| {
         step(handle, cx, |window, cx| {
             workspace.update(cx, |ws, cx| {
@@ -1544,6 +1545,11 @@ fn a_question_run_in_the_editor_goes_to_the_assistant_not_the_database(cx: &mut 
             window.dispatch_action(Box::new(crate::RunQuery), cx)
         });
     };
+    let running = |cx: &mut TestAppContext| {
+        workspace.read_with(cx, |ws, cx| {
+            ws.tabs.active_query().unwrap().read(cx).is_running(cx)
+        })
+    };
     step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| {
             shop_for_the_assistant(ws, cx);
@@ -1551,26 +1557,44 @@ fn a_question_run_in_the_editor_goes_to_the_assistant_not_the_database(cx: &mut 
             ws.active_user = Some("app".into());
         })
     });
+    // No AI set up for the chat: everything runs as SQL, as before.
     run(question, cx);
-    step(handle, cx, |window, cx| {
-        let ws = workspace.read(cx);
-        // Not sent to the database; no provider yet, so it says so.
-        assert!(!ws.tabs.active_query().unwrap().read(cx).is_running(cx));
-        assert!(shows(&workspace, Panel::Assistant, cx));
-        assert!(window.find("assistant-problem").visible());
-        window.click("assistant-run-as-sql", cx);
+    assert!(running(cx));
+    step(handle, cx, |_, cx| {
+        assert!(!shows(&workspace, Panel::Assistant, cx));
     });
-    step(handle, cx, |window, cx| {
-        // Run as SQL after all, as typed.
+    // Set up: a question goes to the assistant, not the database (its comment
+    // doesn't count).
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, _| {
+            ws.assistant.provider = Some(Arc::new(Echo("Here you go.".into())));
+        });
+        let mut s = crate::settings::Settings::default();
+        s.ai.provider = Some(ProviderKind::Ollama);
+        s.ai.providers.insert(
+            ProviderKind::Ollama,
+            crate::settings::ProviderSettings {
+                model: Some("m".into()),
+                base_url: None,
+            },
+        );
+        crate::settings::set_for_test(s, cx);
+    });
+    run(question, cx);
+    assert!(!running(cx));
+    wait_for(cx, |cx| {
+        workspace.read_with(cx, |ws, cx| {
+            let panel = ws.panels.assistant.read(cx);
+            !panel.is_running() && panel.messages().len() == 2
+        })
+    });
+    step(handle, cx, |_, cx| {
+        assert!(shows(&workspace, Panel::Assistant, cx));
         let ws = workspace.read(cx);
-        assert!(ws.tabs.active_query().unwrap().read(cx).is_running(cx));
-        assert!(window.try_find("assistant-problem").is_none());
+        let asked = ws.panels.assistant.read(cx).messages()[0].text();
+        assert_eq!(asked, question);
     });
     // SQL runs as always.
     run("select id from orders", cx);
-    step(handle, cx, |window, cx| {
-        let ws = workspace.read(cx);
-        assert!(ws.tabs.active_query().unwrap().read(cx).is_running(cx));
-        assert!(window.try_find("assistant-problem").is_none());
-    });
+    assert!(running(cx));
 }
