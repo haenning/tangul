@@ -5,6 +5,8 @@
 //! This file holds the state and the layout; each topic adds its own
 //! `impl Workspace` in a submodule (connections, tabs, safety, bookmarks, …).
 
+mod ai;
+mod ai_settings;
 mod assist;
 mod bars;
 mod bookmarks;
@@ -162,6 +164,10 @@ pub struct Workspace {
     /// Why the AI has no connection to a database, by database id: shown in the
     /// title bar until it connects (it never connects as anyone else instead).
     ai_problems: HashMap<String, String>,
+    /// The databases offered to AI tools (the assistant, MCP clients).
+    ai: ai::Ai,
+    /// The providers with an API key in the Keychain; `None` until read.
+    ai_keys: Option<std::collections::HashSet<tangul_ai::llm::ProviderKind>>,
     /// The MCP server, while `mcp.enabled` is set.
     mcp: mcp::Mcp,
     focus_handle: FocusHandle,
@@ -270,6 +276,8 @@ impl Workspace {
             ai_check: Task::ready(()),
             ai_warning_pulse: 0,
             ai_problems: HashMap::new(),
+            ai: ai::Ai::default(),
+            ai_keys: None,
             mcp: mcp::Mcp::default(),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![

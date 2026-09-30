@@ -1,3 +1,4 @@
+mod ai_settings;
 mod assets;
 mod bookmark_form;
 mod chart;

@@ -616,6 +616,7 @@ pub(super) fn ai_menu(
                 }),
         );
     }
+    let ws = workspace.clone();
     menu.item(PopupMenuItem::element(|_, cx| {
         div()
             .max_w(px(TEXT_WIDTH))
@@ -624,6 +625,16 @@ pub(super) fn ai_menu(
             .text_color(cx.theme().muted_foreground)
             .child(VALUES_NOTE)
     }))
+    .separator()
+    .item(
+        PopupMenuItem::new("Show settings")
+            .icon(IconName::Settings)
+            .on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| {
+                    ws.open_ai_settings(crate::ai_settings::Page::Assistant, window, cx)
+                });
+            }),
+    )
 }
 
 /// Under the value profile levels: what they don't limit.
@@ -636,7 +647,7 @@ const SAME_USER_NOTE: &str = "The AI connects as your own user: it can read what
     that may only read on the server is the safer choice.";
 
 /// What the title bar says when the AI's user may change or drop tables.
-fn ai_user_warning(tables: u64) -> String {
+pub(super) fn ai_user_warning(tables: u64) -> String {
     let noun = if tables == 1 { "table" } else { "tables" };
     format!(
         "Your current AI user can change or drop {tables} {noun}. It is strongly \

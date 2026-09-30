@@ -212,6 +212,16 @@ impl Profiles {
         self.store_secret(account, secret);
     }
 
+    /// Removes a secret of the app's own (e.g. an AI provider's API key).
+    pub fn forget_secret(&mut self, account: &str) {
+        self.passwords.remove(account);
+        if !self.in_memory
+            && let Err(e) = keychain(account).and_then(|k| Ok(k.delete_credential()?))
+        {
+            eprintln!("keychain delete failed: {e:#}");
+        }
+    }
+
     /// A secret by Keychain account (user id, or [`SshConfig::secret_account`]).
     pub fn password(&mut self, account: &str) -> Option<String> {
         if let Some(pw) = self.passwords.get(account) {

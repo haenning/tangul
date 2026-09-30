@@ -821,13 +821,13 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
                     .unwrap()
                     .starts_with("Bearer ")
             );
-            assert_eq!(ws.mcp_offered(), ["shop"]);
+            assert_eq!(ws.ai_offered(), ["shop"]);
         });
     });
     // Bookmarks are offered as they are saved and deleted, passwords redacted.
     step(handle, cx, |window, cx| {
         workspace.update(cx, |ws, cx| {
-            let bookmarks = |ws: &Workspace| ws.mcp_offered_bookmarks();
+            let bookmarks = |ws: &Workspace| ws.ai_offered_bookmarks();
             assert!(bookmarks(ws).is_empty());
             ws.save_bookmark(
                 tangul_data::local::Bookmark {
@@ -855,13 +855,80 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
         workspace.update(cx, |ws, _| {
             // Turned off for AI tools: no longer offered.
             ws.data.profiles.databases[0].ai_tools = false;
-            ws.expose_to_mcp();
-            assert!(ws.mcp_offered().is_empty());
+            ws.expose_to_ai();
+            assert!(ws.ai_offered().is_empty());
         });
         crate::settings::set_for_test(mcp(false), cx);
     });
     step(handle, cx, |_, cx| {
         assert_eq!(workspace.read(cx).mcp_url(), None);
+    });
+}
+
+#[gpui_kit::test]
+fn the_ai_settings_open_on_mcp_from_the_status_bar(cx: &mut TestAppContext) {
+    use crate::ai_settings::Page;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+        });
+        let mut s = crate::settings::Settings::default();
+        s.mcp.enabled = true;
+        s.mcp.port = 0;
+        crate::settings::set_for_test(s, cx);
+    });
+    let settings_tab = |ws: &Workspace| ws.tabs.active().and_then(|t| t.ai_settings()).cloned();
+    // The plug opens the MCP page.
+    step(handle, cx, |window, cx| window.click("mcp", cx));
+    step(handle, cx, |window, cx| {
+        let tab = settings_tab(workspace.read(cx)).expect("the settings tab");
+        assert_eq!(tab.read(cx).page(), Page::Mcp);
+        assert!(window.find("mcp-enabled").visible());
+        window.click("mcp-copy-command", cx);
+    });
+    step(handle, cx, |_, cx| {
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .unwrap_or_default();
+        assert!(copied.starts_with("claude mcp add"), "{copied}");
+    });
+    // The database's AI settings are here too.
+    step(handle, cx, |_, cx| {
+        assert_eq!(workspace.read(cx).ai_offered(), ["shop"]);
+    });
+    step(handle, cx, |window, cx| {
+        // Below the server's sections.
+        let down = gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-2000.)));
+        window.scroll("ai-settings-body", down, cx);
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("ai-tools", 0usize), cx)
+    });
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        assert!(!ws.data.profiles.databases[0].ai_tools);
+        assert!(ws.ai_offered().is_empty());
+    });
+    // The title bar's AI menu shows the same tab, on the assistant's page.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_ai_settings(Page::Assistant, window, cx)
+        })
+    });
+    step(handle, cx, |window, cx| {
+        let ws = workspace.read(cx);
+        let tabs = ws
+            .tabs
+            .items()
+            .filter(|t| t.ai_settings().is_some())
+            .count();
+        assert_eq!(tabs, 1);
+        assert_eq!(settings_tab(ws).unwrap().read(cx).page(), Page::Assistant);
+        assert!(window.find("ai-provider-anthropic").visible());
     });
 }
 
@@ -1001,7 +1068,7 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     let sink = step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| {
             shop_for_the_assistant(ws, cx);
-            ws.mcp_proposals(cx)
+            ws.ai_proposals(cx)
         })
     });
     // As the MCP server does (from its thread in the app; the test scheduler wants
@@ -1031,7 +1098,7 @@ fn a_shown_result_opens_with_its_chart_and_isnt_run_again(cx: &mut TestAppContex
     let sink = step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| {
             shop_for_the_assistant(ws, cx);
-            ws.mcp_shows(cx)
+            ws.ai_shows(cx)
         })
     });
     let sql = "SELECT day, orders, revenue FROM daily";
@@ -1163,7 +1230,7 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
                 })
                 .unwrap();
             // What the server hands over after a client's run_readonly.
-            ws.record_mcp_call(
+            ws.record_tool_call(
                 tangul_ai::ToolCall {
                     at: 100,
                     caller: "mcp",

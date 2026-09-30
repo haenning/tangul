@@ -21,8 +21,20 @@ impl Workspace {
                 cx,
             );
         }
-        self.expose_to_mcp();
+        self.expose_to_ai();
+        self.push_ai_settings(cx);
         cx.notify();
+    }
+
+    /// Whether AI tools (the assistant, MCP clients) may use the database.
+    pub(super) fn set_ai_tools(
+        &mut self,
+        db_id: &str,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_ai(db_id, |db| db.ai_tools = on, window, cx);
     }
 
     /// The database user the AI connects as; `None`: the tab's user.
@@ -379,7 +391,7 @@ impl Workspace {
             id
         });
         self.rename_conns(&db_id, cx);
-        self.expose_to_mcp();
+        self.expose_to_ai();
         if let Err(e) = result {
             window.push_notification(
                 Notification::error(format!("Could not save connection: {e:#}")),
