@@ -1,10 +1,11 @@
 //! The app's own SQLite database (`local.db` next to `profiles.toml`): bookmarks,
-//! query history, learned usage, favorites, a per-user schema cache and small app
-//! state, one file per topic.
+//! query history, learned usage, favorites, a per-user schema cache, the
+//! assistant's conversations and small app state, one file per topic.
 //! Falls back to an in-memory database if the file cannot be opened.
 
 mod audit;
 mod bookmarks;
+mod chats;
 mod favorites;
 mod history;
 mod kv;
@@ -144,6 +145,21 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX audit_at ON audit (at DESC);",
     "ALTER TABLE history ADD COLUMN source TEXT NOT NULL DEFAULT 'app';",
+    "CREATE TABLE chats (
+        id INTEGER PRIMARY KEY,
+        database_id TEXT,
+        title TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX chats_updated ON chats (updated_at DESC);
+    CREATE TABLE chat_messages (
+        chat_id INTEGER NOT NULL,
+        seq INTEGER NOT NULL,
+        at INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        PRIMARY KEY (chat_id, seq)
+    );",
 ];
 
 pub struct Local {
@@ -216,6 +232,7 @@ impl Local {
 
 pub use audit::AuditEntry;
 pub use bookmarks::bare_sql;
+pub use chats::ChatSummary;
 
 #[cfg(test)]
 mod tests {

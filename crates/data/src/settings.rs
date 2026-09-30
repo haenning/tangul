@@ -19,14 +19,23 @@
 //!     "max_age": "365d",
 //!     "max_mb": 50
 //!   },
-//!   "mcp": { "enabled": false, "port": 7433 }
+//!   "mcp": { "enabled": false, "port": 7433 },
+//!   "ai": {
+//!     "provider": "anthropic",
+//!     "providers": { "anthropic": { "model": "claude-sonnet-5-5" },
+//!                    "ollama": { "model": "llama3.2", "base_url": "http://localhost:11434" } },
+//!     "max_tool_rounds": 12,
+//!     "questions_in_editor": true
+//!   }
 //! }
 //! ```
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer};
+use tangul_core::llm::ProviderKind;
 
 use crate::config::config_dir;
 
@@ -52,6 +61,62 @@ pub struct Settings {
     pub safety: SafetySettings,
     pub monitoring: MonitoringSettings,
     pub mcp: McpSettings,
+    pub ai: AiSettings,
+}
+
+/// The in-app assistant: the model provider it talks to. API keys are in the
+/// Keychain, never in this file.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct AiSettings {
+    /// `null` until one is chosen: the assistant can't answer yet.
+    pub provider: Option<ProviderKind>,
+    /// Model and address per provider, kept when switching between them.
+    pub providers: BTreeMap<ProviderKind, ProviderSettings>,
+    /// Most model answers with tool calls per question.
+    pub max_tool_rounds: usize,
+    /// A question typed into the editor and run goes to the assistant instead of the
+    /// database (only when it is surely not SQL).
+    pub questions_in_editor: bool,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            providers: BTreeMap::new(),
+            max_tool_rounds: 12,
+            questions_in_editor: true,
+        }
+    }
+}
+
+impl AiSettings {
+    /// The settings of `kind`, empty when it has none.
+    pub fn of(&self, kind: ProviderKind) -> ProviderSettings {
+        self.providers.get(&kind).cloned().unwrap_or_default()
+    }
+
+    /// The model of `kind`: the one chosen, else the provider's default.
+    pub fn model(&self, kind: ProviderKind) -> Option<String> {
+        self.of(kind)
+            .model
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| kind.default_model().map(str::to_string))
+    }
+
+    /// Tool rounds per question, at least 1 and at most 50.
+    pub fn max_tool_rounds(&self) -> usize {
+        self.max_tool_rounds.clamp(1, 50)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ProviderSettings {
+    pub model: Option<String>,
+    /// Where its API is; `null`: the provider's own (see `ProviderKind`).
+    pub base_url: Option<String>,
 }
 
 /// The MCP server: MCP clients (Claude Code, …) use tangul's AI tools on the
@@ -332,6 +397,12 @@ pub fn create_if_missing(editor_font_size: f32, editor_font_family: &str) -> Opt
                 "enabled": false,
                 "port": 7433,
             },
+            "ai": {
+                "provider": null,
+                "providers": {},
+                "max_tool_rounds": 12,
+                "questions_in_editor": true,
+            },
         });
         let write = || -> std::io::Result<()> {
             std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
@@ -354,25 +425,46 @@ pub fn write_read_only(path: &Path, user: &str, on: bool) -> Result<Settings, St
     Settings::parse(&std::fs::read_to_string(path).unwrap_or_default()).map_err(|e| e.to_string())
 }
 
-/// Sets `mcp.enabled` in the file at `path`, keeping everything else in it.
-/// Returns the settings as they are now.
-pub fn write_mcp_enabled(path: &Path, on: bool) -> Result<Settings, String> {
+/// Sets the value at `keys` (e.g. `["mcp", "enabled"]`) in the file at `path`,
+/// keeping everything else in it; `null` removes the key. Returns the settings as
+/// they are now.
+pub fn write_value(
+    path: &Path,
+    keys: &[&str],
+    value: serde_json::Value,
+) -> Result<Settings, String> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    let updated = with_mcp_enabled(&text, on)?;
+    let updated = with_value(&text, keys, value)?;
     std::fs::write(path, updated).map_err(|e| e.to_string())?;
     Settings::parse(&std::fs::read_to_string(path).unwrap_or_default()).map_err(|e| e.to_string())
 }
 
-fn with_mcp_enabled(text: &str, on: bool) -> Result<String, String> {
+/// `text` (the settings file) with `value` at `keys`; objects on the way are
+/// created.
+fn with_value(text: &str, keys: &[&str], value: serde_json::Value) -> Result<String, String> {
+    let (last, parents) = keys.split_last().ok_or("no key given")?;
     let mut root = root(text)?;
-    let mcp = root
+    let mut object = root
         .as_object_mut()
-        .ok_or("settings.json must contain a JSON object")?
-        .entry("mcp")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or("\"mcp\" in settings.json must be an object")?;
-    mcp.insert("enabled".into(), on.into());
+        .ok_or("settings.json must contain a JSON object")?;
+    let mut path = String::new();
+    for key in parents {
+        path = if path.is_empty() {
+            key.to_string()
+        } else {
+            format!("{path}.{key}")
+        };
+        object = object
+            .entry(*key)
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or_else(|| format!("\"{path}\" in settings.json must be an object"))?;
+    }
+    if value.is_null() {
+        object.remove(*last);
+    } else {
+        object.insert(last.to_string(), value);
+    }
     Ok(serde_json::to_string_pretty(&root).map_err(|e| e.to_string())? + "\n")
 }
 
@@ -494,20 +586,72 @@ mod tests {
     fn mcp_is_off_until_turned_on() {
         let s = Settings::default();
         assert_eq!((s.mcp.enabled, s.mcp.port), (false, 7433));
+        let enabled = |text: &str, on: bool| with_value(text, &["mcp", "enabled"], on.into());
         let text = r#"{"mcp": {"port": 9000}, "editor": {"font_size": 15}}"#;
-        let on = with_mcp_enabled(text, true).unwrap();
+        let on = enabled(text, true).unwrap();
         let s = Settings::parse(&on).unwrap();
         assert_eq!((s.mcp.enabled, s.mcp.port), (true, 9000));
         assert_eq!(s.font_size(), Some(15.));
-        let off = Settings::parse(&with_mcp_enabled(&on, false).unwrap()).unwrap();
+        let off = Settings::parse(&enabled(&on, false).unwrap()).unwrap();
         assert!(!off.mcp.enabled);
         assert!(
-            Settings::parse(&with_mcp_enabled("", true).unwrap())
+            Settings::parse(&enabled("", true).unwrap())
                 .unwrap()
                 .mcp
                 .enabled
         );
-        assert!(with_mcp_enabled(r#"{"mcp": 1}"#, true).is_err());
+        assert_eq!(
+            enabled(r#"{"mcp": 1}"#, true).unwrap_err(),
+            "\"mcp\" in settings.json must be an object"
+        );
+        assert!(enabled("[]", true).is_err());
+        assert!(with_value("{}", &[], true.into()).is_err());
+    }
+
+    #[test]
+    fn values_are_set_and_removed_deep_down() {
+        let keys = ["ai", "providers", "ollama", "base_url"];
+        let set = with_value("{}", &keys, "http://gpu:11434".into()).unwrap();
+        let s = Settings::parse(&set).unwrap();
+        assert_eq!(
+            s.ai.of(ProviderKind::Ollama).base_url.as_deref(),
+            Some("http://gpu:11434")
+        );
+        let unset = with_value(&set, &keys, serde_json::Value::Null).unwrap();
+        assert_eq!(
+            Settings::parse(&unset).unwrap().ai.of(ProviderKind::Ollama),
+            ProviderSettings::default()
+        );
+        assert_eq!(
+            with_value(r#"{"ai": {"providers": 3}}"#, &keys, 1.into()).unwrap_err(),
+            "\"ai.providers\" in settings.json must be an object"
+        );
+    }
+
+    #[test]
+    fn the_assistant_has_no_provider_until_one_is_chosen() {
+        let s = Settings::default();
+        assert_eq!(s.ai.provider, None);
+        assert!(s.ai.questions_in_editor);
+        assert_eq!(s.ai.max_tool_rounds(), 12);
+        let s = Settings::parse(
+            r#"{"ai": {"provider": "gemini", "max_tool_rounds": 0,
+                "providers": {"gemini": {"model": "gemini-x"}, "anthropic": {"model": " "}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.ai.provider, Some(ProviderKind::Gemini));
+        assert_eq!(
+            s.ai.model(ProviderKind::Gemini).as_deref(),
+            Some("gemini-x")
+        );
+        // A blank model: the provider's default, if it has one.
+        assert_eq!(
+            s.ai.model(ProviderKind::Anthropic).as_deref(),
+            ProviderKind::Anthropic.default_model()
+        );
+        assert_eq!(s.ai.model(ProviderKind::Openai), None);
+        assert_eq!(s.ai.max_tool_rounds(), 1);
+        assert!(Settings::parse(r#"{"ai": {"provider": "nope"}}"#).is_err());
     }
 
     #[test]

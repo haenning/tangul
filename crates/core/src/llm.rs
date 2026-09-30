@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     /// Anthropic's Messages API (Claude).
@@ -59,6 +59,15 @@ impl ProviderKind {
         }
     }
 
+    /// The model used until one is chosen; `None`: the user picks one from the list
+    /// the provider offers.
+    pub fn default_model(self) -> Option<&'static str> {
+        match self {
+            ProviderKind::Anthropic => Some("claude-sonnet-5-5"),
+            ProviderKind::Openai | ProviderKind::Gemini | ProviderKind::Ollama => None,
+        }
+    }
+
     /// Whether it needs an API key (stored in the Keychain).
     pub fn needs_key(self) -> bool {
         self != ProviderKind::Ollama
@@ -90,6 +99,8 @@ mod tests {
         }
         assert_eq!(ProviderKind::from_key("nope"), None);
         assert!(!ProviderKind::Ollama.needs_key() && ProviderKind::Gemini.needs_key());
+        assert!(ProviderKind::Anthropic.default_model().is_some());
+        assert_eq!(ProviderKind::Ollama.default_model(), None);
         assert!(
             ProviderKind::Openai.custom_base_url() && !ProviderKind::Anthropic.custom_base_url()
         );

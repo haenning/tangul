@@ -37,14 +37,19 @@ pub fn set_read_only(user: &str, on: bool, cx: &mut App) -> Result<(), String> {
     Ok(())
 }
 
-/// Sets `mcp.enabled` in the file, keeping everything else in it, and applies the
-/// change right away.
-pub fn set_mcp_enabled(on: bool, cx: &mut App) -> Result<(), String> {
+/// Sets the value at `keys` in the file (`null` removes it), keeping everything
+/// else in it, and applies the change right away.
+pub fn set_value(keys: &[&str], value: serde_json::Value, cx: &mut App) -> Result<(), String> {
     let path = ensure_file(cx).ok_or("could not create the settings file")?;
-    let settings = write_mcp_enabled(&path, on)?;
+    let settings = write_value(&path, keys, value)?;
     cx.set_global(Current(settings));
     cx.refresh_windows();
     Ok(())
+}
+
+/// Turns the MCP server on or off (`mcp.enabled`).
+pub fn set_mcp_enabled(on: bool, cx: &mut App) -> Result<(), String> {
+    set_value(&["mcp", "enabled"], on.into(), cx)
 }
 
 fn hsla(c: Rgb) -> Hsla {
