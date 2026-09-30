@@ -1,5 +1,5 @@
 //! SQL assistance without UI: tokenizing, statement analysis, fingerprints, editor
-//! completion, usage-based ranking and query suggestions.
+//! completion, usage-based ranking, query suggestions and telling questions from SQL.
 
 pub mod analyze;
 pub mod chart;
@@ -13,6 +13,7 @@ pub mod grammar;
 pub mod guard;
 pub mod join_graph;
 pub mod lexer;
+pub mod nl;
 pub mod profile;
 pub mod redact;
 pub mod refine;
