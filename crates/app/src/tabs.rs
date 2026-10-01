@@ -5,6 +5,7 @@
 use gpui_kit::*;
 use tangul_core::TabId;
 
+use crate::ai_settings::AiSettingsTab;
 use crate::file_tab::FileTab;
 use crate::query_tab::QueryTab;
 
@@ -13,6 +14,8 @@ use crate::query_tab::QueryTab;
 pub enum TabItem {
     Query(Entity<QueryTab>),
     File(Entity<FileTab>),
+    /// The AI settings (assistant and MCP); one at a time.
+    AiSettings(Entity<AiSettingsTab>),
     // Boards (#97) become a kind of their own here, `Board(Entity<BoardTab>)`: a
     // grid of `ResultView`s, one per query.
 }
@@ -22,6 +25,7 @@ impl TabItem {
         match self {
             TabItem::Query(t) => t.read(cx).id,
             TabItem::File(t) => t.read(cx).id,
+            TabItem::AiSettings(t) => t.read(cx).id,
         }
     }
 
@@ -29,27 +33,35 @@ impl TabItem {
         match self {
             TabItem::Query(t) => t.read(cx).title.clone(),
             TabItem::File(t) => t.read(cx).title.clone(),
+            TabItem::AiSettings(t) => t.read(cx).title.clone(),
         }
     }
 
     pub fn query(&self) -> Option<&Entity<QueryTab>> {
         match self {
             TabItem::Query(t) => Some(t),
-            TabItem::File(_) => None,
+            _ => None,
         }
     }
 
     pub fn file(&self) -> Option<&Entity<FileTab>> {
         match self {
             TabItem::File(t) => Some(t),
-            TabItem::Query(_) => None,
+            _ => None,
+        }
+    }
+
+    pub fn ai_settings(&self) -> Option<&Entity<AiSettingsTab>> {
+        match self {
+            TabItem::AiSettings(t) => Some(t),
+            _ => None,
         }
     }
 
     /// Changes that would be lost on closing (asks first).
     pub fn has_unsaved_changes(&self, cx: &App) -> bool {
         match self {
-            TabItem::Query(_) => false,
+            TabItem::Query(_) | TabItem::AiSettings(_) => false,
             TabItem::File(t) => t.read(cx).has_unsaved_changes(cx),
         }
     }
@@ -59,6 +71,7 @@ impl TabItem {
         match self {
             TabItem::Query(t) => t.read(cx).in_transaction(),
             TabItem::File(t) => t.read(cx).has_unsaved_changes(cx),
+            TabItem::AiSettings(_) => false,
         }
     }
 
@@ -66,6 +79,7 @@ impl TabItem {
         match self {
             TabItem::Query(t) => QueryTab::focus_editor(t, window, cx),
             TabItem::File(t) => FileTab::focus(t, window, cx),
+            TabItem::AiSettings(t) => AiSettingsTab::focus(t, window, cx),
         }
     }
 
@@ -73,6 +87,7 @@ impl TabItem {
         match self {
             TabItem::Query(t) => t.clone().into(),
             TabItem::File(t) => t.clone().into(),
+            TabItem::AiSettings(t) => t.clone().into(),
         }
     }
 }

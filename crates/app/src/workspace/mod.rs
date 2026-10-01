@@ -5,7 +5,10 @@
 //! This file holds the state and the layout; each topic adds its own
 //! `impl Workspace` in a submodule (connections, tabs, safety, bookmarks, …).
 
+mod ai;
+mod ai_settings;
 mod assist;
+mod assistant;
 mod bars;
 mod bookmarks;
 mod command_palette;
@@ -162,8 +165,14 @@ pub struct Workspace {
     /// Why the AI has no connection to a database, by database id: shown in the
     /// title bar until it connects (it never connects as anyone else instead).
     ai_problems: HashMap<String, String>,
+    /// The databases offered to AI tools (the assistant, MCP clients).
+    ai: ai::Ai,
+    /// The providers with an API key in the Keychain; `None` until read.
+    ai_keys: Option<std::collections::HashSet<tangul_ai::llm::ProviderKind>>,
     /// The MCP server, while `mcp.enabled` is set.
     mcp: mcp::Mcp,
+    /// The assistant's chat: where its tool calls go.
+    assistant: assistant::Assistant,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -238,8 +247,12 @@ impl Workspace {
         );
         let value = cx.new(|cx| ValuePanel::new(window, cx));
         let value_sub = cx.subscribe_in(&value, window, Self::on_value_event);
-        let settings_sub =
-            cx.observe_global::<settings::Current>(|this: &mut Self, cx| this.sync_mcp(cx));
+        let settings_sub = cx.observe_global::<settings::Current>(|this: &mut Self, cx| {
+            this.sync_mcp(cx);
+            this.sync_assistant(cx);
+        });
+        let assistant = cx.new(|cx| crate::assistant::ChatPanel::new(window, cx));
+        let assistant_sub = cx.subscribe_in(&assistant, window, Self::on_chat_event);
         let mut this = Self {
             engine,
             data,
@@ -248,6 +261,7 @@ impl Workspace {
             right,
             panels: Panels {
                 value,
+                assistant,
                 value_focus: cx.focus_handle(),
                 schema: SchemaTree::new(schema_search),
                 bookmark_search,
@@ -270,7 +284,10 @@ impl Workspace {
             ai_check: Task::ready(()),
             ai_warning_pulse: 0,
             ai_problems: HashMap::new(),
+            ai: ai::Ai::default(),
+            ai_keys: None,
             mcp: mcp::Mcp::default(),
+            assistant: assistant::Assistant::default(),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![
                 search_sub,
@@ -278,6 +295,7 @@ impl Workspace {
                 schema_sub,
                 value_sub,
                 settings_sub,
+                assistant_sub,
             ],
             _pump: pump,
         };
@@ -301,6 +319,7 @@ impl Workspace {
             this.check_ai_user(cx);
         }
         this.sync_mcp(cx);
+        this.sync_assistant(cx);
         // Starts on the empty state; keys like ⌘T need a focused element.
         window.focus(&this.focus_handle, cx);
         this

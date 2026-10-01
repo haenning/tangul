@@ -449,15 +449,25 @@ impl Render for ConnectionForm {
             }))
         };
         // Also when setting up a new connection, before it has users.
-        let db_fields = db_fields.child(
-            Checkbox::new("ai-tools")
-                .label("Available to AI tools (MCP clients, the assistant)")
-                .checked(self.ai_tools)
-                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                    this.ai_tools = *checked;
-                    cx.notify();
-                })),
-        );
+        let db_fields = db_fields
+            .child(
+                Checkbox::new("ai-tools")
+                    .label("Available to AI tools (MCP clients, the assistant)")
+                    .checked(self.ai_tools)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.ai_tools = *checked;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "The assistant's provider and the MCP server: AI settings (the \
+                         title bar's AI menu → Show settings).",
+                    ),
+            );
         let can_set_up = self.mode == FormMode::EditDatabase
             && self.ai_account.is_none()
             && dialect_for(self.driver)

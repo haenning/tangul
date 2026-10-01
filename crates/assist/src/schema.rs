@@ -86,6 +86,16 @@ impl SchemaIndex {
         })
     }
 
+    /// Whether `word` names a schema, table or column (any case).
+    pub fn knows_name(&self, word: &str) -> bool {
+        let known = |name: &str| name.eq_ignore_ascii_case(word);
+        self.info
+            .tables
+            .iter()
+            .any(|t| known(&t.name) || known(&t.schema))
+            || self.info.columns.iter().any(|c| known(&c.name))
+    }
+
     pub fn has_schema(&self, name: &str) -> bool {
         self.info
             .tables
@@ -197,6 +207,15 @@ pub(crate) mod tests {
             ..Default::default()
         };
         SchemaIndex::new(info, dialect_for(driver), Some("public".into()))
+    }
+
+    #[test]
+    fn names_of_schemas_tables_and_columns_are_known() {
+        let s = sample();
+        for word in ["APP", "users", "Logs", "email", "user_id"] {
+            assert!(s.knows_name(word), "{word}");
+        }
+        assert!(!s.knows_name("customers"));
     }
 
     #[test]

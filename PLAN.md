@@ -121,10 +121,17 @@ crates/
   assist/   # SQL lexer, dialects (one file per database), analysis, completion,
             # usage ranking, suggestions — no UI/I/O
   tunnel/   # SSH tunnels (russh): lazy session, local listener, known_hosts checks
-  data/     # everything on disk, no UI: profiles + Keychain, local.db, metrics.db,
-            # settings.json; `Data` opens it all (app now, MCP server later)
-  service/  # shared by front ends, no UI: connections by purpose, scheduled bookmarks
-  app/      # GPUI binary `tangul`: workspace, query tab, results grid, forms
+  data/     # everything on disk, no UI: profiles + Keychain, local.db (incl. the
+            # assistant's chats), metrics.db, settings.json; `Data` opens it all
+  service/  # shared by front ends, no UI: connections by purpose, scheduled bookmarks,
+            # the knowledge pool
+  llm/      # model provider APIs, no UI: one Provider (streamed answers, tool calls,
+            # models) with an adapter per API (Anthropic, OpenAI-compatible, Gemini,
+            # Ollama); knows nothing about databases or tangul's tools
+  ai/       # the assistant's tools (one registry, one Ctx as security layer), the MCP
+            # server, and `chat`: the in-app conversation loop over the same tools
+  app/      # GPUI binary `tangul`: workspace, query tab, results grid, forms, the AI
+            # settings tab and the assistant's chat
 ```
 
 ---

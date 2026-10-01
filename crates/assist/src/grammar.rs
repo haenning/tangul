@@ -84,7 +84,7 @@ enum Paren {
 }
 
 /// Every word the walker treats as a keyword; anything else is an identifier.
-const KEYWORDS: &[&str] = &[
+pub(crate) const KEYWORDS: &[&str] = &[
     "all",
     "and",
     "any",

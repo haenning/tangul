@@ -1,46 +1,34 @@
-//! The MCP server (`tangul_ai::mcp`) while `mcp.enabled` is set: which databases it
-//! offers, its token (Keychain), where its tool calls are recorded (the audit log,
-//! and the statements they ran in the database's history) and its button in the
-//! status bar.
+//! The MCP server (`tangul_ai::mcp`) while `mcp.enabled` is set: starting and
+//! stopping it, its token (Keychain), what clients need to add it, and its icon in
+//! the status bar. The databases it offers and where its calls go are shared with
+//! the assistant (`ai.rs`); its settings are on the AI settings tab.
 
-use std::collections::HashSet;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Mutex, PoisonError, RwLock};
 
-use tangul_ai::mcp::{CtxSource, McpServer, new_token};
-use tangul_ai::{
-    AuditSink, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink, ShownResult, SqlProposal,
-    ToolCall,
-};
-use tangul_data::local::{AuditEntry, Source};
+use tangul_ai::mcp::{McpServer, new_token};
 
 use super::*;
+use crate::ai_settings::{McpState, Page};
 
 /// Keychain account of the server's token.
 const TOKEN_ACCOUNT: &str = "mcp-token";
-
-/// What the server's thread hands to the window.
-enum McpEvent {
-    /// A call that ran a statement: into the database's history.
-    Ran(ToolCall),
-    /// Statements to open in a tab (`propose_sql`).
-    Proposed(SqlProposal),
-    /// A read's result to open in a tab (`run_readonly` with `show`).
-    Shown(ShownResult),
-}
 
 /// Fields drop in order: the event task goes before the server, so the server
 /// closing its end never wakes the task from the server's thread.
 #[derive(Default)]
 pub(super) struct Mcp {
-    /// Takes the server's events (see [`McpEvent`]) in the window.
+    /// Takes the server's events (see `AiEvent`) in the window.
     events: Option<Task<()>>,
     server: Option<McpServer>,
     /// The port it could not start on, and why.
     failed: Option<(u16, String)>,
-    /// The databases offered now; the server reads it for every call.
-    exposed: Arc<RwLock<Vec<Exposed>>>,
     calls: Arc<AtomicU64>,
+}
+
+impl Mcp {
+    pub(super) fn running(&self) -> bool {
+        self.server.is_some()
+    }
 }
 
 impl Workspace {
@@ -66,6 +54,7 @@ impl Workspace {
             self.stop_mcp();
             self.start_mcp(want.port, cx);
         }
+        self.push_ai_settings(cx);
         cx.notify();
     }
 
@@ -77,193 +66,17 @@ impl Workspace {
 
     fn start_mcp(&mut self, port: u16, cx: &mut Context<Self>) {
         let token = self.mcp_token();
-        let (knowledge, engine) = (self.knowledge.clone(), self.engine.clone());
-        let events = self.mcp_events(cx);
-        let (exposed, sink) = (self.mcp.exposed.clone(), self.mcp_audit(events.clone()));
-        let proposals: ProposalSink = Arc::new({
-            let events = events.clone();
-            move |proposal| {
-                let _ = events.try_send(McpEvent::Proposed(proposal));
-            }
-        });
-        let shows: ShowSink = Arc::new(move |shown| {
-            let _ = events.try_send(McpEvent::Shown(shown));
-        });
-        let source: CtxSource = Arc::new(move || {
-            let exposed = exposed
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            Ctx::new(knowledge.clone(), Some(engine.clone()), exposed)
-                .with_audit("mcp", sink.clone())
-                .with_proposals(proposals.clone())
-                .with_shows(shows.clone())
-        });
+        let (task, events) = self.ai_events(cx);
+        self.mcp.events = Some(task);
+        let source = self.ai_ctx_source("mcp", events, self.mcp.calls.clone());
         match McpServer::start(port, token, source) {
             Ok(server) => {
                 self.mcp.server = Some(server);
                 self.mcp.failed = None;
-                self.expose_to_mcp();
+                self.expose_to_ai();
             }
             Err(e) => self.mcp.failed = Some((port, e.to_string())),
         }
-    }
-
-    /// Where the server's events go: to this window, which records the statements
-    /// clients ran in the history and opens their proposals in tabs.
-    fn mcp_events(&mut self, cx: &mut Context<Self>) -> async_channel::Sender<McpEvent> {
-        let (tx, rx) = async_channel::unbounded::<McpEvent>();
-        self.mcp.events = Some(cx.spawn(async move |this, cx| {
-            while let Ok(event) = rx.recv().await {
-                // The workspace's window (there is one at a time).
-                let handled = cx.update(|cx| {
-                    let window = cx.windows().first().copied()?;
-                    window
-                        .update(cx, |_, window, cx| {
-                            this.update(cx, |ws, cx| match event {
-                                McpEvent::Ran(call) => ws.record_mcp_call(call, cx),
-                                McpEvent::Proposed(p) => ws.open_proposal(p, window, cx),
-                                McpEvent::Shown(s) => ws.open_shown(s, window, cx),
-                            })
-                            .ok()
-                        })
-                        .ok()
-                        .flatten()
-                });
-                if handled.is_none() {
-                    break;
-                }
-            }
-        }));
-        tx
-    }
-
-    /// A proposal from a client, as the server hands it over (tests).
-    #[cfg(test)]
-    pub(super) fn mcp_proposals(&mut self, cx: &mut Context<Self>) -> ProposalSink {
-        let events = self.mcp_events(cx);
-        Arc::new(move |proposal| {
-            let _ = events.try_send(McpEvent::Proposed(proposal));
-        })
-    }
-
-    /// A result to show from a client, as the server hands it over (tests).
-    #[cfg(test)]
-    pub(super) fn mcp_shows(&mut self, cx: &mut Context<Self>) -> ShowSink {
-        let events = self.mcp_events(cx);
-        Arc::new(move |shown| {
-            let _ = events.try_send(McpEvent::Shown(shown));
-        })
-    }
-
-    /// Records the statement a client's call ran in its database's history.
-    pub(super) fn record_mcp_call(&mut self, call: ToolCall, cx: &mut Context<Self>) {
-        let Some(sql) = call.sql.as_deref() else {
-            return;
-        };
-        let user = {
-            let exposed = self
-                .mcp
-                .exposed
-                .read()
-                .unwrap_or_else(PoisonError::into_inner);
-            let named = |e: &&Exposed| match &call.connection {
-                Some(name) => e.name.eq_ignore_ascii_case(name),
-                None => exposed.len() == 1,
-            };
-            exposed.iter().find(named).map(|e| e.user.clone())
-        };
-        let Some(user) = user else {
-            return;
-        };
-        let Some(db_id) = self.find_user(&user).map(|(db, _)| db.id.clone()) else {
-            return;
-        };
-        // Passwords (`CREATE ROLE … PASSWORD '…'`) are never kept.
-        let sql = tangul_assist::redact::redact(sql);
-        let fp = fingerprint(&sql);
-        let entry = NewHistory {
-            database_id: &db_id,
-            user_id: &user,
-            sql: &sql,
-            fingerprint: &fp,
-            entry: HistoryEntry {
-                sql: sql.to_string(),
-                source: Source::Mcp,
-                started_at: call.at - call.duration_ms,
-                duration_ms: call.duration_ms,
-                rows: call.rows.map(|n| n as i64),
-                error: call.error,
-            },
-        };
-        if let Err(e) = self.data.local.add_history(&entry) {
-            eprintln!("could not record history: {e:#}");
-        }
-        if self.active_db.as_deref() == Some(db_id.as_str()) {
-            self.refresh_history(cx);
-        }
-    }
-
-    /// Opens a proposal in a new tab, not run, on your connection to its database.
-    pub(super) fn open_proposal(
-        &mut self,
-        proposal: SqlProposal,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let title = proposal
-            .title
-            .clone()
-            .unwrap_or_else(|| format!("Proposed · {}", proposal.connection));
-        self.open_sql(&title, &proposal.sql, window, cx);
-        let Some(tab) = self.tabs.active_query().cloned() else {
-            return;
-        };
-        if let Some(conn) = self.tab_conn(&proposal.user) {
-            tab.update(cx, |t, cx| t.set_conn(conn, cx));
-        }
-        cx.notify();
-    }
-
-    /// Opens a read the assistant ran in a new tab on your connection to its
-    /// database, with its result (or chart) already there: it isn't run again.
-    pub(super) fn open_shown(
-        &mut self,
-        shown: ShownResult,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let title = shown
-            .title
-            .clone()
-            .unwrap_or_else(|| format!("Shown · {}", shown.connection));
-        let text = match &shown.note {
-            Some(note) => format!("-- Shown by the assistant: {note}\n{}", shown.sql),
-            None => format!("-- Shown by the assistant\n{}", shown.sql),
-        };
-        self.open_sql(&title, &text, window, cx);
-        let Some(tab) = self.tabs.active_query().cloned() else {
-            return;
-        };
-        let conn = self.tab_conn(&shown.user);
-        let query = QueryId(self.next_id());
-        tab.update(cx, |t, cx| {
-            if let Some(conn) = conn {
-                t.set_conn(conn, cx);
-            }
-            if let Some(chart) = shown.chart {
-                t.request_chart(chart.style, chart.column, cx);
-            }
-            t.show_result(
-                query,
-                &shown.sql,
-                shown.result,
-                shown.truncated,
-                shown.elapsed,
-                cx,
-            );
-        });
-        cx.notify();
     }
 
     /// The server's token; made (and saved) the first time.
@@ -277,7 +90,7 @@ impl Workspace {
     }
 
     /// A new token: clients set up with the old one are locked out.
-    fn new_mcp_token(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn new_mcp_token(&mut self, cx: &mut Context<Self>) {
         self.data.profiles.set_secret(TOKEN_ACCOUNT, new_token());
         if let Some(port) = self.mcp.server.as_ref().map(|s| s.addr().port()) {
             self.stop_mcp();
@@ -286,116 +99,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Writes each tool call to the audit log (its own handle on `local.db`, as the
-    /// calls come from the server's thread), and hands the ones that ran a statement
-    /// to the window for the history (a refused one never ran).
-    fn mcp_audit(&self, events: async_channel::Sender<McpEvent>) -> AuditSink {
-        let local = Mutex::new(Local::open(self.data.profiles.dir()));
-        let calls = self.mcp.calls.clone();
-        Arc::new(move |call: ToolCall| {
-            calls.fetch_add(1, Ordering::Relaxed);
-            if call.sql.is_some() && call.outcome != "refused" {
-                let _ = events.try_send(McpEvent::Ran(call.clone()));
-            }
-            let entry = AuditEntry {
-                at: call.at,
-                caller: call.caller.into(),
-                target: match &call.connection {
-                    Some(c) => format!("tool:{} {c}", call.tool),
-                    None => format!("tool:{}", call.tool),
-                },
-                sql: call.input,
-                outcome: call.outcome.into(),
-                error: call.error,
-                duration_ms: Some(call.duration_ms),
-                rows: None,
-            };
-            let local = local.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Err(e) = local.add_audit(&entry) {
-                eprintln!("could not write the audit log: {e:#}");
-            }
-        })
-    }
-
-    /// Offers the connected databases that are available to AI tools, each on its
-    /// assistant connection (the database's AI user), with what is known of it
-    /// through its connected user (the active one first).
-    pub(super) fn expose_to_mcp(&mut self) {
-        if self.mcp.server.is_none() {
-            return;
-        }
-        let mut users: Vec<String> = self.conns.keys().cloned().collect();
-        users.sort_by_key(|id| (Some(id) != self.active_user.as_ref(), id.clone()));
-        let (mut seen, mut names, mut exposed) = (HashSet::new(), HashSet::new(), Vec::new());
-        for user_id in users {
-            let Some((db, _)) = self.find_user(&user_id) else {
-                continue;
-            };
-            if !db.ai_tools || !seen.insert(db.id.clone()) {
-                continue;
-            }
-            let db = db.clone();
-            // No AI connection: shown in the title bar, and the database isn't offered.
-            let conn = match self.connections.connect_assistant(
-                &self.engine,
-                &mut self.data.profiles,
-                &user_id,
-            ) {
-                Ok(conn) => conn,
-                Err(problem) => {
-                    self.ai_problems.insert(db.id.clone(), problem);
-                    continue;
-                }
-            };
-            // Clients name a database by it, so no two may share one.
-            let base = db.display_name();
-            let name = (1..)
-                .map(|n| match n {
-                    1 => base.clone(),
-                    n => format!("{base} ({n})"),
-                })
-                .find(|name| names.insert(name.clone()))
-                .unwrap_or(base);
-            exposed.push(Exposed {
-                name,
-                user: user_id,
-                conn,
-                driver: db.driver,
-                values: db.ai_values,
-                bookmarks: self.mcp_bookmarks(&db.id),
-            });
-        }
-        *self
-            .mcp
-            .exposed
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = exposed;
-    }
-
-    /// The bookmarks of database `db_id` as the assistant sees them.
-    fn mcp_bookmarks(&self, db_id: &str) -> Vec<SharedBookmark> {
-        self.data
-            .local
-            .bookmarks_for(Some(db_id))
-            .into_iter()
-            .map(|b| SharedBookmark {
-                name: b.name,
-                sql: b.sql,
-            })
-            .collect()
-    }
-
-    /// A bookmark was saved or deleted: the server offers the bookmarks as they are.
-    pub(super) fn refresh_mcp_bookmarks(&mut self) {
-        let mut exposed = self
-            .mcp
-            .exposed
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
-        for e in exposed.iter_mut() {
-            if let Some((db, _)) = self.find_user(&e.user) {
-                e.bookmarks = self.mcp_bookmarks(&db.id.clone());
-            }
+    /// The server as the settings tab shows it.
+    pub(super) fn mcp_state(&self) -> McpState {
+        McpState {
+            url: self.mcp.server.as_ref().map(McpServer::url),
+            failed: self.mcp.failed.clone(),
+            calls: self.mcp.calls.load(Ordering::Relaxed),
+            offered: if self.mcp.server.is_some() {
+                self.ai_exposed().into_iter().map(|e| e.name).collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -403,23 +117,6 @@ impl Workspace {
     #[cfg(test)]
     pub(super) fn mcp_url(&self) -> Option<String> {
         self.mcp.server.as_ref().map(McpServer::url)
-    }
-
-    /// The bookmarks offered for the first database (tests).
-    #[cfg(test)]
-    pub(super) fn mcp_offered_bookmarks(&self) -> Vec<SharedBookmark> {
-        let exposed = self.mcp.exposed.read().unwrap();
-        exposed
-            .first()
-            .map(|e| e.bookmarks.clone())
-            .unwrap_or_default()
-    }
-
-    /// The names of the databases offered now.
-    #[cfg(test)]
-    pub(super) fn mcp_offered(&self) -> Vec<String> {
-        let exposed = self.mcp.exposed.read().unwrap();
-        exposed.iter().map(|e| e.name.clone()).collect()
     }
 
     /// The command that adds the server to Claude Code.
@@ -450,18 +147,14 @@ impl Workspace {
         serde_json::to_string_pretty(&entry).ok()
     }
 
-    /// The status bar's plug: whether MCP clients can use tangul, and its menu.
+    /// The status bar's plug: green while MCP clients can use tangul, grey when
+    /// not. It opens the MCP settings.
     pub(super) fn render_mcp_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let databases = self
-            .mcp
-            .exposed
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len();
+        let databases = self.ai_exposed().len();
         let (color, tooltip) = match (&self.mcp.server, &self.mcp.failed) {
             (Some(server), _) => (
-                theme.foreground,
+                theme.success,
                 format!(
                     "MCP server on {} · {databases} database{} · {} tool calls",
                     server.url(),
@@ -470,7 +163,7 @@ impl Workspace {
                 ),
             ),
             (None, Some((port, e))) => (
-                theme.danger,
+                theme.muted_foreground,
                 format!("The MCP server could not start on port {port}: {e}"),
             ),
             (None, None) => (
@@ -479,77 +172,13 @@ impl Workspace {
                     .to_string(),
             ),
         };
-        let (on, weak) = (self.mcp.server.is_some(), cx.entity().downgrade());
-        let enabled = settings::current(cx).mcp.enabled;
         Button::new("mcp")
             .icon(Icon::new(Lucide::Plug).text_color(color))
             .ghost()
             .xsmall()
             .tooltip(tooltip)
-            .dropdown_menu(move |menu, _, _| mcp_menu(menu, enabled, on, &weak))
+            .on_click(
+                cx.listener(|this, _, window, cx| this.open_ai_settings(Page::Mcp, window, cx)),
+            )
     }
-}
-
-fn mcp_menu(
-    menu: PopupMenu,
-    enabled: bool,
-    on: bool,
-    workspace: &WeakEntity<Workspace>,
-) -> PopupMenu {
-    let ws = workspace.clone();
-    let menu = menu.item(PopupMenuItem::new("MCP server").checked(enabled).on_click(
-        move |_, window, cx| {
-            if let Err(e) = settings::set_mcp_enabled(!enabled, cx) {
-                window.push_notification(Notification::error(e), cx);
-            }
-            let _ = ws.update(cx, |ws, cx| ws.sync_mcp(cx));
-        },
-    ));
-    if !on {
-        return menu;
-    }
-    let (copy, desktop, renew) = (workspace.clone(), workspace.clone(), workspace.clone());
-    menu.separator()
-        .item(
-            PopupMenuItem::new("Copy the command for Claude Code").on_click(
-                move |_, window, cx| {
-                    let command = copy.update(cx, |ws, _| ws.mcp_command()).ok().flatten();
-                    if let Some(command) = command {
-                        cx.write_to_clipboard(ClipboardItem::new_string(command));
-                        window.push_notification(
-                            Notification::info("Copied: run it in a terminal to add tangul"),
-                            cx,
-                        );
-                    }
-                },
-            ),
-        )
-        .item(
-            PopupMenuItem::new("Copy the config for Claude Desktop").on_click(
-                move |_, window, cx| {
-                    let config = desktop
-                        .update(cx, |ws, _| ws.mcp_desktop_config())
-                        .ok()
-                        .flatten();
-                    if let Some(config) = config {
-                        cx.write_to_clipboard(ClipboardItem::new_string(config));
-                        window.push_notification(
-                            Notification::info(
-                                "Copied: add it to \"mcpServers\" in Claude Desktop's \
-                                 claude_desktop_config.json (Settings → Developer → Edit \
-                                 Config), then restart Claude Desktop",
-                            ),
-                            cx,
-                        );
-                    }
-                },
-            ),
-        )
-        .item(
-            PopupMenuItem::new("New token (clients must be added again)").on_click(
-                move |_, _, cx| {
-                    let _ = renew.update(cx, |ws, cx| ws.new_mcp_token(cx));
-                },
-            ),
-        )
 }

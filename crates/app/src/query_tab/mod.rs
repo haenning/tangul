@@ -20,6 +20,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_assist::chart::{ChartData, ChartStyle, ChartView};
 use tangul_assist::columns::ColumnFacts;
+use tangul_assist::dialect::Dialect;
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::{ConnId, QueryId, ResultSet, TabId};
 use tangul_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
@@ -82,7 +83,14 @@ pub enum TabEvent {
     Compare(CellValue),
     /// See [`ResultEvent::ToggleViewer`].
     ToggleViewer,
+    /// Run was pressed on a question, not SQL: for the assistant, not the
+    /// database.
+    Ask(String),
 }
+
+/// Whether text about to run on a connection (its id and dialect) is surely a
+/// question for the assistant.
+pub type QuestionCheck = Rc<dyn Fn(&str, ConnId, &dyn Dialect, &App) -> bool>;
 
 pub struct QueryTab {
     pub id: TabId,
@@ -104,6 +112,8 @@ pub struct QueryTab {
     results: Entity<ResultView>,
     /// Session pinned to this tab because a transaction is open.
     in_transaction: bool,
+    /// Tells questions from SQL on run; none: everything runs.
+    questions: Option<QuestionCheck>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -150,6 +160,7 @@ impl QueryTab {
             editor,
             results,
             in_transaction: false,
+            questions: None,
             _subscriptions: subscriptions,
         }
     }
@@ -221,8 +232,17 @@ impl QueryTab {
         SqlEditor::set_completion(&self.editor, provider, cx);
     }
 
+    pub fn set_question_check(&mut self, check: QuestionCheck) {
+        self.questions = Some(check);
+    }
+
     pub fn sql(&self, cx: &App) -> String {
         self.editor.read(cx).text(cx)
+    }
+
+    /// Puts `sql` into the editor at the cursor.
+    pub fn insert_sql(&mut self, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.insert(sql, window, cx));
     }
 
     pub fn result_columns(&self, cx: &App) -> Vec<String> {
@@ -288,6 +308,19 @@ impl QueryTab {
         }
         // Without a connection nothing runs; the workspace says so.
         let dialect = self.conn.as_ref().map(|c| c.read(cx).dialect());
+        // A question goes to the assistant, as typed, before anything is formatted
+        // or sent to the database.
+        let question = dialect
+            .zip(self.conn_id(cx))
+            .zip(self.questions.clone())
+            .and_then(|((d, conn), check)| {
+                let text = self.editor.read(cx).run_text(d, cx)?;
+                check(&text, conn, d, cx).then_some(text)
+            });
+        if let Some(question) = question {
+            cx.emit(TabEvent::Ask(question.trim().to_string()));
+            return;
+        }
         let take = self.editor.update(cx, |e, cx| match dialect {
             Some(d) => e.take_run(d, window, cx),
             None => e.take_run_all(window, cx),

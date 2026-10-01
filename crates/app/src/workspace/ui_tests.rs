@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::component::{Root, Theme, ThemeMode};
@@ -821,13 +822,13 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
                     .unwrap()
                     .starts_with("Bearer ")
             );
-            assert_eq!(ws.mcp_offered(), ["shop"]);
+            assert_eq!(ws.ai_offered(), ["shop"]);
         });
     });
     // Bookmarks are offered as they are saved and deleted, passwords redacted.
     step(handle, cx, |window, cx| {
         workspace.update(cx, |ws, cx| {
-            let bookmarks = |ws: &Workspace| ws.mcp_offered_bookmarks();
+            let bookmarks = |ws: &Workspace| ws.ai_offered_bookmarks();
             assert!(bookmarks(ws).is_empty());
             ws.save_bookmark(
                 tangul_data::local::Bookmark {
@@ -855,13 +856,80 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
         workspace.update(cx, |ws, _| {
             // Turned off for AI tools: no longer offered.
             ws.data.profiles.databases[0].ai_tools = false;
-            ws.expose_to_mcp();
-            assert!(ws.mcp_offered().is_empty());
+            ws.expose_to_ai();
+            assert!(ws.ai_offered().is_empty());
         });
         crate::settings::set_for_test(mcp(false), cx);
     });
     step(handle, cx, |_, cx| {
         assert_eq!(workspace.read(cx).mcp_url(), None);
+    });
+}
+
+#[gpui_kit::test]
+fn the_ai_settings_open_on_mcp_from_the_status_bar(cx: &mut TestAppContext) {
+    use crate::ai_settings::Page;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+        });
+        let mut s = crate::settings::Settings::default();
+        s.mcp.enabled = true;
+        s.mcp.port = 0;
+        crate::settings::set_for_test(s, cx);
+    });
+    let settings_tab = |ws: &Workspace| ws.tabs.active().and_then(|t| t.ai_settings()).cloned();
+    // The plug opens the MCP page.
+    step(handle, cx, |window, cx| window.click("mcp", cx));
+    step(handle, cx, |window, cx| {
+        let tab = settings_tab(workspace.read(cx)).expect("the settings tab");
+        assert_eq!(tab.read(cx).page(), Page::Mcp);
+        assert!(window.find("mcp-enabled").visible());
+        window.click("mcp-copy-command", cx);
+    });
+    step(handle, cx, |_, cx| {
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .unwrap_or_default();
+        assert!(copied.starts_with("claude mcp add"), "{copied}");
+    });
+    // The database's AI settings are here too.
+    step(handle, cx, |_, cx| {
+        assert_eq!(workspace.read(cx).ai_offered(), ["shop"]);
+    });
+    step(handle, cx, |window, cx| {
+        // Below the server's sections.
+        let down = gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-2000.)));
+        window.scroll("ai-settings-body", down, cx);
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("ai-tools", 0usize), cx)
+    });
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        assert!(!ws.data.profiles.databases[0].ai_tools);
+        assert!(ws.ai_offered().is_empty());
+    });
+    // The title bar's AI menu shows the same tab, on the assistant's page.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_ai_settings(Page::Assistant, window, cx)
+        })
+    });
+    step(handle, cx, |window, cx| {
+        let ws = workspace.read(cx);
+        let tabs = ws
+            .tabs
+            .items()
+            .filter(|t| t.ai_settings().is_some())
+            .count();
+        assert_eq!(tabs, 1);
+        assert_eq!(settings_tab(ws).unwrap().read(cx).page(), Page::Assistant);
+        assert!(window.find("ai-provider-anthropic").visible());
     });
 }
 
@@ -1001,7 +1069,7 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     let sink = step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| {
             shop_for_the_assistant(ws, cx);
-            ws.mcp_proposals(cx)
+            ws.ai_proposals(cx)
         })
     });
     // As the MCP server does (from its thread in the app; the test scheduler wants
@@ -1031,7 +1099,7 @@ fn a_shown_result_opens_with_its_chart_and_isnt_run_again(cx: &mut TestAppContex
     let sink = step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| {
             shop_for_the_assistant(ws, cx);
-            ws.mcp_shows(cx)
+            ws.ai_shows(cx)
         })
     });
     let sql = "SELECT day, orders, revenue FROM daily";
@@ -1163,7 +1231,7 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
                 })
                 .unwrap();
             // What the server hands over after a client's run_readonly.
-            ws.record_mcp_call(
+            ws.record_tool_call(
                 tangul_ai::ToolCall {
                     at: 100,
                     caller: "mcp",
@@ -1352,5 +1420,254 @@ fn format_formats_without_running(cx: &mut TestAppContext) {
         let t = tab.read(cx);
         assert_eq!(t.sql(cx), "select\n  a,\n  b\nfrom\n  t");
         assert!(!t.is_running(cx));
+    });
+}
+
+/// A model that answers every question with the same text.
+struct Echo(String);
+
+#[async_trait::async_trait]
+impl tangul_ai::llm::Provider for Echo {
+    async fn chat(
+        &self,
+        _: &tangul_ai::llm::Request,
+        on: &mut (dyn FnMut(tangul_ai::llm::Delta) + Send),
+    ) -> Result<tangul_ai::llm::Reply, tangul_ai::llm::Error> {
+        on(tangul_ai::llm::Delta::Text(self.0.clone()));
+        Ok(tangul_ai::llm::Reply {
+            message: tangul_ai::llm::Message::assistant(vec![tangul_ai::llm::Part::Text {
+                text: self.0.clone(),
+            }]),
+            ..Default::default()
+        })
+    }
+
+    async fn models(&self) -> Result<Vec<String>, tangul_ai::llm::Error> {
+        Ok(Vec::new())
+    }
+}
+
+/// Runs the window until `done` holds: the assistant answers on its own runtime.
+fn wait_for(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) {
+    for _ in 0..500 {
+        cx.run_until_parked();
+        if done(cx) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("not in time");
+}
+
+#[gpui_kit::test]
+fn the_assistant_answers_in_the_right_sidebar_and_keeps_the_chat(cx: &mut TestAppContext) {
+    use tangul_ai::llm::ProviderKind;
+    let (handle, workspace) = open(cx);
+    // No provider yet: it says so, and the question stays.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.ask_assistant("which orders are open?".into(), true, window, cx)
+        })
+    });
+    step(handle, cx, |window, cx| {
+        assert!(shows(&workspace, Panel::Assistant, cx));
+        assert!(window.find("assistant-problem").visible());
+        assert!(window.find("assistant-set-up").visible());
+        let panel = workspace.read(cx).panels.assistant.clone();
+        assert!(panel.read(cx).messages().is_empty());
+    });
+    // With a model: the answer comes, its SQL opens in a tab.
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.assistant.provider = Some(Arc::new(Echo(
+                "Like this:\n```sql\nSELECT id FROM orders WHERE status = 'open'\n```\n".into(),
+            )));
+        });
+        let mut s = crate::settings::Settings::default();
+        s.ai.provider = Some(ProviderKind::Ollama);
+        s.ai.providers.insert(
+            ProviderKind::Ollama,
+            crate::settings::ProviderSettings {
+                model: Some("m".into()),
+                base_url: None,
+            },
+        );
+        crate::settings::set_for_test(s, cx);
+    });
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.ask_assistant("which orders are open?".into(), false, window, cx)
+        })
+    });
+    wait_for(cx, |cx| {
+        workspace.read_with(cx, |ws, cx| {
+            let panel = ws.panels.assistant.read(cx);
+            !panel.is_running() && panel.messages().len() == 2
+        })
+    });
+    step(handle, cx, |window, cx| {
+        let ws = workspace.read(cx);
+        // Kept in local.db, as the list shows it.
+        let chats = ws.data.local.chats(10);
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0].title, "which orders are open?");
+        assert_eq!(chats[0].database_id.as_deref(), Some("db"));
+        assert_eq!(ws.data.local.chat_messages(chats[0].id).len(), 2);
+        assert!(window.try_find("assistant-problem").is_none());
+        // The answer's text, then its SQL block (message 1, part 0, segment 1).
+        window.click(("sql-open", 100_001usize), cx);
+    });
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.active_query().expect("opened").read(cx);
+        assert_eq!(tab.sql(cx), "SELECT id FROM orders WHERE status = 'open'");
+        assert!(!tab.is_running(cx), "not run");
+    });
+}
+
+#[gpui_kit::test]
+fn a_question_run_in_the_editor_goes_to_the_assistant_once_it_is_set_up(cx: &mut TestAppContext) {
+    use tangul_ai::llm::ProviderKind;
+    let (handle, workspace) = open(cx);
+    let question = "-- asked by Ann\nwhich customers ordered twice last month?";
+    let run = |text: &'static str, cx: &mut TestAppContext| {
+        step(handle, cx, |window, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.open_sql("Q", text, window, cx);
+                let tab = ws.tabs.active_query().unwrap().clone();
+                QueryTab::focus_editor(&tab, window, cx);
+            });
+        });
+        step(handle, cx, |window, cx| {
+            window.dispatch_action(Box::new(crate::RunQuery), cx)
+        });
+    };
+    let running = |cx: &mut TestAppContext| {
+        workspace.read_with(cx, |ws, cx| {
+            ws.tabs.active_query().unwrap().read(cx).is_running(cx)
+        })
+    };
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+        })
+    });
+    // No AI set up for the chat: everything runs as SQL, as before.
+    run(question, cx);
+    assert!(running(cx));
+    step(handle, cx, |_, cx| {
+        assert!(!shows(&workspace, Panel::Assistant, cx));
+    });
+    // Set up: a question goes to the assistant, not the database (its comment
+    // doesn't count).
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, _| {
+            ws.assistant.provider = Some(Arc::new(Echo("Here you go.".into())));
+        });
+        let mut s = crate::settings::Settings::default();
+        s.ai.provider = Some(ProviderKind::Ollama);
+        s.ai.providers.insert(
+            ProviderKind::Ollama,
+            crate::settings::ProviderSettings {
+                model: Some("m".into()),
+                base_url: None,
+            },
+        );
+        crate::settings::set_for_test(s, cx);
+    });
+    run(question, cx);
+    assert!(!running(cx));
+    wait_for(cx, |cx| {
+        workspace.read_with(cx, |ws, cx| {
+            let panel = ws.panels.assistant.read(cx);
+            !panel.is_running() && panel.messages().len() == 2
+        })
+    });
+    step(handle, cx, |_, cx| {
+        assert!(shows(&workspace, Panel::Assistant, cx));
+        let ws = workspace.read(cx);
+        let asked = ws.panels.assistant.read(cx).messages()[0].text();
+        assert_eq!(asked, question);
+    });
+    // SQL runs as always.
+    run("select id from orders", cx);
+    assert!(running(cx));
+}
+
+#[gpui_kit::test]
+fn tool_calls_show_a_few_then_pages_of_25(cx: &mut TestAppContext) {
+    use crate::ai_settings::{CallsView, Page};
+    use tangul_data::local::AuditEntry;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            for at in 0..32 {
+                ws.data
+                    .local
+                    .add_audit(&AuditEntry {
+                        at,
+                        caller: "mcp".into(),
+                        target: format!("tool:run_readonly shop {at}"),
+                        sql: "{}".into(),
+                        outcome: "ran".into(),
+                        error: None,
+                        duration_ms: Some(1),
+                        rows: None,
+                    })
+                    .unwrap();
+            }
+            ws.open_ai_settings(Page::Mcp, window, cx);
+        })
+    });
+    let shown = |cx: &mut TestAppContext| {
+        workspace.read_with(cx, |ws, cx| {
+            let tab = ws
+                .tabs
+                .active()
+                .and_then(|t| t.ai_settings())
+                .unwrap()
+                .read(cx);
+            let calls = &tab.state().mcp_calls;
+            (tab.calls_view("mcp"), calls.entries.len(), calls.total)
+        })
+    };
+    assert_eq!(shown(cx), (CallsView::Collapsed, 5, 32));
+    let down = || gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-5000.)));
+    step(handle, cx, |window, cx| {
+        window.scroll("ai-settings-body", down(), cx)
+    });
+    step(handle, cx, |window, cx| window.click("mcp-calls-more", cx));
+    assert_eq!(shown(cx), (CallsView::Page(0), 25, 32));
+    step(handle, cx, |window, cx| {
+        window.scroll("ai-settings-body", down(), cx)
+    });
+    step(handle, cx, |window, cx| window.click("mcp-calls-next", cx));
+    assert_eq!(shown(cx), (CallsView::Page(1), 7, 32));
+    step(handle, cx, |window, cx| {
+        window.scroll("ai-settings-body", down(), cx)
+    });
+    step(handle, cx, |window, cx| window.click("mcp-calls-less", cx));
+    assert_eq!(shown(cx), (CallsView::Collapsed, 5, 32));
+}
+
+#[gpui_kit::test]
+fn the_status_bar_ends_with_the_ai_then_the_value_viewer(cx: &mut TestAppContext) {
+    let (handle, _) = open(cx);
+    step(handle, cx, |window, _| {
+        let x = |id: gpui_kit::ElementId| window.find(id).bounds().origin.x;
+        let assistant = x(button(Panel::Assistant).into());
+        let mcp = x("mcp".into());
+        let value = x(button(Panel::Value).into());
+        assert!(
+            assistant < mcp && mcp < value,
+            "{assistant:?} {mcp:?} {value:?}"
+        );
+        // The ACP placeholder is gone.
+        assert!(window.try_find("ai-agent").is_none());
     });
 }

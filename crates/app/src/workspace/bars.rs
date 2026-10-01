@@ -231,27 +231,25 @@ impl Workspace {
     /// Zed-style bottom bar: sidebar panels, then (planned) AI and schema-graph
     /// tools; the active query's timing on the right.
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let buttons = |sidebar: &Sidebar, cx: &mut Context<Self>| {
-            sidebar
-                .panels
-                .iter()
-                .map(|&panel| {
-                    Button::new(("panel", panel as usize))
-                        .icon(Icon::new(panel.icon()))
-                        .ghost()
-                        .xsmall()
-                        .selected(sidebar.shows(panel))
-                        .tooltip(panel.label())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if panel == Panel::Value {
-                                this.release_viewer_focus(window, cx);
-                            }
-                            this.toggle_panel(panel, cx)
-                        }))
-                })
-                .collect::<Vec<_>>()
+        let button = |panel: Panel, cx: &mut Context<Self>| {
+            let shown = self.left.shows(panel) || self.right.shows(panel);
+            Button::new(("panel", panel as usize))
+                .icon(Icon::new(panel.icon()))
+                .ghost()
+                .xsmall()
+                .selected(shown)
+                .tooltip(panel.label())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if panel == Panel::Value {
+                        this.release_viewer_focus(window, cx);
+                    }
+                    this.toggle_panel(panel, cx)
+                }))
         };
-        let (left, right) = (buttons(&self.left, cx), buttons(&self.right, cx));
+        let left: Vec<_> = self.left.panels.iter().map(|&p| button(p, cx)).collect();
+        // Right: the AI (the assistant, the MCP server), then the value viewer.
+        let (assistant, value) = (button(Panel::Assistant, cx), button(Panel::Value, cx));
+        let mcp = self.render_mcp_button(cx).into_any_element();
         let theme = cx.theme();
         // File tabs (settings) have no results to time or chart.
         let (query_text, running, chart) = self
@@ -292,14 +290,6 @@ impl Workspace {
             .text_color(theme.muted_foreground)
             .children(left)
             .child(separator())
-            .child(planned("ai-agent", Lucide::Bot, "Agent via ACP — planned"))
-            .child(planned(
-                "ai-assist",
-                Lucide::Sparkles,
-                "AI query help — planned",
-            ))
-            .child(separator())
-            .child(self.render_mcp_button(cx))
             .child(planned(
                 "schema-graph",
                 Lucide::Network,
@@ -309,7 +299,10 @@ impl Workspace {
             .when(running, |this| this.child(Spinner::new().xsmall()))
             .child(div().pr_1().child(query_text))
             .children(chart_button)
-            .children(right)
+            .child(assistant)
+            .child(mcp)
+            .child(separator())
+            .child(value)
             .child(div().w_1())
     }
 
@@ -616,6 +609,7 @@ pub(super) fn ai_menu(
                 }),
         );
     }
+    let ws = workspace.clone();
     menu.item(PopupMenuItem::element(|_, cx| {
         div()
             .max_w(px(TEXT_WIDTH))
@@ -624,6 +618,16 @@ pub(super) fn ai_menu(
             .text_color(cx.theme().muted_foreground)
             .child(VALUES_NOTE)
     }))
+    .separator()
+    .item(
+        PopupMenuItem::new("Show settings")
+            .icon(IconName::Settings)
+            .on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| {
+                    ws.open_ai_settings(crate::ai_settings::Page::Assistant, window, cx)
+                });
+            }),
+    )
 }
 
 /// Under the value profile levels: what they don't limit.
@@ -636,7 +640,7 @@ const SAME_USER_NOTE: &str = "The AI connects as your own user: it can read what
     that may only read on the server is the safer choice.";
 
 /// What the title bar says when the AI's user may change or drop tables.
-fn ai_user_warning(tables: u64) -> String {
+pub(super) fn ai_user_warning(tables: u64) -> String {
     let noun = if tables == 1 { "table" } else { "tables" };
     format!(
         "Your current AI user can change or drop {tables} {noun}. It is strongly \

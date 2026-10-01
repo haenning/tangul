@@ -18,6 +18,8 @@ impl Workspace {
             tab: tab.downgrade(),
         });
         tab.update(cx, |t, cx| t.set_completion(provider, cx));
+        let check = self.question_check();
+        tab.update(cx, |t, _| t.set_question_check(check));
         let events = cx.subscribe_in(&tab, window, Self::on_tab_event);
         self.tabs.push(TabItem::Query(tab.clone()), Some(events));
         QueryTab::focus_editor(&tab, window, cx);
@@ -254,6 +256,7 @@ impl Workspace {
                     self.show_panel(Panel::Value, cx);
                 }
             }
+            TabEvent::Ask(question) => self.ask_assistant(question.clone(), true, window, cx),
             TabEvent::Compare(cell) => {
                 let picked = self.picked(tab, cell, cx);
                 let old = self
