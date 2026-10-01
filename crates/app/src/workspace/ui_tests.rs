@@ -27,6 +27,7 @@ use crate::query_tab::QueryTab;
 fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Workspace>) {
     cx.update(|cx| {
         gpui_kit::init(cx);
+        crate::syntax::init();
         Theme::change(ThemeMode::Dark, None, cx);
         crate::settings::init_defaults(cx);
         crate::bind_keys(cx);

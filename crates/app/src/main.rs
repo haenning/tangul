@@ -13,6 +13,7 @@ mod query_router;
 mod query_tab;
 mod result_view;
 mod settings;
+mod syntax;
 mod tabs;
 mod theme;
 mod ui;
@@ -60,6 +61,7 @@ fn main() {
     }
     app.run(move |cx| {
         init(cx);
+        syntax::init();
         Theme::change(ThemeMode::Dark, None, cx);
         settings::init(cx);
 
