@@ -1,0 +1,43 @@
+{
+  "name": "Tangul Dark Rainbow",
+  "mode": "dark",
+  "colors": {
+    "background": "#0a0a0a",
+    "surface": "#171717",
+    "raised": "#171717",
+    "hover": "#262626",
+    "active": "#2e2e2e",
+    "border": "#262626",
+    "input_border": "#2f2f2f",
+    "foreground": "#fafafa",
+    "muted": "#a3a3a3",
+    "subtle": "#8f8f8f",
+    "accent": "#e5484d",
+    "accent_foreground": "#ffffff",
+    "selection": "#e5484d40",
+    "danger": "#f87171",
+    "warning": "#facc15",
+    "success": "#4ade80",
+    "info": "#22d3ee"
+  },
+  "charts": [
+    "#f87171",
+    "#fb923c",
+    "#facc15",
+    "#4ade80",
+    "#60a5fa",
+    "#818cf8",
+    "#c084fc"
+  ],
+  "syntax": {
+    "keyword": "#87b1f6",
+    "string": "#a3e09f",
+    "number": "#cc9e00",
+    "comment": "#9d9d9d",
+    "function": "#b3c5f3",
+    "type": "#cba6f7",
+    "property": "#bcc4e0",
+    "operator": "#caccca",
+    "punctuation": "#caccca"
+  }
+}

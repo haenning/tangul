@@ -25,9 +25,13 @@ use crate::config::config_dir;
 use crate::settings::Rgb;
 
 const DIR: &str = "themes";
-const BUILT_IN: [&str; 2] = [
+/// One dark and one light theme, each also with rainbow charts (the colors of the
+/// rainbow, light ones on dark, deep ones on light).
+const BUILT_IN: [&str; 4] = [
     include_str!("../themes/tangul-dark.json"),
     include_str!("../themes/tangul-light.json"),
+    include_str!("../themes/tangul-dark-rainbow.json"),
+    include_str!("../themes/tangul-light-rainbow.json"),
 ];
 
 /// Which appearance a theme is for.
@@ -134,7 +138,7 @@ impl Theme {
     }
 }
 
-/// The themes that ship with the app: one dark, one light.
+/// The themes that ship with the app.
 pub fn built_in() -> Vec<Theme> {
     BUILT_IN
         .iter()
@@ -142,7 +146,7 @@ pub fn built_in() -> Vec<Theme> {
         .collect()
 }
 
-/// The built-in theme for `mode`.
+/// The default theme for `mode` (the first built-in one of it).
 pub fn default_for(mode: ThemeMode) -> Theme {
     built_in()
         .into_iter()
@@ -263,9 +267,22 @@ mod tests {
     }
 
     #[test]
-    fn one_dark_and_one_light_ship() {
+    fn dark_and_light_ship_monochrome_and_rainbow() {
         assert_eq!(default_for(ThemeMode::Dark).name, "Tangul Dark");
         assert_eq!(default_for(ThemeMode::Light).name, "Tangul Light");
+        let themes = built_in();
+        for (name, mode) in [
+            ("Tangul Dark Rainbow", ThemeMode::Dark),
+            ("Tangul Light Rainbow", ThemeMode::Light),
+        ] {
+            let rainbow = themes.iter().find(|t| t.name == name).unwrap();
+            assert_eq!(rainbow.mode, mode);
+            assert_eq!(rainbow.charts.len(), 7);
+            // The rest as the monochrome one of its mode.
+            assert_eq!(rainbow.colors, default_for(mode).colors);
+            assert_eq!(rainbow.syntax, default_for(mode).syntax);
+        }
+        assert!(themes.iter().filter(|t| t.charts.len() == 1).count() == 2);
     }
 
     #[test]
@@ -300,14 +317,23 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "not a theme").unwrap();
         let (themes, problems) = load(Some(&dir));
         let names: Vec<_> = themes.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, ["My Dark", "Tangul Dark", "Tangul Light"]);
+        assert_eq!(
+            names,
+            [
+                "My Dark",
+                "Tangul Dark",
+                "Tangul Dark Rainbow",
+                "Tangul Light",
+                "Tangul Light Rainbow"
+            ]
+        );
         assert_eq!(themes[0], mine);
         assert_eq!(themes[1].colors.accent.to_hex(), "#ff0000");
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("broken.json"));
         assert_eq!(stamp(&dir).len(), 4);
         // No folder: the built-in ones.
-        assert_eq!(load(None).0.len(), 2);
+        assert_eq!(load(None).0.len(), BUILT_IN.len());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

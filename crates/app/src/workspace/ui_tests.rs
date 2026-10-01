@@ -1720,6 +1720,15 @@ fn the_theme_follows_the_appearance_setting(cx: &mut TestAppContext) {
     assert_eq!(colors[0], crate::theme::color(dark.charts[0]));
     assert!(colors.windows(2).all(|w| w[0] != w[1]));
     assert!(colors[3].l < colors[0].l, "fainter on a dark background");
+    // A rainbow theme: seven colors, one per series.
+    let mut s = Settings::default();
+    s.theme.appearance = Appearance::Dark;
+    s.theme.dark = "Tangul Dark Rainbow".into();
+    cx.update(|cx| crate::settings::set_for_test(s, cx));
+    let colors = cx.update(|cx| crate::theme::chart_colors(8, cx));
+    let distinct: std::collections::HashSet<_> = colors.iter().map(|c| format!("{c:?}")).collect();
+    assert_eq!(distinct.len(), 7);
+    assert_eq!(colors[7], colors[0]);
     step(handle, cx, |window, _| {
         assert!(window.find(("panel", 0usize)).visible())
     });
