@@ -8,6 +8,7 @@ pub mod local;
 pub mod metrics;
 pub mod profiles;
 pub mod settings;
+pub mod themes;
 
 use anyhow::Result;
 

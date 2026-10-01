@@ -19,6 +19,7 @@
 //!     "max_age": "365d",
 //!     "max_mb": 50
 //!   },
+//!   "theme": { "appearance": "auto", "dark": "Tangul Dark", "light": "Tangul Light" },
 //!   "mcp": { "enabled": false, "port": 7433 },
 //!   "ai": {
 //!     "provider": "anthropic",
@@ -34,7 +35,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tangul_core::llm::ProviderKind;
 
 use crate::config::config_dir;
@@ -60,8 +61,55 @@ pub struct Settings {
     pub chart: ChartSettings,
     pub safety: SafetySettings,
     pub monitoring: MonitoringSettings,
+    pub theme: ThemeSettings,
     pub mcp: McpSettings,
     pub ai: AiSettings,
+}
+
+/// The color themes (see [`crate::themes`]): one for dark, one for light, and
+/// which of them shows.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ThemeSettings {
+    pub appearance: Appearance,
+    /// The theme's name, for dark appearance.
+    pub dark: String,
+    /// The theme's name, for light appearance.
+    pub light: String,
+}
+
+impl Default for ThemeSettings {
+    fn default() -> Self {
+        Self {
+            appearance: Appearance::Auto,
+            dark: "Tangul Dark".into(),
+            light: "Tangul Light".into(),
+        }
+    }
+}
+
+/// Which theme shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// As the system: dark or light, switching when it does.
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::Auto, Appearance::Dark, Appearance::Light];
+
+    /// The name in `settings.json`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Appearance::Auto => "auto",
+            Appearance::Dark => "dark",
+            Appearance::Light => "light",
+        }
+    }
 }
 
 /// The in-app assistant: the model provider it talks to. API keys are in the
@@ -309,6 +357,50 @@ impl Rgb {
             a: channels.get(3).copied().unwrap_or(255),
         })
     }
+
+    /// `#rrggbb`, or `#rrggbbaa` when not opaque.
+    pub fn to_hex(self) -> String {
+        let hex = format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b);
+        if self.a == 255 {
+            hex
+        } else {
+            format!("{hex}{:02x}", self.a)
+        }
+    }
+
+    /// Relative luminance (WCAG 2), ignoring alpha.
+    pub fn luminance(self) -> f64 {
+        let channel = |c: u8| {
+            let c = f64::from(c) / 255.;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(self.r) + 0.7152 * channel(self.g) + 0.0722 * channel(self.b)
+    }
+
+    /// Contrast ratio with `other` (WCAG 2): 1 to 21.
+    pub fn contrast(self, other: Rgb) -> f64 {
+        let (a, b) = (self.luminance(), other.luminance());
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+}
+
+impl Serialize for Rgb {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for Rgb {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Rgb::parse(text.trim()).ok_or_else(|| {
+            serde::de::Error::custom(format!("invalid color {text:?}, expected e.g. \"#2563eb\""))
+        })
+    }
 }
 
 fn color<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Rgb>, D::Error> {
@@ -393,6 +485,11 @@ pub fn create_if_missing(editor_font_size: f32, editor_font_family: &str) -> Opt
                 "max_points": 10000,
                 "max_age": "365d",
                 "max_mb": 50,
+            },
+            "theme": {
+                "appearance": "auto",
+                "dark": "Tangul Dark",
+                "light": "Tangul Light",
             },
             "mcp": {
                 "enabled": false,
@@ -627,6 +724,37 @@ mod tests {
             with_value(r#"{"ai": {"providers": 3}}"#, &keys, 1.into()).unwrap_err(),
             "\"ai.providers\" in settings.json must be an object"
         );
+    }
+
+    #[test]
+    fn themes_follow_the_system_until_set() {
+        let s = Settings::default();
+        assert_eq!(s.theme.appearance, Appearance::Auto);
+        assert_eq!(
+            (s.theme.dark.as_str(), s.theme.light.as_str()),
+            ("Tangul Dark", "Tangul Light")
+        );
+        let s = Settings::parse(r#"{"theme": {"appearance": "light", "light": "Mine"}}"#).unwrap();
+        assert_eq!(s.theme.appearance, Appearance::Light);
+        assert_eq!(
+            (s.theme.dark.as_str(), s.theme.light.as_str()),
+            ("Tangul Dark", "Mine")
+        );
+        assert!(Settings::parse(r#"{"theme": {"appearance": "dim"}}"#).is_err());
+        assert_eq!(
+            Appearance::ALL.map(Appearance::key),
+            ["auto", "dark", "light"]
+        );
+    }
+
+    #[test]
+    fn colors_are_written_as_hex() {
+        let c = Rgb::parse("#0af").unwrap();
+        assert_eq!(c.to_hex(), "#00aaff");
+        assert_eq!(Rgb::parse("#00aaff80").unwrap().to_hex(), "#00aaff80");
+        let (white, black) = (Rgb::parse("#fff").unwrap(), Rgb::parse("#000").unwrap());
+        assert!((white.contrast(black) - 21.).abs() < 0.01);
+        assert!((white.contrast(white) - 1.).abs() < 0.01);
     }
 
     #[test]
