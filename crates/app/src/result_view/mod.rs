@@ -599,14 +599,8 @@ impl ResultView {
         view: ChartView,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
-        let mut colors = vec![
-            theme.chart_1,
-            theme.chart_2,
-            theme.chart_3,
-            theme.chart_4,
-            theme.chart_5,
-        ];
+        // One per series: the theme's chart colors, or shades of its one.
+        let mut colors = crate::theme::chart_colors(data.series.len(), cx);
         // A single column keeps the color it has among all of them.
         if let Some(i) = view.series {
             let n = colors.len();

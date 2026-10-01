@@ -266,7 +266,13 @@ impl Workspace {
             })
             .unwrap_or_default();
         let chart_button = chart.map(|(tab, (data, shown))| {
-            chart_button(tab, data, shown, theme.chart_1, theme.muted_foreground)
+            chart_button(
+                tab,
+                data,
+                shown,
+                crate::theme::chart_colors(1, cx)[0],
+                theme.muted_foreground,
+            )
         });
         let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
 

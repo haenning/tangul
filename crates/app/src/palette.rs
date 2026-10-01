@@ -4,6 +4,8 @@
 use tangul_assist::suggest::one_line;
 
 use tangul_data::local::{Bookmark, HistoryEntry};
+use tangul_data::settings::{Appearance, ThemeSettings};
+use tangul_data::themes::ThemeMode;
 
 /// Length at which a history entry's SQL is cut in the list.
 const LABEL_LEN: usize = 120;
@@ -19,6 +21,15 @@ pub enum PaletteAction {
     Bookmark(String),
     /// SQL of the history entry.
     History(String),
+    /// Which theme shows (`theme.appearance`).
+    Appearance(Appearance),
+    /// Use the theme of this name for its mode (`theme.dark` / `theme.light`).
+    Theme {
+        mode: ThemeMode,
+        name: String,
+    },
+    /// Save the theme of this name as a file in the themes folder and open it.
+    SaveTheme(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,9 +54,52 @@ pub struct PaletteGroup {
     pub items: Vec<PaletteItem>,
 }
 
+/// The commands that choose and save themes: `themes` as (name, mode), `chosen`
+/// what the settings say (marked "current").
+fn theme_commands(themes: &[(String, ThemeMode)], chosen: &ThemeSettings) -> Vec<PaletteItem> {
+    let current = |yes: bool| if yes { "  (current)" } else { "" };
+    let appearance = Appearance::ALL.map(|a| {
+        let what = match a {
+            Appearance::Auto => "follow the system",
+            Appearance::Dark => "dark",
+            Appearance::Light => "light",
+        };
+        PaletteItem {
+            label: format!("Appearance: {what}{}", current(chosen.appearance == a)),
+            search: "theme mode dark light auto system colors".into(),
+            action: PaletteAction::Appearance(a),
+        }
+    });
+    let choose = themes.iter().map(|(name, mode)| {
+        let (kind, set) = match mode {
+            ThemeMode::Dark => ("Dark", &chosen.dark),
+            ThemeMode::Light => ("Light", &chosen.light),
+        };
+        PaletteItem {
+            label: format!("{kind} theme: {name}{}", current(set == name)),
+            search: "theme colors appearance".into(),
+            action: PaletteAction::Theme {
+                mode: *mode,
+                name: name.clone(),
+            },
+        }
+    });
+    let save = themes.iter().map(|(name, _)| PaletteItem {
+        label: format!("Save theme as a file: {name}"),
+        search: "theme colors export edit json".into(),
+        action: PaletteAction::SaveTheme(name.clone()),
+    });
+    appearance.into_iter().chain(choose).chain(save).collect()
+}
+
 /// Groups in display order; groups without entries are left out.
-pub fn groups(bookmarks: &[Bookmark], history: &[HistoryEntry]) -> Vec<PaletteGroup> {
-    let commands = vec![
+pub fn groups(
+    bookmarks: &[Bookmark],
+    history: &[HistoryEntry],
+    themes: &[(String, ThemeMode)],
+    chosen: &ThemeSettings,
+) -> Vec<PaletteGroup> {
+    let mut commands = vec![
         PaletteItem {
             label: "Open settings".into(),
             search: "preferences settings.json font size editor".into(),
@@ -62,6 +116,7 @@ pub fn groups(bookmarks: &[Bookmark], history: &[HistoryEntry]) -> Vec<PaletteGr
             action: PaletteAction::Format,
         },
     ];
+    commands.extend(theme_commands(themes, chosen));
     let bookmarks = bookmarks
         .iter()
         .map(|b| PaletteItem {
@@ -122,6 +177,8 @@ mod tests {
         let groups = groups(
             &[bookmark("b1", "Active users", "SELECT *\nFROM users")],
             &[history("SELECT 1")],
+            &[],
+            &ThemeSettings::default(),
         );
         let kinds: Vec<_> = groups.iter().map(|g| g.kind).collect();
         assert_eq!(
@@ -145,7 +202,7 @@ mod tests {
 
     #[test]
     fn empty_groups_are_left_out() {
-        let groups = groups(&[], &[]);
+        let groups = groups(&[], &[], &[], &ThemeSettings::default());
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].kind, PaletteKind::Command);
     }
@@ -153,7 +210,12 @@ mod tests {
     #[test]
     fn sql_is_searchable_and_shown_on_one_line() {
         let long = format!("SELECT {}\nFROM t", "x, ".repeat(100));
-        let groups = groups(&[bookmark("b", "Report", &long)], &[history(&long)]);
+        let groups = groups(
+            &[bookmark("b", "Report", &long)],
+            &[history(&long)],
+            &[],
+            &ThemeSettings::default(),
+        );
         // Bookmarks are found by their SQL as well as their name.
         assert!(groups[1].items[0].search.contains("FROM t"));
         assert!(!groups[1].items[0].search.contains('\n'));
@@ -164,5 +226,32 @@ mod tests {
         assert!(item.search.ends_with("FROM t"));
         // The full SQL is what gets opened.
         assert_eq!(item.action, PaletteAction::History(long));
+    }
+
+    #[test]
+    fn themes_are_chosen_per_appearance_and_saved() {
+        let themes = [
+            ("Tangul Dark".to_string(), ThemeMode::Dark),
+            ("Tangul Light".to_string(), ThemeMode::Light),
+        ];
+        let groups = groups(&[], &[], &themes, &ThemeSettings::default());
+        let labels: Vec<_> = groups[0].items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Appearance: follow the system  (current)"));
+        assert!(labels.contains(&"Appearance: dark"));
+        assert!(labels.contains(&"Dark theme: Tangul Dark  (current)"));
+        assert!(labels.contains(&"Light theme: Tangul Light  (current)"));
+        assert!(labels.contains(&"Save theme as a file: Tangul Light"));
+        let pick = groups[0]
+            .items
+            .iter()
+            .find(|i| i.label.starts_with("Light theme"))
+            .unwrap();
+        assert_eq!(
+            pick.action,
+            PaletteAction::Theme {
+                mode: ThemeMode::Light,
+                name: "Tangul Light".into()
+            }
+        );
     }
 }

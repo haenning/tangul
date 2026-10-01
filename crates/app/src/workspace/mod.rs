@@ -91,7 +91,7 @@ use crate::{
     completion::SqlCompletion,
     connection::{ConnStatus, Connection},
     connection_form::{ConnectionForm, FormMode, FormOutput},
-    file_tab::FileTab,
+    file_tab::{FileKind, FileTab},
     monitor::{self, Monitor},
     palette::{self, PaletteAction, PaletteKind},
     query_router::{QueryRouter, RunningQuery},
@@ -251,6 +251,10 @@ impl Workspace {
             this.sync_mcp(cx);
             this.sync_assistant(cx);
         });
+        // "auto": the theme follows the system's appearance as it changes.
+        let appearance_sub = cx.observe_window_appearance(window, |_, window, cx| {
+            crate::theme::apply(Some(window), cx)
+        });
         let assistant = cx.new(|cx| crate::assistant::ChatPanel::new(window, cx));
         let assistant_sub = cx.subscribe_in(&assistant, window, Self::on_chat_event);
         let mut this = Self {
@@ -295,6 +299,7 @@ impl Workspace {
                 schema_sub,
                 value_sub,
                 settings_sub,
+                appearance_sub,
                 assistant_sub,
             ],
             _pump: pump,

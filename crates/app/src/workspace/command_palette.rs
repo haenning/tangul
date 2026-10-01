@@ -19,7 +19,12 @@ impl Workspace {
             Some(db) => self.data.local.history(db, "", &[], HISTORY_LIMIT),
             None => Vec::new(),
         };
-        let groups = palette::groups(&bookmarks, &history);
+        let themes: Vec<_> = crate::theme::list(cx)
+            .iter()
+            .map(|t| (t.name.clone(), t.mode))
+            .collect();
+        let chosen = settings::current(cx).theme.clone();
+        let groups = palette::groups(&bookmarks, &history, &themes, &chosen);
         let list = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, {
@@ -113,6 +118,47 @@ impl Workspace {
             }
             PaletteAction::Bookmark(id) => self.open_bookmark(&id, false, window, cx),
             PaletteAction::History(sql) => self.open_sql("History", &sql, window, cx),
+            PaletteAction::Appearance(a) => {
+                let result = settings::set_value(&["theme", "appearance"], a.key().into(), cx);
+                self.report_settings(result, window, cx);
+            }
+            PaletteAction::Theme { mode, name } => {
+                let key = match mode {
+                    tangul_data::themes::ThemeMode::Dark => "dark",
+                    tangul_data::themes::ThemeMode::Light => "light",
+                };
+                let result = settings::set_value(&["theme", key], name.into(), cx);
+                self.report_settings(result, window, cx);
+            }
+            PaletteAction::SaveTheme(name) => self.save_theme(&name, window, cx),
+        }
+    }
+
+    fn report_settings(&self, result: Result<(), String>, window: &mut Window, cx: &mut App) {
+        if let Err(e) = result {
+            window.push_notification(Notification::error(e), cx);
+        }
+    }
+
+    /// Saves the theme called `name` into the themes folder and opens the file, to
+    /// change it there.
+    fn save_theme(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(theme) = crate::theme::list(cx)
+            .iter()
+            .find(|t| t.name == name)
+            .cloned()
+        else {
+            return;
+        };
+        let saved = tangul_data::themes::dir()
+            .ok_or_else(|| "there is no config folder".to_string())
+            .and_then(|dir| tangul_data::themes::save(&dir, &theme));
+        match saved {
+            Ok(path) => self.open_file(path, FileKind::Theme, window, cx),
+            Err(e) => window.push_notification(
+                Notification::error(format!("Could not save the theme: {e}")),
+                cx,
+            ),
         }
     }
 }

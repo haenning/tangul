@@ -1,11 +1,12 @@
-//! Applies `settings.json` (see [`tangul_data::settings`]) to the theme, reloads it
-//! while the app runs, and makes the settings in effect available to every view.
+//! Applies `settings.json` (see [`tangul_data::settings`]): the fonts here, the
+//! themes in [`crate::theme`]; reloads it while the app runs, and makes the settings
+//! in effect available to every view.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use gpui_kit::component::Theme;
-use gpui_kit::{App, Global, Hsla, Pixels, Rgba, SharedString, px};
+use gpui_kit::{App, Global, Pixels, SharedString, px};
 pub use tangul_data::settings::*;
 
 /// How often the file is checked for changes.
@@ -42,8 +43,7 @@ pub fn set_read_only(user: &str, on: bool, cx: &mut App) -> Result<(), String> {
 pub fn set_value(keys: &[&str], value: serde_json::Value, cx: &mut App) -> Result<(), String> {
     let path = ensure_file(cx).ok_or("could not create the settings file")?;
     let settings = write_value(&path, keys, value)?;
-    cx.set_global(Current(settings));
-    cx.refresh_windows();
+    apply(&settings, cx);
     Ok(())
 }
 
@@ -52,36 +52,33 @@ pub fn set_mcp_enabled(on: bool, cx: &mut App) -> Result<(), String> {
     set_value(&["mcp", "enabled"], on.into(), cx)
 }
 
-fn hsla(c: Rgb) -> Hsla {
-    Rgba {
-        r: f32::from(c.r) / 255.,
-        g: f32::from(c.g) / 255.,
-        b: f32::from(c.b) / 255.,
-        a: f32::from(c.a) / 255.,
-    }
-    .into()
+/// The editor font before any setting was applied, so that removing a key brings
+/// the default back.
+struct FontDefaults {
+    size: Pixels,
+    family: SharedString,
 }
 
-/// What the theme had before any setting was applied, so that removing a key
-/// brings the default back.
-struct ThemeDefaults {
-    font_size: Pixels,
-    font_family: SharedString,
-    chart_color: Hsla,
-}
+impl Global for FontDefaults {}
 
-fn apply(settings: &Settings, defaults: &ThemeDefaults, cx: &mut App) {
-    cx.set_global(Current(settings.clone()));
+/// Puts the font settings onto the theme (after a theme change too, which resets
+/// them).
+pub fn apply_fonts(cx: &mut App) {
+    let Some(defaults) = cx.try_global::<FontDefaults>() else {
+        return;
+    };
+    let (size, family) = (defaults.size, defaults.family.clone());
+    let settings = current(cx).clone();
     let theme = Theme::global_mut(cx);
-    theme.mono_font_size = settings.font_size().map_or(defaults.font_size, px);
+    theme.mono_font_size = settings.font_size().map_or(size, px);
     theme.mono_font_family = settings
         .font_family()
-        .map_or_else(|| defaults.font_family.clone(), |f| f.to_string().into());
-    theme.chart_1 = settings
-        .chart
-        .primary_color
-        .map_or(defaults.chart_color, hsla);
-    cx.refresh_windows();
+        .map_or(family, |f| f.to_string().into());
+}
+
+fn apply(settings: &Settings, cx: &mut App) {
+    cx.set_global(Current(settings.clone()));
+    crate::theme::apply(None, cx);
 }
 
 /// Loads and applies the settings, then re-applies them whenever the file changes.
@@ -89,31 +86,50 @@ fn apply(settings: &Settings, defaults: &ThemeDefaults, cx: &mut App) {
 #[cfg(test)]
 pub fn init_defaults(cx: &mut App) {
     cx.set_global(Current(Settings::default()));
+    let theme = cx.global::<Theme>();
+    let defaults = FontDefaults {
+        size: theme.mono_font_size,
+        family: theme.mono_font_family.clone(),
+    };
+    cx.set_global(defaults);
+    crate::theme::init_built_in(cx);
+    crate::theme::apply(None, cx);
 }
 
 /// Applies `settings` without the file (tests).
 #[cfg(test)]
 pub fn set_for_test(settings: Settings, cx: &mut App) {
-    cx.set_global(Current(settings));
+    apply(&settings, cx);
 }
 
 pub fn init(cx: &mut App) {
     cx.set_global(Current(Settings::default()));
     let defaults = {
         let theme = cx.global::<Theme>();
-        ThemeDefaults {
-            font_size: theme.mono_font_size,
-            font_family: theme.mono_font_family.clone(),
-            chart_color: theme.chart_1,
+        FontDefaults {
+            size: theme.mono_font_size,
+            family: theme.mono_font_family.clone(),
         }
     };
-    let Some(path) = path() else { return };
+    cx.set_global(defaults);
+    crate::theme::init(cx);
+    let Some(path) = path() else {
+        crate::theme::apply(None, cx);
+        return;
+    };
     let mut seen = None;
-    reload(&path, &mut seen, &defaults, cx);
+    reload(&path, &mut seen, cx);
+    // The settings when no file was read: still the themes.
+    if seen == Some(None) {
+        crate::theme::apply(None, cx);
+    }
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(POLL).await;
-            cx.update(|cx| reload(&path, &mut seen, &defaults, cx));
+            cx.update(|cx| {
+                reload(&path, &mut seen, cx);
+                crate::theme::reload_if_changed(cx);
+            });
         }
     })
     .detach();
@@ -121,12 +137,7 @@ pub fn init(cx: &mut App) {
 
 /// Applies the file if it changed since `seen` (its modification time). A file that
 /// can't be parsed keeps the settings that were applied before.
-fn reload(
-    path: &Path,
-    seen: &mut Option<Option<SystemTime>>,
-    defaults: &ThemeDefaults,
-    cx: &mut App,
-) {
+fn reload(path: &Path, seen: &mut Option<Option<SystemTime>>, cx: &mut App) {
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     if *seen == Some(modified) {
         return;
@@ -135,7 +146,7 @@ fn reload(
     // No file: defaults.
     let text = std::fs::read_to_string(path).unwrap_or_default();
     match Settings::parse(&text) {
-        Ok(settings) => apply(&settings, defaults, cx),
+        Ok(settings) => apply(&settings, cx),
         Err(e) => eprintln!("ignoring invalid {}: {e}", path.display()),
     }
 }

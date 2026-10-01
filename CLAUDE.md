@@ -15,7 +15,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   filters); put testable logic here
 - `crates/tunnel`: SSH tunnels
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
-  incl. the assistant's chats, `metrics.db`, `settings.json`)
+  incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
+  the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
+  `settings.json`)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
   and `knowledge`: the one pool of what is known about the databases (schema per
@@ -55,6 +57,12 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   - `assistant/`: the assistant's chat (right sidebar); knows nothing about the
     workspace: runs a conversation it is handed, asks for storage and SQL actions with
     events
+  - `theme.rs`: every color of the app. A theme (semantic colors, one JSON file per
+    theme, dark or light) becomes gpui-kit's theme there; chart colors (one color:
+    shades of it; several: in turn) and the engraved wordmark come from it too.
+    `theme.appearance` ("auto" follows the system), `theme.dark` and `theme.light` in
+    `settings.json` choose. **No color literal anywhere else** (a test checks it):
+    views use `cx.theme()` or `crate::theme`
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
     nothing about tabs, so boards and the assistant can reuse it

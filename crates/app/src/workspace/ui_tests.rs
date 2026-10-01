@@ -1671,3 +1671,56 @@ fn the_status_bar_ends_with_the_ai_then_the_value_viewer(cx: &mut TestAppContext
         assert!(window.try_find("ai-agent").is_none());
     });
 }
+
+#[gpui_kit::test]
+fn the_theme_follows_the_appearance_setting(cx: &mut TestAppContext) {
+    use crate::settings::{Appearance, Settings};
+    use tangul_data::themes::{ThemeMode, default_for};
+    let (handle, _) = open(cx);
+    let set = |appearance: Appearance, light: &str, cx: &mut TestAppContext| {
+        let mut s = Settings::default();
+        s.theme.appearance = appearance;
+        s.theme.light = light.into();
+        cx.update(|cx| crate::settings::set_for_test(s, cx));
+    };
+    let background = |cx: &mut TestAppContext| cx.update(|cx| Theme::global(cx).background);
+    let dark = default_for(ThemeMode::Dark);
+    let light = default_for(ThemeMode::Light);
+    set(Appearance::Dark, "Tangul Light", cx);
+    assert_eq!(background(cx), crate::theme::color(dark.colors.background));
+    set(Appearance::Light, "Tangul Light", cx);
+    assert_eq!(background(cx), crate::theme::color(light.colors.background));
+    assert_eq!(
+        cx.update(|cx| crate::theme::current(cx).name.clone()),
+        "Tangul Light"
+    );
+    // A theme of the user's, chosen for light.
+    let mut mine = light.clone();
+    mine.name = "Paper".into();
+    mine.colors.background = tangul_data::settings::Rgb::parse("#f4f1ea").unwrap();
+    mine.charts = vec![mine.colors.accent, mine.colors.info];
+    cx.update(|cx| {
+        cx.global_mut::<crate::theme::Themes>()
+            .list
+            .push(mine.clone())
+    });
+    set(Appearance::Light, "Paper", cx);
+    assert_eq!(background(cx), crate::theme::color(mine.colors.background));
+    // Several chart colors: one per series, in turn.
+    let colors = cx.update(|cx| crate::theme::chart_colors(3, cx));
+    assert_eq!(colors[2], crate::theme::color(mine.colors.accent));
+    // A name that isn't a light theme: the built-in one, and why.
+    set(Appearance::Light, "Tangul Dark", cx);
+    assert_eq!(background(cx), crate::theme::color(light.colors.background));
+    let problems = cx.update(|cx| cx.global::<crate::theme::Themes>().problems.clone());
+    assert_eq!(problems, ["theme: Tangul Dark is not a light theme"]);
+    // One chart color: shades of it, from full to faint.
+    set(Appearance::Dark, "Tangul Light", cx);
+    let colors = cx.update(|cx| crate::theme::chart_colors(4, cx));
+    assert_eq!(colors[0], crate::theme::color(dark.charts[0]));
+    assert!(colors.windows(2).all(|w| w[0] != w[1]));
+    assert!(colors[3].l < colors[0].l, "fainter on a dark background");
+    step(handle, cx, |window, _| {
+        assert!(window.find(("panel", 0usize)).visible())
+    });
+}
