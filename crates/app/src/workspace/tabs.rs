@@ -36,6 +36,17 @@ impl Workspace {
             );
             return;
         };
+        self.open_file(path, FileKind::Settings, window, cx);
+    }
+
+    /// Opens `path` in a file tab (or shows the one it is open in).
+    pub(super) fn open_file(
+        &mut self,
+        path: std::path::PathBuf,
+        kind: FileKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let open = self
             .tabs
             .items()
@@ -44,7 +55,7 @@ impl Workspace {
             Some(ix) => self.tabs.set_active(ix),
             None => {
                 let id = TabId(self.next_id());
-                let tab = cx.new(|cx| FileTab::new(id, path, window, cx));
+                let tab = cx.new(|cx| FileTab::new(id, path, kind, window, cx));
                 self.tabs.push(TabItem::File(tab), None);
             }
         }

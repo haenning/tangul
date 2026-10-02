@@ -126,20 +126,6 @@ impl Layout {
     }
 }
 
-/// `color` mixed into `background`: an opaque tint, so stacked layers painted over
-/// each other keep their own color.
-fn tint(color: Hsla, background: Hsla, amount: f32) -> Hsla {
-    let (c, b) = (color.to_rgb(), background.to_rgb());
-    let mix = |c: f32, b: f32| b + (c - b) * amount;
-    Rgba {
-        r: mix(c.r, b.r),
-        g: mix(c.g, b.g),
-        b: mix(c.b, b.b),
-        a: 1.,
-    }
-    .into()
-}
-
 impl ResultChart {
     fn color(&self, series: usize) -> Hsla {
         self.colors[series % self.colors.len().max(1)]
@@ -248,7 +234,7 @@ impl ResultChart {
                         .x(|p: &(f32, f32)| Some(p.0))
                         .y0(zero)
                         .y1(|p: &(f32, f32)| Some(p.1))
-                        .fill(tint(color, background, 0.45))
+                        .fill(crate::theme::tint(color, background, 0.45))
                         .stroke(color)
                         .stroke_style(curve)
                         .paint(bounds, window);

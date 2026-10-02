@@ -18,7 +18,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use tangul_core::llm::ProviderKind;
-use tangul_core::{TabId, ValueAccess};
+use tangul_core::{AiAccess, TabId, ValueAccess};
 use tangul_data::local::AuditEntry;
 
 use crate::settings;
@@ -64,6 +64,8 @@ pub struct DatabaseAi {
     /// The user the AI connects as; `None`: the user selected in the app.
     pub ai_user: Option<String>,
     pub values: ValueAccess,
+    /// Its own level (the settings' ceilings may limit it further).
+    pub access: AiAccess,
     pub ai_tools: bool,
     /// What is wrong with its AI user (gone, can't connect, may write).
     pub warning: Option<String>,
@@ -144,6 +146,10 @@ pub enum AiSettingsEvent {
     SetAiTools {
         database: String,
         on: bool,
+    },
+    SetAccess {
+        database: String,
+        access: AiAccess,
     },
     /// Open the database's connection settings.
     EditDatabase(String),

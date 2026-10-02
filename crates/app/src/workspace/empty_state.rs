@@ -7,19 +7,7 @@ impl Workspace {
     pub(super) fn render_empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         // Engraved: a faint fill between a dark edge above and a light edge below.
-        let (fill, shade, light) = if theme.mode.is_dark() {
-            (
-                white().opacity(0.05),
-                black().opacity(0.9),
-                white().opacity(0.09),
-            )
-        } else {
-            (
-                black().opacity(0.08),
-                black().opacity(0.12),
-                white().opacity(0.95),
-            )
-        };
+        let crate::theme::Engraving { fill, shade, light } = crate::theme::engraving(cx);
         let word = |color: Hsla| {
             div()
                 .text_size(px(72.))

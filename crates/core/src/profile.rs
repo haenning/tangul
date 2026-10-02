@@ -67,6 +67,10 @@ pub struct Database {
     /// Its own queries return rows either way: the AI user's grants decide those.
     #[serde(default, skip_serializing_if = "ValueAccess::is_none")]
     pub ai_values: ValueAccess,
+    /// What AI tools may see of it: its data (reads through the gate) or only its
+    /// schema. Only written when schema only.
+    #[serde(default, skip_serializing_if = "AiAccess::is_data")]
+    pub ai_access: AiAccess,
     /// AI tools (MCP clients, the assistant) may use this database. On unless the
     /// user turns it off; only written when off.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
@@ -217,6 +221,43 @@ impl ValueAccess {
             ValueAccess::None => "No value profiles",
             ValueAccess::Statistics => "Statistics: NULL share, distinct count",
             ValueAccess::Values => "Values: range and most frequent values",
+        }
+    }
+}
+
+/// What AI tools (the assistant, MCP clients) may see of a database.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiAccess {
+    /// Its schema and, through the gate, what its reads return.
+    #[default]
+    Data,
+    /// Only what tangul knows of its structure (schema, comments, keys, joins):
+    /// no row ever reaches the AI, and no AI connection is opened. Queries are
+    /// proposed for the user to run.
+    Schema,
+}
+
+impl AiAccess {
+    pub const ALL: [AiAccess; 2] = [AiAccess::Data, AiAccess::Schema];
+
+    pub fn is_data(&self) -> bool {
+        *self == AiAccess::Data
+    }
+
+    /// The stricter of the two (a database's level under a caller's ceiling).
+    pub fn min(self, other: AiAccess) -> AiAccess {
+        if self == AiAccess::Schema || other == AiAccess::Schema {
+            AiAccess::Schema
+        } else {
+            AiAccess::Data
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AiAccess::Data => "Data: reads through the gate",
+            AiAccess::Schema => "Schema only: the AI sees no data",
         }
     }
 }

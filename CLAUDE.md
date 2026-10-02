@@ -15,7 +15,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   filters); put testable logic here
 - `crates/tunnel`: SSH tunnels
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
-  incl. the assistant's chats, `metrics.db`, `settings.json`)
+  incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
+  the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
+  `settings.json`)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
   and `knowledge`: the one pool of what is known about the databases (schema per
@@ -55,6 +57,12 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   - `assistant/`: the assistant's chat (right sidebar); knows nothing about the
     workspace: runs a conversation it is handed, asks for storage and SQL actions with
     events
+  - `theme.rs`: every color of the app. A theme (semantic colors, one JSON file per
+    theme, dark or light) becomes gpui-kit's theme there; chart colors (one color:
+    shades of it; several: in turn) and the engraved wordmark come from it too.
+    `theme.appearance` ("auto" follows the system), `theme.dark` and `theme.light` in
+    `settings.json` choose. **No color literal anywhere else** (a test checks it):
+    views use `cx.theme()` or `crate::theme`
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
     nothing about tabs, so boards and the assistant can reuse it
@@ -141,6 +149,14 @@ explicit OK, and keep them covered by tests.
   user (allowed; the title bar says what that means). A chosen user that is gone or
   can't connect is shown to the user, and the AI has no connection: it never connects
   as anyone else instead.
+- **Schema only.** A database's `ai_access` (`"data"` or `"schema"`), under the
+  callers' ceilings `ai.access` (assistant) and `mcp.access` (MCP) in `settings.json`;
+  the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no
+  `conn`, `Ctx` no engine when nothing may read data), value profiles are off,
+  bookmarks are shown only as fingerprints, and tools that read rows
+  (`Tool::reads_rows`: `run_readonly`, `get_cell`, `column_profile`) aren't offered and
+  are refused (audited) by the registry, not by the tools. `propose_sql` then also takes
+  queries: they open unrun for the user, and their result never goes back to the AI.
 - **Secrets.** Passwords in SQL (`… PASSWORD '…'`, `IDENTIFIED BY '…'`) are replaced by
   `assist::redact` before history, bookmarks, the assistant's chats
   (`ai::chat::for_storage`) and the audit log.

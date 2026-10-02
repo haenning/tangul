@@ -28,7 +28,10 @@ then; tangul then tracks its duration and row count over time. list_bookmarks li
 them; run_readonly with \"bookmark\" runs one (with \"show\", for the user too).
 - Changes: statements that change data or schema are never run by you; propose_sql \
 opens them in a tab for the user to review and run as themselves. It is only for \
-changes.
+changes, except on a schema-only database.
+- Schema only: on a database marked so in list_connections you get its structure, \
+never a row; propose_sql opens your queries for the user to run, and their result \
+stays with them.
 - Results: the user can filter, sort and page a result without writing SQL, follow \
 foreign keys to related rows, and compare two values side by side.
 - Safety: you only read, in a read-only transaction that is rolled back, as the \

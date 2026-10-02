@@ -16,7 +16,10 @@ impl AiSettingsTab {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let enabled = settings::current(cx).mcp.enabled;
+        let (enabled, access) = {
+            let mcp = &settings::current(cx).mcp;
+            (mcp.enabled, mcp.access)
+        };
         let mcp = self.state.mcp.clone();
         let status: SharedString = match (&mcp.url, &mcp.failed) {
             (Some(url), _) => format!(
@@ -28,6 +31,7 @@ impl AiSettingsTab {
             (None, Some((port, e))) => format!("Could not start on port {port}: {e}").into(),
             (None, None) => "Off: MCP clients can't use tangul's databases.".into(),
         };
+        let schema_only = self.schema_only_row("mcp-schema-only", "mcp", access, cx);
         let server = section(
             "MCP server",
             Some(
@@ -53,6 +57,7 @@ impl AiSettingsTab {
                     div().w(px(90.)).child(Input::new(&self.port).small()),
                     cx,
                 ),
+                schema_only,
             ],
             cx,
         );

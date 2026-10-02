@@ -198,6 +198,10 @@ impl Tool for RunReadonly {
         "run_readonly"
     }
 
+    fn reads_rows(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Run one read-only statement, or a bookmark (list_bookmarks) by name, and get \
          its rows (tab-separated). It runs once, in a read-only transaction that is \
@@ -257,7 +261,7 @@ impl Tool for RunReadonly {
         // What the user is shown isn't cut to what the model reads.
         let kept_rows = if show.is_some() { ROW_LIMIT } else { limit };
         let statement = sql.trim().to_string();
-        let out = read(ctx, conn.conn, sql, kept_rows).await?;
+        let out = read(ctx, conn.session()?, sql, kept_rows).await?;
         let set = out.results.into_iter().last();
         let rows = match &set {
             Some(set) => Rows {

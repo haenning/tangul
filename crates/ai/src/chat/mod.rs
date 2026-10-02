@@ -75,10 +75,11 @@ impl std::fmt::Display for ChatError {
 
 impl std::error::Error for ChatError {}
 
-/// The registry's tools as the model sees them, each mapped the same way.
-pub fn tool_defs(registry: &Registry) -> Vec<ToolDef> {
+/// The registry's tools `ctx` may use as the model sees them, each mapped the same
+/// way.
+pub fn tool_defs(registry: &Registry, ctx: &Ctx) -> Vec<ToolDef> {
     registry
-        .specs()
+        .specs_for(ctx)
         .into_iter()
         .map(|s| ToolDef {
             name: s.name.to_string(),
@@ -100,7 +101,7 @@ pub async fn answer(
     on: &mut (dyn FnMut(ChatEvent) + Send),
 ) -> Result<(), ChatError> {
     let mut messages = history.to_vec();
-    let tools = tool_defs(registry);
+    let tools = tool_defs(registry, ctx);
     let system = system_prompt(ctx, settings.focus.as_deref());
     for _ in 0..settings.max_rounds.max(1) {
         let request = Request {
@@ -301,7 +302,10 @@ mod tests {
         // The second request carries the answer with its calls and their results.
         let seen = script.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0].tools.len(), Registry::standard().specs().len());
+        assert_eq!(
+            seen[0].tools.len(),
+            Registry::standard().specs_for(&ctx()).len()
+        );
         assert!(seen[0].system.contains("tangul"));
         let results = &seen[1].messages[2];
         assert_eq!(results.role, Role::User);
@@ -384,9 +388,11 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_is_offered() {
-        let defs = tool_defs(&Registry::standard());
-        assert!(defs.iter().any(|d| d.name == "run_readonly"));
+    fn tools_that_read_rows_need_a_database_that_allows_it() {
+        // No engine, nothing to read: only what tangul knows is offered.
+        let defs = tool_defs(&Registry::standard(), &ctx());
+        assert!(defs.iter().any(|d| d.name == "describe_table"));
+        assert!(defs.iter().all(|d| d.name != "run_readonly"));
         assert!(defs.iter().all(|d| d.input_schema.is_object()));
     }
 }

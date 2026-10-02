@@ -69,8 +69,8 @@ use tangul_assist::{
     usage::{Usage, learn},
 };
 use tangul_core::{
-    ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo,
-    TableKind, ValueAccess,
+    AiAccess, ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId,
+    TableInfo, TableKind, ValueAccess,
 };
 use tangul_data::Data;
 use tangul_data::local::{Bookmark, HistoryEntry, Local, NewHistory, Source, bare_sql};
@@ -91,7 +91,7 @@ use crate::{
     completion::SqlCompletion,
     connection::{ConnStatus, Connection},
     connection_form::{ConnectionForm, FormMode, FormOutput},
-    file_tab::FileTab,
+    file_tab::{FileKind, FileTab},
     monitor::{self, Monitor},
     palette::{self, PaletteAction, PaletteKind},
     query_router::{QueryRouter, RunningQuery},
@@ -248,8 +248,13 @@ impl Workspace {
         let value = cx.new(|cx| ValuePanel::new(window, cx));
         let value_sub = cx.subscribe_in(&value, window, Self::on_value_event);
         let settings_sub = cx.observe_global::<settings::Current>(|this: &mut Self, cx| {
+            this.sync_ai_access(cx);
             this.sync_mcp(cx);
             this.sync_assistant(cx);
+        });
+        // "auto": the theme follows the system's appearance as it changes.
+        let appearance_sub = cx.observe_window_appearance(window, |_, window, cx| {
+            crate::theme::apply(Some(window), cx)
         });
         let assistant = cx.new(|cx| crate::assistant::ChatPanel::new(window, cx));
         let assistant_sub = cx.subscribe_in(&assistant, window, Self::on_chat_event);
@@ -295,6 +300,7 @@ impl Workspace {
                 schema_sub,
                 value_sub,
                 settings_sub,
+                appearance_sub,
                 assistant_sub,
             ],
             _pump: pump,
@@ -318,6 +324,7 @@ impl Workspace {
             this.refresh_history(cx);
             this.check_ai_user(cx);
         }
+        this.sync_ai_access(cx);
         this.sync_mcp(cx);
         this.sync_assistant(cx);
         // Starts on the empty state; keys like ⌘T need a focused element.

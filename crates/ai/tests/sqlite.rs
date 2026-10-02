@@ -17,7 +17,7 @@ use tangul_ai::{
 use tangul_assist::dialect::dialect_for;
 use tangul_assist::schema::SchemaIndex;
 use tangul_core::chart::ChartStyle;
-use tangul_core::{ConnId, ConnectConfig, DriverKind, TlsMode, ValueAccess};
+use tangul_core::{AiAccess, ConnId, ConnectConfig, DriverKind, TlsMode, ValueAccess};
 use tangul_engine::{Command, EngineConfig, Event};
 use tangul_service::knowledge::Knowledge;
 
@@ -98,7 +98,8 @@ async fn shop_with(name: &str, values: ValueAccess) -> (PathBuf, Ctx) {
     let exposed = Exposed {
         name: "shop".into(),
         user: "u1".into(),
-        conn,
+        conn: Some(conn),
+        access: Default::default(),
         driver: DriverKind::Sqlite,
         values,
         bookmarks: vec![
@@ -761,6 +762,118 @@ async fn bookmarks_are_listed_with_their_sql() {
         Err(ToolError::NotFound(
             "connection other; available: shop".into()
         ))
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_only_sees_structure_and_never_a_row() {
+    let (dir, ctx) = shop_with("schema-only", ValueAccess::Values).await;
+    let calls: Arc<Mutex<Vec<ToolCall>>> = Arc::default();
+    let proposed: Arc<Mutex<Vec<SqlProposal>>> = Arc::default();
+    // The caller's ceiling (`mcp.access = "schema"`) wins over the database's data.
+    let ctx = ctx
+        .with_ceiling(AiAccess::Schema)
+        .with_audit("mcp", {
+            let calls = calls.clone();
+            Arc::new(move |c| calls.lock().unwrap().push(c))
+        })
+        .with_proposals({
+            let proposed = proposed.clone();
+            Arc::new(move |p| proposed.lock().unwrap().push(p))
+        });
+    let (ctx, shown) = showing(ctx);
+    // Nothing left to reach the server with.
+    assert!(!ctx.reads_data());
+    let e = &ctx.exposed()[0];
+    assert_eq!(
+        (e.access, e.conn, e.values),
+        (AiAccess::Schema, None, ValueAccess::None)
+    );
+    // Tools that read rows aren't offered.
+    let offered: Vec<_> = Registry::standard()
+        .specs_for(&ctx)
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    for data in ["run_readonly", "get_cell", "column_profile"] {
+        assert!(!offered.contains(&data), "{data}");
+    }
+    assert!(offered.contains(&"describe_table") && offered.contains(&"propose_sql"));
+    // The structure is there.
+    assert!(
+        call(&ctx, "describe_table", json!({"table": "orders"}))
+            .await
+            .unwrap()
+            .starts_with("orders (table)\ncolumns:\n  id integer pk identity")
+    );
+    assert_eq!(
+        call(&ctx, "list_connections", json!({})).await.unwrap(),
+        "shop (SQLite, 4 tables, schema only: no rows)"
+    );
+    // Called anyway, they are refused before they run, and audited as refused.
+    let refused = |name: &str| {
+        Err(ToolError::NotAllowed(format!(
+            "{name} is schema only: the AI sees no data from it. Write the query from the \
+             schema and open it for the user with propose_sql; they run it themselves"
+        )))
+    };
+    for (tool, input) in [
+        ("run_readonly", json!({"sql": "SELECT email FROM users"})),
+        (
+            "run_readonly",
+            json!({"bookmark": "Paid orders", "show": {}}),
+        ),
+        (
+            "column_profile",
+            json!({"table": "users", "column": "email"}),
+        ),
+        (
+            "get_cell",
+            json!({"result": "r1", "row": 1, "column": "email"}),
+        ),
+    ] {
+        assert_eq!(call(&ctx, tool, input).await, refused("shop"), "{tool}");
+    }
+    assert!(shown.lock().unwrap().is_empty());
+    // Bookmarks without their values.
+    assert_eq!(
+        call(&ctx, "list_bookmarks", json!({})).await.unwrap(),
+        "Bookmarks on shop:\n\nPaid orders:\nselect id from orders where status = ?\n\n\
+         Clean up:\ndelete from orders where status = ?"
+    );
+    // A query is proposed: it opens for the user, and no row comes back.
+    let sql = "SELECT email FROM users";
+    assert_eq!(
+        call(&ctx, "propose_sql", json!({"sql": sql}))
+            .await
+            .unwrap(),
+        "Opened in tangul in a new tab on shop for the user to review and run. It was not \
+         run. Its result is the user's: it never comes back to you."
+    );
+    assert_eq!(
+        proposed.lock().unwrap()[0].sql,
+        format!("-- Proposed by the assistant\n{sql}")
+    );
+    let outcomes: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| (c.tool.clone(), c.sql.clone(), c.outcome))
+        .collect();
+    let tool = |t: &str, outcome| (t.to_string(), None, outcome);
+    assert_eq!(
+        outcomes,
+        [
+            tool("describe_table", "ran"),
+            tool("list_connections", "ran"),
+            tool("run_readonly", "refused"),
+            tool("run_readonly", "refused"),
+            tool("column_profile", "refused"),
+            tool("get_cell", "refused"),
+            tool("list_bookmarks", "ran"),
+            tool("propose_sql", "ran"),
+        ]
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }

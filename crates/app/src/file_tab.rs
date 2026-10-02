@@ -1,4 +1,5 @@
-//! A tab editing a file instead of SQL (`settings.json`): only the editor, `⌘S`
+//! A tab editing a file instead of SQL (`settings.json`, a theme): only the editor,
+//! `⌘S`
 //! saves.
 
 use std::path::{Path, PathBuf};
@@ -17,7 +18,26 @@ use tangul_core::TabId;
 
 use crate::{SaveFile, settings};
 
+/// What a file is, to check it when saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Settings,
+    /// A color theme (applied when the folder is read again, within a second).
+    Theme,
+}
+
+impl FileKind {
+    /// Why `text` can't be applied, if it can't.
+    fn problem(self, text: &str) -> Option<String> {
+        match self {
+            FileKind::Settings => settings::problem(text),
+            FileKind::Theme => tangul_data::themes::Theme::parse(text).err(),
+        }
+    }
+}
+
 pub struct FileTab {
+    kind: FileKind,
     pub id: TabId,
     pub title: SharedString,
     path: PathBuf,
@@ -30,7 +50,13 @@ pub struct FileTab {
 }
 
 impl FileTab {
-    pub fn new(id: TabId, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        id: TabId,
+        path: PathBuf,
+        kind: FileKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
@@ -44,6 +70,7 @@ impl FileTab {
             }
         });
         Self {
+            kind,
             id,
             title: path
                 .file_name()
@@ -86,7 +113,7 @@ impl FileTab {
             );
             return false;
         }
-        self.problem = settings::problem(&text).map(Into::into);
+        self.problem = self.kind.problem(&text).map(Into::into);
         self.saved = text;
         cx.notify();
         true

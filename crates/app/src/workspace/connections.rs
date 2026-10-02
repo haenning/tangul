@@ -59,12 +59,16 @@ impl Workspace {
         else {
             return;
         };
-        let Some(sql) = self
-            .data
-            .profiles
-            .database(&db_id)
-            .and_then(|db| dialect_for(db.driver).writable_tables_sql())
-        else {
+        let Some(db) = self.data.profiles.database(&db_id) else {
+            return;
+        };
+        // Schema only: no AI connection, nothing it could write.
+        if !self.ai_access(db).is_data() {
+            self.knowledge.set_ai_writable(&db_id, 0);
+            self.ai_problems.remove(&db_id);
+            return;
+        }
+        let Some(sql) = dialect_for(db.driver).writable_tables_sql() else {
             return;
         };
         let conn = match self.connections.connect_assistant(
@@ -159,6 +163,18 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.update_ai(db_id, |db| db.ai_values = access, window, cx);
+    }
+
+    /// What AI tools may see of the database: its data or only its schema.
+    pub(super) fn set_ai_access(
+        &mut self,
+        db_id: &str,
+        access: AiAccess,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_ai(db_id, |db| db.ai_access = access, window, cx);
+        self.check_ai_user(cx);
     }
 
     pub(super) fn connect(&mut self, user_id: &str, cx: &mut Context<Self>) {

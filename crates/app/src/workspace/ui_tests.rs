@@ -27,6 +27,7 @@ use crate::query_tab::QueryTab;
 fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Workspace>) {
     cx.update(|cx| {
         gpui_kit::init(cx);
+        crate::syntax::init();
         Theme::change(ThemeMode::Dark, None, cx);
         crate::settings::init_defaults(cx);
         crate::bind_keys(cx);
@@ -555,6 +556,7 @@ fn the_title_bar_shows_the_ai_user_before_yours(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.active_db = Some("db".into());
@@ -607,6 +609,7 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.active_db = Some("db".into());
@@ -653,6 +656,7 @@ fn shop_with_ai_user(workspace: &Entity<Workspace>, ai: Option<&str>, cx: &mut A
             ssh: None,
             assistant_user: ai.map(Into::into),
             ai_values: Default::default(),
+            ai_access: Default::default(),
             ai_tools: true,
         });
         ws.active_db = Some("db".into());
@@ -793,6 +797,7 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.connect("app", cx);
@@ -954,6 +959,7 @@ fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext)
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.active_db = Some("db".into());
@@ -1021,6 +1027,7 @@ fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.connect("app", cx);
@@ -1056,6 +1063,7 @@ fn shop_for_the_assistant(ws: &mut Workspace, cx: &mut gpui_kit::Context<Workspa
         ssh: None,
         assistant_user: None,
         ai_values: Default::default(),
+        ai_access: Default::default(),
         ai_tools: true,
     });
     ws.connect("app", cx);
@@ -1200,6 +1208,7 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.active_db = Some("db".into());
@@ -1669,5 +1678,125 @@ fn the_status_bar_ends_with_the_ai_then_the_value_viewer(cx: &mut TestAppContext
         );
         // The ACP placeholder is gone.
         assert!(window.try_find("ai-agent").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn the_theme_follows_the_appearance_setting(cx: &mut TestAppContext) {
+    use crate::settings::{Appearance, Settings};
+    use tangul_data::themes::{ThemeMode, default_for};
+    let (handle, _) = open(cx);
+    let set = |appearance: Appearance, light: &str, cx: &mut TestAppContext| {
+        let mut s = Settings::default();
+        s.theme.appearance = appearance;
+        s.theme.light = light.into();
+        cx.update(|cx| crate::settings::set_for_test(s, cx));
+    };
+    let background = |cx: &mut TestAppContext| cx.update(|cx| Theme::global(cx).background);
+    let dark = default_for(ThemeMode::Dark);
+    let light = default_for(ThemeMode::Light);
+    set(Appearance::Dark, "Tangul Light", cx);
+    assert_eq!(background(cx), crate::theme::color(dark.colors.background));
+    set(Appearance::Light, "Tangul Light", cx);
+    assert_eq!(background(cx), crate::theme::color(light.colors.background));
+    assert_eq!(
+        cx.update(|cx| crate::theme::current(cx).name.clone()),
+        "Tangul Light"
+    );
+    // A theme of the user's, chosen for light.
+    let mut mine = light.clone();
+    mine.name = "Paper".into();
+    mine.colors.background = tangul_data::settings::Rgb::parse("#f4f1ea").unwrap();
+    mine.charts = vec![mine.colors.accent, mine.colors.info];
+    cx.update(|cx| {
+        cx.global_mut::<crate::theme::Themes>()
+            .list
+            .push(mine.clone())
+    });
+    set(Appearance::Light, "Paper", cx);
+    assert_eq!(background(cx), crate::theme::color(mine.colors.background));
+    // Several chart colors: one per series, in turn.
+    let colors = cx.update(|cx| crate::theme::chart_colors(3, cx));
+    assert_eq!(colors[2], crate::theme::color(mine.colors.accent));
+    // A name that isn't a light theme: the built-in one, and why.
+    set(Appearance::Light, "Tangul Dark", cx);
+    assert_eq!(background(cx), crate::theme::color(light.colors.background));
+    let problems = cx.update(|cx| cx.global::<crate::theme::Themes>().problems.clone());
+    assert_eq!(problems, ["theme: Tangul Dark is not a light theme"]);
+    // One chart color: shades of it, from full to faint.
+    set(Appearance::Dark, "Tangul Light", cx);
+    let colors = cx.update(|cx| crate::theme::chart_colors(4, cx));
+    assert_eq!(colors[0], crate::theme::color(dark.charts[0]));
+    assert!(colors.windows(2).all(|w| w[0] != w[1]));
+    assert!(colors[3].l < colors[0].l, "fainter on a dark background");
+    // A rainbow theme: seven colors, one per series.
+    let mut s = Settings::default();
+    s.theme.appearance = Appearance::Dark;
+    s.theme.dark = "Tangul Dark Rainbow".into();
+    cx.update(|cx| crate::settings::set_for_test(s, cx));
+    let colors = cx.update(|cx| crate::theme::chart_colors(8, cx));
+    let distinct: std::collections::HashSet<_> = colors.iter().map(|c| format!("{c:?}")).collect();
+    assert_eq!(distinct.len(), 7);
+    assert_eq!(colors[7], colors[0]);
+    step(handle, cx, |window, _| {
+        assert!(window.find(("panel", 0usize)).visible())
+    });
+}
+
+#[gpui_kit::test]
+fn schema_only_opens_no_ai_connection(cx: &mut TestAppContext) {
+    use tangul_core::AiAccess;
+    use tangul_service::connections::Purpose;
+    let (handle, workspace) = open(cx);
+    let offered = |ws: &Workspace| {
+        let e = ws.ai_exposed().into_iter().next().expect("offered");
+        (e.access, e.conn.is_some())
+    };
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.ai.assistant_used = true;
+            ws.expose_to_ai();
+            assert_eq!(offered(ws), (AiAccess::Data, true));
+            assert!(ws.connections.get(Purpose::Assistant, "app").is_some());
+        })
+    });
+    // Switched in the title bar's menu: applies at once, the AI connection closes.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.set_ai_access("db", AiAccess::Schema, window, cx);
+            assert_eq!(offered(ws), (AiAccess::Schema, false));
+            assert!(ws.connections.get(Purpose::Assistant, "app").is_none());
+            let db = ws.data.profiles.database("db").unwrap();
+            assert_eq!(db.ai_access, AiAccess::Schema);
+            // No AI user, so nothing to warn about.
+            assert_eq!(ws.knowledge.ai_writable("db"), Some(0));
+        });
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("ai-user-switcher").visible());
+        workspace.update(cx, |ws, cx| {
+            ws.set_ai_access("db", AiAccess::Data, window, cx);
+            assert_eq!(offered(ws), (AiAccess::Data, true));
+        });
+        // MCP clients only ever get the schema; the assistant may read.
+        let mut s = crate::settings::Settings::default();
+        s.mcp.access = AiAccess::Schema;
+        crate::settings::set_for_test(s, cx);
+    });
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            let events = ws.test_events(cx);
+            let calls = Arc::default();
+            let mcp = ws.ai_ctx_source("mcp", events.clone(), Arc::clone(&calls))();
+            let assistant = ws.ai_ctx_source("assistant", events, calls)();
+            assert!(!mcp.reads_data());
+            assert_eq!(mcp.exposed()[0].conn, None);
+            assert!(assistant.reads_data());
+            // The assistant still reads, so its connection stays.
+            assert_eq!(offered(ws), (AiAccess::Data, true));
+        });
     });
 }
