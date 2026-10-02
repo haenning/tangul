@@ -1,5 +1,6 @@
 //! `list_bookmarks`: the user's saved queries for a database, by name, with their
-//! SQL; run_readonly runs (and shows) one by name.
+//! SQL; run_readonly runs (and shows) one by name. On a schema-only database the
+//! SQL is its fingerprint: literals as `?`, comments gone (see `Exposed`).
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -38,7 +39,8 @@ impl Tool for ListBookmarks {
 
     fn description(&self) -> &'static str {
         "The user's bookmarks (saved queries) for a database: name and SQL. Run one \
-         with run_readonly and `bookmark` (add `show` to open it for the user too)."
+         with run_readonly and `bookmark` (add `show` to open it for the user too). On \
+         a schema-only database its values are replaced by ?."
     }
 
     fn input_schema(&self) -> Value {

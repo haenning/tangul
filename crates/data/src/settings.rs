@@ -20,13 +20,14 @@
 //!     "max_mb": 50
 //!   },
 //!   "theme": { "appearance": "auto", "dark": "Tangul Dark", "light": "Tangul Light" },
-//!   "mcp": { "enabled": false, "port": 7433 },
+//!   "mcp": { "enabled": false, "port": 7433, "access": "data" },
 //!   "ai": {
 //!     "provider": "anthropic",
 //!     "providers": { "anthropic": { "model": "claude-sonnet-5-5" },
 //!                    "ollama": { "model": "llama3.2", "base_url": "http://localhost:11434" } },
 //!     "max_tool_rounds": 12,
-//!     "questions_in_editor": true
+//!     "questions_in_editor": true,
+//!     "access": "data"
 //!   }
 //! }
 //! ```
@@ -36,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use tangul_core::AiAccess;
 use tangul_core::llm::ProviderKind;
 
 use crate::config::config_dir;
@@ -127,6 +129,9 @@ pub struct AiSettings {
     /// database: only while the assistant is set up (provider, model, key), and only
     /// when it is surely not SQL (comments aside).
     pub questions_in_editor: bool,
+    /// The most the assistant may see of any database: `data`, or `schema` (only
+    /// the structure, whatever a database allows).
+    pub access: AiAccess,
 }
 
 impl Default for AiSettings {
@@ -136,6 +141,7 @@ impl Default for AiSettings {
             providers: BTreeMap::new(),
             max_tool_rounds: 12,
             questions_in_editor: true,
+            access: AiAccess::Data,
         }
     }
 }
@@ -176,6 +182,9 @@ pub struct McpSettings {
     pub enabled: bool,
     /// Listens on `127.0.0.1:<port>`.
     pub port: u16,
+    /// The most MCP clients may see of any database: `data`, or `schema` (only the
+    /// structure, whatever a database allows).
+    pub access: AiAccess,
 }
 
 impl Default for McpSettings {
@@ -183,6 +192,7 @@ impl Default for McpSettings {
         Self {
             enabled: false,
             port: 7433,
+            access: AiAccess::Data,
         }
     }
 }
@@ -494,12 +504,14 @@ pub fn create_if_missing(editor_font_size: f32, editor_font_family: &str) -> Opt
             "mcp": {
                 "enabled": false,
                 "port": 7433,
+                "access": "data",
             },
             "ai": {
                 "provider": null,
                 "providers": {},
                 "max_tool_rounds": 12,
                 "questions_in_editor": true,
+                "access": "data",
             },
         });
         let write = || -> std::io::Result<()> {
@@ -678,6 +690,20 @@ mod tests {
         );
         assert!(with_read_only("{broken", "u", true).is_err());
         assert!(with_read_only("[]", "u", true).is_err());
+    }
+
+    #[test]
+    fn ai_access_ceilings_default_to_data() {
+        let s = Settings::default();
+        assert_eq!(
+            (s.ai.access, s.mcp.access),
+            (AiAccess::Data, AiAccess::Data)
+        );
+        let s = Settings::parse(r#"{"mcp": {"access": "schema"}}"#).unwrap();
+        assert_eq!(
+            (s.ai.access, s.mcp.access),
+            (AiAccess::Data, AiAccess::Schema)
+        );
     }
 
     #[test]

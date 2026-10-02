@@ -88,8 +88,10 @@ impl Workspace {
                         .collect(),
                     ai_user: db.assistant_user.clone(),
                     values: db.ai_values,
+                    access: db.ai_access,
                     ai_tools: db.ai_tools,
-                    warning,
+                    // Schema only: no AI user to warn about.
+                    warning: warning.filter(|_| self.ai_access(db).is_data()),
                 }
             })
             .collect();
@@ -191,6 +193,9 @@ impl Workspace {
             }
             AiSettingsEvent::SetAiTools { database, on } => {
                 self.set_ai_tools(&database, on, window, cx)
+            }
+            AiSettingsEvent::SetAccess { database, access } => {
+                self.set_ai_access(&database, access, window, cx)
             }
             AiSettingsEvent::EditDatabase(database) => {
                 self.open_form(FormMode::EditDatabase, Some(database), None, window, cx)

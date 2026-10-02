@@ -556,6 +556,7 @@ fn the_title_bar_shows_the_ai_user_before_yours(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.active_db = Some("db".into());
@@ -608,6 +609,7 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.active_db = Some("db".into());
@@ -654,6 +656,7 @@ fn shop_with_ai_user(workspace: &Entity<Workspace>, ai: Option<&str>, cx: &mut A
             ssh: None,
             assistant_user: ai.map(Into::into),
             ai_values: Default::default(),
+            ai_access: Default::default(),
             ai_tools: true,
         });
         ws.active_db = Some("db".into());
@@ -794,6 +797,7 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.connect("app", cx);
@@ -955,6 +959,7 @@ fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext)
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.active_db = Some("db".into());
@@ -1022,6 +1027,7 @@ fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.connect("app", cx);
@@ -1057,6 +1063,7 @@ fn shop_for_the_assistant(ws: &mut Workspace, cx: &mut gpui_kit::Context<Workspa
         ssh: None,
         assistant_user: None,
         ai_values: Default::default(),
+        ai_access: Default::default(),
         ai_tools: true,
     });
     ws.connect("app", cx);
@@ -1201,6 +1208,7 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             });
             ws.active_db = Some("db".into());
@@ -1732,5 +1740,63 @@ fn the_theme_follows_the_appearance_setting(cx: &mut TestAppContext) {
     assert_eq!(colors[7], colors[0]);
     step(handle, cx, |window, _| {
         assert!(window.find(("panel", 0usize)).visible())
+    });
+}
+
+#[gpui_kit::test]
+fn schema_only_opens_no_ai_connection(cx: &mut TestAppContext) {
+    use tangul_core::AiAccess;
+    use tangul_service::connections::Purpose;
+    let (handle, workspace) = open(cx);
+    let offered = |ws: &Workspace| {
+        let e = ws.ai_exposed().into_iter().next().expect("offered");
+        (e.access, e.conn.is_some())
+    };
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.ai.assistant_used = true;
+            ws.expose_to_ai();
+            assert_eq!(offered(ws), (AiAccess::Data, true));
+            assert!(ws.connections.get(Purpose::Assistant, "app").is_some());
+        })
+    });
+    // Switched in the title bar's menu: applies at once, the AI connection closes.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.set_ai_access("db", AiAccess::Schema, window, cx);
+            assert_eq!(offered(ws), (AiAccess::Schema, false));
+            assert!(ws.connections.get(Purpose::Assistant, "app").is_none());
+            let db = ws.data.profiles.database("db").unwrap();
+            assert_eq!(db.ai_access, AiAccess::Schema);
+            // No AI user, so nothing to warn about.
+            assert_eq!(ws.knowledge.ai_writable("db"), Some(0));
+        });
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("ai-user-switcher").visible());
+        workspace.update(cx, |ws, cx| {
+            ws.set_ai_access("db", AiAccess::Data, window, cx);
+            assert_eq!(offered(ws), (AiAccess::Data, true));
+        });
+        // MCP clients only ever get the schema; the assistant may read.
+        let mut s = crate::settings::Settings::default();
+        s.mcp.access = AiAccess::Schema;
+        crate::settings::set_for_test(s, cx);
+    });
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            let events = ws.test_events(cx);
+            let calls = Arc::default();
+            let mcp = ws.ai_ctx_source("mcp", events.clone(), Arc::clone(&calls))();
+            let assistant = ws.ai_ctx_source("assistant", events, calls)();
+            assert!(!mcp.reads_data());
+            assert_eq!(mcp.exposed()[0].conn, None);
+            assert!(assistant.reads_data());
+            // The assistant still reads, so its connection stays.
+            assert_eq!(offered(ws), (AiAccess::Data, true));
+        });
     });
 }

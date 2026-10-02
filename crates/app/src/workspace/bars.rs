@@ -1,6 +1,7 @@
 //! The title bar (database and user menus) and the status bar (connection details,
 //! panels, chart button).
 
+use super::ai::Ceilings;
 use super::*;
 
 impl Workspace {
@@ -50,6 +51,13 @@ impl Workspace {
                     .map_or("No user".into(), |u| u.user.clone()),
             };
             let (db_id, values, weak) = (db.id.clone(), db.ai_values, weak.clone());
+            // Schema only (the database's or every caller's ceiling): no AI user, so
+            // nothing to warn about; the button says what the AI sees instead.
+            let access = Access {
+                database: db.ai_access,
+                ceilings: self.ai_ceilings(),
+            };
+            let schema_only = !self.ai_access(db).is_data();
             // How many tables the AI's user may change; `None` until checked.
             let checked = self.knowledge.ai_writable(&db.id);
             let writable = checked.filter(|n| *n > 0);
@@ -64,18 +72,27 @@ impl Workspace {
                 .into_iter()
                 .chain(writable.map(ai_user_warning))
                 .collect();
-            let warning = (!alerts.is_empty()).then(|| alerts.join("\n\n"));
+            let warning = (!alerts.is_empty() && !schema_only).then(|| alerts.join("\n\n"));
             // One piece of advice: red when the AI's user may write, none when it
             // is read-only on the server, and on your own user, until that is
             // known, what it means.
-            let note = (ai_user.is_none() && checked.is_none()).then(|| SAME_USER_NOTE.to_string());
+            let note = (ai_user.is_none() && checked.is_none() && !schema_only)
+                .then(|| SAME_USER_NOTE.to_string());
             let (color, tooltip): (Hsla, SharedString) = match (&warning, &note) {
                 (Some(w), _) => (theme.danger, w.clone().into()),
                 (None, Some(n)) => (theme.warning, n.clone().into()),
+                (None, None) if schema_only => {
+                    (theme.muted_foreground, AiAccess::Schema.label().into())
+                }
                 (None, None) => (
                     theme.muted_foreground,
                     "The database user the AI connects as".into(),
                 ),
+            };
+            let label = if schema_only {
+                "Schema only".to_string()
+            } else {
+                label
             };
             let button = Button::new("ai-user-switcher")
                 .label(label)
@@ -96,6 +113,7 @@ impl Workspace {
                             &users,
                             ai_user.as_deref(),
                             values,
+                            access,
                             warning.as_deref(),
                             note.as_deref(),
                             &weak,
@@ -546,9 +564,38 @@ pub(super) fn database_menu(
     )
 }
 
-/// The AI's database user (the tab's user when none is set) and whether it may
-/// read column values. `warning`: what is wrong (red); `note`: what the choice
-/// means.
+/// What the AI may see of a database: its own level and the callers' ceilings.
+#[derive(Clone, Copy)]
+pub(super) struct Access {
+    pub(super) database: AiAccess,
+    pub(super) ceilings: Ceilings,
+}
+
+impl Access {
+    /// What the settings' ceilings leave of a database that allows data.
+    fn limit(self) -> Option<&'static str> {
+        if !self.database.is_data() {
+            return None;
+        }
+        match (self.ceilings.assistant, self.ceilings.mcp) {
+            (AiAccess::Data, AiAccess::Data) => None,
+            (AiAccess::Schema, AiAccess::Schema) => {
+                Some("The AI settings limit the assistant and MCP clients to the schema.")
+            }
+            (AiAccess::Schema, _) => Some("The AI settings limit the assistant to the schema."),
+            (_, AiAccess::Schema) => Some("The AI settings limit MCP clients to the schema."),
+        }
+    }
+
+    /// Whether some caller may read data from it.
+    fn data(self) -> bool {
+        self.database.min(self.ceilings.loosest()).is_data()
+    }
+}
+
+/// What the AI sees of the database, its database user (the tab's user when none is
+/// set) and whether it may read column values. `warning`: what is wrong (red);
+/// `note`: what the choice means.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ai_menu(
     mut menu: PopupMenu,
@@ -556,6 +603,7 @@ pub(super) fn ai_menu(
     users: &[(String, String)],
     current: Option<&str>,
     values: ValueAccess,
+    access: Access,
     warning: Option<&str>,
     note: Option<&str>,
     workspace: &WeakEntity<Workspace>,
@@ -586,7 +634,33 @@ pub(super) fn ai_menu(
             }))
             .separator();
     }
-    menu = menu.label("The AI connects as");
+    menu = menu.label("The AI sees");
+    for level in AiAccess::ALL {
+        let (ws, db_id) = (workspace.clone(), db_id.to_string());
+        menu = menu.item(
+            PopupMenuItem::new(level.label())
+                .checked(access.database == level)
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.set_ai_access(&db_id, level, window, cx));
+                }),
+        );
+    }
+    if let Some(limit) = access.limit() {
+        menu = menu.item(menu_note(limit));
+    }
+    let ws = workspace.clone();
+    let settings = PopupMenuItem::new("Show settings")
+        .icon(IconName::Settings)
+        .on_click(move |_, window, cx| {
+            let _ = ws.update(cx, |ws, cx| {
+                ws.open_ai_settings(crate::ai_settings::Page::Assistant, window, cx)
+            });
+        });
+    // Schema only: no AI user and no values to choose.
+    if !access.data() {
+        return menu.item(menu_note(SCHEMA_NOTE)).separator().item(settings);
+    }
+    menu = menu.separator().label("The AI connects as");
     let choices = std::iter::once((None, "Same as your user".to_string())).chain(
         users
             .iter()
@@ -615,26 +689,25 @@ pub(super) fn ai_menu(
                 }),
         );
     }
-    let ws = workspace.clone();
-    menu.item(PopupMenuItem::element(|_, cx| {
+    menu.item(menu_note(VALUES_NOTE)).separator().item(settings)
+}
+
+/// A line of small print in a menu, wrapped to its width.
+fn menu_note(text: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, cx| {
         div()
             .max_w(px(TEXT_WIDTH))
             .whitespace_normal()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .child(VALUES_NOTE)
-    }))
-    .separator()
-    .item(
-        PopupMenuItem::new("Show settings")
-            .icon(IconName::Settings)
-            .on_click(move |_, window, cx| {
-                let _ = ws.update(cx, |ws, cx| {
-                    ws.open_ai_settings(crate::ai_settings::Page::Assistant, window, cx)
-                });
-            }),
-    )
+            .child(text)
+    })
 }
+
+/// Under the access levels when the AI sees only the schema.
+const SCHEMA_NOTE: &str = "The AI gets the structure (tables, columns, keys, comments), \
+    never a row, and no AI connection is opened. Queries it writes open in a tab for you \
+    to run.";
 
 /// Under the value profile levels: what they don't limit.
 const VALUES_NOTE: &str = "The AI's own queries return rows whatever this says; the \

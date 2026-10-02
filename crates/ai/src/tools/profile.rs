@@ -67,6 +67,10 @@ impl Tool for ColumnProfileTool {
         "column_profile"
     }
 
+    fn reads_rows(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "What a column's values look like, from a sample: how many are NULL, how many \
          distinct, the range, and the most frequent values with their counts. Use the \
@@ -133,7 +137,7 @@ impl Tool for ColumnProfileTool {
                     );
                 let counts = read(
                     ctx,
-                    conn.conn,
+                    conn.session()?,
                     counts_sql(d, &table_sql, &meta.name, range),
                     1,
                 )
@@ -149,7 +153,7 @@ impl Tool for ColumnProfileTool {
                 } else {
                     match read(
                         ctx,
-                        conn.conn,
+                        conn.session()?,
                         top_values_sql(d, &table_sql, &meta.name),
                         TOP_VALUES,
                     )

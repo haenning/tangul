@@ -66,6 +66,7 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
                 ssh: None,
                 assistant_user: None,
                 ai_values: Default::default(),
+                ai_access: Default::default(),
                 ai_tools: true,
             }),
         }
@@ -331,6 +332,25 @@ mod tests {
                 .unwrap()
                 .contains("ai_values = \"statistics\"")
         );
+    }
+
+    #[test]
+    fn schema_only_is_saved_only_when_set() {
+        use tangul_core::{AiAccess, Database};
+        let mut d: Database = toml::from_str(
+            "id = \"d\"\nname = \"n\"\ndriver = \"postgres\"\nhost = \"h\"\nport = 5432\n",
+        )
+        .unwrap();
+        assert_eq!(d.ai_access, AiAccess::Data);
+        assert!(!toml::to_string(&d).unwrap().contains("ai_access"));
+        d.ai_access = AiAccess::Schema;
+        let saved = toml::to_string(&d).unwrap();
+        assert!(saved.contains("ai_access = \"schema\""));
+        assert_eq!(toml::from_str::<Database>(&saved).unwrap(), d);
+        // The stricter of a database's level and a caller's ceiling.
+        assert_eq!(AiAccess::Data.min(AiAccess::Schema), AiAccess::Schema);
+        assert_eq!(AiAccess::Schema.min(AiAccess::Data), AiAccess::Schema);
+        assert_eq!(AiAccess::Data.min(AiAccess::Data), AiAccess::Data);
     }
 
     #[test]

@@ -56,6 +56,8 @@ impl AiSettingsTab {
             )),
             Some(p) => rows.extend(self.provider_rows(p, cx)),
         }
+        let access = settings::current(cx).ai.access;
+        let schema_only = self.schema_only_row("ai-schema-only", "ai", access, cx);
         let provider = section(
             "Assistant",
             Some(
@@ -104,6 +106,7 @@ impl AiSettingsTab {
                     div(),
                     cx,
                 ),
+                schema_only,
             ],
             cx,
         );

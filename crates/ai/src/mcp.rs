@@ -73,9 +73,12 @@ impl ServerHandler for Tangul {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        // Only what the databases allow now: data tools aren't listed where none may
+        // be read.
+        let ctx = (self.ctx)();
         let tools = self
             .registry
-            .specs()
+            .specs_for(&ctx)
             .into_iter()
             .map(|spec| {
                 let schema = match spec.input_schema {

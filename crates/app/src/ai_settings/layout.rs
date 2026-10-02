@@ -11,9 +11,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_core::ValueAccess;
+use tangul_core::{AiAccess, ValueAccess};
 
 use super::{AiSettingsEvent, AiSettingsTab, CALLS_COLLAPSED, CALLS_PAGE, CallsView};
+use crate::settings;
 
 /// A titled group of rows.
 pub(super) fn section(
@@ -176,6 +177,32 @@ impl AiSettingsTab {
                             }
                             menu
                         });
+                    let (weak, id, access) = (cx.entity().downgrade(), db.id.clone(), db.access);
+                    let access_menu = Button::new(("ai-access", ix))
+                        .label(access.label())
+                        .icon(IconName::ChevronDown)
+                        .xsmall()
+                        .outline()
+                        .dropdown_menu(move |mut menu, _, _| {
+                            menu = menu.label("The AI sees");
+                            for level in AiAccess::ALL {
+                                let (weak, database) = (weak.clone(), id.clone());
+                                menu = menu.item(
+                                    PopupMenuItem::new(level.label())
+                                        .checked(access == level)
+                                        .on_click(move |_, _, cx| {
+                                            let database = database.clone();
+                                            let _ = weak.update(cx, |_, cx| {
+                                                cx.emit(AiSettingsEvent::SetAccess {
+                                                    database,
+                                                    access: level,
+                                                })
+                                            });
+                                        }),
+                                );
+                            }
+                            menu
+                        });
                     let (tools_id, edit_id) = (db.id.clone(), db.id.clone());
                     v_flex()
                         .px_3()
@@ -220,10 +247,15 @@ impl AiSettingsTab {
                                     .flex_wrap()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("Connects as")
-                                    .child(user_menu)
-                                    .child("Value profiles")
-                                    .child(values_menu),
+                                    .child("Sees")
+                                    .child(access_menu)
+                                    // Schema only: no AI user, no values.
+                                    .when(access.is_data(), |this| {
+                                        this.child("Connects as")
+                                            .child(user_menu)
+                                            .child("Value profiles")
+                                            .child(values_menu)
+                                    }),
                             )
                         })
                         .when_some(db.warning.clone(), |this, w| {
@@ -246,9 +278,43 @@ impl AiSettingsTab {
             Some(
                 "What AI tools may use, for the assistant and MCP clients alike. The same \
                  settings are in the title bar's AI menu and each connection's settings. A \
-                 database user that may only read on the server is the safer choice.",
+                 database user that may only read on the server is the safer choice; schema \
+                 only keeps every row from the AI.",
             ),
             rows,
+            cx,
+        )
+    }
+
+    /// The switch for a caller's ceiling (`ai.access`, `mcp.access`): on, it sees
+    /// only the schema of every database.
+    pub(super) fn schema_only_row(
+        &self,
+        id: &'static str,
+        caller: &'static str,
+        current: AiAccess,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        row(
+            "Schema only",
+            Some(
+                "Only the structure of every database (tables, columns, keys, comments), \
+                 never a row, whatever a database allows. Queries open in a tab for you to \
+                 run."
+                    .into(),
+            ),
+            Switch::new(id)
+                .checked(!current.is_data())
+                .on_click(cx.listener(move |this, on: &bool, window, cx| {
+                    let access = if *on {
+                        AiAccess::Schema
+                    } else {
+                        AiAccess::Data
+                    };
+                    let value = serde_json::to_value(access).unwrap_or_default();
+                    let result = settings::set_value(&[caller, "access"], value, cx);
+                    this.report(result, window, cx);
+                })),
             cx,
         )
     }

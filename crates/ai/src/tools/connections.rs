@@ -21,6 +21,8 @@ struct Connection {
     database: &'static str,
     connected: bool,
     tables: usize,
+    /// `data` or `schema` (only the structure: no rows, queries are proposed).
+    access: tangul_core::AiAccess,
     /// `none`, `statistics` or `values`: what may be read from the rows.
     values: tangul_core::ValueAccess,
 }
@@ -33,7 +35,9 @@ impl Tool for ListConnections {
 
     fn description(&self) -> &'static str {
         "The databases you may use, with their kind (PostgreSQL, MySQL, SQLite) and \
-         table count. Pass a name as `connection` to other tools when there are several."
+         table count, and what you may see: on a schema-only one only its structure, \
+         never rows (propose queries with propose_sql). Pass a name as `connection` to \
+         other tools when there are several."
     }
 
     fn input_schema(&self) -> Value {
@@ -52,6 +56,7 @@ impl Tool for ListConnections {
                     database: e.driver.label(),
                     connected: known.is_some(),
                     tables: known.map_or(0, |k| k.schema.tables().len()),
+                    access: e.access,
                     values: e.values,
                 }
             })
@@ -71,7 +76,11 @@ impl Tool for ListConnections {
                         tangul_core::ValueAccess::Statistics => ", column statistics readable",
                         tangul_core::ValueAccess::Values => ", column values readable",
                     };
-                    format!("{} ({}, {state}{values})", c.name, c.database)
+                    let schema_only = match c.access {
+                        tangul_core::AiAccess::Data => "",
+                        tangul_core::AiAccess::Schema => ", schema only: no rows",
+                    };
+                    format!("{} ({}, {state}{schema_only}{values})", c.name, c.database)
                 })
                 .collect::<Vec<_>>()
                 .join("\n")

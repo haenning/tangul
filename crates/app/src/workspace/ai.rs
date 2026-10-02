@@ -12,6 +12,7 @@ use tangul_ai::{
     ToolCall,
 };
 use tangul_data::local::{AuditEntry, Source};
+use tangul_service::connections::assistant_user;
 
 use super::*;
 
@@ -26,11 +27,39 @@ pub(super) enum AiEvent {
     Shown(ShownResult),
 }
 
+/// The most each caller may see of any database (`ai.access`, `mcp.access`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Ceilings {
+    pub(super) assistant: AiAccess,
+    pub(super) mcp: AiAccess,
+}
+
+impl Ceilings {
+    fn of(self, caller: &str) -> AiAccess {
+        if caller == "mcp" {
+            self.mcp
+        } else {
+            self.assistant
+        }
+    }
+
+    /// The most any caller may see.
+    pub(super) fn loosest(self) -> AiAccess {
+        if self.assistant.is_data() || self.mcp.is_data() {
+            AiAccess::Data
+        } else {
+            AiAccess::Schema
+        }
+    }
+}
+
 /// The databases offered to AI tools.
 #[derive(Default)]
 pub(super) struct Ai {
     /// Offered now; every tool call reads it.
     pub(super) exposed: Arc<RwLock<Vec<Exposed>>>,
+    /// As the settings say; every tool call reads it.
+    pub(super) ceilings: Arc<RwLock<Ceilings>>,
     /// Whether the assistant was used in this window: then the databases are
     /// offered (and their AI connections opened) even while MCP is off.
     pub(super) assistant_used: bool,
@@ -40,6 +69,55 @@ impl Workspace {
     /// Whether anything uses AI tools, so the databases must be offered.
     fn ai_in_use(&self) -> bool {
         self.mcp.running() || self.ai.assistant_used
+    }
+
+    /// The callers' ceilings now.
+    pub(super) fn ai_ceilings(&self) -> Ceilings {
+        *self
+            .ai
+            .ceilings
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The most any AI caller may see of `db`: its own level under the loosest
+    /// ceiling. Schema only: no AI connection is opened for it.
+    pub(super) fn ai_access(&self, db: &Database) -> AiAccess {
+        db.ai_access.min(self.ai_ceilings().loosest())
+    }
+
+    /// Takes `ai.access` and `mcp.access` from the settings; a change applies to
+    /// the next tool call.
+    pub(super) fn sync_ai_access(&mut self, cx: &mut Context<Self>) {
+        let s = settings::current(cx);
+        let ceilings = Ceilings {
+            assistant: s.ai.access,
+            mcp: s.mcp.access,
+        };
+        if ceilings == self.ai_ceilings() {
+            return;
+        }
+        *self
+            .ai
+            .ceilings
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = ceilings;
+        self.expose_to_ai();
+        self.check_ai_user(cx);
+        self.push_ai_settings(cx);
+        cx.notify();
+    }
+
+    /// Closes the AI connection of `user_id`'s database, if one is open: a
+    /// schema-only database has none.
+    pub(super) fn close_ai_connection(&mut self, user_id: &str) {
+        let Ok(as_user) = assistant_user(&self.data.profiles, user_id) else {
+            return;
+        };
+        if let Some(conn) = self.connections.get(Purpose::Assistant, &as_user) {
+            self.engine.send(Command::Disconnect { conn });
+            self.connections.forget(conn);
+        }
     }
 
     /// Offers the connected databases that are available to AI tools, each on its
@@ -60,17 +138,26 @@ impl Workspace {
                 continue;
             }
             let db = db.clone();
-            // No AI connection: shown in the title bar, and the database isn't offered.
-            let conn = match self.connections.connect_assistant(
-                &self.engine,
-                &mut self.data.profiles,
-                &user_id,
-            ) {
-                Ok(conn) => conn,
-                Err(problem) => {
-                    self.ai_problems.insert(db.id.clone(), problem);
-                    continue;
+            let access = self.ai_access(&db);
+            let conn = if access.is_data() {
+                // No AI connection: shown in the title bar, and the database isn't
+                // offered.
+                match self.connections.connect_assistant(
+                    &self.engine,
+                    &mut self.data.profiles,
+                    &user_id,
+                ) {
+                    Ok(conn) => Some(conn),
+                    Err(problem) => {
+                        self.ai_problems.insert(db.id.clone(), problem);
+                        continue;
+                    }
                 }
+            } else {
+                // Schema only: what is known through your connection, nothing more.
+                self.close_ai_connection(&user_id);
+                self.ai_problems.remove(&db.id);
+                None
             };
             // Tools name a database by it, so no two may share one.
             let base = db.display_name();
@@ -86,6 +173,7 @@ impl Workspace {
                 user: user_id,
                 conn,
                 driver: db.driver,
+                access,
                 values: db.ai_values,
                 bookmarks: self.ai_bookmarks(&db.id),
             });
@@ -143,7 +231,7 @@ impl Workspace {
         calls: Arc<AtomicU64>,
     ) -> Arc<dyn Fn() -> Ctx + Send + Sync> {
         let (knowledge, engine) = (self.knowledge.clone(), self.engine.clone());
-        let exposed = self.ai.exposed.clone();
+        let (exposed, ceilings) = (self.ai.exposed.clone(), self.ai.ceilings.clone());
         let sink = self.ai_audit(events.clone(), calls);
         let proposals: ProposalSink = Arc::new({
             let events = events.clone();
@@ -159,7 +247,13 @@ impl Workspace {
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
+            let ceiling = ceilings
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .of(caller);
+            // Without a connection that may read data, the context has no engine.
             Ctx::new(knowledge.clone(), Some(engine.clone()), exposed)
+                .with_ceiling(ceiling)
                 .with_audit(caller, sink.clone())
                 .with_proposals(proposals.clone())
                 .with_shows(shows.clone())
@@ -359,7 +453,7 @@ impl Workspace {
 
     /// Where the tool calls of a test hand their events.
     #[cfg(test)]
-    fn test_events(&mut self, cx: &mut Context<Self>) -> async_channel::Sender<AiEvent> {
+    pub(super) fn test_events(&mut self, cx: &mut Context<Self>) -> async_channel::Sender<AiEvent> {
         let (task, events) = self.ai_events(cx);
         task.detach();
         events

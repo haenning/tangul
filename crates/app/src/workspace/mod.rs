@@ -69,8 +69,8 @@ use tangul_assist::{
     usage::{Usage, learn},
 };
 use tangul_core::{
-    ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId, TableInfo,
-    TableKind, ValueAccess,
+    AiAccess, ColumnMeta, ConnId, Database, DbUser, DriverKind, QueryId, SchemaInfo, TabId,
+    TableInfo, TableKind, ValueAccess,
 };
 use tangul_data::Data;
 use tangul_data::local::{Bookmark, HistoryEntry, Local, NewHistory, Source, bare_sql};
@@ -248,6 +248,7 @@ impl Workspace {
         let value = cx.new(|cx| ValuePanel::new(window, cx));
         let value_sub = cx.subscribe_in(&value, window, Self::on_value_event);
         let settings_sub = cx.observe_global::<settings::Current>(|this: &mut Self, cx| {
+            this.sync_ai_access(cx);
             this.sync_mcp(cx);
             this.sync_assistant(cx);
         });
@@ -323,6 +324,7 @@ impl Workspace {
             this.refresh_history(cx);
             this.check_ai_user(cx);
         }
+        this.sync_ai_access(cx);
         this.sync_mcp(cx);
         this.sync_assistant(cx);
         // Starts on the empty state; keys like ⌘T need a focused element.

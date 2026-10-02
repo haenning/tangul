@@ -10,7 +10,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode, ValueAccess};
+use tangul_core::{
+    AiAccess, Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode, ValueAccess,
+};
 
 use tangul_assist::dialect::dialect_for;
 use tangul_data::profiles::{new_id, new_password};
@@ -74,6 +76,8 @@ pub struct ConnectionForm {
     assistant_user: Option<String>,
     /// What the assistant may read from the rows of this database.
     ai_values: ValueAccess,
+    /// What AI tools may see: its data, or only its schema.
+    ai_access: AiAccess,
     /// AI tools (MCP clients, the assistant) may use this database.
     ai_tools: bool,
     /// Set up by "Set up a read-only AI user…", saved with the form.
@@ -185,6 +189,7 @@ impl ConnectionForm {
             }),
             assistant_user: db.and_then(|d| d.assistant_user.clone()),
             ai_values: db.map(|d| d.ai_values).unwrap_or_default(),
+            ai_access: db.map(|d| d.ai_access).unwrap_or_default(),
             // On for a new database too: the user turns it off.
             ai_tools: db.is_none_or(|d| d.ai_tools),
             ai_account: None,
@@ -272,6 +277,7 @@ impl ConnectionForm {
                 users: base.as_ref().map(|b| b.users.clone()).unwrap_or_default(),
                 assistant_user: self.assistant_user.clone(),
                 ai_values: self.ai_values,
+                ai_access: self.ai_access,
                 ai_tools: self.ai_tools,
                 ssh: ssh.then(|| SshConfig {
                     host: value(&self.ssh_host),
@@ -459,21 +465,50 @@ impl Render for ConnectionForm {
                         cx.notify();
                     })),
             )
+            .when(self.ai_tools, |this| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .flex_wrap()
+                        .child(div().text_xs().child("AI sees"))
+                        .children(AiAccess::ALL.map(|access| {
+                            let b =
+                                Button::new(SharedString::from(format!("ai-access-{access:?}")))
+                                    .label(access.label())
+                                    .xsmall();
+                            let b = if self.ai_access == access {
+                                b.primary()
+                            } else {
+                                b.ghost()
+                            };
+                            b.on_click(cx.listener(move |this, _, _, cx| {
+                                this.ai_access = access;
+                                cx.notify();
+                            }))
+                        })),
+                )
+            })
             .child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(
+                    .child(if self.ai_access.is_data() {
                         "The assistant's provider and the MCP server: AI settings (the \
-                         title bar's AI menu → Show settings).",
-                    ),
+                         title bar's AI menu → Show settings)."
+                    } else {
+                        "Schema only: AI tools get its structure (tables, columns, keys, \
+                         comments), never a row, and no AI connection is opened. Queries \
+                         they write open in a tab for you to run."
+                    }),
             );
         let can_set_up = self.mode == FormMode::EditDatabase
             && self.ai_account.is_none()
             && dialect_for(self.driver)
                 .readonly_account_sql("", "", "", &[])
                 .is_some();
-        let db_fields = db_fields.when(!users.is_empty(), |this| {
+        // Its AI user and value profiles only matter where the AI reads data.
+        let db_fields = db_fields.when(!users.is_empty() && self.ai_access.is_data(), |this| {
             let current = self.assistant_user.clone();
             this.child(
                 v_flex()

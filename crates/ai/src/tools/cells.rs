@@ -43,6 +43,10 @@ impl Tool for GetCell {
         "get_cell"
     }
 
+    fn reads_rows(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "The whole value of a cell run_readonly cut short, from tangul's copy of that \
          result (kept about 10 minutes); the database doesn't run anything. JSON comes \

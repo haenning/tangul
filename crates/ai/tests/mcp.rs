@@ -75,7 +75,8 @@ async fn server_on(
     let exposed = vec![Exposed {
         name: "shop".into(),
         user: "u1".into(),
-        conn,
+        conn: Some(conn),
+        access: Default::default(),
         driver: DriverKind::Sqlite,
         values: ValueAccess::None,
         bookmarks: Vec::new(),

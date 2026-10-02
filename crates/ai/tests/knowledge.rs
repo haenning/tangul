@@ -161,7 +161,8 @@ fn exposed(name: &str, user: &str) -> Exposed {
     Exposed {
         name: name.into(),
         user: user.into(),
-        conn: ConnId(1),
+        conn: Some(ConnId(1)),
+        access: Default::default(),
         driver: DriverKind::Postgres,
         values: ValueAccess::None,
         bookmarks: Vec::new(),

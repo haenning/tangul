@@ -80,6 +80,11 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     /// JSON Schema of the input (see [`schema_of`]).
     fn input_schema(&self) -> Value;
+    /// Whether it reads rows (or what came from them): not offered, and refused,
+    /// where the database's access is schema only.
+    fn reads_rows(&self) -> bool {
+        false
+    }
     /// The statement a call with `input` runs on the database, if any (recorded with
     /// the call, for the database's history).
     fn statement(&self, _ctx: &Ctx, _input: &Value) -> Option<String> {
@@ -117,9 +122,21 @@ impl Registry {
         }
     }
 
+    /// Every tool, whatever a context allows.
     pub fn specs(&self) -> Vec<ToolSpec> {
+        self.specs_where(|_| true)
+    }
+
+    /// The tools `ctx` may use: those that read rows only where some connection
+    /// allows reading data, so a model doesn't try them.
+    pub fn specs_for(&self, ctx: &Ctx) -> Vec<ToolSpec> {
+        self.specs_where(|t| !t.reads_rows() || ctx.reads_data())
+    }
+
+    fn specs_where(&self, keep: impl Fn(&dyn Tool) -> bool) -> Vec<ToolSpec> {
         self.tools
             .iter()
+            .filter(|t| keep(t.as_ref()))
             .map(|t| ToolSpec {
                 name: t.name(),
                 description: t.description(),
@@ -148,12 +165,21 @@ impl Registry {
             (*caller, sink.clone(), connection, clip(&logged.to_string()))
         });
         let tool = self.tools.iter().find(|t| t.name() == name);
+        // The context decides, not the tool: rows only where data may be read.
+        let allowed = match tool {
+            Some(t) if t.reads_rows() => {
+                ctx.check_data(input.get("connection").and_then(Value::as_str))
+            }
+            _ => Ok(()),
+        };
         let sql = tool
+            .filter(|_| allowed.is_ok())
             .and_then(|t| t.statement(ctx, &input))
             .map(|sql| redact(&sql).into_owned());
-        let result = match tool {
-            Some(tool) => tool.call(ctx, input).await,
-            None => Err(ToolError::NotFound(format!("no tool named {name}"))),
+        let result = match (tool, allowed) {
+            (_, Err(e)) => Err(e),
+            (Some(tool), Ok(())) => tool.call(ctx, input).await,
+            (None, Ok(())) => Err(ToolError::NotFound(format!("no tool named {name}"))),
         };
         if let Some((caller, sink, connection, input)) = record {
             let (outcome, error) = match &result {

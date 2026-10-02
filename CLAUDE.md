@@ -149,6 +149,14 @@ explicit OK, and keep them covered by tests.
   user (allowed; the title bar says what that means). A chosen user that is gone or
   can't connect is shown to the user, and the AI has no connection: it never connects
   as anyone else instead.
+- **Schema only.** A database's `ai_access` (`"data"` or `"schema"`), under the
+  callers' ceilings `ai.access` (assistant) and `mcp.access` (MCP) in `settings.json`;
+  the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no
+  `conn`, `Ctx` no engine when nothing may read data), value profiles are off,
+  bookmarks are shown only as fingerprints, and tools that read rows
+  (`Tool::reads_rows`: `run_readonly`, `get_cell`, `column_profile`) aren't offered and
+  are refused (audited) by the registry, not by the tools. `propose_sql` then also takes
+  queries: they open unrun for the user, and their result never goes back to the AI.
 - **Secrets.** Passwords in SQL (`… PASSWORD '…'`, `IDENTIFIED BY '…'`) are replaced by
   `assist::redact` before history, bookmarks, the assistant's chats
   (`ai::chat::for_storage`) and the audit log.
