@@ -22,6 +22,9 @@ pub const PROFILE_TTL: Duration = Duration::from_secs(60 * 60);
 /// A column: (schema, table, column), as the catalog spells them.
 pub type ColumnRef = (String, String, String);
 
+/// Values of a column, most frequent first.
+pub type Values = Arc<Vec<String>>;
+
 /// Handle to the pool.
 #[derive(Clone, Default)]
 pub struct Knowledge(Arc<RwLock<Pool>>);
@@ -37,6 +40,10 @@ struct Pool {
     /// Value profiles by database user and column, with when they were taken. Only
     /// filled where the user allowed the assistant to read values.
     profiles: HashMap<(String, ColumnRef), (ColumnProfile, Instant)>,
+    /// The editor's quick looks at text columns (frequent values among a few
+    /// hundred rows) by database user and column, with when they were taken. Kept
+    /// apart from the profiles: the AI never reads them.
+    quick_values: HashMap<(String, ColumnRef), (Values, Instant)>,
     /// By database id: how many tables the AI's database user may change or drop
     /// (as the server answered); unknown until checked.
     ai_writable: HashMap<String, u64>,
@@ -88,6 +95,7 @@ impl Knowledge {
         self.write(|p| {
             p.users.remove(user);
             p.profiles.retain(|(u, _), _| u != user);
+            p.quick_values.retain(|(u, _), _| u != user);
         });
     }
 
@@ -127,6 +135,48 @@ impl Knowledge {
                         profile.top.iter().map(|(v, _)| v.clone()).collect(),
                     )
                 })
+                .collect()
+        })
+    }
+
+    /// The database user connection `conn` is open as.
+    pub fn user_of_conn(&self, conn: ConnId) -> Option<String> {
+        self.read(|p| {
+            p.users
+                .iter()
+                .find(|(_, u)| u.conn == conn)
+                .map(|(id, _)| id.clone())
+        })
+    }
+
+    /// Whether `user`'s `column` had a quick look within [`PROFILE_TTL`].
+    pub fn has_quick_values(&self, user: &str, column: &ColumnRef) -> bool {
+        self.read(|p| {
+            p.quick_values
+                .get(&(user.to_string(), column.clone()))
+                .is_some_and(|(_, at)| at.elapsed() < PROFILE_TTL)
+        })
+    }
+
+    pub fn set_quick_values(&self, user: &str, column: ColumnRef, values: Vec<String>) {
+        self.write(|p| {
+            p.quick_values.insert(
+                (user.to_string(), column),
+                (Arc::new(values), Instant::now()),
+            )
+        });
+    }
+
+    /// The fresh quick looks of the user behind connection `conn`.
+    pub fn quick_values_for_conn(&self, conn: ConnId) -> Vec<(ColumnRef, Values)> {
+        let Some(user) = self.user_of_conn(conn) else {
+            return Vec::new();
+        };
+        self.read(|p| {
+            p.quick_values
+                .iter()
+                .filter(|((u, _), (_, at))| *u == user && at.elapsed() < PROFILE_TTL)
+                .map(|((_, c), (values, _))| (c.clone(), values.clone()))
                 .collect()
         })
     }
@@ -298,5 +348,28 @@ mod tests {
         assert_eq!(k.history_for_conn(ConnId(1))[0].sql, "select 1");
         assert!(k.history_for_conn(ConnId(2)).is_empty());
         assert!(k.history_for_conn(ConnId(9)).is_empty());
+    }
+
+    #[test]
+    fn quick_values_per_user_apart_from_profiles() {
+        let k = Knowledge::default();
+        k.set_schema("u1", "db1", ConnId(1), schema("orders"));
+        k.set_schema("u2", "db1", ConnId(2), schema("orders"));
+        let col = (
+            "app".to_string(),
+            "orders".to_string(),
+            "status".to_string(),
+        );
+        assert_eq!(k.user_of_conn(ConnId(2)).as_deref(), Some("u2"));
+        assert!(!k.has_quick_values("u1", &col));
+        k.set_quick_values("u1", col.clone(), vec!["paid".into()]);
+        assert!(k.has_quick_values("u1", &col));
+        assert_eq!(*k.quick_values_for_conn(ConnId(1))[0].1, ["paid"]);
+        assert!(k.quick_values_for_conn(ConnId(2)).is_empty());
+        assert!(k.quick_values_for_conn(ConnId(9)).is_empty());
+        // Never a profile: the AI doesn't see them.
+        assert!(k.known_values("u1").is_empty());
+        k.forget_user("u1");
+        assert!(!k.has_quick_values("u1", &col));
     }
 }

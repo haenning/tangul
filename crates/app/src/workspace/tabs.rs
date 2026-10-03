@@ -18,6 +18,7 @@ impl Workspace {
             knowledge: self.knowledge.clone(),
             tab: tab.downgrade(),
             snippets: snippets.clone(),
+            looks: self.quick_looks.requests(),
         });
         tab.update(cx, |t, cx| t.set_completion(provider, snippets, cx));
         let check = self.question_check();

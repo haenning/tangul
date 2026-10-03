@@ -20,9 +20,11 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   `settings.json`)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
-  and `knowledge`: the one pool of what is known about the databases (schema per
-  user, usage and most run queries per database). The editor, schema tree, results and the assistant all
-  read it; don't keep copies elsewhere
+  `values` (the editor's quick look at a column's values) and `knowledge`: the one
+  pool of what is known about the databases (schema per user, usage and most run
+  queries per database, value profiles and the editor's quick looks per user). The
+  editor, schema tree, results and the assistant all read it; don't keep copies
+  elsewhere
 - `crates/llm`: model providers, no UI, nothing about databases or tangul's tools: one
   `Provider` (a streamed answer with tool calls, the models on offer) with an adapter
   per API (`anthropic.rs`, `openai.rs` for every OpenAI-compatible service, `gemini.rs`,
@@ -118,7 +120,7 @@ explicit OK, and keep them covered by tests.
 
 - **One gate.** Every statement to a database passes the engine's gate
   (`crates/engine/src/gate.rs`). Front ends pass only a `Caller` (User, Schedule,
-  Assistant) and an `Approval` (the tab dialog's go-ahead); they never decide
+  Editor, Assistant) and an `Approval` (the tab dialog's go-ahead); they never decide
   read-only mode or the time limit themselves. No command, flag or setting skips the gate. The engine reads
   `settings.json` itself.
 - **User (tabs).** In write mode the user writes freely; the "UPDATE/DELETE without
@@ -127,6 +129,11 @@ explicit OK, and keep them covered by tests.
   the statement then has to be run again); a go-ahead never runs a write past it. Tabs (`Command::Execute`) are the user's only.
 - **Schedules.** Only statements on the read allow-list (`assist::guard::not_reads`);
   anything else is refused. Reads run like the assistant's.
+- **Editor values.** While a condition on a text column is typed, the editor may
+  look at its values (`assist::profile::quick_values_sql`: at most a few hundred
+  rows) as `Caller::Editor`, with the schedules' rules; only where the database's
+  `editor_values` is on (the default). The values are kept apart from the AI's
+  value profiles: AI tools never read them.
 - **Assistant reads.** Only allow-listed reads run, through
   `EngineHandle::query` (never on a tab's session), in `Mode::RolledBack`: session
   read-only, inside `START TRANSACTION READ ONLY`, always rolled back. One statement
@@ -166,7 +173,8 @@ explicit OK, and keep them covered by tests.
   as before.
 - **Everyone.** `safety.max_query_time` applies to every caller, set on the server and
   enforced by the engine's timer.
-- **Audit.** Assistant and schedule runs (ran, proposed, refused) and every AI tool
+- **Audit.** Assistant and schedule runs (ran, proposed, refused), what the editor had
+  refused, and every AI tool
   call (caller `mcp`) go to the `audit` table in `local.db`.
 - **Tests.** Changes to the gate, guard, pool or drivers come with tests, including
   live ones (`crates/engine/tests/live.rs`, e.g. `assistant_checks`: a write hidden in

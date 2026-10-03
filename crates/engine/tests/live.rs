@@ -686,6 +686,54 @@ async fn assistant_checks(h: &mut Harness, sneak: Option<(&str, &str)>) {
     h.run(tab, "DROP TABLE tangul_ai_test").await;
 }
 
+/// The editor's quick look at a column (`Caller::Editor`): the generated read runs
+/// and answers with the frequent values; a write hidden in a read (`sneak`, a call
+/// of the function `assistant_checks` set up) fails read-only, and writes are
+/// refused, never proposed.
+async fn editor_checks(h: &mut Harness, driver: DriverKind, sneak: &str) {
+    let tab = TabId(12);
+    h.set(false, None);
+    h.run(tab, "DROP TABLE IF EXISTS tangul_ai_test").await;
+    h.run(
+        tab,
+        "CREATE TABLE tangul_ai_test (id INT, status VARCHAR(10))",
+    )
+    .await;
+    h.run(
+        tab,
+        "INSERT INTO tangul_ai_test VALUES (1, 'paid'), (2, 'paid'), (3, 'open'), (4, NULL)",
+    )
+    .await;
+    let mut query = 1100;
+    let mut ask = async |h: &mut Harness, sql: &str| {
+        query += 1;
+        let options = QueryOptions::new(Caller::Editor);
+        h.engine.query(QueryId(query), h.conn, sql, options).await
+    };
+    let d = tangul_assist::dialect::dialect_for(driver);
+    let look = tangul_assist::profile::quick_values_sql(d, "tangul_ai_test", "status");
+    let out = ask(h, &look).await.unwrap();
+    let values: Vec<_> = (0..out.results[0].row_count())
+        .map(|r| out.results[0].cell(r, 0).unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(values, ["paid", "open"]);
+
+    let error = ask(h, sneak).await.unwrap_err();
+    let message = error.message.to_lowercase().replace('-', " ");
+    assert!(message.contains("read only"), "{error}");
+    for write in [
+        "DELETE FROM tangul_ai_test",
+        "SELECT 1; DELETE FROM tangul_ai_test",
+        "SELECT * FROM tangul_ai_test FOR UPDATE",
+    ] {
+        let error = ask(h, write).await.unwrap_err();
+        assert!(error.proposal.is_none(), "{write} is refused, not proposed");
+    }
+    let out = ask(h, "SELECT count(*) FROM tangul_ai_test").await.unwrap();
+    assert_eq!(out.results[0].cell(0, 0), Some("4"));
+    h.run(tab, "DROP TABLE tangul_ai_test").await;
+}
+
 #[tokio::test]
 async fn postgres() {
     let Some(cfg) = config("TANGUL_TEST_PG") else {
@@ -723,6 +771,7 @@ async fn postgres() {
         )),
     )
     .await;
+    editor_checks(&mut h, DriverKind::Postgres, "SELECT tangul_ai_sneak()").await;
     h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak()").await;
 }
 
@@ -765,6 +814,7 @@ async fn mysql() {
         )),
     )
     .await;
+    editor_checks(&mut h, DriverKind::Mysql, "SELECT tangul_ai_sneak()").await;
     h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak").await;
 }
 

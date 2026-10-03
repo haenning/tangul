@@ -16,6 +16,8 @@ mod connections;
 mod empty_state;
 mod history;
 mod mcp;
+mod quick_values;
+pub use quick_values::LookRequest;
 mod safety;
 mod scheduled;
 mod schema;
@@ -173,6 +175,8 @@ pub struct Workspace {
     mcp: mcp::Mcp,
     /// The assistant's chat: where its tool calls go.
     assistant: assistant::Assistant,
+    /// The editor's quick looks at column values.
+    quick_looks: quick_values::QuickLooks,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -293,6 +297,7 @@ impl Workspace {
             ai_keys: None,
             mcp: mcp::Mcp::default(),
             assistant: assistant::Assistant::default(),
+            quick_looks: quick_values::QuickLooks::start(cx),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![
                 search_sub,

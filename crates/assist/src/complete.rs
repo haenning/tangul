@@ -11,7 +11,9 @@ use tangul_core::{ColumnMeta, ForeignKey, TableKind};
 use crate::analyze::{TableRef, analyze, significant, statements};
 use crate::dialect::Dialect;
 use crate::grammar::{self, CasePart, Clause, Expect, State, Vocab};
+use crate::hints::ValueHints;
 use crate::lexer::{Token, TokenKind, tokenize, unquote};
+use crate::profile::is_secret;
 use crate::refine::ColumnKind;
 use crate::schema::SchemaIndex;
 use crate::usage::{Usage, UsageKind, column_key, parse_join_key, table_key};
@@ -48,6 +50,9 @@ pub struct Completion {
     /// What comes next is clear enough to open the menu before a letter is typed
     /// (after a space, `(` or `'`): a table, a unit, a value for the column, ….
     pub eager: bool,
+    /// A text column the cursor compares with whose values from the data aren't
+    /// known yet: worth a quick look ([`crate::profile::quick_values_sql`]).
+    pub sample: Option<ColumnMeta>,
 }
 
 const MAX_ITEMS: usize = 80;
@@ -62,7 +67,14 @@ enum Target {
     Nothing,
 }
 
-pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -> Completion {
+/// `hints`: values for columns, from history and the data.
+pub fn complete(
+    sql: &str,
+    offset: usize,
+    schema: &SchemaIndex,
+    usage: &Usage,
+    hints: &ValueHints,
+) -> Completion {
     let offset = offset.min(sql.len());
     let Some((start, end)) = statements(sql)
         .into_iter()
@@ -79,11 +91,12 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
         if t.kind == TokenKind::Comment {
             return Completion::default();
         }
-        return in_string(stmt, &tokens, t, off, schema)
-            .map(|(range, items)| Completion {
+        return in_string(stmt, &tokens, t, off, schema, hints)
+            .map(|(range, items, sample)| Completion {
                 replace: start + range.start..start + range.end,
                 eager: !items.is_empty(),
                 items: ranked(items),
+                sample,
             })
             .unwrap_or_default();
     }
@@ -121,7 +134,9 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
         scope: &scope,
         resolved: &resolved,
         lower_keywords: lower_keywords(stmt, &tokens, &prefix),
+        hints,
     };
+    let mut sample = None;
     let d = schema.dialect();
     let last_word = |words: &[&str]| {
         before
@@ -190,6 +205,7 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
                     && let Some(meta) = column_meta(schema, &scope, &resolved, &column)
                 {
                     items.extend(cx.values_for(meta, op));
+                    sample = wants_sample(schema, hints, meta).then(|| meta.clone());
                 }
                 eager = !items.is_empty()
                     || last_word(&[
@@ -225,7 +241,23 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
         replace: start + replace_start..offset,
         eager: eager && !items.is_empty(),
         items,
+        sample,
     }
+}
+
+/// Whether a quick look at `column`'s data would add values: a text column, not an
+/// enum, not a secret, not looked at yet.
+fn wants_sample(schema: &SchemaIndex, hints: &ValueHints, column: &ColumnMeta) -> bool {
+    ColumnKind::from_type(&column.data_type) == ColumnKind::Text
+        && schema.enum_of(column).is_none()
+        && !is_secret(&column.name)
+        && !hints.has_data(&column_key(&column.schema, &column.table, &column.name))
+}
+
+/// The text of a string literal (`'it''s'` → `it's`); `None` for other literals.
+fn string_text(literal: &str) -> Option<String> {
+    let inner = literal.strip_prefix('\'')?.strip_suffix('\'')?;
+    Some(inner.replace("''", "'"))
 }
 
 fn target(sql: &str, before: &[Token], scope: &[TableRef], schema: &SchemaIndex) -> Target {
@@ -270,6 +302,7 @@ struct Ctx<'a> {
     scope: &'a [TableRef],
     resolved: &'a [Option<usize>],
     lower_keywords: bool,
+    hints: &'a ValueHints,
 }
 
 /// How well `candidate` matches what was typed; `None` hides it.
@@ -296,8 +329,9 @@ fn usage_boost(score: f64) -> f64 {
 }
 
 impl Ctx<'_> {
-    /// Values for `column` compared by `op`: an enum's values, `''` with the cursor
-    /// inside, today and the last days for dates, `TRUE`/`FALSE`. Above columns.
+    /// Values for `column` compared by `op`: the ones used before and frequent in
+    /// the data, an enum's values, `''` with the cursor inside, today and the last
+    /// days for dates, `TRUE`/`FALSE`. Above columns.
     fn values_for(&self, column: &ColumnMeta, op: Op) -> Vec<Suggestion> {
         let case = |v: &str| {
             if self.lower_keywords {
@@ -307,6 +341,12 @@ impl Ctx<'_> {
             }
         };
         let mut values: Vec<(String, String, Option<usize>)> = Vec::new();
+        let key = column_key(&column.schema, &column.table, &column.name);
+        for h in self.hints.for_column(&key) {
+            if h.like == (op == Op::Like) {
+                values.push((h.literal.clone(), h.literal.clone(), None));
+            }
+        }
         let quoted = |v: &str| self.schema.dialect().string(v);
         if let Some(e) = self.schema.enum_of(column) {
             values.extend(e.values.iter().map(|v| (quoted(v), quoted(v), None)));
@@ -664,7 +704,7 @@ fn case_words(part: CasePart) -> &'static [&'static str] {
 
 /// How a value is compared with a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Op {
+pub(crate) enum Op {
     /// `=`, `<>`, `<`, …
     Compare,
     /// `LIKE`, `ILIKE`
@@ -674,11 +714,11 @@ enum Op {
 }
 
 /// A column named in the statement: `(qualifier, name)`.
-type ColumnName = (Option<String>, String);
+pub(crate) type ColumnName = (Option<String>, String);
 
 /// The column a value at the end of `before` is compared with: `col = |`,
 /// `t.col LIKE |`, `col IN ('a', |`.
-fn comparison(sql: &str, before: &[Token]) -> Option<(ColumnName, Op)> {
+pub(crate) fn comparison(sql: &str, before: &[Token]) -> Option<(ColumnName, Op)> {
     let at = |i: usize| before.get(i).copied();
     let word = |i: usize, w: &str| at(i).is_some_and(|t| t.is_word(sql, w));
     let punct = |i: usize, c: char| at(i).is_some_and(|t| t.is_punct(sql, c));
@@ -762,7 +802,8 @@ fn in_string(
     t: Token,
     off: usize,
     schema: &SchemaIndex,
-) -> Option<(Range<usize>, Vec<Suggestion>)> {
+    hints: &ValueHints,
+) -> Option<(Range<usize>, Vec<Suggestion>, Option<ColumnMeta>)> {
     let d = schema.dialect();
     let i = tokens.iter().position(|x| x.start == t.start)?;
     let content = t.start + 1;
@@ -790,7 +831,7 @@ fn in_string(
                 value_item(&unit, prefix, n, "unit")
             })
             .collect();
-        return Some((content + word_start..off, items));
+        return Some((content + word_start..off, items, None));
     }
 
     // An argument with fixed values: `DATE_TRUNC('|'`, `TO_CHAR(d, '|'`.
@@ -802,26 +843,36 @@ fn in_string(
                 .enumerate()
                 .filter_map(|(n, c)| value_item(c, typed, n, &function))
                 .collect();
-            return Some((content..off, items));
+            return Some((content..off, items, None));
         }
     }
 
-    // `status = '|`: the values of the column's enum.
-    let (column, _) = comparison(sql, &tokens[..i])?;
+    // `status = '|`: the column's values used before, frequent in the data, of its
+    // enum.
+    let (column, op) = comparison(sql, &tokens[..i])?;
     let scope = analyze(sql).tables;
     let resolved = resolve_scope(&scope, schema);
     let meta = column_meta(schema, &scope, &resolved, &column)?;
-    let items = schema
-        .enum_of(meta)?
-        .values
+    let key = column_key(&meta.schema, &meta.table, &meta.name);
+    let mut values: Vec<String> = hints
+        .for_column(&key)
+        .iter()
+        .filter(|h| h.like == (op == Op::Like))
+        .filter_map(|h| string_text(&h.literal))
+        .collect();
+    if let Some(e) = schema.enum_of(meta) {
+        values.extend(e.values.iter().cloned());
+    }
+    let items = values
         .iter()
         .enumerate()
         .filter_map(|(n, v)| value_item(v, typed, n, "value"))
         .collect();
-    Some((content..off, items))
+    let sample = wants_sample(schema, hints, meta).then(|| meta.clone());
+    Some((content..off, items, sample))
 }
 
-fn resolve_scope(scope: &[TableRef], schema: &SchemaIndex) -> Vec<Option<usize>> {
+pub(crate) fn resolve_scope(scope: &[TableRef], schema: &SchemaIndex) -> Vec<Option<usize>> {
     scope
         .iter()
         .map(|t| schema.resolve(t.schema.as_deref(), &t.name))
@@ -829,7 +880,7 @@ fn resolve_scope(scope: &[TableRef], schema: &SchemaIndex) -> Vec<Option<usize>>
 }
 
 /// The column `name` refers to among the tables in scope.
-fn column_meta<'a>(
+pub(crate) fn column_meta<'a>(
     schema: &'a SchemaIndex,
     scope: &[TableRef],
     resolved: &[Option<usize>],
@@ -976,7 +1027,10 @@ mod tests {
     fn at(sql: &str, usage: &Usage) -> (Completion, String) {
         let offset = sql.find('|').unwrap();
         let sql = sql.replace('|', "");
-        (complete(&sql, offset, &sample(), usage), sql)
+        (
+            complete(&sql, offset, &sample(), usage, &ValueHints::default()),
+            sql,
+        )
     }
 
     fn labels(sql: &str) -> Vec<String> {
@@ -1077,7 +1131,7 @@ mod tests {
             let offset = sql.find('|').unwrap();
             let sql = sql.replace('|', "");
             let s = crate::schema::tests::sample_for(driver);
-            complete(&sql, offset, &s, &Usage::new(0))
+            complete(&sql, offset, &s, &Usage::new(0), &ValueHints::default())
                 .items
                 .into_iter()
                 .map(|i| i.label)
@@ -1143,7 +1197,13 @@ mod tests {
 
     fn on(driver: tangul_core::DriverKind, sql: &str) -> Completion {
         let offset = sql.find('|').unwrap();
-        complete(&sql.replace('|', ""), offset, &rich(driver), &Usage::new(0))
+        complete(
+            &sql.replace('|', ""),
+            offset,
+            &rich(driver),
+            &Usage::new(0),
+            &ValueHints::default(),
+        )
     }
 
     fn pg(sql: &str) -> Vec<String> {
@@ -1362,5 +1422,51 @@ mod tests {
         // Only at the end of the statement; a later statement starts over.
         assert_eq!(continuation("select * from app.o x", 17, &history), None);
         assert_eq!(at("select 1; select * from app.o"), Some("rders".into()));
+    }
+
+    #[test]
+    fn values_used_before_and_in_the_data() {
+        let schema = rich(tangul_core::DriverKind::Postgres);
+        let history = [HistoryPattern {
+            sql: "select * from app.users where name = 'bob' or email like '%@x.io'".into(),
+            runs: 3,
+        }];
+        let mut hints = ValueHints::from_history(&history, &schema);
+        let at = |sql: &str, hints: &ValueHints| {
+            let offset = sql.find('|').unwrap();
+            complete(
+                &sql.replace('|', ""),
+                offset,
+                &schema,
+                &Usage::new(0),
+                hints,
+            )
+        };
+        let labels = |c: &Completion| c.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>();
+
+        // From history; the data not looked at yet: asked for.
+        let c = at("select * from app.users where name = |", &hints);
+        assert_eq!(labels(&c)[..2], ["'bob'", "'…'"]);
+        assert_eq!(c.sample.as_ref().map(|m| m.name.as_str()), Some("name"));
+        let c = at("select * from app.users where email like |", &hints);
+        assert_eq!(labels(&c)[0], "'%@x.io'");
+
+        // Then the data's, after history's; nothing more to ask for.
+        let key = column_key("app", "users", "name");
+        hints.add_data(key, &["ann".into(), "bob".into()], schema.dialect());
+        let c = at("select * from app.users where name = |", &hints);
+        assert_eq!(labels(&c)[..3], ["'bob'", "'ann'", "'…'"]);
+        assert!(c.sample.is_none());
+        let c = at("select * from app.users where name in ('bob', 'a|", &hints);
+        assert_eq!(labels(&c), ["ann"]);
+        assert!(c.sample.is_none());
+
+        // Not worth a look: enums, secrets, numbers.
+        for sql in [
+            "select * from app.users where status = |",
+            "select * from app.users where id = |",
+        ] {
+            assert!(at(sql, &hints).sample.is_none(), "{sql}");
+        }
     }
 }

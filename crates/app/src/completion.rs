@@ -11,9 +11,12 @@ use lsp_types::{
     InlineCompletionContext, InlineCompletionItem, InlineCompletionResponse, TextEdit,
 };
 use tangul_assist::complete::{SuggestionKind, complete, continuation};
+use tangul_assist::hints::ValueHints;
+use tangul_assist::usage::column_key;
 use tangul_service::knowledge::Knowledge;
 
 use crate::query_tab::QueryTab;
+use crate::workspace::LookRequest;
 
 /// Items of the last menu whose cursor goes inside them (`''`): the inserted text
 /// and where in it the cursor goes. The editor moves the cursor there after such
@@ -46,6 +49,8 @@ pub struct SqlCompletion {
     pub knowledge: Knowledge,
     pub tab: WeakEntity<QueryTab>,
     pub snippets: Snippets,
+    /// Where to ask for a quick look at a column's values (the workspace).
+    pub looks: async_channel::Sender<LookRequest>,
 }
 
 impl CompletionProvider for SqlCompletion {
@@ -64,11 +69,22 @@ impl CompletionProvider for SqlCompletion {
         let Some((schema, usage)) = self.knowledge.for_conn(conn) else {
             return empty();
         };
+        let history = self.knowledge.history_for_conn(conn);
+        let looked_at = self.knowledge.quick_values_for_conn(conn);
         let rope = rope.clone();
-        let snippets = self.snippets.clone();
+        let (snippets, looks) = (self.snippets.clone(), self.looks.clone());
         cx.background_spawn(async move {
             let text = rope.to_string();
-            let completion = complete(&text, offset, &schema, &usage);
+            // Values for columns: compared with before, frequent in the data.
+            let mut hints = ValueHints::from_history(&history, &schema);
+            for ((s, t, c), values) in looked_at {
+                hints.add_data(column_key(&s, &t, &c), &values, schema.dialect());
+            }
+            let completion = complete(&text, offset, &schema, &usage, &hints);
+            // Shown from the next keystroke on.
+            if let Some(column) = completion.sample.clone() {
+                let _ = looks.try_send((conn, column));
+            }
             // Without a word being typed (after a space, `(`, `'`) only where what
             // follows is clear: a table, a unit, a value for the column, ….
             let typing = text

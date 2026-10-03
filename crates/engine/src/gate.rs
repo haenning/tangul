@@ -33,6 +33,9 @@ pub enum Caller {
     Schedule,
     /// The AI assistant (agent panel, MCP).
     Assistant,
+    /// The editor sampling a column's values to offer them (like schedules: reads
+    /// only).
+    Editor,
 }
 
 impl Caller {
@@ -41,6 +44,7 @@ impl Caller {
             Caller::User => "user",
             Caller::Schedule => "schedule",
             Caller::Assistant => "assistant",
+            Caller::Editor => "editor",
         }
     }
 }
@@ -131,7 +135,7 @@ fn decide_with(
 ) -> Decision {
     let run = user_run(settings, db_user);
     match caller {
-        Caller::Schedule | Caller::Assistant => {
+        Caller::Schedule | Caller::Editor | Caller::Assistant => {
             let not_reads: Vec<(String, String)> = guard::not_reads_with(sql, lexing)
                 .into_iter()
                 .map(|(keyword, statement)| (keyword, one_line(&statement, STATEMENT_LEN)))
@@ -146,9 +150,14 @@ fn decide_with(
                     mode: Mode::RolledBack,
                 });
             }
-            if caller == Caller::Schedule {
+            if caller != Caller::Assistant {
+                let place = if caller == Caller::Schedule {
+                    "on a schedule"
+                } else {
+                    "for the editor"
+                };
                 return Decision::Refuse(format!(
-                    "only statements that read may run on a schedule; this one is {}",
+                    "only statements that read may run {place}; this one is {}",
                     not_reads[0].0
                 ));
             }
@@ -280,7 +289,7 @@ impl Gate {
     ) -> Enforced {
         let sql = match caller {
             Caller::User => sql.to_string(),
-            Caller::Schedule | Caller::Assistant => guard::read_text(sql, lexing),
+            Caller::Schedule | Caller::Editor | Caller::Assistant => guard::read_text(sql, lexing),
         };
         let run = |run| Enforced::Run {
             run,
@@ -501,32 +510,39 @@ mod tests {
     }
 
     #[test]
-    fn schedules_only_read() {
+    fn schedules_and_the_editor_only_read() {
         let g = gate("{}");
-        assert!(matches!(
-            g.enforce_default("rw", "select * from t", Caller::Schedule, Approval::None),
-            Enforced::Run {
-                run: Run {
-                    read_only: true,
-                    mode: Mode::RolledBack,
+        for caller in [Caller::Schedule, Caller::Editor] {
+            assert!(matches!(
+                g.enforce_default("rw", "select * from t", caller, Approval::None),
+                Enforced::Run {
+                    run: Run {
+                        read_only: true,
+                        mode: Mode::RolledBack,
+                        ..
+                    },
                     ..
-                },
-                ..
+                }
+            ));
+            for sql in [
+                "delete from t where id = 1",
+                "select nextval('s')",
+                "set x = 1",
+                "select 1; select 2",
+            ] {
+                assert!(
+                    matches!(
+                        g.enforce_default("rw", sql, caller, Approval::Confirmed),
+                        Enforced::Refused(_)
+                    ),
+                    "{sql}"
+                );
             }
-        ));
-        for sql in [
-            "delete from t where id = 1",
-            "select nextval('s')",
-            "set x = 1",
-        ] {
-            assert!(
-                matches!(
-                    g.enforce_default("rw", sql, Caller::Schedule, Approval::Confirmed),
-                    Enforced::Refused(_)
-                ),
-                "{sql}"
-            );
         }
+        assert!(matches!(
+            g.enforce_default("rw", "delete from t where id = 1", Caller::Editor, Approval::None),
+            Enforced::Refused(r) if r.contains("for the editor")
+        ));
     }
 
     #[test]

@@ -11,6 +11,11 @@ pub const SAMPLE_ROWS: usize = 10_000;
 pub const TOP_VALUES: usize = 10;
 /// Longest value kept; longer ones are cut.
 pub const VALUE_CHARS: usize = 64;
+/// Rows the editor's quick look at a column reads: few, so it answers at once even
+/// on tables with millions of rows.
+pub const QUICK_ROWS: usize = 500;
+/// Values the quick look keeps.
+pub const QUICK_VALUES: usize = 20;
 
 /// Columns never read for a profile, whatever the opt-in: they look like secrets.
 pub fn is_secret(column: &str) -> bool {
@@ -58,6 +63,19 @@ pub fn top_values_sql(d: &dyn Dialect, table: &str, column: &str) -> String {
     )
 }
 
+/// The editor's quick look: the most frequent non-NULL values among the first
+/// [`QUICK_ROWS`] rows the server returns (NULLs are dropped after the limit, so
+/// the scan stops after those rows however empty the column is).
+pub fn quick_values_sql(d: &dyn Dialect, table: &str, column: &str) -> String {
+    format!(
+        "SELECT v, count(*) FROM (SELECT {c} AS v FROM {table} {}) AS tangul_sample \
+         WHERE v IS NOT NULL GROUP BY v ORDER BY 2 DESC, 1 {}",
+        d.limit(QUICK_ROWS, 0),
+        d.limit(QUICK_VALUES, 0),
+        c = quote_ident(d, column)
+    )
+}
+
 /// `value` cut to [`VALUE_CHARS`].
 pub fn clip(value: &str) -> String {
     match value.char_indices().nth(VALUE_CHARS) {
@@ -86,6 +104,16 @@ mod tests {
             top_values_sql(my, "`order`", "status"),
             "SELECT v, count(*) FROM (SELECT status AS v FROM `order` LIMIT 10000) AS \
              tangul_sample WHERE v IS NOT NULL GROUP BY v ORDER BY 2 DESC, 1 LIMIT 10"
+        );
+    }
+
+    #[test]
+    fn quick_look() {
+        let pg = dialect_for(DriverKind::Postgres);
+        assert_eq!(
+            quick_values_sql(pg, "app.orders", "Status"),
+            "SELECT v, count(*) FROM (SELECT \"Status\" AS v FROM app.orders LIMIT 500) AS \
+             tangul_sample WHERE v IS NOT NULL GROUP BY v ORDER BY 2 DESC, 1 LIMIT 20"
         );
     }
 

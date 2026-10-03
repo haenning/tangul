@@ -68,6 +68,7 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
                 ai_values: Default::default(),
                 ai_access: Default::default(),
                 ai_tools: true,
+                editor_values: true,
             }),
         }
     }

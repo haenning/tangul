@@ -75,6 +75,11 @@ pub struct Database {
     /// user turns it off; only written when off.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub ai_tools: bool,
+    /// The editor may take a quick look at a text column's values (a few hundred
+    /// rows) to offer them in conditions. On unless turned off; only written when
+    /// off.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub editor_values: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

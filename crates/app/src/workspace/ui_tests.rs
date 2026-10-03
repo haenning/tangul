@@ -558,6 +558,7 @@ fn the_title_bar_shows_the_ai_user_before_yours(cx: &mut TestAppContext) {
                 ai_values: Default::default(),
                 ai_access: Default::default(),
                 ai_tools: true,
+                editor_values: true,
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
@@ -611,6 +612,7 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
                 ai_values: Default::default(),
                 ai_access: Default::default(),
                 ai_tools: true,
+                editor_values: true,
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
@@ -658,6 +660,7 @@ fn shop_with_ai_user(workspace: &Entity<Workspace>, ai: Option<&str>, cx: &mut A
             ai_values: Default::default(),
             ai_access: Default::default(),
             ai_tools: true,
+            editor_values: true,
         });
         ws.active_db = Some("db".into());
         ws.active_user = Some("app".into());
@@ -799,6 +802,7 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
                 ai_values: Default::default(),
                 ai_access: Default::default(),
                 ai_tools: true,
+                editor_values: true,
             });
             ws.connect("app", cx);
             assert_eq!(ws.mcp_url(), None);
@@ -961,6 +965,7 @@ fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext)
                 ai_values: Default::default(),
                 ai_access: Default::default(),
                 ai_tools: true,
+                editor_values: true,
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
@@ -1029,6 +1034,7 @@ fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
                 ai_values: Default::default(),
                 ai_access: Default::default(),
                 ai_tools: true,
+                editor_values: true,
             });
             ws.connect("app", cx);
             ws.active_db = Some("db".into());
@@ -1065,6 +1071,7 @@ fn shop_for_the_assistant(ws: &mut Workspace, cx: &mut gpui_kit::Context<Workspa
         ai_values: Default::default(),
         ai_access: Default::default(),
         ai_tools: true,
+        editor_values: true,
     });
     ws.connect("app", cx);
 }
@@ -1210,6 +1217,7 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
                 ai_values: Default::default(),
                 ai_access: Default::default(),
                 ai_tools: true,
+                editor_values: true,
             });
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
