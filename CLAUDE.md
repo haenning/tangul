@@ -6,7 +6,7 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 
 ## Layout
 
-- `crates/core`: shared types, no I/O (incl. chart settings and learned usage as stored)
+- `crates/core`: shared types, no I/O (incl. chart settings, boards and learned usage as stored)
 - `crates/drivers`: sessions per database (text protocol); a Cargo feature each
 - `crates/engine`: tokio backend thread; front ends talk to it only via `Command` / `Event`
   (streamed into tabs) or `EngineHandle::query` (the whole result, for everything else).
