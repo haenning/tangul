@@ -320,6 +320,15 @@ impl BoardTab {
                 })
                 .into_any_element(),
         };
+        let open_id = id.clone();
+        // In both modes: a tile's query in a tab of its own, to try other charts or
+        // see the table behind one.
+        let open = Button::new(("tile-open", ix))
+            .icon(Icon::new(Lucide::ExternalLink))
+            .ghost()
+            .xsmall()
+            .tooltip("Open in a tab")
+            .on_click(cx.listener(move |this, _, _, cx| this.open_tile(&open_id, cx)));
         let actions = if self.editing {
             let (width_id, label_id, remove_id) = (id.clone(), id.clone(), id.clone());
             let (icon, tooltip, width) = match tile.width {
@@ -351,6 +360,7 @@ impl BoardTab {
                             this.open_tile_form(&label_id, window, cx)
                         })),
                 )
+                .child(open)
                 .child(
                     Button::new(("tile-remove", ix))
                         .icon(IconName::Delete)
@@ -362,15 +372,7 @@ impl BoardTab {
                         })),
                 )
         } else {
-            let open_id = id.clone();
-            h_flex().child(
-                Button::new(("tile-open", ix))
-                    .icon(Icon::new(Lucide::ExternalLink))
-                    .ghost()
-                    .xsmall()
-                    .tooltip("Open in a tab")
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_tile(&open_id, cx))),
-            )
+            h_flex().child(open)
         };
         let dragged = DraggedTile {
             id: id.clone(),

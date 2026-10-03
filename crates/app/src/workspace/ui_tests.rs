@@ -1906,6 +1906,18 @@ fn board_edit_mode_resizes_moves_and_removes_tiles(cx: &mut TestAppContext) {
     });
     cx.update(|cx| assert_eq!(tile_ids(&workspace, &id, cx), ["t2", "t1", "t3"]));
 
+    // Opening a tile in a tab works in edit mode too.
+    step(handle, cx, |window, cx| {
+        window.click(("tile-open", 0usize), cx)
+    });
+    cx.update(|cx| assert!(workspace.read(cx).tabs.active_query().is_some()));
+    cx.update(|cx| {
+        workspace.update(cx, |ws, _| {
+            let board = ws.tabs.items().position(|t| t.board().is_some()).unwrap();
+            ws.tabs.set_active(board);
+        })
+    });
+
     step(handle, cx, |window, cx| {
         window.click(("tile-remove", 1usize), cx)
     });
