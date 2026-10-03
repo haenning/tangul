@@ -1432,6 +1432,32 @@ fn format_formats_without_running(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui_kit::test]
+fn a_chosen_quote_pair_puts_the_cursor_between_the_quotes(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let sql = "select * from users where email = ";
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab(sql, window, cx))
+    });
+    let items = vec![("''".to_string(), 1), ("'%%'".to_string(), 2)];
+    step(handle, cx, |window, cx| {
+        QueryTab::insert_item(&tab, "''", items.clone(), window, cx)
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(tab.read(cx).sql(cx), format!("{sql}''"));
+        assert_eq!(tab.read(cx).cursor(cx), sql.len() + 1);
+    });
+    // Other inserts (and the same text once the menu is gone) leave the cursor at
+    // their end.
+    step(handle, cx, |window, cx| {
+        QueryTab::insert_item(&tab, " and name = ''", Vec::new(), window, cx)
+    });
+    step(handle, cx, |_, cx| {
+        let t = tab.read(cx);
+        assert_eq!(t.cursor(cx), t.sql(cx).len());
+    });
+}
+
 /// A model that answers every question with the same text.
 struct Echo(String);
 

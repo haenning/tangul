@@ -21,7 +21,7 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
   and `knowledge`: the one pool of what is known about the databases (schema per
-  user, usage per database). The editor, schema tree, results and the assistant all
+  user, usage and most run queries per database). The editor, schema tree, results and the assistant all
   read it; don't keep copies elsewhere
 - `crates/llm`: model providers, no UI, nothing about databases or tangul's tools: one
   `Provider` (a streamed answer with tool calls, the models on offer) with an adapter

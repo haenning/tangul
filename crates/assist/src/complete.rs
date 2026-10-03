@@ -5,11 +5,14 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use tangul_core::{ForeignKey, TableKind};
+use tangul_core::usage::HistoryPattern;
+use tangul_core::{ColumnMeta, ForeignKey, TableKind};
 
 use crate::analyze::{TableRef, analyze, significant, statements};
-use crate::grammar::{self, Clause, Expect, State};
+use crate::dialect::Dialect;
+use crate::grammar::{self, CasePart, Clause, Expect, State, Vocab};
 use crate::lexer::{Token, TokenKind, tokenize, unquote};
+use crate::refine::ColumnKind;
 use crate::schema::SchemaIndex;
 use crate::usage::{Usage, UsageKind, column_key, parse_join_key, table_key};
 
@@ -21,6 +24,8 @@ pub enum SuggestionKind {
     View,
     Column,
     Join,
+    /// A literal or expression for a value: `'…'`, an enum's value, `CURRENT_DATE`.
+    Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +35,9 @@ pub struct Suggestion {
     pub kind: SuggestionKind,
     pub detail: String,
     pub score: f64,
+    /// Where the cursor goes in `insert` (a byte offset) when not at its end:
+    /// between the quotes of `''`.
+    pub cursor: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -37,6 +45,9 @@ pub struct Completion {
     /// Byte range of `sql` the chosen item replaces (the partially typed word).
     pub replace: Range<usize>,
     pub items: Vec<Suggestion>,
+    /// What comes next is clear enough to open the menu before a letter is typed
+    /// (after a space, `(` or `'`): a table, a unit, a value for the column, ….
+    pub eager: bool,
 }
 
 const MAX_ITEMS: usize = 80;
@@ -62,14 +73,21 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
     let stmt = &sql[start..end];
     let off = offset - start;
 
-    // Inside a string or comment: nothing to complete.
-    if tokenize(stmt).iter().any(|t| {
-        matches!(t.kind, TokenKind::String | TokenKind::Comment) && t.start < off && off < t.end
-    }) {
-        return Completion::default();
+    let tokens = significant(stmt);
+    // Inside a comment: nothing. Inside a string: units, formats, an enum's values.
+    if let Some(t) = tokenize(stmt).into_iter().find(|t| inside(stmt, t, off)) {
+        if t.kind == TokenKind::Comment {
+            return Completion::default();
+        }
+        return in_string(stmt, &tokens, t, off, schema)
+            .map(|(range, items)| Completion {
+                replace: start + range.start..start + range.end,
+                eager: !items.is_empty(),
+                items: ranked(items),
+            })
+            .unwrap_or_default();
     }
 
-    let tokens = significant(stmt);
     let current = tokens
         .iter()
         .position(|t| t.is_ident() && t.start < off && off <= t.end);
@@ -93,10 +111,7 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
         let typing = current.is_some() && t.start <= replace_start && replace_start <= t.end;
         !typing && dot != Some(t.end)
     });
-    let resolved: Vec<Option<usize>> = scope
-        .iter()
-        .map(|t| schema.resolve(t.schema.as_deref(), &t.name))
-        .collect();
+    let resolved = resolve_scope(&scope, schema);
 
     let target = target(stmt, &before, &scope, schema);
     let cx = Ctx {
@@ -108,13 +123,23 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
         lower_keywords: lower_keywords(stmt, &tokens, &prefix),
     };
     let d = schema.dialect();
-    let mut items = match target {
+    let last_word = |words: &[&str]| {
+        before
+            .last()
+            .is_some_and(|t| words.iter().any(|w| t.is_word(stmt, w)))
+    };
+    let mut eager = true;
+    let items = match target {
         Target::Nothing => Vec::new(),
         Target::ColumnsOf(i) => cx.columns(Some(i)),
         Target::TablesIn(s) => cx.tables(Some(&s)),
         Target::State(st) => match st.expect {
-            Expect::Statement => cx.keywords(d.statement_keywords()),
+            Expect::Statement => {
+                eager = false;
+                cx.keywords(d.statement_keywords())
+            }
             Expect::Words(words) => cx.keywords(words),
+            Expect::Vocab(v) => cx.keywords(&vocab(d, v)),
             Expect::Name => Vec::new(),
             Expect::Table if st.clause == Clause::Join => {
                 let mut items = cx.joins(None);
@@ -126,15 +151,50 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
             // keywords once two letters make the intent clear.
             Expect::AfterTable { alias: false } if prefix.chars().count() < 2 => Vec::new(),
             Expect::AfterTable { alias } => {
+                eager = false;
                 cx.keywords(&grammar::after_table_keywords(d.syntax(), st.clause, alias))
             }
-            Expect::AfterOperand { star } => cx.keywords(&grammar::after_operand_keywords(
-                d.syntax(),
-                st.clause,
-                star,
-            )),
+            Expect::AfterOperand { .. } if st.between => cx.keywords(&["AND"]),
+            Expect::AfterOperand { .. } if st.case.is_some() => {
+                cx.keywords(case_words(st.case.unwrap_or(CasePart::Case)))
+            }
+            Expect::AfterOperand { star } => {
+                eager = false;
+                cx.keywords(&grammar::after_operand_keywords(
+                    d.syntax(),
+                    st.clause,
+                    star,
+                ))
+            }
             Expect::Operand { first } => {
                 let mut items = Vec::new();
+                // `CASE |`, `IN (|`: the word that usually follows, first.
+                let mut lead = Vec::new();
+                if last_word(&["case"]) {
+                    lead.push("WHEN");
+                }
+                if before.last().is_some_and(|t| t.is_punct(stmt, '('))
+                    && before.len() >= 2
+                    && ["in", "any", "some", "all"]
+                        .iter()
+                        .any(|w| before[before.len() - 2].is_word(stmt, w))
+                {
+                    lead.push("SELECT");
+                }
+                items.extend(cx.keywords(&lead).into_iter().map(|mut i| {
+                    i.score += 3.0;
+                    i
+                }));
+                // Values that fit the column it is compared with.
+                if let Some((column, op)) = comparison(stmt, &before)
+                    && let Some(meta) = column_meta(schema, &scope, &resolved, &column)
+                {
+                    items.extend(cx.values_for(meta, op));
+                }
+                eager = !items.is_empty()
+                    || last_word(&[
+                        "where", "and", "or", "on", "when", "then", "else", "by", "having", "set",
+                    ]);
                 // Right after `JOIN t ON`: the join conditions first.
                 if st.clause == Clause::On
                     && before.last().is_some_and(|t| t.is_word(stmt, "on"))
@@ -148,21 +208,22 @@ pub fn complete(sql: &str, offset: usize, schema: &SchemaIndex, usage: &Usage) -
                     items.extend(cx.functions(d.functions()));
                 }
                 items.extend(cx.keywords(grammar::operand_keywords(st.clause, first)));
+                // `CURRENT_DATE`, `INTERVAL`, …: only once typing started.
+                if !prefix.is_empty() && grammar::operand_takes_columns(st.clause) {
+                    let mut words = vec!["CURRENT_DATE", "CURRENT_TIMESTAMP", "TRUE", "FALSE"];
+                    if !d.interval_units().is_empty() {
+                        words.insert(0, "INTERVAL");
+                    }
+                    items.extend(cx.keywords(&words));
+                }
                 items
             }
         },
     };
-    items.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then(a.label.len().cmp(&b.label.len()))
-            .then(a.label.cmp(&b.label))
-    });
-    let mut seen = HashSet::new();
-    items.retain(|i| seen.insert(i.insert.clone()));
-    items.truncate(MAX_ITEMS);
+    let items = ranked(items);
     Completion {
         replace: start + replace_start..offset,
+        eager: eager && !items.is_empty(),
         items,
     }
 }
@@ -235,6 +296,54 @@ fn usage_boost(score: f64) -> f64 {
 }
 
 impl Ctx<'_> {
+    /// Values for `column` compared by `op`: an enum's values, `''` with the cursor
+    /// inside, today and the last days for dates, `TRUE`/`FALSE`. Above columns.
+    fn values_for(&self, column: &ColumnMeta, op: Op) -> Vec<Suggestion> {
+        let case = |v: &str| {
+            if self.lower_keywords {
+                v.to_lowercase()
+            } else {
+                v.to_string()
+            }
+        };
+        let mut values: Vec<(String, String, Option<usize>)> = Vec::new();
+        let quoted = |v: &str| self.schema.dialect().string(v);
+        if let Some(e) = self.schema.enum_of(column) {
+            values.extend(e.values.iter().map(|v| (quoted(v), quoted(v), None)));
+        }
+        match ColumnKind::from_type(&column.data_type) {
+            ColumnKind::Text if op == Op::Like => {
+                values.push(("'%…%'".into(), "'%%'".into(), Some(2)));
+            }
+            ColumnKind::Text => values.push(("'…'".into(), "''".into(), Some(1))),
+            ColumnKind::Date | ColumnKind::DateTime if op != Op::Like => {
+                for v in self.schema.dialect().date_values() {
+                    values.push((case(v), case(v), None));
+                }
+                values.push(("'…'".into(), "''".into(), Some(1)));
+            }
+            ColumnKind::Bool if op == Op::Compare => {
+                values.extend(["TRUE", "FALSE"].map(|v| (case(v), case(v), None)));
+            }
+            _ => {}
+        }
+        values
+            .into_iter()
+            .enumerate()
+            .filter_map(|(n, (label, insert, cursor))| {
+                let score = match_score(&label, self.prefix)?;
+                Some(Suggestion {
+                    label,
+                    insert,
+                    kind: SuggestionKind::Value,
+                    detail: column.data_type.clone(),
+                    score: score + 3.0 - n as f64 * 0.01,
+                    cursor,
+                })
+            })
+            .collect()
+    }
+
     /// `list` is in order of relevance; that order survives ranking.
     fn keywords(&self, list: &[&str]) -> Vec<Suggestion> {
         list.iter()
@@ -253,6 +362,7 @@ impl Ctx<'_> {
                     detail: "keyword".into(),
                     // Below schema objects when mixed with them.
                     score: score - 0.5 - i as f64 * 0.01,
+                    cursor: None,
                 })
             })
             .collect()
@@ -279,6 +389,7 @@ impl Ctx<'_> {
                     kind: SuggestionKind::Function,
                     detail: "function".into(),
                     score: score - 0.3 - i as f64 * 0.001,
+                    cursor: None,
                 })
             })
             .collect()
@@ -311,6 +422,7 @@ impl Ctx<'_> {
                     kind,
                     detail: format!("{noun} · {}", t.schema),
                     score: score + usage_boost(usage),
+                    cursor: None,
                 })
             })
             .collect()
@@ -357,6 +469,7 @@ impl Ctx<'_> {
                     detail: format!("{} · {}{pk}", t.name, c.data_type),
                     // Unscoped columns (no FROM yet) rank by usage only.
                     score: score + usage_boost(usage) + if table_ref.is_some() { 0.5 } else { 0.0 },
+                    cursor: None,
                 });
             }
         }
@@ -409,6 +522,7 @@ impl Ctx<'_> {
                             kind: SuggestionKind::Join,
                             detail: detail.clone(),
                             score: score + base + 1.0,
+                            cursor: None,
                         });
                     }
                     None => {
@@ -425,6 +539,7 @@ impl Ctx<'_> {
                             kind: SuggestionKind::Join,
                             detail: detail.clone(),
                             score: score + base + 1.0,
+                            cursor: None,
                         });
                     }
                 }
@@ -481,6 +596,303 @@ impl Ctx<'_> {
             .find(|a| !taken(a))
             .unwrap_or(base)
     }
+}
+
+/// Best first, each insert once, at most [`MAX_ITEMS`].
+fn ranked(mut items: Vec<Suggestion>) -> Vec<Suggestion> {
+    items.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(a.label.len().cmp(&b.label.len()))
+            .then(a.label.cmp(&b.label))
+    });
+    let mut seen = HashSet::new();
+    items.retain(|i| seen.insert(i.insert.clone()));
+    items.truncate(MAX_ITEMS);
+    items
+}
+
+/// Whether `off` is inside `t`, a string or comment (also one still open at the end).
+fn inside(sql: &str, t: &Token, off: usize) -> bool {
+    let text = t.text(sql);
+    let open = match t.kind {
+        TokenKind::String => text.starts_with('\'') && (text.len() == 1 || !text.ends_with('\'')),
+        TokenKind::Comment => !text.starts_with("/*"),
+        _ => return false,
+    };
+    t.start < off && (off < t.end || (off == t.end && open))
+}
+
+/// The words of a dialect's vocabulary.
+fn vocab(d: &dyn Dialect, v: Vocab) -> Vec<&'static str> {
+    match v {
+        Vocab::IntervalUnit => d.interval_units().to_vec(),
+        Vocab::DateField => d.date_fields().to_vec(),
+        Vocab::Type => d.cast_types().to_vec(),
+        Vocab::Negated => {
+            let x = d.syntax();
+            let mut words = vec!["IN", "LIKE", "BETWEEN"];
+            if x.ilike {
+                words.push("ILIKE");
+            }
+            if x.regexp {
+                words.push("REGEXP");
+            }
+            words
+        }
+    }
+}
+
+/// What may follow an operand inside `CASE`, after its last word.
+fn case_words(part: CasePart) -> &'static [&'static str] {
+    match part {
+        CasePart::Case => &["WHEN"],
+        CasePart::When => &[
+            "THEN",
+            "AND",
+            "OR",
+            "IN",
+            "LIKE",
+            "IS NULL",
+            "IS NOT NULL",
+            "BETWEEN",
+        ],
+        CasePart::Then => &["WHEN", "ELSE", "END"],
+        CasePart::Else => &["END"],
+    }
+}
+
+/// How a value is compared with a column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    /// `=`, `<>`, `<`, …
+    Compare,
+    /// `LIKE`, `ILIKE`
+    Like,
+    /// `IN (…`
+    In,
+}
+
+/// A column named in the statement: `(qualifier, name)`.
+type ColumnName = (Option<String>, String);
+
+/// The column a value at the end of `before` is compared with: `col = |`,
+/// `t.col LIKE |`, `col IN ('a', |`.
+fn comparison(sql: &str, before: &[Token]) -> Option<(ColumnName, Op)> {
+    let at = |i: usize| before.get(i).copied();
+    let word = |i: usize, w: &str| at(i).is_some_and(|t| t.is_word(sql, w));
+    let punct = |i: usize, c: char| at(i).is_some_and(|t| t.is_punct(sql, c));
+    // Skip the values of an IN list typed so far.
+    let mut j = before.len();
+    while j > 0
+        && at(j - 1).is_some_and(|t| {
+            matches!(t.kind, TokenKind::String | TokenKind::Number) || t.is_punct(sql, ',')
+        })
+    {
+        j -= 1;
+    }
+    let mut k = before.len();
+    let op = if j >= 2 && punct(j - 1, '(') && word(j - 2, "in") {
+        k = j - 2;
+        Op::In
+    } else if k >= 1 && (word(k - 1, "like") || word(k - 1, "ilike")) {
+        k -= 1;
+        Op::Like
+    } else {
+        let mut n = 0;
+        while n < 2 && k > n && ['=', '<', '>', '!'].iter().any(|&c| punct(k - 1 - n, c)) {
+            n += 1;
+        }
+        if n == 0 {
+            return None;
+        }
+        k -= n;
+        Op::Compare
+    };
+    if k >= 1 && word(k - 1, "not") {
+        k -= 1;
+    }
+    let name = at(k.checked_sub(1)?).filter(|t| t.is_ident())?;
+    let qualifier = (k >= 3 && punct(k - 2, '.'))
+        .then(|| at(k - 3).filter(|t| t.is_ident()))
+        .flatten()
+        .map(|t| unquote(t.text(sql)));
+    Some(((qualifier, unquote(name.text(sql))), op))
+}
+
+/// The function call whose argument `tokens[i]` is: (name in lower case, argument
+/// index from 0).
+fn call_of(sql: &str, tokens: &[Token], i: usize) -> Option<(String, usize)> {
+    let (mut depth, mut arg) = (0usize, 0usize);
+    for j in (0..i).rev() {
+        let t = tokens[j];
+        if t.is_punct(sql, ')') {
+            depth += 1;
+        } else if t.is_punct(sql, '(') {
+            if depth == 0 {
+                let f = tokens.get(j.checked_sub(1)?).filter(|t| t.is_ident())?;
+                return Some((f.text(sql).to_ascii_lowercase(), arg));
+            }
+            depth -= 1;
+        } else if depth == 0 && t.is_punct(sql, ',') {
+            arg += 1;
+        }
+    }
+    None
+}
+
+/// A value inside a string literal, inserted as it is.
+fn value_item(label: &str, prefix: &str, n: usize, detail: &str) -> Option<Suggestion> {
+    let score = match_score(label, prefix)?;
+    Some(Suggestion {
+        label: label.to_string(),
+        insert: label.replace('\'', "''"),
+        kind: SuggestionKind::Value,
+        detail: detail.to_string(),
+        score: score - n as f64 * 0.01,
+        cursor: None,
+    })
+}
+
+/// Completion inside the string literal `t` at `off`: the range to replace and the
+/// items.
+fn in_string(
+    sql: &str,
+    tokens: &[Token],
+    t: Token,
+    off: usize,
+    schema: &SchemaIndex,
+) -> Option<(Range<usize>, Vec<Suggestion>)> {
+    let d = schema.dialect();
+    let i = tokens.iter().position(|x| x.start == t.start)?;
+    let content = t.start + 1;
+    let typed = &sql[content..off];
+
+    // `INTERVAL '7 d|'`: the unit after the number.
+    if i > 0 && tokens[i - 1].is_word(sql, "interval") {
+        let word_start = typed.trim_end_matches(char::is_alphabetic).len();
+        let number = typed[..word_start].trim();
+        let units = d.interval_text_units();
+        if units.is_empty() || !number.ends_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        let plural = number.rsplit(' ').next() != Some("1");
+        let prefix = &typed[word_start..];
+        let items = units
+            .iter()
+            .enumerate()
+            .filter_map(|(n, u)| {
+                let unit = if plural {
+                    format!("{u}s")
+                } else {
+                    u.to_string()
+                };
+                value_item(&unit, prefix, n, "unit")
+            })
+            .collect();
+        return Some((content + word_start..off, items));
+    }
+
+    // An argument with fixed values: `DATE_TRUNC('|'`, `TO_CHAR(d, '|'`.
+    if let Some((function, arg)) = call_of(sql, tokens, i) {
+        let choices = d.string_choices(&function, arg);
+        if !choices.is_empty() {
+            let items = choices
+                .iter()
+                .enumerate()
+                .filter_map(|(n, c)| value_item(c, typed, n, &function))
+                .collect();
+            return Some((content..off, items));
+        }
+    }
+
+    // `status = '|`: the values of the column's enum.
+    let (column, _) = comparison(sql, &tokens[..i])?;
+    let scope = analyze(sql).tables;
+    let resolved = resolve_scope(&scope, schema);
+    let meta = column_meta(schema, &scope, &resolved, &column)?;
+    let items = schema
+        .enum_of(meta)?
+        .values
+        .iter()
+        .enumerate()
+        .filter_map(|(n, v)| value_item(v, typed, n, "value"))
+        .collect();
+    Some((content..off, items))
+}
+
+fn resolve_scope(scope: &[TableRef], schema: &SchemaIndex) -> Vec<Option<usize>> {
+    scope
+        .iter()
+        .map(|t| schema.resolve(t.schema.as_deref(), &t.name))
+        .collect()
+}
+
+/// The column `name` refers to among the tables in scope.
+fn column_meta<'a>(
+    schema: &'a SchemaIndex,
+    scope: &[TableRef],
+    resolved: &[Option<usize>],
+    (qualifier, name): &ColumnName,
+) -> Option<&'a ColumnMeta> {
+    let tables: Vec<usize> = match qualifier {
+        Some(q) => {
+            let i = scope.iter().position(|t| t.answers_to(q))?;
+            resolved[i].into_iter().collect()
+        }
+        None => resolved.iter().flatten().copied().collect(),
+    };
+    tables.into_iter().find_map(|ix| {
+        schema
+            .columns(ix)
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+    })
+}
+
+/// The rest of the statement at `offset` as run before: of the queries in
+/// `history` (most run first), the first that starts with what was typed (apart
+/// from case and spacing), from the cursor on. Only at the end of a statement.
+pub fn continuation(sql: &str, offset: usize, history: &[HistoryPattern]) -> Option<String> {
+    let offset = offset.min(sql.len());
+    if !sql[offset..].trim().is_empty() && !sql[offset..].trim_start().starts_with(';') {
+        return None;
+    }
+    let start = statements(sql)
+        .into_iter()
+        .find(|&(s, e)| offset >= s && offset <= e)
+        .map_or(offset, |(s, _)| s);
+    let typed = sql[start..offset].trim_start();
+    if typed.is_empty() {
+        return None;
+    }
+    history.iter().find_map(|p| {
+        let rest = p.sql[continues(&p.sql, typed)?..]
+            .trim_end()
+            .trim_end_matches(';')
+            .trim_end();
+        (!rest.trim().is_empty()).then(|| rest.to_string())
+    })
+}
+
+/// Where `pattern` goes on after `typed`, a beginning of it apart from case and the
+/// length of spaces.
+fn continues(pattern: &str, typed: &str) -> Option<usize> {
+    let mut p = pattern.char_indices().peekable();
+    let mut t = typed.chars().peekable();
+    while let Some(c) = t.next() {
+        if c.is_whitespace() {
+            while t.next_if(|c| c.is_whitespace()).is_some() {}
+            p.next_if(|(_, c)| c.is_whitespace())?;
+            while p.next_if(|(_, c)| c.is_whitespace()).is_some() {}
+            continue;
+        }
+        let (_, pc) = p.next()?;
+        if !pc.to_lowercase().eq(c.to_lowercase()) {
+            return None;
+        }
+    }
+    Some(p.peek().map_or(pattern.len(), |&(i, _)| i))
 }
 
 /// A join between two schema tables on column lists.
@@ -687,5 +1099,268 @@ mod tests {
             "insert into app.users values (1) o|",
         );
         assert_eq!(my, ["on duplicate key update"]);
+    }
+
+    /// `sample()` plus `app.users.created_at` (timestamp), `active` (boolean) and
+    /// `status` (enum `app.status`), in `driver`'s dialect.
+    fn rich(driver: tangul_core::DriverKind) -> SchemaIndex {
+        let mut info = crate::schema::tests::sample_for(driver).info().clone();
+        let col = |name: &str, ty: &str, enum_type: Option<&str>| ColumnMeta {
+            schema: "app".into(),
+            table: "users".into(),
+            name: name.into(),
+            data_type: ty.into(),
+            nullable: true,
+            enum_type: enum_type.map(Into::into),
+            ..Default::default()
+        };
+        let after_users = info
+            .columns
+            .iter()
+            .rposition(|c| c.table == "users")
+            .unwrap()
+            + 1;
+        info.columns.splice(
+            after_users..after_users,
+            [
+                col("created_at", "timestamp with time zone", None),
+                col("active", "boolean", None),
+                col("status", "status", Some("app.status")),
+            ],
+        );
+        info.enums.push(tangul_core::EnumInfo {
+            schema: "app".into(),
+            name: "status".into(),
+            values: vec!["active".into(), "invited".into(), "it's off".into()],
+            comment: None,
+        });
+        SchemaIndex::new(
+            info,
+            crate::dialect::dialect_for(driver),
+            Some("public".into()),
+        )
+    }
+
+    fn on(driver: tangul_core::DriverKind, sql: &str) -> Completion {
+        let offset = sql.find('|').unwrap();
+        complete(&sql.replace('|', ""), offset, &rich(driver), &Usage::new(0))
+    }
+
+    fn pg(sql: &str) -> Vec<String> {
+        on(tangul_core::DriverKind::Postgres, sql)
+            .items
+            .into_iter()
+            .map(|i| i.label)
+            .collect()
+    }
+
+    fn my(sql: &str) -> Vec<String> {
+        on(tangul_core::DriverKind::Mysql, sql)
+            .items
+            .into_iter()
+            .map(|i| i.label)
+            .collect()
+    }
+
+    #[test]
+    fn intervals_and_their_units() {
+        let q = "select * from app.users where created_at > now() - ";
+        assert!(pg(&format!("{q}in|")).contains(&"interval".to_string()));
+        assert_eq!(
+            pg(&format!("{q}interval 1 |"))[..3],
+            ["day", "hour", "minute"]
+        );
+        assert_eq!(pg(&format!("{q}interval 1 h|")), ["hour"]);
+        assert_eq!(my(&format!("{q}interval 7 w|")), ["week"]);
+        // Inside the text: singular after 1, plural otherwise.
+        assert_eq!(pg(&format!("{q}interval '7 d|'")), ["days"]);
+        assert_eq!(pg(&format!("{q}interval '1 d|")), ["day"]);
+        let c = on(
+            tangul_core::DriverKind::Postgres,
+            &format!("{q}interval '7 d|'"),
+        );
+        assert!(c.eager);
+        assert_eq!(c.replace.len(), 1);
+        assert!(!pg(&format!("{q}interval '7 days' |")).contains(&"day".to_string()));
+        // SQLite has no INTERVAL.
+        let sqlite = on(
+            tangul_core::DriverKind::Sqlite,
+            "select * from t where a > in|",
+        );
+        assert!(!sqlite.items.iter().any(|i| i.label == "interval"));
+    }
+
+    #[test]
+    fn fields_types_and_fixed_arguments() {
+        assert_eq!(pg("select extract(|")[..3], ["year", "month", "day"]);
+        assert_eq!(pg("select extract(y|"), ["year"]);
+        assert_eq!(pg("select extract(year |"), ["from"]);
+        assert!(pg("select cast(id as |").contains(&"timestamptz".to_string()));
+        assert!(pg("select id::|").contains(&"bigint".to_string()));
+        assert!(my("select cast(id as |").contains(&"signed".to_string()));
+        assert_eq!(
+            pg("select date_trunc('|', created_at) from app.users")[0],
+            "day"
+        );
+        assert_eq!(
+            pg("select date_trunc('mo|', created_at) from app.users"),
+            ["month"]
+        );
+        assert_eq!(
+            my("select date_format(created_at, '|') from app.users")[0],
+            "%Y-%m-%d"
+        );
+        // Other strings and comments: nothing.
+        assert!(pg("select 'mo|'").is_empty());
+        assert!(pg("select 1 -- fr|").is_empty());
+    }
+
+    #[test]
+    fn values_that_fit_the_column() {
+        let c = on(
+            tangul_core::DriverKind::Postgres,
+            "select * from app.users where email = |",
+        );
+        assert!(c.eager, "{:?}", c.items);
+        assert_eq!(
+            (c.items[0].insert.as_str(), c.items[0].cursor),
+            ("''", Some(1))
+        );
+        let c = on(
+            tangul_core::DriverKind::Postgres,
+            "select * from app.users u where u.email like |",
+        );
+        assert_eq!(
+            (c.items[0].insert.as_str(), c.items[0].cursor),
+            ("'%%'", Some(2))
+        );
+        assert_eq!(
+            pg("select * from app.users where created_at >= |")[..2],
+            ["current_date", "now() - interval '7 days'"]
+        );
+        assert_eq!(
+            my("select * from app.users where created_at >= |")[1],
+            "now() - interval 7 day"
+        );
+        assert_eq!(
+            pg("select * from app.users where active = |")[..2],
+            ["true", "false"]
+        );
+        assert_eq!(pg("select * from app.users where active <> f|")[0], "false");
+        // An enum: its values, also inside the quotes and in IN lists.
+        assert_eq!(
+            pg("select * from app.users where status = |")[..3],
+            ["'active'", "'invited'", "'it''s off'"]
+        );
+        assert_eq!(
+            pg("select * from app.users where status = 'in|'"),
+            ["invited"]
+        );
+        let c = on(
+            tangul_core::DriverKind::Postgres,
+            "select * from app.users where status in ('active', 'it|",
+        );
+        assert_eq!(c.items[0].insert, "it''s off");
+        assert!(
+            pg("select * from app.users where status not in (|").contains(&"'invited'".to_string())
+        );
+        // Numbers: no value to offer, the columns as before.
+        let c = on(
+            tangul_core::DriverKind::Postgres,
+            "select * from app.users where id = |",
+        );
+        assert!(!c.eager && c.items.iter().all(|i| i.kind != SuggestionKind::Value));
+    }
+
+    #[test]
+    fn case_between_and_subqueries() {
+        assert_eq!(
+            pg("select case when id = 1 |"),
+            [
+                "then",
+                "and",
+                "or",
+                "in",
+                "like",
+                "is null",
+                "is not null",
+                "between"
+            ]
+        );
+        assert_eq!(
+            pg("select case when id = 1 then 2 |"),
+            ["when", "else", "end"]
+        );
+        assert_eq!(pg("select case when id = 1 then 2 e|"), ["else", "end"]);
+        assert_eq!(pg("select case |")[0], "when");
+        assert_eq!(pg("select * from app.users where id between 1 |"), ["and"]);
+        assert_eq!(pg("select * from app.users where id in (sel|"), ["select"]);
+        assert_eq!(pg("select * from app.users where exists (|"), ["select"]);
+        assert_eq!(pg("select count(*) over (|"), ["partition by", "order by"]);
+        assert_eq!(
+            pg("select * from app.users where email not |"),
+            ["in", "like", "between", "ilike"]
+        );
+        assert_eq!(
+            pg("select * from app.users where cur|")[..2],
+            ["current_date", "current_timestamp"]
+        );
+    }
+
+    #[test]
+    fn eager_only_where_the_next_word_is_clear() {
+        let eager = |sql: &str| on(tangul_core::DriverKind::Postgres, sql).eager;
+        for sql in [
+            "select * from |",
+            "select * from app.users where |",
+            "select * from app.users where id = 1 and |",
+            "select * from app.users order by |",
+            "select * from app.users u join |",
+            "select now() - interval 1 |",
+            "select case when id = 1 |",
+        ] {
+            assert!(eager(sql), "{sql}");
+        }
+        for sql in [
+            "|",
+            "select |",
+            "select id |",
+            "select * from app.users |",
+            "select * from app.users where id |",
+            "select * from app.users where id = 1 |",
+        ] {
+            assert!(!eager(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn continuation_from_history() {
+        let history = [
+            HistoryPattern {
+                sql: "SELECT *\nFROM app.users\nWHERE created_at > now() - interval '7 days';"
+                    .into(),
+                runs: 9,
+            },
+            HistoryPattern {
+                sql: "select * from app.orders".into(),
+                runs: 3,
+            },
+        ];
+        let at = |sql: &str| continuation(sql, sql.len(), &history);
+        assert_eq!(
+            at("select * from app.users where "),
+            Some("created_at > now() - interval '7 days'".into())
+        );
+        assert_eq!(at("select * from app.o"), Some("rders".into()));
+        assert_eq!(
+            at("SELECT  *  FROM"),
+            Some(" app.users\nWHERE created_at > now() - interval '7 days'".into())
+        );
+        assert_eq!(at("select * from app.orders"), None);
+        assert_eq!(at("select count(*)"), None);
+        assert_eq!(at(""), None);
+        // Only at the end of the statement; a later statement starts over.
+        assert_eq!(continuation("select * from app.o x", 17, &history), None);
+        assert_eq!(at("select 1; select * from app.o"), Some("rders".into()));
     }
 }

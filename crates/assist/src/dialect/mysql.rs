@@ -86,6 +86,75 @@ impl Dialect for Mysql {
             "json_object",
             "cast",
             "round",
+            "date_sub",
+            "datediff",
+            "timestampdiff",
+            "year",
+            "month",
+            "day",
+            "hour",
+            "week",
+            "str_to_date",
+            "unix_timestamp",
+            "from_unixtime",
+            "if",
+            "greatest",
+            "least",
+            "abs",
+            "replace",
+            "substring",
+            "regexp_replace",
+            "row_number",
+            "rank",
+            "dense_rank",
+            "lag",
+            "lead",
+            "json_unquote",
+            "json_arrayagg",
+        ]
+    }
+
+    fn interval_units(&self) -> &'static [&'static str] {
+        &[
+            "DAY", "HOUR", "MINUTE", "MONTH", "YEAR", "WEEK", "SECOND", "QUARTER",
+        ]
+    }
+
+    fn date_fields(&self) -> &'static [&'static str] {
+        &[
+            "YEAR",
+            "MONTH",
+            "DAY",
+            "HOUR",
+            "WEEK",
+            "QUARTER",
+            "MINUTE",
+            "SECOND",
+            "YEAR_MONTH",
+        ]
+    }
+
+    fn cast_types(&self) -> &'static [&'static str] {
+        &[
+            "SIGNED", "UNSIGNED", "CHAR", "DATE", "DATETIME", "DECIMAL", "JSON", "TIME", "DOUBLE",
+            "BINARY",
+        ]
+    }
+
+    fn string_choices(&self, function: &str, arg: usize) -> &'static [&'static str] {
+        match (function, arg) {
+            ("date_format", 1) => &["%Y-%m-%d", "%Y-%m", "%Y-%m-%d %H:%i", "%H:%i", "%W"],
+            ("str_to_date", 1) => &["%Y-%m-%d", "%d.%m.%Y", "%Y-%m-%d %H:%i:%s"],
+            _ => &[],
+        }
+    }
+
+    fn date_values(&self) -> &'static [&'static str] {
+        &[
+            "CURDATE()",
+            "NOW() - INTERVAL 7 DAY",
+            "CURDATE() - INTERVAL 30 DAY",
+            "DATE_FORMAT(NOW(), '%Y-%m-01')",
         ]
     }
 

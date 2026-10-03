@@ -1,5 +1,6 @@
 //! What tangul knows about the databases, in one place for every reader: the
-//! schema of each connected database user and the learned usage of each database.
+//! schema of each connected database user and the learned usage and most run
+//! queries of each database.
 //! The app's editor, schema tree and results read it, and so will the assistant's
 //! tools; nothing keeps a copy of its own.
 //!
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use tangul_assist::schema::SchemaIndex;
 use tangul_assist::usage::Usage;
+use tangul_core::usage::HistoryPattern;
 use tangul_core::{ColumnProfile, ConnId};
 
 /// How long a value profile is used before it is sampled again.
@@ -30,6 +32,8 @@ struct Pool {
     users: HashMap<String, UserKnowledge>,
     /// Learned usage by database id (shared by the database's users).
     usage: HashMap<String, Arc<Usage>>,
+    /// The most run queries by database id, most run first.
+    history: HashMap<String, Arc<Vec<HistoryPattern>>>,
     /// Value profiles by database user and column, with when they were taken. Only
     /// filled where the user allowed the assistant to read values.
     profiles: HashMap<(String, ColumnRef), (ColumnProfile, Instant)>,
@@ -143,6 +147,21 @@ impl Knowledge {
             let usage = p.usage.get(&u.database).cloned().unwrap_or_default();
             Some((u.schema.clone(), usage))
         })
+    }
+
+    /// The most run queries of the database behind connection `conn`.
+    pub fn history_for_conn(&self, conn: ConnId) -> Arc<Vec<HistoryPattern>> {
+        self.read(|p| {
+            p.users
+                .values()
+                .find(|u| u.conn == conn)
+                .and_then(|u| p.history.get(&u.database).cloned())
+                .unwrap_or_default()
+        })
+    }
+
+    pub fn set_history(&self, database: &str, history: Arc<Vec<HistoryPattern>>) {
+        self.write(|p| p.history.insert(database.to_string(), history));
     }
 
     pub fn usage(&self, database: &str) -> Option<Arc<Usage>> {
@@ -263,5 +282,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["u1", "u2"]
         );
+    }
+
+    #[test]
+    fn most_run_queries_per_database() {
+        let k = Knowledge::default();
+        k.set_schema("u1", "db1", ConnId(1), schema("users"));
+        k.set_schema("u2", "db2", ConnId(2), schema("users"));
+        assert!(k.history_for_conn(ConnId(1)).is_empty());
+        let history = vec![HistoryPattern {
+            sql: "select 1".into(),
+            runs: 2,
+        }];
+        k.set_history("db1", Arc::new(history));
+        assert_eq!(k.history_for_conn(ConnId(1))[0].sql, "select 1");
+        assert!(k.history_for_conn(ConnId(2)).is_empty());
+        assert!(k.history_for_conn(ConnId(9)).is_empty());
     }
 }

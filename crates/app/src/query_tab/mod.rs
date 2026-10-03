@@ -28,6 +28,7 @@ use tangul_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
 use crate::{
     BookmarkQuery, FormatQuery, RunAll, RunQuery,
     assets::Lucide,
+    completion::Snippets,
     connection::{ConnStatus, Connection},
     result_view::{CellValue, ResultEvent, ResultView},
 };
@@ -228,8 +229,13 @@ impl QueryTab {
         SqlEditor::focus(&editor, window, cx);
     }
 
-    pub fn set_completion(&self, provider: Rc<dyn CompletionProvider>, cx: &mut App) {
-        SqlEditor::set_completion(&self.editor, provider, cx);
+    pub fn set_completion(
+        &self,
+        provider: Rc<dyn CompletionProvider>,
+        snippets: Snippets,
+        cx: &mut App,
+    ) {
+        SqlEditor::set_completion(&self.editor, provider, snippets, cx);
     }
 
     pub fn set_question_check(&mut self, check: QuestionCheck) {
@@ -468,6 +474,32 @@ impl QueryTab {
     #[cfg(test)]
     pub fn comments(&self, cx: &App) -> Vec<std::ops::Range<usize>> {
         self.editor.read(cx).comments(cx)
+    }
+
+    /// Inserts `text` at the cursor in one edit, as a chosen menu item does, with
+    /// `snippets` as the last menu's items (tests).
+    #[cfg(test)]
+    pub fn insert_item(
+        tab: &Entity<Self>,
+        text: &str,
+        snippets: Vec<(String, usize)>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let editor = tab.read(cx).editor.read(cx);
+        let state = editor.state.clone();
+        editor.snippets.set(snippets);
+        state.update(cx, |e, cx| {
+            let end = e.value().len();
+            e.set_selected_range(end..end, cx);
+            e.insert(text.to_string(), window, cx);
+        });
+    }
+
+    /// The cursor's byte offset in the editor (tests).
+    #[cfg(test)]
+    pub fn cursor(&self, cx: &App) -> usize {
+        self.editor.read(cx).state.read(cx).cursor()
     }
 
     /// The view the result is set to, even before a run (tests).

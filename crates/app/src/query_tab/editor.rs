@@ -20,6 +20,8 @@ use tangul_assist::lexer::{Lexing, TokenKind, tokenize, tokenize_with};
 use tangul_assist::statement::statement_at;
 use tangul_engine::Problem;
 
+use crate::completion::Snippets;
+
 /// Pause in typing after which the SQL is checked on the server.
 const VALIDATE_AFTER: Duration = Duration::from_secs(1);
 /// Limits per check; larger scripts are only checked in part.
@@ -48,7 +50,7 @@ pub enum EditorEvent {
 }
 
 pub struct SqlEditor {
-    state: Entity<EditorState>,
+    pub(super) state: Entity<EditorState>,
     /// Where the SQL of the next / current run starts in the editor (errors are
     /// reported relative to the executed text), and that text.
     pending_origin: Option<usize>,
@@ -71,6 +73,10 @@ pub struct SqlEditor {
     /// The statements sent for the current generation's check.
     validating: Vec<(usize, String)>,
     _validation: Task<()>,
+    /// Menu items whose cursor goes inside them, and the text's length before the
+    /// last edit (to tell an inserted item from typing).
+    pub(super) snippets: Snippets,
+    text_len: usize,
     _changes: Subscription,
 }
 
@@ -87,6 +93,7 @@ impl SqlEditor {
         });
         let changes = cx.subscribe(&state, |this: &mut Self, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
+                this.place_snippet_cursor(cx);
                 this.color_comments(cx);
                 this.revalidate(cx);
             }
@@ -105,6 +112,8 @@ impl SqlEditor {
             edit_generation: 0,
             validating: Vec::new(),
             _validation: Task::ready(()),
+            snippets: Snippets::default(),
+            text_len: text.len(),
             _changes: changes,
         };
         editor.color_comments(cx);
@@ -160,10 +169,34 @@ impl SqlEditor {
     pub fn set_completion(
         editor: &Entity<Self>,
         provider: Rc<dyn CompletionProvider>,
+        snippets: Snippets,
         cx: &mut App,
     ) {
-        let state = editor.read(cx).state.clone();
+        let state = editor.update(cx, |e, _| {
+            e.snippets = snippets;
+            e.state.clone()
+        });
         state.update(cx, |e, _| e.lsp_mut().completion_provider = Some(provider));
+    }
+
+    /// After a menu item like `''` went in, the cursor goes inside it. Only for
+    /// edits that added more than one character (an item, not typing).
+    fn place_snippet_cursor(&mut self, cx: &mut Context<Self>) {
+        let (len, before) = {
+            let e = self.state.read(cx);
+            let value = e.value();
+            let cursor = e.cursor().min(value.len());
+            (value.len(), value[..cursor].to_string())
+        };
+        let grew = len > self.text_len + 1;
+        self.text_len = len;
+        if !grew {
+            return;
+        }
+        if let Some(at) = self.snippets.cursor_after(&before) {
+            self.state
+                .update(cx, |e, cx| e.set_selected_range(at..at, cx));
+        }
     }
 
     /// Puts `text` at the cursor, on a line of its own, and focuses the editor.

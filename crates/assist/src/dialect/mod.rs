@@ -71,6 +71,34 @@ pub trait Dialect: Sync {
     /// Clauses and operators the editor offers beyond standard SQL.
     fn syntax(&self) -> Syntax;
 
+    /// Units after `INTERVAL 1`, most used first; none where there is no `INTERVAL`.
+    fn interval_units(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Units written inside the interval's text (`INTERVAL '7 days'`), singular.
+    fn interval_text_units(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Fields of `EXTRACT(… FROM x)`.
+    fn date_fields(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Types offered in casts.
+    fn cast_types(&self) -> &'static [&'static str];
+
+    /// The string literals argument `arg` (from 0) of `function` (lower case)
+    /// takes: units, fields, formats.
+    fn string_choices(&self, _function: &str, _arg: usize) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Values offered when comparing a date or timestamp column: today, the last
+    /// days, ….
+    fn date_values(&self) -> &'static [&'static str];
+
     /// Comments, quoting and terminators the database's lexer knows beyond the
     /// common ones.
     fn lexing(&self) -> Lexing {

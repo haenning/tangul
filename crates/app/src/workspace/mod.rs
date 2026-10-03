@@ -88,7 +88,7 @@ use crate::{
     PrevSidebarPanel, RunAll, ToggleRightSidebar, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
-    completion::SqlCompletion,
+    completion::{Snippets, SqlCompletion},
     connection::{ConnStatus, Connection},
     connection_form::{ConnectionForm, FormMode, FormOutput},
     file_tab::{FileKind, FileTab},
