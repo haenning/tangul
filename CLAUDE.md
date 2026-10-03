@@ -17,7 +17,7 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
   incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
   the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
-  `settings.json`)
+  `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
   and `knowledge`: the one pool of what is known about the databases (schema per
