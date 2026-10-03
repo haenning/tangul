@@ -158,6 +158,9 @@ impl Workspace {
         let Some(tab) = self.tabs.remove(ix) else {
             return;
         };
+        if let Some(board) = tab.board() {
+            board.update(cx, |b, _| b.cancel());
+        }
         if let Some(tab) = tab.query().map(|t| t.read(cx))
             && let Some(conn) = tab.conn_id(cx)
         {
@@ -451,6 +454,7 @@ impl Workspace {
             let query = tab.query().map(|t| t.read(cx));
             let bookmarked = query.is_some_and(|t| t.bookmark_id.is_some());
             let has_sql = query.is_some_and(|t| !t.sql(cx).trim().is_empty());
+            let from_tile = query.is_some_and(|t| t.board_tile.is_some());
             let label: SharedString = if tab.is_dirty(cx) {
                 format!("{title} •").into()
             } else {
@@ -465,7 +469,9 @@ impl Workspace {
                 .child(label.clone())
                 .context_menu({
                     let weak = weak.clone();
-                    move |menu, _, _| tab_menu(menu, id, pinned, bookmarked, has_sql, &weak)
+                    move |menu, _, _| {
+                        tab_menu(menu, id, pinned, bookmarked, has_sql, from_tile, &weak)
+                    }
                 });
             Tab::new()
                 .aria_label(label)
@@ -526,6 +532,7 @@ pub(super) fn tab_menu(
     pinned: bool,
     bookmarked: bool,
     has_sql: bool,
+    from_tile: bool,
     workspace: &WeakEntity<Workspace>,
 ) -> PopupMenu {
     let item = |label: &str, f: fn(&mut Workspace, TabId, &mut Window, &mut Context<Workspace>)| {
@@ -540,10 +547,20 @@ pub(super) fn tab_menu(
             if pinned { "Unpin" } else { "Pin" },
             |ws, tab, _, cx| ws.toggle_tab_pin(tab, cx),
         ));
-    if bookmarked {
+    let menu = if bookmarked {
         menu.item(item("Remove bookmark", Workspace::toggle_tab_bookmark))
     } else if has_sql {
         menu.item(item("Bookmark query…", Workspace::toggle_tab_bookmark))
+    } else {
+        menu
+    };
+    let menu = if has_sql {
+        menu.item(item("Add to board…", Workspace::add_tab_to_board))
+    } else {
+        menu
+    };
+    if from_tile && has_sql {
+        menu.item(item("Update tile", Workspace::update_tile_from_tab))
     } else {
         menu
     }
@@ -561,7 +578,7 @@ impl Workspace {
         }
     }
 
-    fn query_tab(&self, id: TabId, cx: &App) -> Option<Entity<QueryTab>> {
+    pub(super) fn query_tab(&self, id: TabId, cx: &App) -> Option<Entity<QueryTab>> {
         self.tabs.queries().find(|t| t.read(cx).id == id).cloned()
     }
 

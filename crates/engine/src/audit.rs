@@ -1,5 +1,6 @@
-//! The audit log: what the assistant and schedules sent, what the editor had
-//! refused, and how it went.
+//! The audit log: what the assistant and schedules sent, and how it went; of
+//! boards and the editor's looks at values, only what was refused (they run
+//! often, and only reads).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,8 +26,9 @@ impl Audit {
         rows: Option<u64>,
     ) {
         let Some(local) = &self.0 else { return };
-        // The editor's samples are the user's own reads; only refusals are kept.
-        if caller == Caller::User || (caller == Caller::Editor && outcome != "refused") {
+        if caller == Caller::User
+            || (matches!(caller, Caller::Board | Caller::Editor) && outcome != "refused")
+        {
             return;
         }
         let entry = AuditEntry {

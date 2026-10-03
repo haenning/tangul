@@ -6,6 +6,7 @@ use gpui_kit::*;
 use tangul_core::TabId;
 
 use crate::ai_settings::AiSettingsTab;
+use crate::board::BoardTab;
 use crate::file_tab::FileTab;
 use crate::query_tab::QueryTab;
 
@@ -16,8 +17,8 @@ pub enum TabItem {
     File(Entity<FileTab>),
     /// The AI settings (assistant and MCP); one at a time.
     AiSettings(Entity<AiSettingsTab>),
-    // Boards (#97) become a kind of their own here, `Board(Entity<BoardTab>)`: a
-    // grid of `ResultView`s, one per query.
+    /// A board: its tiles' results, refreshed together; one tab per board.
+    Board(Entity<BoardTab>),
 }
 
 impl TabItem {
@@ -26,6 +27,7 @@ impl TabItem {
             TabItem::Query(t) => t.read(cx).id,
             TabItem::File(t) => t.read(cx).id,
             TabItem::AiSettings(t) => t.read(cx).id,
+            TabItem::Board(t) => t.read(cx).id,
         }
     }
 
@@ -34,6 +36,7 @@ impl TabItem {
             TabItem::Query(t) => t.read(cx).title.clone(),
             TabItem::File(t) => t.read(cx).title.clone(),
             TabItem::AiSettings(t) => t.read(cx).title.clone(),
+            TabItem::Board(t) => t.read(cx).title.clone(),
         }
     }
 
@@ -58,10 +61,17 @@ impl TabItem {
         }
     }
 
+    pub fn board(&self) -> Option<&Entity<BoardTab>> {
+        match self {
+            TabItem::Board(t) => Some(t),
+            _ => None,
+        }
+    }
+
     /// Changes that would be lost on closing (asks first).
     pub fn has_unsaved_changes(&self, cx: &App) -> bool {
         match self {
-            TabItem::Query(_) | TabItem::AiSettings(_) => false,
+            TabItem::Query(_) | TabItem::AiSettings(_) | TabItem::Board(_) => false,
             TabItem::File(t) => t.read(cx).has_unsaved_changes(cx),
         }
     }
@@ -71,7 +81,7 @@ impl TabItem {
         match self {
             TabItem::Query(t) => t.read(cx).in_transaction(),
             TabItem::File(t) => t.read(cx).has_unsaved_changes(cx),
-            TabItem::AiSettings(_) => false,
+            TabItem::AiSettings(_) | TabItem::Board(_) => false,
         }
     }
 
@@ -80,6 +90,7 @@ impl TabItem {
             TabItem::Query(t) => QueryTab::focus_editor(t, window, cx),
             TabItem::File(t) => FileTab::focus(t, window, cx),
             TabItem::AiSettings(t) => AiSettingsTab::focus(t, window, cx),
+            TabItem::Board(t) => BoardTab::focus(t, window, cx),
         }
     }
 
@@ -88,6 +99,7 @@ impl TabItem {
             TabItem::Query(t) => t.clone().into(),
             TabItem::File(t) => t.clone().into(),
             TabItem::AiSettings(t) => t.clone().into(),
+            TabItem::Board(t) => t.clone().into(),
         }
     }
 }

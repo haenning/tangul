@@ -75,6 +75,11 @@ impl Workspace {
         self.refresh_chats(cx);
     }
 
+    /// Whether the chat is set up (provider, model, key).
+    pub(super) fn assistant_ready(&self) -> bool {
+        self.assistant.ready.get()
+    }
+
     /// How a tab tells a question from SQL: surely not SQL for its connection's
     /// database (words of its schema count as SQL). Only while the chat is set up
     /// (provider, model, key) and the setting is on; otherwise everything runs.
@@ -199,6 +204,7 @@ impl Workspace {
             }
             ChatPanelEvent::ListChats => self.refresh_chats(cx),
             ChatPanelEvent::OpenSql(sql) => self.open_sql("From the assistant", &sql, window, cx),
+            ChatPanelEvent::AddToBoard(sql) => self.add_answer_to_board(&sql, window, cx),
             ChatPanelEvent::InsertSql(sql) => match self.tabs.active_query().cloned() {
                 Some(tab) => tab.update(cx, |t, cx| t.insert_sql(&sql, window, cx)),
                 None => self.open_sql("From the assistant", &sql, window, cx),

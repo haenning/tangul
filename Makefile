@@ -11,7 +11,7 @@ export TANGUL_SIGN_IDENTITY
 
 .DEFAULT_GOAL := help
 .PHONY: help setup tools docker-up db-up db-down db-reset db-logs psql mysql run run-release run-dev \
-        test test-live fmt lint license license-check ci app dmg install signing-cert release
+        test test-live test-live-native fmt lint license license-check ci app dmg install signing-cert release
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -35,6 +35,9 @@ docker-up: # Start Docker Desktop on macOS if the daemon isn't running (not list
 
 db-up: docker-up ## Start dev Postgres (:55432), MySQL (:53306) and an SSH bastion (:52222)
 	docker compose up -d --wait
+	@docker compose port ssh 22 | grep -q ':52222$$' || { \
+		echo "The dev ports are taken by another compose project (docker compose ls); stop it first." >&2; \
+		exit 1; }
 
 db-down: ## Stop dev databases (data is kept)
 	docker compose down
@@ -69,6 +72,11 @@ test: ## Unit tests (no databases needed)
 test-live: db-up ## Integration tests against the dev databases
 	TANGUL_TEST_PG=$(PG_URL) TANGUL_TEST_MYSQL=$(MYSQL_URL) TANGUL_TEST_SSH=$(SSH_URL) \
 		cargo test -p tangul-engine
+
+test-live-native: ## test-live without Docker (Debian/Ubuntu, e.g. cloud sessions): databases via apt
+	scripts/dev-db-native.sh
+	TANGUL_TEST_PG=$(PG_URL) TANGUL_TEST_MYSQL=$(MYSQL_URL) TANGUL_TEST_SSH=$(SSH_URL) \
+		TANGUL_TEST_SSH_DB=127.0.0.1:55432 cargo test -p tangul-engine
 
 app: ## Build target/bundle/tangul.app and a DMG (UNIVERSAL=1 for Apple Silicon + Intel)
 	scripts/bundle-macos.sh $(if $(UNIVERSAL),--universal)

@@ -23,7 +23,7 @@ use tangul_assist::columns::ColumnFacts;
 use tangul_assist::dialect::Dialect;
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::{ConnId, QueryId, ResultSet, TabId};
-use tangul_engine::{Command, EngineHandle, ExecEvent, Problem, QueryEvent};
+use tangul_engine::{Command, EngineHandle, Problem, QueryEvent, QueryOutput};
 
 use crate::{
     BookmarkQuery, FormatQuery, RunAll, RunQuery,
@@ -104,6 +104,9 @@ pub struct QueryTab {
     pub bookmark_id: Option<String>,
     /// Times the last query was run successfully, when it is worth bookmarking.
     pub bookmark_hint: Option<u32>,
+    /// The board tile (board id, tile id) its query was opened from: "Update tile"
+    /// writes the query back there.
+    pub board_tile: Option<(String, String)>,
     /// Editor/results split. The editor is the first panel; height 0 means hidden.
     split: Entity<ResizableState>,
     /// Editor height to come back to when it is shown again after being hidden.
@@ -154,6 +157,7 @@ impl QueryTab {
             _conn_changes: conn.as_ref().map(|c| cx.observe(c, |_, _, cx| cx.notify())),
             conn,
             bookmark_id: None,
+            board_tile: None,
             bookmark_hint: None,
             split: cx.new(|_| ResizableState::default()),
             editor_restore: px(EDITOR_HEIGHT),
@@ -389,27 +393,15 @@ impl QueryTab {
         cx: &mut Context<Self>,
     ) {
         self.started(query, sql, cx);
-        let rows = result.row_count() as u64;
-        let (columns, batch) = result.into_batch();
-        let mut events = Vec::new();
-        if !columns.is_empty() {
-            events.push(QueryEvent::Exec(ExecEvent::ResultStart(columns)));
-            events.push(QueryEvent::Exec(ExecEvent::Rows(batch)));
-        }
-        if truncated {
-            events.push(QueryEvent::Exec(ExecEvent::Truncated));
-        }
-        events.push(QueryEvent::Exec(ExecEvent::StatementDone { rows }));
-        events.push(QueryEvent::Finished {
+        let output = QueryOutput {
+            rows: Some(result.row_count() as u64),
+            results: vec![result],
+            truncated,
             elapsed,
-            error: None,
-            error_position: None,
-            in_transaction: false,
-            cancelled: false,
-        });
-        for event in events {
-            self.on_query_event(event, cx);
-        }
+        };
+        self.in_transaction = false;
+        self.results.update(cx, |r, cx| r.replay(Ok(output), cx));
+        cx.notify();
     }
 
     /// Called by the workspace once a derived query (filter, sort, next page) was

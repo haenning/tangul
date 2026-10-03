@@ -1,6 +1,7 @@
 mod ai_settings;
 mod assets;
 mod assistant;
+mod board;
 mod bookmark_form;
 mod chart;
 mod completion;
@@ -43,6 +44,12 @@ actions!(
         Quit
     ]
 );
+
+/// A new id for a tab or a query, unique while the app runs.
+pub(crate) fn next_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 fn main() {
     // The engine owns its own tokio runtime thread; the UI only exchanges messages.

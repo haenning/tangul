@@ -52,7 +52,7 @@ impl RowBatch {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ResultSet {
     columns: Vec<ColumnInfo>,
     text: String,
