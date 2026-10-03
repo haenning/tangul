@@ -10,9 +10,10 @@
 mod form;
 mod view;
 
-pub use form::{AddForm, Choices, DetailsForm, Target};
+pub use form::{AddForm, Adding, BookmarkChoice, Choices, DetailsForm, Target};
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
@@ -49,6 +50,8 @@ pub enum BoardEvent {
     OpenLink(usize),
     /// Edit the board's name, description and links.
     EditDetails,
+    /// Ask the assistant for a tile's query.
+    AskAi(String),
     /// A whole refresh failed on this connection (gone, never connected): the
     /// workspace drops it and hands over a new one ([`BoardTab::set_conn`]).
     ConnectionFailed(ConnId),
@@ -80,6 +83,8 @@ pub struct BoardTab {
     show_description: bool,
     /// Per link: what it opens is gone (a deleted bookmark or board).
     broken: Vec<bool>,
+    /// What "Add tile" offers, asked for when the menu opens.
+    choices: Option<ChoicesFn>,
     /// When the last refresh started, and the one running.
     last: Option<Instant>,
     running: Option<QueryId>,
@@ -95,6 +100,9 @@ pub struct BoardTab {
 }
 
 impl EventEmitter<BoardEvent> for BoardTab {}
+
+/// What "Add tile" and links can offer (the workspace knows).
+pub type ChoicesFn = Rc<dyn Fn(&App) -> Choices>;
 
 /// How often "updated … ago" is redrawn.
 const TICK: Duration = Duration::from_secs(30);
@@ -128,6 +136,7 @@ impl BoardTab {
             editing: false,
             show_description: false,
             broken: Vec::new(),
+            choices: None,
             last: None,
             running: None,
             updated: None,
@@ -154,6 +163,18 @@ impl BoardTab {
             self.refresh(cx);
         }
         cx.notify();
+    }
+
+    /// Where "Add tile" takes its bookmarks, recent queries and whether the
+    /// assistant is there.
+    pub fn set_choices(&mut self, choices: ChoicesFn) {
+        self.choices = Some(choices);
+    }
+
+    /// What "Add tile" offers now.
+    #[cfg(test)]
+    pub fn choices(&self, cx: &App) -> Choices {
+        self.choices.as_ref().map(|f| f(cx)).unwrap_or_default()
     }
 
     /// Whether link `ix` opens nothing any more.

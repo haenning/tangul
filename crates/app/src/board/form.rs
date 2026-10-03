@@ -25,13 +25,24 @@ pub struct Details {
     pub links: Vec<Link>,
 }
 
+/// A bookmark to link to or make a tile of.
+#[derive(Clone)]
+pub struct BookmarkChoice {
+    pub id: String,
+    pub name: String,
+    pub sql: String,
+    pub view: Option<ChartView>,
+}
+
 /// What links can go to: the database's bookmarks (id, name, chart), its other
 /// boards (id, name) and recent queries.
 #[derive(Clone, Default)]
 pub struct Choices {
-    pub bookmarks: Vec<(String, String, Option<ChartView>)>,
+    pub bookmarks: Vec<BookmarkChoice>,
     pub boards: Vec<(String, String)>,
     pub history: Vec<String>,
+    /// The assistant is set up, so it can be asked for a query.
+    pub ai: bool,
 }
 
 /// A link being edited.
@@ -109,8 +120,8 @@ impl DetailsForm {
                     .choices
                     .bookmarks
                     .iter()
-                    .find(|b| b.0 == id)
-                    .map(|b| b.1.clone());
+                    .find(|b| b.id == id)
+                    .map(|b| b.name.clone());
                 RowTo::Bookmark(id, name)
             }
             LinkTo::Board(id) => {
@@ -214,12 +225,12 @@ impl DetailsForm {
         if !choices.bookmarks.is_empty() {
             let (bookmarks, this) = (choices.bookmarks.clone(), this.clone());
             menu = menu.submenu("Bookmark", window, cx, move |mut menu, _, _| {
-                for (id, name, _) in &bookmarks {
+                for b in &bookmarks {
                     let link = Link {
-                        label: name.clone(),
-                        to: LinkTo::Bookmark(id.clone()),
+                        label: b.name.clone(),
+                        to: LinkTo::Bookmark(b.id.clone()),
                     };
-                    menu = menu.item(item(name.clone(), link, &this));
+                    menu = menu.item(item(b.name.clone(), link, &this));
                 }
                 menu.max_h(px(320.)).scrollable(true)
             });
@@ -370,7 +381,7 @@ impl DetailsForm {
 }
 
 /// "Table", "Bars side by side", …
-fn view_label(view: Option<ChartView>) -> &'static str {
+pub(super) fn view_label(view: Option<ChartView>) -> &'static str {
     match view {
         None => "Table",
         Some(view) => view.style.label(),
@@ -467,6 +478,14 @@ impl Render for TileForm {
     }
 }
 
+/// What "Add to board" was told.
+pub struct Adding {
+    pub title: String,
+    pub target: Target,
+    pub as_link: bool,
+    pub view: Option<ChartView>,
+}
+
 /// Where "Add to board" puts the tile.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
@@ -482,6 +501,8 @@ pub struct AddForm {
     title: Entity<InputState>,
     with_tile: bool,
     as_link: bool,
+    /// How a tile shows its result.
+    view: Option<ChartView>,
     /// The database's boards as (id, name).
     boards: Vec<(String, String)>,
     /// Index into `boards`; `None` is a new board.
@@ -495,6 +516,8 @@ impl AddForm {
         title: &str,
         boards: Vec<(String, String)>,
         with_tile: bool,
+        view: Option<ChartView>,
+        preselect: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -504,7 +527,10 @@ impl AddForm {
                 .default_value(title.to_string())
         });
         let new_name = cx.new(|cx| InputState::new(window, cx).placeholder("New board's name"));
-        let chosen = (with_tile && !boards.is_empty()).then_some(0);
+        let chosen = match preselect.and_then(|id| boards.iter().position(|b| b.0 == id)) {
+            Some(at) => Some(at),
+            None => (with_tile && !boards.is_empty()).then_some(0),
+        };
         let focus = match chosen {
             Some(_) => title.read(cx).focus_handle(cx),
             None => new_name.read(cx).focus_handle(cx),
@@ -514,6 +540,7 @@ impl AddForm {
             title,
             with_tile,
             as_link: false,
+            view,
             boards,
             chosen,
             new_name,
@@ -523,7 +550,7 @@ impl AddForm {
 
     /// The title, where it goes and whether as a link, or `None` (and why, in the
     /// form).
-    pub fn submit(&mut self, cx: &mut Context<Self>) -> Option<(String, Target, bool)> {
+    pub fn submit(&mut self, cx: &mut Context<Self>) -> Option<Adding> {
         let title = self.title.read(cx).value().trim().to_string();
         let target = match self.chosen.and_then(|i| self.boards.get(i)) {
             Some((id, _)) => Target::Board(id.clone()),
@@ -542,7 +569,12 @@ impl AddForm {
             cx.notify();
             return None;
         }
-        Some((title, target, self.as_link))
+        Some(Adding {
+            title,
+            target,
+            as_link: self.as_link,
+            view: self.view,
+        })
     }
 }
 
@@ -607,6 +639,14 @@ impl Render for AddForm {
                             .child(hint),
                     ),
             )
+            .when(!self.as_link, |this| {
+                this.child(view_picker(
+                    "add-view",
+                    self.view,
+                    cx.entity().downgrade(),
+                    |f: &mut Self, v| f.view = v,
+                ))
+            })
             .child(
                 div()
                     .text_xs()
@@ -632,5 +672,145 @@ impl Render for AddForm {
             .when_some(self.error.clone(), |this, error| {
                 this.child(div().text_sm().text_color(theme.danger).child(error))
             })
+    }
+}
+
+/// "Shown as" and a menu of the table and every chart; `set` stores the pick.
+pub(super) fn view_picker<T: 'static>(
+    id: &'static str,
+    current: Option<ChartView>,
+    this: WeakEntity<T>,
+    set: fn(&mut T, Option<ChartView>),
+) -> impl IntoElement {
+    h_flex()
+        .gap_1()
+        .items_center()
+        .text_xs()
+        .child("Shown as")
+        .child(
+            Button::new(id)
+                .label(view_label(current))
+                .ghost()
+                .xsmall()
+                .dropdown_menu(move |mut menu, _, _| {
+                    let views = std::iter::once(None).chain(ChartStyle::ALL.map(|style| {
+                        Some(ChartView {
+                            style,
+                            series: None,
+                        })
+                    }));
+                    for view in views {
+                        let this = this.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(view_label(view))
+                                .checked(view == current)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this.update(cx, |f, cx| {
+                                        set(f, view);
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                }),
+        )
+}
+
+/// A new tile from a query typed in: title, SQL and how it is shown.
+pub struct QueryForm {
+    title: Entity<InputState>,
+    sql: Entity<TextareaState>,
+    view: Option<ChartView>,
+    error: Option<SharedString>,
+}
+
+impl QueryForm {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let title = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
+        let sql = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(4, 12)
+                .placeholder("select …")
+        });
+        window.focus(&sql.read(cx).focus_handle(cx), cx);
+        Self {
+            title,
+            sql,
+            view: None,
+            error: None,
+        }
+    }
+
+    pub fn submit(&mut self, cx: &mut Context<Self>) -> Option<Tile> {
+        let sql = self.sql.read(cx).value().trim().to_string();
+        if sql.is_empty() {
+            self.error = Some("Write the query".into());
+            cx.notify();
+            return None;
+        }
+        Some(Tile {
+            title: self.title.read(cx).value().trim().to_string(),
+            sql,
+            view: self.view,
+            ..Tile::default()
+        })
+    }
+}
+
+impl Render for QueryForm {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let danger = cx.theme().danger;
+        v_flex()
+            .gap_2()
+            .child(Input::new(&self.title))
+            .child(Textarea::new(&self.sql))
+            .child(view_picker(
+                "query-view",
+                self.view,
+                cx.entity().downgrade(),
+                |f: &mut Self, v| f.view = v,
+            ))
+            .when_some(self.error.clone(), |this, error| {
+                this.child(div().text_sm().text_color(danger).child(error))
+            })
+    }
+}
+
+/// "Ask AI": what the tile should show, in a sentence.
+pub struct AskForm {
+    question: Entity<TextareaState>,
+}
+
+impl AskForm {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let question = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 6)
+                .placeholder("Signups per day this month, by plan")
+        });
+        window.focus(&question.read(cx).focus_handle(cx), cx);
+        Self { question }
+    }
+
+    pub fn question(&self, cx: &App) -> String {
+        self.question.read(cx).value().trim().to_string()
+    }
+}
+
+impl Render for AskForm {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "What should the tile show? The assistant writes the query; add it \
+                         to the board from its answer.",
+                    ),
+            )
+            .child(Textarea::new(&self.question))
     }
 }

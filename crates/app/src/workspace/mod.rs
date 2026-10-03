@@ -174,6 +174,9 @@ pub struct Workspace {
     mcp: mcp::Mcp,
     /// The assistant's chat: where its tool calls go.
     assistant: assistant::Assistant,
+    /// The board the assistant was last asked for a tile from, and the question:
+    /// "Add to board" on its answer goes there.
+    board_asked: Option<(String, String)>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -295,6 +298,7 @@ impl Workspace {
             ai_keys: None,
             mcp: mcp::Mcp::default(),
             assistant: assistant::Assistant::default(),
+            board_asked: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![
                 search_sub,

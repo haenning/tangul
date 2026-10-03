@@ -2151,3 +2151,75 @@ fn board_details_keep_links_without_showing_where_they_point(cx: &mut TestAppCon
         assert_eq!(board.links, links);
     });
 }
+
+#[gpui_kit::test]
+fn add_tile_offers_bookmarks_and_recent_queries(cx: &mut TestAppContext) {
+    use tangul_data::local::{Bookmark, HistoryEntry, NewHistory, Source};
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(handle, &workspace, &[], cx);
+    cx.update(|cx| {
+        workspace.update(cx, |ws, _| {
+            let bookmark = Bookmark {
+                id: "bm".into(),
+                name: "Orders per day".into(),
+                sql: "select 2".into(),
+                database_id: Some("db".into()),
+                ..Default::default()
+            };
+            ws.data.local.upsert_bookmark(&bookmark, "fp").unwrap();
+            for (at, sql) in [(1, "select 5"), (2, "select 6"), (3, "select 5")] {
+                ws.data
+                    .local
+                    .add_history(&NewHistory {
+                        database_id: "db",
+                        user_id: "app",
+                        sql,
+                        fingerprint: sql,
+                        entry: HistoryEntry {
+                            sql: sql.into(),
+                            source: Source::App,
+                            started_at: at,
+                            duration_ms: 1,
+                            rows: Some(1),
+                            error: None,
+                        },
+                    })
+                    .unwrap();
+            }
+        })
+    });
+    cx.update(|cx| {
+        let choices = board_tab(&workspace, cx).read(cx).choices(cx);
+        assert_eq!(choices.bookmarks[0].sql, "select 2");
+        // Newest first, each query once.
+        assert_eq!(choices.history, ["select 5", "select 6"]);
+        // No assistant set up: no "Ask AI".
+        assert!(!choices.ai);
+        assert!(choices.boards.iter().all(|(b, _)| *b != id));
+    });
+}
+
+#[gpui_kit::test]
+fn an_answer_to_ask_ai_goes_onto_the_board_it_was_asked_from(cx: &mut TestAppContext) {
+    use crate::board::BoardEvent;
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(handle, &workspace, &["select 1"], cx);
+    let tab = cx.update(|cx| board_tab(&workspace, cx));
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |_, cx| {
+            cx.emit(BoardEvent::AskAi("Signups per day".into()))
+        })
+    });
+    cx.update(|cx| assert!(shows(&workspace, Panel::Assistant, cx)));
+    // "Add to board" on the answer's SQL: the dialog has that board chosen.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_answer_to_board("select 9", window, cx))
+    });
+    step(handle, cx, |window, cx| window.click("add", cx));
+    cx.update(|cx| {
+        let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
+        assert_eq!(board.tiles.len(), 2);
+        assert_eq!(board.tiles[1].title, "Signups per day");
+        assert_eq!(board.tiles[1].sql, "select 9");
+    });
+}

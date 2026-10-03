@@ -15,10 +15,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use tangul_assist::suggest::one_line;
 use tangul_core::board::{LinkTo, Refresh, Row, Tile, Width, is_web, rows};
-use tangul_service::boards::Edit;
+use tangul_service::boards::{self, Edit};
 
-use super::form::TileForm;
+use super::form::{AskForm, QueryForm, TileForm};
 use super::{BoardEvent, BoardTab, link_action, link_icon};
 use crate::assets::Lucide;
 
@@ -236,6 +237,7 @@ impl BoardTab {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(status)
+                            .child(self.render_add_menu(cx))
                             .child(refresh_menu)
                             .child(
                                 Button::new("board-refresh")
@@ -462,6 +464,112 @@ impl BoardTab {
                         }
                     }))
             })
+    }
+
+    /// "Add tile": from a bookmark or the history in one click, a query typed in,
+    /// or (with the assistant set up) asked of the AI.
+    fn render_add_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (this, choices) = (cx.entity().downgrade(), self.choices.clone());
+        Button::new("board-add")
+            .icon(IconName::Plus)
+            .label("Add tile")
+            .ghost()
+            .xsmall()
+            .dropdown_menu(move |mut menu, window, cx| {
+                let choices = choices.as_ref().map(|f| f(cx)).unwrap_or_default();
+                let add = |label: String, tile: Tile, this: &WeakEntity<BoardTab>| {
+                    let this = this.clone();
+                    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        let tile = tile.clone();
+                        let _ =
+                            this.update(cx, |_, cx| cx.emit(BoardEvent::Edit(Edit::AddTile(tile))));
+                    })
+                };
+                if !choices.bookmarks.is_empty() {
+                    let (bookmarks, this) = (choices.bookmarks.clone(), this.clone());
+                    menu = menu.submenu("From bookmark", window, cx, move |mut menu, _, _| {
+                        for b in &bookmarks {
+                            let tile = boards::tile(&b.name, &b.sql, b.view);
+                            menu = menu.item(add(b.name.clone(), tile, &this));
+                        }
+                        menu.max_h(px(320.)).scrollable(true)
+                    });
+                }
+                if !choices.history.is_empty() {
+                    let (history, this) = (choices.history.clone(), this.clone());
+                    menu = menu.submenu("From history", window, cx, move |mut menu, _, _| {
+                        for sql in &history {
+                            let line = one_line(sql, 60);
+                            let tile = boards::tile(&one_line(sql, 40), sql, None);
+                            menu = menu.item(add(line, tile, &this));
+                        }
+                        menu.max_h(px(320.)).scrollable(true)
+                    });
+                }
+                let query = this.clone();
+                menu = menu.item(PopupMenuItem::new("New query…").on_click(
+                    move |_, window, cx| {
+                        let _ = query.update(cx, |t, cx| t.open_query_form(window, cx));
+                    },
+                ));
+                if choices.ai {
+                    let ask = this.clone();
+                    menu = menu.item(PopupMenuItem::new("Ask AI…").on_click(
+                        move |_, window, cx| {
+                            let _ = ask.update(cx, |t, cx| t.open_ask_form(window, cx));
+                        },
+                    ));
+                }
+                menu
+            })
+    }
+
+    /// A tile from a query typed in.
+    fn open_query_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let form = cx.new(|cx| QueryForm::new(window, cx));
+        let board = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let save = {
+                let (form, board) = (form.clone(), board.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let Some(tile) = form.update(cx, |f, cx| f.submit(cx)) else {
+                        return;
+                    };
+                    let _ =
+                        board.update(cx, |_, cx| cx.emit(BoardEvent::Edit(Edit::AddTile(tile))));
+                    window.close_dialog(cx);
+                }
+            };
+            dialog
+                .title("New tile")
+                .w(px(560.))
+                .child(form.clone())
+                .footer(footer(save))
+        });
+    }
+
+    /// What the tile should show, asked of the assistant.
+    fn open_ask_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let form = cx.new(|cx| AskForm::new(window, cx));
+        let board = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let save = {
+                let (form, board) = (form.clone(), board.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let question = form.read(cx).question(cx);
+                    if question.is_empty() {
+                        return;
+                    }
+                    let _ = board.update(cx, |_, cx| cx.emit(BoardEvent::AskAi(question)));
+                    window.close_dialog(cx);
+                }
+            };
+            dialog
+                .title("Ask AI for a tile")
+                .w(px(480.))
+                .child(form.clone())
+                .footer(footer(save))
+        });
     }
 
     fn open_tile_form(&mut self, tile: &str, window: &mut Window, cx: &mut Context<Self>) {

@@ -6,11 +6,13 @@ use tangul_core::board::{Board, Link, LinkTo, Tile};
 use tangul_service::boards::{self, Edit};
 
 use super::*;
-use crate::board::{AddForm, BoardEvent, BoardTab, Choices, DetailsForm, Target};
+use crate::board::{
+    AddForm, Adding, BoardEvent, BoardTab, BookmarkChoice, Choices, DetailsForm, Target,
+};
 
 /// What "Add to board" adds: a tile, or the same as a link (chosen in the dialog).
 #[derive(Clone)]
-pub(super) struct Adding {
+pub(super) struct Item {
     pub(super) tile: Tile,
     pub(super) link: Link,
 }
@@ -40,6 +42,19 @@ impl Workspace {
             let (tab_id, engine) = (TabId(self.next_id()), self.engine.clone());
             let tab = cx.new(|cx| BoardTab::new(tab_id, board, engine, conn, dialect, window, cx));
             let events = cx.subscribe_in(&tab, window, Self::on_board_event);
+            let (workspace, db_id, board_id) = (
+                cx.entity().downgrade(),
+                tab.read(cx).board().database_id.clone(),
+                id.to_string(),
+            );
+            tab.update(cx, |t, _| {
+                t.set_choices(Rc::new(move |cx| {
+                    workspace
+                        .upgrade()
+                        .map(|ws| ws.read(cx).link_choices(&db_id, &board_id))
+                        .unwrap_or_default()
+                }))
+            });
             self.tabs.push(TabItem::Board(tab), Some(events));
             self.check_board_links(cx);
         }
@@ -120,6 +135,16 @@ impl Workspace {
                 if let Some(link) = link {
                     self.open_link(&db_id, link, window, cx);
                 }
+            }
+            BoardEvent::AskAi(question) => {
+                let name = tab.read(cx).board().name.clone();
+                self.board_asked = Some((board_id, question.clone()));
+                let prompt = format!(
+                    "For a tile on the board “{name}”: {question}\n\nWrite one query that \
+                     reads this (a small result; ordered by time if it is over time) and say \
+                     whether a table, lines, areas or bars show it best."
+                );
+                self.ask_assistant(prompt, true, window, cx);
             }
             BoardEvent::EditDetails => self.open_details(tab.read(cx).board().clone(), window, cx),
             BoardEvent::ConnectionFailed(conn) => {
@@ -213,7 +238,12 @@ impl Workspace {
                 .local
                 .bookmarks_for(Some(db_id))
                 .into_iter()
-                .map(|b| (b.id, b.name, b.view))
+                .map(|b| BookmarkChoice {
+                    id: b.id,
+                    name: b.name,
+                    sql: b.sql,
+                    view: b.view,
+                })
                 .collect(),
             boards: self
                 .data
@@ -224,6 +254,7 @@ impl Workspace {
                 .map(|b| (b.id.clone(), b.name.clone()))
                 .collect(),
             history,
+            ai: self.assistant_ready(),
         }
     }
 
@@ -333,7 +364,7 @@ impl Workspace {
         let Some(db_id) = self.active_db.clone() else {
             return;
         };
-        self.open_add_dialog("New board", None, db_id, window, cx);
+        self.open_add_dialog("New board", None, db_id, None, window, cx);
     }
 
     /// "Add to board" for the query of tab `id`.
@@ -353,14 +384,14 @@ impl Workspace {
             let t = tab.read(cx);
             (t.title.to_string(), t.sql(cx), t.chart_shown(cx))
         };
-        let adding = Adding {
+        let adding = Item {
             tile: boards::tile(&title, &sql, view),
             link: Link {
                 label: title,
                 to: LinkTo::Query { sql, view },
             },
         };
-        self.open_add_dialog("Add to board", Some(adding), db_id, window, cx);
+        self.open_add_dialog("Add to board", Some(adding), db_id, None, window, cx);
     }
 
     /// "Add to board" for a bookmark (on the selected database).
@@ -374,14 +405,14 @@ impl Workspace {
         else {
             return;
         };
-        let adding = Adding {
+        let adding = Item {
             tile: boards::tile(&bookmark.name, &bookmark.sql, bookmark.view),
             link: Link {
                 label: bookmark.name.clone(),
                 to: LinkTo::Bookmark(bookmark.id.clone()),
             },
         };
-        self.open_add_dialog("Add to board", Some(adding), db_id, window, cx);
+        self.open_add_dialog("Add to board", Some(adding), db_id, None, window, cx);
     }
 
     /// The dialog for a tile or link (or, without one, a new empty board): its
@@ -390,8 +421,9 @@ impl Workspace {
     fn open_add_dialog(
         &mut self,
         title: &'static str,
-        tile: Option<Adding>,
+        tile: Option<Item>,
         db_id: String,
+        preselect: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -409,25 +441,42 @@ impl Workspace {
         let tile_title = tile
             .as_ref()
             .map_or(String::new(), |t| t.tile.title.clone());
-        let form = cx.new(|cx| AddForm::new(&tile_title, choices, tile.is_some(), window, cx));
+        let view = tile.as_ref().and_then(|t| t.tile.view);
+        let form = cx.new(|cx| {
+            AddForm::new(
+                &tile_title,
+                choices,
+                tile.is_some(),
+                view,
+                preselect.as_deref(),
+                window,
+                cx,
+            )
+        });
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let save = {
                 let (form, workspace, tile, db_id) =
                     (form.clone(), workspace.clone(), tile.clone(), db_id.clone());
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let Some((title, target, as_link)) = form.update(cx, |f, cx| f.submit(cx))
+                    let Some(Adding {
+                        title,
+                        target,
+                        as_link,
+                        view,
+                    }) = form.update(cx, |f, cx| f.submit(cx))
                     else {
                         return;
                     };
-                    let tile = tile.clone().map(|adding| match as_link {
+                    let tile = tile.clone().map(|item| match as_link {
                         false => Edit::AddTile(Tile {
                             title,
-                            ..adding.tile
+                            view,
+                            ..item.tile
                         }),
                         true => Edit::AddLink(Link {
                             label: title,
-                            ..adding.link
+                            ..item.link
                         }),
                     });
                     let _ = workspace.update(cx, |ws, cx| {
@@ -459,6 +508,43 @@ impl Workspace {
                     ),
             )
         });
+    }
+
+    /// "Add to board" for SQL from the assistant's answer: to the board it was
+    /// asked for from, if any (titled with the question), else picked in the dialog.
+    pub(super) fn add_answer_to_board(
+        &mut self,
+        sql: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let asked = self
+            .board_asked
+            .clone()
+            .filter(|(id, _)| self.data.boards.get(id).is_some());
+        let db_id = match &asked {
+            Some((id, _)) => self.data.boards.get(id).map(|b| b.database_id.clone()),
+            None => self.active_db.clone(),
+        };
+        let Some(db_id) = db_id else {
+            return;
+        };
+        let title = asked.as_ref().map_or_else(
+            || "From the assistant".to_string(),
+            |(_, q)| one_line(q, 40),
+        );
+        let item = Item {
+            tile: boards::tile(&title, sql, None),
+            link: Link {
+                label: title.clone(),
+                to: LinkTo::Query {
+                    sql: sql.trim().to_string(),
+                    view: None,
+                },
+            },
+        };
+        let preselect = asked.map(|(id, _)| id);
+        self.open_add_dialog("Add to board", Some(item), db_id, preselect, window, cx);
     }
 
     /// Adds a tile or link (`add`) to the target board (made first if new) and
