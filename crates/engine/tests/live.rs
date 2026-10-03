@@ -2,6 +2,8 @@
 //!   TANGUL_TEST_PG=postgres:@127.0.0.1:55432/postgres
 //!   TANGUL_TEST_MYSQL=root:@127.0.0.1:53306/app
 //!   TANGUL_TEST_SSH=tangul:tangul@127.0.0.1:52222  (bastion that reaches postgres:5432)
+//!   TANGUL_TEST_SSH_DB=127.0.0.1:55432  (Postgres as the bastion sees it; default
+//!   postgres:5432, the Docker network's name)
 //! (`make test-live` starts the databases from docker-compose.yml and sets all three.)
 
 use std::time::Duration;
@@ -820,7 +822,8 @@ async fn mysql() {
 }
 
 /// Through the SSH bastion to Postgres: an unknown host key is reported (not
-/// accepted), and after trusting it the connection works.
+/// accepted), and after trusting it the connection works. Postgres is
+/// `TANGUL_TEST_SSH_DB` as the bastion sees it (`postgres:5432` in Docker).
 #[tokio::test]
 async fn ssh_tunnel() {
     let Some(url) = std::env::var("TANGUL_TEST_SSH").ok() else {
@@ -830,6 +833,8 @@ async fn ssh_tunnel() {
     let (creds, hostport) = url.split_once('@').expect("user:pw@host:port");
     let (user, password) = creds.split_once(':').expect("user:pw");
     let (host, port) = hostport.split_once(':').expect("host:port");
+    let db = std::env::var("TANGUL_TEST_SSH_DB").unwrap_or_else(|_| "postgres:5432".into());
+    let (db_host, db_port) = db.split_once(':').expect("TANGUL_TEST_SSH_DB: host:port");
     let known_hosts =
         std::env::temp_dir().join(format!("tangul-known-hosts-{}", std::process::id()));
     let _ = std::fs::remove_file(&known_hosts);
@@ -850,8 +855,8 @@ async fn ssh_tunnel() {
         secret: Some(password.into()),
     };
     let cfg = ConnectConfig {
-        host: "postgres".into(),
-        port: 5432,
+        host: db_host.into(),
+        port: db_port.parse().expect("TANGUL_TEST_SSH_DB port"),
         user: "postgres".into(),
         password: None,
         database: "postgres".into(),

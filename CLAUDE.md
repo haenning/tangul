@@ -180,7 +180,9 @@ explicit OK, and keep them covered by tests.
 ## Commands
 
 - `make run-dev`: dev databases (Docker) plus the app with dev-only profiles
-- `make test`, `make test-live` (against the dev databases)
+- `make test`, `make test-live` (against the dev databases); without Docker (a cloud
+  session on Debian/Ubuntu): `make test-live-native`, which installs and starts the same
+  databases and SSH bastion with apt (`scripts/dev-db-native.sh`)
 - UI tests (`crates/app/src/workspace/ui_tests.rs`): the real workspace in a headless
   window, driven by clicks and keys via gpui-kit's harness (`test-support`), with
   `Data::in_memory()` and `tangul_engine::detached()`. Give elements you want to find
