@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use tangul_core::board::{Board, Link, Refresh, Tile, Width};
+use tangul_core::board::{Board, Link, LinkTo, Refresh, Tile, Width};
 use tangul_core::chart::ChartView;
 use tangul_data::boards::Boards;
 use tangul_data::profiles::new_id;
@@ -15,8 +15,10 @@ use tangul_data::profiles::new_id;
 pub enum Edit {
     Rename(String),
     Describe(String),
-    /// All links at once (the pills, in order); only web addresses.
+    /// All links at once (the pills, in order).
     SetLinks(Vec<Link>),
+    /// A link at the end ("Add to board" as a link).
+    AddLink(Link),
     SetRefresh(Refresh),
     Archive(bool),
     /// Adds a tile at the end; it gets an id of its own.
@@ -102,55 +104,14 @@ pub fn tile(title: &str, sql: &str, view: Option<ChartView>) -> Tile {
     }
 }
 
-/// Links from text, one per line: a label and the address last (`Epic
-/// https://…`), or only the address (then it is the label too). Blank lines are
-/// skipped; [`Edit::SetLinks`] checks the addresses.
-pub fn parse_links(text: &str) -> Vec<Link> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| match line.rsplit_once(char::is_whitespace) {
-            Some((label, url)) => Link {
-                label: label.trim().into(),
-                url: url.into(),
-            },
-            None => Link {
-                label: line.into(),
-                url: line.into(),
-            },
-        })
-        .collect()
-}
-
-/// [`parse_links`]' form of `links`, to edit them as text.
-pub fn links_text(links: &[Link]) -> String {
-    links
-        .iter()
-        .map(|l| match l.label == l.url || l.label.is_empty() {
-            true => l.url.clone(),
-            false => format!("{} {}", l.label, l.url),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn edit_board(board: &mut Board, edit: Edit) -> Result<(), String> {
     match edit {
         Edit::Rename(name) => board.name = name_of(&name)?,
         Edit::Describe(text) => board.description = text.trim().into(),
         Edit::SetLinks(links) => {
-            let links: Vec<Link> = links
-                .into_iter()
-                .map(|l| Link {
-                    label: l.label.trim().into(),
-                    url: l.url.trim().into(),
-                })
-                .collect();
-            if let Some(bad) = links.iter().find(|l| !l.is_web()) {
-                return Err(format!("not a web address: {}", bad.url));
-            }
-            board.links = links;
+            board.links = links.into_iter().map(link_of).collect::<Result<_, _>>()?;
         }
+        Edit::AddLink(link) => board.links.push(link_of(link)?),
         Edit::SetRefresh(refresh) => {
             board.refresh = match refresh {
                 Refresh::Every(secs) => Refresh::Every(secs.max(Refresh::MIN_SECONDS)),
@@ -195,6 +156,31 @@ fn edit_board(board: &mut Board, edit: Edit) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `link` trimmed, if it has a label and somewhere to go.
+fn link_of(link: Link) -> Result<Link, String> {
+    let label = link.label.trim().to_string();
+    if label.is_empty() {
+        return Err("a link needs a label".into());
+    }
+    let to = match link.to {
+        LinkTo::Url(url) => LinkTo::Url(url.trim().into()),
+        LinkTo::Query { sql, view } => LinkTo::Query {
+            sql: sql.trim().into(),
+            view,
+        },
+        other => other,
+    };
+    let link = Link { label, to };
+    if !link.is_valid() {
+        return Err(match &link.to {
+            LinkTo::Url(url) => format!("not a web address: {url}"),
+            LinkTo::Query { .. } => format!("{}: a query link needs a query", link.label),
+            LinkTo::Bookmark(_) | LinkTo::Board(_) => format!("{}: goes nowhere", link.label),
+        });
+    }
+    Ok(link)
 }
 
 fn name_of(name: &str) -> Result<String, String> {
@@ -324,58 +310,54 @@ mod tests {
     }
 
     #[test]
-    fn links_are_web_addresses_only() {
+    fn links_need_a_label_and_somewhere_to_go() {
         let mut boards = Boards::open(None);
         let id = with_tiles(&mut boards, 0).id;
-        let link = |url: &str| Link {
-            label: " Epic ".into(),
-            url: url.into(),
+        let link = |label: &str, to: LinkTo| Link {
+            label: label.into(),
+            to,
+        };
+        let query = |sql: &str| LinkTo::Query {
+            sql: sql.into(),
+            view: ChartView::from_key("bars"),
         };
         let b = apply(
             &mut boards,
             &id,
-            Edit::SetLinks(vec![link(" https://x.io ")]),
+            Edit::SetLinks(vec![
+                link(" Epic ", LinkTo::Url(" https://x.io ".into())),
+                link("Orders", LinkTo::Bookmark("b1".into())),
+            ]),
         )
         .unwrap();
         assert_eq!(
             b.links,
-            [Link {
-                label: "Epic".into(),
-                url: "https://x.io".into()
-            }]
-        );
-        let error = apply(
-            &mut boards,
-            &id,
-            Edit::SetLinks(vec![link("https://ok.io"), link("file:///etc")]),
-        )
-        .unwrap_err();
-        assert!(error.contains("file:///etc"));
-        assert_eq!(boards.get(&id).unwrap().links.len(), 1, "unchanged");
-    }
-
-    #[test]
-    fn links_are_edited_as_text() {
-        let links = parse_links("  Epic  board https://x.io/1 \n\nhttps://y.io\n");
-        assert_eq!(
-            links,
             [
-                Link {
-                    label: "Epic  board".into(),
-                    url: "https://x.io/1".into()
-                },
-                Link {
-                    label: "https://y.io".into(),
-                    url: "https://y.io".into()
-                },
+                link("Epic", LinkTo::Url("https://x.io".into())),
+                link("Orders", LinkTo::Bookmark("b1".into())),
             ]
         );
-        assert_eq!(
-            links_text(&links),
-            "Epic  board https://x.io/1\nhttps://y.io"
-        );
-        assert_eq!(parse_links(&links_text(&links)), links);
-        assert!(parse_links(" \n").is_empty());
+        let b = apply(
+            &mut boards,
+            &id,
+            Edit::AddLink(link("By plan", query(" select 1 "))),
+        )
+        .unwrap();
+        assert_eq!(b.links[2], link("By plan", query("select 1")));
+
+        for (bad, why) in [
+            (
+                link("Epic", LinkTo::Url("file:///etc".into())),
+                "file:///etc",
+            ),
+            (link(" ", LinkTo::Board("b2".into())), "label"),
+            (link("Empty", query(" ")), "needs a query"),
+            (link("Gone", LinkTo::Bookmark("".into())), "nowhere"),
+        ] {
+            let error = apply(&mut boards, &id, Edit::AddLink(bad)).unwrap_err();
+            assert!(error.contains(why), "{error}");
+        }
+        assert_eq!(boards.get(&id).unwrap().links.len(), 3, "unchanged");
     }
 
     #[test]

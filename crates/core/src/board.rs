@@ -9,7 +9,11 @@
 //!   "id": "b18f…",
 //!   "name": "Signups",
 //!   "description": "Growth after the launch.",
-//!   "links": [{ "label": "Epic", "url": "https://…" }],
+//!   "links": [
+//!     { "label": "Epic", "url": "https://…" },
+//!     { "label": "Orders per day", "bookmark": "p18f…" },
+//!     { "label": "By plan", "query": { "sql": "select …", "view": "bars" } }
+//!   ],
 //!   "database_id": "p18e…",
 //!   "refresh": { "every": 60 },
 //!   "tiles": [
@@ -67,23 +71,58 @@ impl Board {
     }
 }
 
-/// A link on a board: a web address for now.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// A link on a board, shown by its label and what it does ("Go to bookmark",
+/// "Open in a new tab"); where it points is only stored, never shown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Link {
     pub label: String,
-    pub url: String,
+    #[serde(flatten)]
+    pub to: LinkTo,
+}
+
+/// Where a link goes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkTo {
+    /// A web page (`http` or `https` only).
+    Url(String),
+    /// A bookmark of the database, by id.
+    Bookmark(String),
+    /// Another board, by id.
+    Board(String),
+    /// A query (typed, or from the history) opened in a new tab, shown as `view`.
+    Query {
+        sql: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "view_out",
+            deserialize_with = "view_in"
+        )]
+        view: Option<ChartView>,
+    },
 }
 
 impl Link {
-    /// Whether it may be opened: `http` or `https` only.
-    pub fn is_web(&self) -> bool {
-        let url = self.url.trim();
-        ["http://", "https://"].iter().any(|scheme| {
-            url.get(..scheme.len())
-                .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
-                && url.len() > scheme.len()
-        })
+    /// Whether it may be opened: a web address must be `http` or `https`, a query
+    /// must have SQL, a bookmark or board an id.
+    pub fn is_valid(&self) -> bool {
+        match &self.to {
+            LinkTo::Url(url) => is_web(url),
+            LinkTo::Bookmark(id) | LinkTo::Board(id) => !id.trim().is_empty(),
+            LinkTo::Query { sql, .. } => !sql.trim().is_empty(),
+        }
     }
+}
+
+/// `http://` or `https://` and something after it.
+pub fn is_web(url: &str) -> bool {
+    let url = url.trim();
+    ["http://", "https://"].iter().any(|scheme| {
+        url.get(..scheme.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
+            && url.len() > scheme.len()
+    })
 }
 
 /// When a board's tiles query the database again.
@@ -259,17 +298,64 @@ mod tests {
     }
 
     #[test]
-    fn only_web_links_open() {
-        let link = |url: &str| Link {
+    fn only_web_addresses_and_complete_links_open() {
+        let link = |to: LinkTo| Link {
             label: "x".into(),
-            url: url.into(),
+            to,
         };
-        assert!(link("https://github.com/x").is_web());
-        assert!(link(" HTTP://example.com").is_web());
-        assert!(!link("https://").is_web());
-        assert!(!link("file:///etc/passwd").is_web());
-        assert!(!link("javascript:alert(1)").is_web());
-        assert!(!link("").is_web());
+        let url = |u: &str| link(LinkTo::Url(u.into())).is_valid();
+        assert!(url("https://github.com/x"));
+        assert!(url(" HTTP://example.com"));
+        assert!(!url("https://"));
+        assert!(!url("file:///etc/passwd"));
+        assert!(!url("javascript:alert(1)"));
+        assert!(!url(""));
+        assert!(link(LinkTo::Bookmark("b1".into())).is_valid());
+        assert!(!link(LinkTo::Board(" ".into())).is_valid());
+        let query = |sql: &str| LinkTo::Query {
+            sql: sql.into(),
+            view: None,
+        };
+        assert!(link(query("select 1")).is_valid());
+        assert!(!link(query("  ")).is_valid());
+    }
+
+    #[test]
+    fn links_are_stored_by_what_they_point_to() {
+        let links = vec![
+            Link {
+                label: "Epic".into(),
+                to: LinkTo::Url("https://x.io".into()),
+            },
+            Link {
+                label: "Orders".into(),
+                to: LinkTo::Bookmark("b1".into()),
+            },
+            Link {
+                label: "Other".into(),
+                to: LinkTo::Board("b2".into()),
+            },
+            Link {
+                label: "By plan".into(),
+                to: LinkTo::Query {
+                    sql: "select 1".into(),
+                    view: ChartView::from_key("bars"),
+                },
+            },
+            Link {
+                label: "Rows".into(),
+                to: LinkTo::Query {
+                    sql: "select 2".into(),
+                    view: None,
+                },
+            },
+        ];
+        let json = serde_json::to_string(&links).unwrap();
+        assert_eq!(
+            json,
+            r#"[{"label":"Epic","url":"https://x.io"},{"label":"Orders","bookmark":"b1"},{"label":"Other","board":"b2"},{"label":"By plan","query":{"sql":"select 1","view":"bars"}},{"label":"Rows","query":{"sql":"select 2"}}]"#
+        );
+        assert_eq!(serde_json::from_str::<Vec<Link>>(&json).unwrap(), links);
     }
 
     #[test]
@@ -280,7 +366,7 @@ mod tests {
             description: "Growth.\nMore text.".into(),
             links: vec![Link {
                 label: "Epic".into(),
-                url: "https://example.com".into(),
+                to: LinkTo::Url("https://example.com".into()),
             }],
             database_id: "db".into(),
             refresh: Refresh::Every(30),

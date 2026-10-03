@@ -2,11 +2,21 @@
 //! `tangul_service::boards`), "Add to board" and "Update tile" from a query tab or
 //! a bookmark, and the sidebar panel.
 
-use tangul_core::board::Board;
+use tangul_core::board::{Board, Link, LinkTo, Tile};
 use tangul_service::boards::{self, Edit};
 
 use super::*;
-use crate::board::{AddForm, BoardEvent, BoardTab, Target};
+use crate::board::{AddForm, BoardEvent, BoardTab, Choices, DetailsForm, Target};
+
+/// What "Add to board" adds: a tile, or the same as a link (chosen in the dialog).
+#[derive(Clone)]
+pub(super) struct Adding {
+    pub(super) tile: Tile,
+    pub(super) link: Link,
+}
+
+/// How many recent queries "Add link" offers.
+const RECENT_QUERIES: usize = 15;
 
 impl Workspace {
     /// Shows board `id` in its tab (opened if it isn't).
@@ -31,6 +41,7 @@ impl Workspace {
             let tab = cx.new(|cx| BoardTab::new(tab_id, board, engine, conn, dialect, window, cx));
             let events = cx.subscribe_in(&tab, window, Self::on_board_event);
             self.tabs.push(TabItem::Board(tab), Some(events));
+            self.check_board_links(cx);
         }
         if let Some(tab) = self.tabs.active().cloned() {
             tab.focus(window, cx);
@@ -104,6 +115,13 @@ impl Workspace {
             BoardEvent::OpenSql { title, sql, run } => {
                 self.open_query_on(&db_id, &title, &sql, run, window, cx);
             }
+            BoardEvent::OpenLink(ix) => {
+                let link = tab.read(cx).board().links.get(ix).cloned();
+                if let Some(link) = link {
+                    self.open_link(&db_id, link, window, cx);
+                }
+            }
+            BoardEvent::EditDetails => self.open_details(tab.read(cx).board().clone(), window, cx),
             BoardEvent::ConnectionFailed(conn) => {
                 if self.connections.purpose(conn) == Some(Purpose::Background) {
                     self.engine.send(Command::Disconnect { conn });
@@ -113,6 +131,146 @@ impl Workspace {
                 tab.update(cx, |t, cx| t.set_conn(new, cx));
             }
         }
+    }
+
+    /// Opens what a board's link points to (a web address the board opens itself).
+    fn open_link(&mut self, db_id: &str, link: Link, window: &mut Window, cx: &mut Context<Self>) {
+        match link.to {
+            LinkTo::Url(_) => {}
+            LinkTo::Bookmark(id) => {
+                if self.data.local.bookmark(&id).is_none() {
+                    self.link_gone("bookmark", window, cx);
+                    return;
+                }
+                if self.active_db.as_deref() != Some(db_id) {
+                    self.select_database(db_id.to_string(), window, cx);
+                }
+                self.open_bookmark(&id, true, window, cx);
+            }
+            LinkTo::Board(id) => {
+                if self.data.boards.get(&id).is_none() {
+                    self.link_gone("board", window, cx);
+                    return;
+                }
+                self.open_board(&id, window, cx);
+            }
+            LinkTo::Query { sql, view } => {
+                let tab = self.open_query_on(db_id, &link.label, &sql, true, window, cx);
+                tab.update(cx, |t, cx| t.set_chart_view(view, cx));
+            }
+        }
+    }
+
+    fn link_gone(&mut self, what: &str, window: &mut Window, cx: &mut Context<Self>) {
+        window.push_notification(
+            Notification::warning(format!(
+                "That {what} is gone. Remove the link in the board's details."
+            )),
+            cx,
+        );
+        self.check_board_links(cx);
+    }
+
+    /// Tells the open boards which of their links open nothing any more.
+    pub(super) fn check_board_links(&mut self, cx: &mut Context<Self>) {
+        let tabs: Vec<Entity<BoardTab>> = self
+            .tabs
+            .items()
+            .filter_map(|t| t.board().cloned())
+            .collect();
+        for tab in tabs {
+            let broken: Vec<bool> = tab
+                .read(cx)
+                .board()
+                .links
+                .iter()
+                .map(|l| match &l.to {
+                    LinkTo::Bookmark(id) => self.data.local.bookmark(id).is_none(),
+                    LinkTo::Board(id) => self.data.boards.get(id).is_none(),
+                    LinkTo::Url(_) | LinkTo::Query { .. } => false,
+                })
+                .collect();
+            tab.update(cx, |t, cx| t.set_broken(broken, cx));
+        }
+    }
+
+    /// What links of a board of `db_id` can go to: its bookmarks, its other boards,
+    /// recent queries.
+    fn link_choices(&self, db_id: &str, board_id: &str) -> Choices {
+        let mut history: Vec<String> = Vec::new();
+        for entry in self.data.local.history(db_id, "", &[], 200) {
+            let sql = entry.sql.trim().to_string();
+            if entry.error.is_none() && !sql.is_empty() && !history.contains(&sql) {
+                history.push(sql);
+            }
+            if history.len() == RECENT_QUERIES {
+                break;
+            }
+        }
+        Choices {
+            bookmarks: self
+                .data
+                .local
+                .bookmarks_for(Some(db_id))
+                .into_iter()
+                .map(|b| (b.id, b.name, b.view))
+                .collect(),
+            boards: self
+                .data
+                .boards
+                .for_database(db_id)
+                .into_iter()
+                .filter(|b| b.id != board_id)
+                .map(|b| (b.id.clone(), b.name.clone()))
+                .collect(),
+            history,
+        }
+    }
+
+    /// The board's name, description and links in a dialog.
+    fn open_details(&mut self, board: Board, window: &mut Window, cx: &mut Context<Self>) {
+        let choices = self.link_choices(&board.database_id, &board.id);
+        let form = cx.new(|cx| DetailsForm::new(&board, choices, window, cx));
+        let workspace = cx.entity().downgrade();
+        let id = board.id;
+        window.open_dialog(cx, move |dialog, _, _| {
+            let save = {
+                let (form, workspace, id) = (form.clone(), workspace.clone(), id.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let Some(details) = form.update(cx, |f, cx| f.submit(cx)) else {
+                        return;
+                    };
+                    let _ = workspace.update(cx, |ws, cx| {
+                        for edit in [
+                            Edit::Rename(details.name),
+                            Edit::Describe(details.description),
+                            Edit::SetLinks(details.links),
+                        ] {
+                            ws.edit_board(&id, edit, window, cx);
+                        }
+                        ws.check_board_links(cx);
+                    });
+                    window.close_dialog(cx);
+                }
+            };
+            dialog
+                .title("Board details")
+                .w(px(560.))
+                .child(form.clone())
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("save").label("Save").primary().on_click(save)),
+                )
+        });
     }
 
     /// Opens `sql` in a new tab on database `db_id` (selected first, so it never runs
@@ -195,8 +353,14 @@ impl Workspace {
             let t = tab.read(cx);
             (t.title.to_string(), t.sql(cx), t.chart_shown(cx))
         };
-        let tile = boards::tile(&title, &sql, view);
-        self.open_add_dialog("Add to board", Some(tile), db_id, window, cx);
+        let adding = Adding {
+            tile: boards::tile(&title, &sql, view),
+            link: Link {
+                label: title,
+                to: LinkTo::Query { sql, view },
+            },
+        };
+        self.open_add_dialog("Add to board", Some(adding), db_id, window, cx);
     }
 
     /// "Add to board" for a bookmark (on the selected database).
@@ -210,16 +374,23 @@ impl Workspace {
         else {
             return;
         };
-        let tile = boards::tile(&bookmark.name, &bookmark.sql, bookmark.view);
-        self.open_add_dialog("Add to board", Some(tile), db_id, window, cx);
+        let adding = Adding {
+            tile: boards::tile(&bookmark.name, &bookmark.sql, bookmark.view),
+            link: Link {
+                label: bookmark.name.clone(),
+                to: LinkTo::Bookmark(bookmark.id.clone()),
+            },
+        };
+        self.open_add_dialog("Add to board", Some(adding), db_id, window, cx);
     }
 
-    /// The dialog for a tile (or, without one, a new empty board): its title, and
-    /// one of the database's boards or a new one. The board opens afterwards.
+    /// The dialog for a tile or link (or, without one, a new empty board): its
+    /// title, as a tile or a link, and one of the database's boards or a new one.
+    /// The board opens afterwards.
     fn open_add_dialog(
         &mut self,
         title: &'static str,
-        tile: Option<tangul_core::board::Tile>,
+        tile: Option<Adding>,
         db_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -235,7 +406,9 @@ impl Workspace {
                 .collect(),
             None => Vec::new(),
         };
-        let tile_title = tile.as_ref().map_or(String::new(), |t| t.title.clone());
+        let tile_title = tile
+            .as_ref()
+            .map_or(String::new(), |t| t.tile.title.clone());
         let form = cx.new(|cx| AddForm::new(&tile_title, choices, tile.is_some(), window, cx));
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
@@ -243,12 +416,20 @@ impl Workspace {
                 let (form, workspace, tile, db_id) =
                     (form.clone(), workspace.clone(), tile.clone(), db_id.clone());
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let Some((title, target)) = form.update(cx, |f, cx| f.submit(cx)) else {
+                    let Some((title, target, as_link)) = form.update(cx, |f, cx| f.submit(cx))
+                    else {
                         return;
                     };
-                    let tile = tile
-                        .clone()
-                        .map(|t| tangul_core::board::Tile { title, ..t });
+                    let tile = tile.clone().map(|adding| match as_link {
+                        false => Edit::AddTile(Tile {
+                            title,
+                            ..adding.tile
+                        }),
+                        true => Edit::AddLink(Link {
+                            label: title,
+                            ..adding.link
+                        }),
+                    });
                     let _ = workspace.update(cx, |ws, cx| {
                         ws.add_to_board(&db_id, target, tile, window, cx)
                     });
@@ -280,12 +461,13 @@ impl Workspace {
         });
     }
 
-    /// Adds `tile` to the target board (made first if new) and opens it.
+    /// Adds a tile or link (`add`) to the target board (made first if new) and
+    /// opens it.
     pub(super) fn add_to_board(
         &mut self,
         db_id: &str,
         target: Target,
-        tile: Option<tangul_core::board::Tile>,
+        add: Option<Edit>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -302,10 +484,11 @@ impl Workspace {
                 }
             },
         };
-        if let Some(tile) = tile {
-            self.edit_board(&id, Edit::AddTile(tile), window, cx);
+        if let Some(add) = add {
+            self.edit_board(&id, add, window, cx);
         }
         self.open_board(&id, window, cx);
+        self.check_board_links(cx);
     }
 
     /// "Update tile": the tab's query and chart back into the tile it came from.
@@ -343,6 +526,7 @@ impl Workspace {
                 cx,
             );
         }
+        self.check_board_links(cx);
         cx.notify();
     }
 

@@ -97,6 +97,7 @@ impl Workspace {
             );
         }
         self.refresh_ai_bookmarks();
+        self.check_board_links(cx);
         for tab in self.tabs.queries() {
             if tab.read(cx).bookmark_id.as_deref() == Some(id) {
                 tab.update(cx, |t, _| t.bookmark_id = None);

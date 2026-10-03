@@ -10,19 +10,20 @@
 mod form;
 mod view;
 
-pub use form::{AddForm, Target};
+pub use form::{AddForm, Choices, DetailsForm, Target};
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 use tangul_assist::dialect::Dialect;
-use tangul_core::board::{Board, Refresh};
+use tangul_core::board::{Board, LinkTo, Refresh};
 use tangul_core::chart::ChartView;
 use tangul_core::{ConnId, QueryId, TabId};
 use tangul_engine::{Caller, Command, EngineHandle, QueryError, QueryOptions, QueryOutput};
 use tangul_service::boards::{Batch, Edit, due, next_in};
 
+use crate::assets::Lucide;
 use crate::result_view::{ResultEvent, ResultView};
 
 /// What the board asks of the workspace.
@@ -43,6 +44,11 @@ pub enum BoardEvent {
         sql: String,
         run: bool,
     },
+    /// Open the board's link at this index (not a web address: the board opens
+    /// those itself).
+    OpenLink(usize),
+    /// Edit the board's name, description and links.
+    EditDetails,
     /// A whole refresh failed on this connection (gone, never connected): the
     /// workspace drops it and hands over a new one ([`BoardTab::set_conn`]).
     ConnectionFailed(ConnId),
@@ -72,6 +78,8 @@ pub struct BoardTab {
     editing: bool,
     /// The whole description instead of its first line.
     show_description: bool,
+    /// Per link: what it opens is gone (a deleted bookmark or board).
+    broken: Vec<bool>,
     /// When the last refresh started, and the one running.
     last: Option<Instant>,
     running: Option<QueryId>,
@@ -119,6 +127,7 @@ impl BoardTab {
             tiles: HashMap::new(),
             editing: false,
             show_description: false,
+            broken: Vec::new(),
             last: None,
             running: None,
             updated: None,
@@ -144,6 +153,17 @@ impl BoardTab {
         if stale && self.last.is_some() && self.board.refresh.on_open() {
             self.refresh(cx);
         }
+        cx.notify();
+    }
+
+    /// Whether link `ix` opens nothing any more.
+    pub fn is_broken(&self, ix: usize) -> bool {
+        self.broken.get(ix).copied().unwrap_or(false)
+    }
+
+    /// Which links open nothing any more (a deleted bookmark or board).
+    pub fn set_broken(&mut self, broken: Vec<bool>, cx: &mut Context<Self>) {
+        self.broken = broken;
         cx.notify();
     }
 
@@ -415,6 +435,27 @@ impl BoardTab {
                 view: tile.view,
             });
         }
+    }
+}
+
+/// What a link shows as its kind.
+pub fn link_icon(to: &LinkTo) -> Lucide {
+    match to {
+        LinkTo::Url(_) => Lucide::ExternalLink,
+        LinkTo::Bookmark(_) => Lucide::Bookmark,
+        LinkTo::Board(_) => Lucide::LayoutDashboard,
+        LinkTo::Query { view: None, .. } => Lucide::Table,
+        LinkTo::Query { view: Some(_), .. } => Lucide::ChartLine,
+    }
+}
+
+/// What a link does, as its tooltip says.
+pub fn link_action(to: &LinkTo) -> &'static str {
+    match to {
+        LinkTo::Url(_) => "Open in the browser",
+        LinkTo::Bookmark(_) => "Go to bookmark",
+        LinkTo::Board(_) => "Open board",
+        LinkTo::Query { .. } => "Open in a new tab",
     }
 }
 

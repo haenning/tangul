@@ -1981,7 +1981,7 @@ fn add_to_board_makes_a_new_board_and_a_tile_opens_in_a_tab(cx: &mut TestAppCont
     let (handle, workspace) = open(cx);
     cx.update(|cx| shop_with_ai_user(&workspace, None, cx));
     step(handle, cx, |window, cx| {
-        let tile = boards::tile("Per day", "select 1", None);
+        let tile = boards::Edit::AddTile(boards::tile("Per day", "select 1", None));
         workspace.update(cx, |ws, cx| {
             ws.add_to_board("db", Target::New("Growth".into()), Some(tile), window, cx)
         })
@@ -2005,5 +2005,149 @@ fn add_to_board_makes_a_new_board_and_a_tile_opens_in_a_tab(cx: &mut TestAppCont
             query.read(cx).board_tile,
             Some((board.id, "t1".to_string()))
         );
+    });
+}
+
+#[gpui_kit::test]
+fn board_links_open_what_they_point_to_and_say_when_it_is_gone(cx: &mut TestAppContext) {
+    use tangul_core::board::{Link, LinkTo};
+    use tangul_core::chart::ChartView;
+    use tangul_data::local::Bookmark;
+    use tangul_service::boards::Edit;
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(handle, &workspace, &[], cx);
+    let bars = ChartView::from_key("bars");
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            let bookmark = Bookmark {
+                id: "bm".into(),
+                name: "Orders per day".into(),
+                sql: "select 2".into(),
+                database_id: Some("db".into()),
+                ..Default::default()
+            };
+            ws.data.local.upsert_bookmark(&bookmark, "fp").unwrap();
+            let link = |label: &str, to| Link {
+                label: label.into(),
+                to,
+            };
+            let links = vec![
+                link("Orders", LinkTo::Bookmark("bm".into())),
+                link(
+                    "By plan",
+                    LinkTo::Query {
+                        sql: "select 3".into(),
+                        view: bars,
+                    },
+                ),
+                link("Old board", LinkTo::Board("gone".into())),
+            ];
+            ws.edit_board(&id, Edit::SetLinks(links), window, cx);
+            ws.check_board_links(cx);
+        })
+    });
+    let tabs = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).tabs.items().count());
+    let before = tabs(cx);
+
+    // A query opens in a new tab, shown as it was set.
+    step(handle, cx, |window, cx| {
+        window.click(("board-link", 1usize), cx)
+    });
+    cx.update(|cx| {
+        let query = workspace.read(cx).tabs.active_query().cloned().unwrap();
+        assert_eq!(query.read(cx).title.as_ref(), "By plan");
+        assert_eq!(query.read(cx).sql(cx), "select 3");
+        assert_eq!(query.read(cx).chart_view(cx), bars);
+    });
+
+    // A bookmark opens as the bookmark.
+    let show_board = |cx: &mut TestAppContext| {
+        step(handle, cx, |window, cx| {
+            workspace.update(cx, |ws, cx| ws.open_board(&id, window, cx))
+        })
+    };
+    show_board(cx);
+    step(handle, cx, |window, cx| {
+        window.click(("board-link", 0usize), cx)
+    });
+    cx.update(|cx| {
+        let query = workspace.read(cx).tabs.active_query().cloned().unwrap();
+        assert_eq!(query.read(cx).title.as_ref(), "Orders per day");
+        assert_eq!(query.read(cx).bookmark_id.as_deref(), Some("bm"));
+    });
+
+    // A board that is gone: the link says so and opens nothing.
+    show_board(cx);
+    let opened = tabs(cx);
+    assert_eq!(opened, before + 2);
+    step(handle, cx, |window, cx| {
+        window.click(("board-link", 2usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(workspace.read(cx).tabs.items().count(), opened);
+        assert!(board_tab(&workspace, cx).read(cx).is_broken(2));
+        assert!(!board_tab(&workspace, cx).read(cx).is_broken(0));
+    });
+}
+
+#[gpui_kit::test]
+fn add_to_board_as_a_link(cx: &mut TestAppContext) {
+    use crate::board::Target;
+    use tangul_core::board::{Link, LinkTo};
+    use tangul_service::boards::Edit;
+    let (handle, workspace) = open(cx);
+    cx.update(|cx| shop_with_ai_user(&workspace, None, cx));
+    step(handle, cx, |window, cx| {
+        let link = Edit::AddLink(Link {
+            label: "Raw rows".into(),
+            to: LinkTo::Query {
+                sql: "select 1".into(),
+                view: None,
+            },
+        });
+        workspace.update(cx, |ws, cx| {
+            ws.add_to_board("db", Target::New("Growth".into()), Some(link), window, cx)
+        })
+    });
+    cx.update(|cx| {
+        let board = board_tab(&workspace, cx).read(cx).board().clone();
+        assert!(board.tiles.is_empty());
+        assert_eq!(board.links[0].label, "Raw rows");
+    });
+}
+
+#[gpui_kit::test]
+fn board_details_keep_links_without_showing_where_they_point(cx: &mut TestAppContext) {
+    use tangul_core::board::{Link, LinkTo};
+    use tangul_service::boards::Edit;
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(handle, &workspace, &[], cx);
+    let links = vec![
+        Link {
+            label: "Epic".into(),
+            to: LinkTo::Url("https://example.com/epic".into()),
+        },
+        Link {
+            label: "Other".into(),
+            to: LinkTo::Board("gone".into()),
+        },
+    ];
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.edit_board(&id, Edit::SetLinks(links.clone()), window, cx)
+        })
+    });
+    step(handle, cx, |window, cx| window.click("board-edit", cx));
+    step(handle, cx, |window, cx| window.click("board-details", cx));
+    step(handle, cx, |window, _| {
+        assert!(
+            window.try_find("board-links").is_some(),
+            "the dialog is open"
+        );
+    });
+    step(handle, cx, |window, cx| window.click("save", cx));
+    cx.update(|cx| {
+        let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
+        assert_eq!(board.links, links);
     });
 }

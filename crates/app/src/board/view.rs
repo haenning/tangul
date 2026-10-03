@@ -10,15 +10,16 @@ use gpui_kit::component::{
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
     spinner::Spinner,
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_core::board::{Refresh, Row, Tile, Width, rows};
+use tangul_core::board::{LinkTo, Refresh, Row, Tile, Width, is_web, rows};
 use tangul_service::boards::Edit;
 
-use super::form::{DetailsForm, TileForm};
-use super::{BoardEvent, BoardTab};
+use super::form::TileForm;
+use super::{BoardEvent, BoardTab, link_action, link_icon};
 use crate::assets::Lucide;
 
 /// A tile's height; tables scroll inside it.
@@ -156,31 +157,45 @@ impl BoardTab {
                 })
         });
         let links = (!board.links.is_empty()).then(|| {
-            h_flex().gap_1().flex_wrap().children(
-                board
-                    .links
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| l.is_web())
-                    .map(|(i, link)| {
-                        let url = link.url.clone();
-                        h_flex()
-                            .id(("board-link", i))
-                            .gap_1()
-                            .px_2()
-                            .py_0p5()
-                            .items_center()
-                            .rounded_full()
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_xs()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.secondary))
-                            .child(Icon::new(Lucide::ExternalLink).xsmall())
-                            .child(link.label.clone())
-                            .on_click(move |_, _, cx| cx.open_url(&url))
-                    }),
-            )
+            h_flex()
+                .gap_1()
+                .flex_wrap()
+                .children(board.links.iter().enumerate().map(|(i, link)| {
+                    let broken = self.is_broken(i);
+                    let tooltip: SharedString = if broken {
+                        "It is gone: remove the link in the board's details".into()
+                    } else {
+                        link_action(&link.to).into()
+                    };
+                    let to = link.to.clone();
+                    h_flex()
+                        .id(("board-link", i))
+                        .test_support()
+                        .gap_1()
+                        .px_2()
+                        .py_0p5()
+                        .items_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_xs()
+                        .when(broken, |this| this.text_color(theme.muted_foreground))
+                        .when(!broken, |this| {
+                            this.cursor_pointer().hover(|s| s.bg(theme.secondary))
+                        })
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .child(Icon::new(link_icon(&link.to)).xsmall())
+                        .child(link.label.clone())
+                        .on_click(cx.listener(move |_, _, _, cx| match &to {
+                            _ if broken => {}
+                            LinkTo::Url(url) => {
+                                if is_web(url) {
+                                    cx.open_url(url)
+                                }
+                            }
+                            _ => cx.emit(BoardEvent::OpenLink(i)),
+                        }))
+                }))
         });
         v_flex()
             .px_4()
@@ -209,9 +224,7 @@ impl BoardTab {
                                 .ghost()
                                 .xsmall()
                                 .on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.open_details(window, cx)
-                                    }),
+                                    cx.listener(|_, _, _, cx| cx.emit(BoardEvent::EditDetails)),
                                 ),
                         )
                     })
@@ -449,33 +462,6 @@ impl BoardTab {
                         }
                     }))
             })
-    }
-
-    /// Name, description and links in a dialog.
-    fn open_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let form = cx.new(|cx| DetailsForm::new(&self.board, window, cx));
-        let board = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let save = {
-                let (form, board) = (form.clone(), board.clone());
-                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let Some(details) = form.update(cx, |f, cx| f.submit(cx)) else {
-                        return;
-                    };
-                    let _ = board.update(cx, |_, cx| {
-                        cx.emit(BoardEvent::Edit(Edit::Rename(details.name)));
-                        cx.emit(BoardEvent::Edit(Edit::Describe(details.description)));
-                        cx.emit(BoardEvent::Edit(Edit::SetLinks(details.links)));
-                    });
-                    window.close_dialog(cx);
-                }
-            };
-            dialog
-                .title("Board details")
-                .w(px(520.))
-                .child(form.clone())
-                .footer(footer(save))
-        });
     }
 
     fn open_tile_form(&mut self, tile: &str, window: &mut Window, cx: &mut Context<Self>) {
