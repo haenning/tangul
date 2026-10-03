@@ -1,5 +1,6 @@
 //! The engine against a local SQLite file (no server needed): the gate (who may run
-//! what), read-only files, the statement time limit, whole results and the audit log.
+//! what), read-only files, the statement time limit, whole results, batches and the
+//! audit log.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -227,6 +228,114 @@ async fn assistant_writes_are_proposed_never_run_and_audited() {
             ("assistant", "proposed"),
             ("assistant", "proposed"),
             ("assistant", "ran"),
+        ]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_runs_reads_in_order_and_one_failing_costs_the_others_nothing() {
+    let (dir, engine, _events) = setup("batch").await;
+    let board = QueryOptions::new(Caller::Board);
+    let statements = [
+        "SELECT count(*) FROM t -- comment",
+        "DELETE FROM t WHERE x = 1",
+        "SELECT * FROM missing",
+        FOREVER,
+        "SELECT max(x) FROM t",
+    ];
+    let out = engine
+        .query_batch(
+            QueryId(1),
+            ConnId(1),
+            statements.iter().map(|s| s.to_string()).collect(),
+            board.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.len(), statements.len());
+    let cell = |i: usize| {
+        out[i].as_ref().unwrap().results[0]
+            .cell(0, 0)
+            .map(str::to_string)
+    };
+    assert_eq!(cell(0).as_deref(), Some("3"));
+    let refused = out[1].as_ref().unwrap_err();
+    assert!(refused.message.contains("on a board"), "{refused}");
+    assert_eq!(refused.proposal, None);
+    let missing = out[2].as_ref().unwrap_err();
+    assert!(missing.message.contains("missing"), "{missing}");
+    let slow = out[3].as_ref().unwrap_err();
+    assert!(slow.message.contains("time limit"), "{slow}");
+    assert_eq!(cell(4).as_deref(), Some("3"));
+
+    // Nothing that may run: no session needed, still a result per statement.
+    let out = engine
+        .query_batch(
+            QueryId(2),
+            ConnId(1),
+            vec!["DROP TABLE t".into()],
+            board.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(out[0].is_err());
+    let out = engine
+        .query_batch(QueryId(3), ConnId(1), Vec::new(), board.clone())
+        .await
+        .unwrap();
+    assert!(out.is_empty());
+
+    // Tabs are the user's only path; a batch is never one.
+    let error = engine
+        .query_batch(
+            QueryId(4),
+            ConnId(1),
+            vec!["SELECT 1".into()],
+            QueryOptions::new(Caller::User),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.message, "only readers run batches");
+    let error = engine
+        .query_batch(
+            QueryId(5),
+            ConnId(9),
+            vec!["SELECT 1".into()],
+            board.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.message, "not connected");
+
+    // Cancelled: the rest doesn't run.
+    let batch = engine.query_batch(
+        QueryId(6),
+        ConnId(1),
+        vec![FOREVER.into(), "SELECT 1".into()],
+        board,
+    );
+    let cancel = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        engine.send(Command::Cancel { query: QueryId(6) });
+    };
+    let (out, ()) = tokio::join!(batch, cancel);
+    let out = out.unwrap();
+    assert!(out[0].is_err());
+    assert_eq!(out[1].as_ref().unwrap_err().message, "cancelled");
+
+    // Boards run often: only what was refused is audited.
+    let audit = Local::open(Some(&dir)).audit(10);
+    let outcomes: Vec<(&str, &str, &str)> = audit
+        .iter()
+        .rev()
+        .map(|e| (e.caller.as_str(), e.outcome.as_str(), e.sql.as_str()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("board", "refused", "DELETE FROM t WHERE x = 1"),
+            ("board", "refused", "DROP TABLE t"),
         ]
     );
     std::fs::remove_dir_all(&dir).unwrap();

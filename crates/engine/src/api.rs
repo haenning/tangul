@@ -55,6 +55,18 @@ pub enum Command {
         options: QueryOptions,
         reply: oneshot::Sender<Result<QueryOutput, QueryError>>,
     },
+    /// Runs `statements` one after another on one spare session, in one read-only
+    /// transaction, and answers on `reply` with a result per statement (in order).
+    /// For readers only (a board's tiles): each statement passes the gate on its own,
+    /// and one that fails or is refused doesn't stop the others. See
+    /// [`EngineHandle::query_batch`].
+    QueryBatch {
+        query: QueryId,
+        conn: ConnId,
+        statements: Vec<String>,
+        options: QueryOptions,
+        reply: oneshot::Sender<Result<Vec<QueryResult>, QueryError>>,
+    },
     Cancel {
         query: QueryId,
     },
@@ -158,6 +170,9 @@ impl QueryOptions {
         }
     }
 }
+
+/// What one statement of a [`Command::QueryBatch`] returned.
+pub type QueryResult = Result<QueryOutput, QueryError>;
 
 /// The whole result of a [`Command::Query`].
 #[derive(Debug, Default)]

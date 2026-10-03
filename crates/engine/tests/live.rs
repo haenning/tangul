@@ -686,6 +686,55 @@ async fn assistant_checks(h: &mut Harness, sneak: Option<(&str, &str)>) {
     h.run(tab, "DROP TABLE tangul_ai_test").await;
 }
 
+/// A board's batch: only reads run, a write hidden in a tile fails (`sneak`: a
+/// function that writes, which passes the allow-list), and a failing tile (on
+/// Postgres it aborts the transaction) costs the ones after it nothing.
+async fn board_checks(h: &mut Harness, sneak: &str) {
+    let tab = TabId(12);
+    h.set(false, None);
+    h.run(tab, "DROP TABLE IF EXISTS tangul_ai_test").await;
+    h.run(tab, "CREATE TABLE tangul_ai_test (id INT)").await;
+    h.run(tab, "INSERT INTO tangul_ai_test VALUES (1)").await;
+    let count = "SELECT count(*) FROM tangul_ai_test";
+    let statements = [
+        count,
+        sneak,
+        "SELECT * FROM tangul_missing",
+        "DELETE FROM tangul_ai_test",
+        "SELECT 1; DELETE FROM tangul_ai_test",
+        "SELECT '\\'; COMMIT; DELETE FROM tangul_ai_test; --'",
+        count,
+    ];
+    h.next_query += 1;
+    let out = h
+        .engine
+        .query_batch(
+            QueryId(h.next_query),
+            h.conn,
+            statements.iter().map(|s| s.to_string()).collect(),
+            QueryOptions::new(Caller::Board),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.len(), statements.len());
+    let first = out[0].as_ref().unwrap();
+    assert_eq!(first.results[0].cell(0, 0), Some("1"));
+    let sneaked = out[1].as_ref().unwrap_err();
+    let message = sneaked.message.to_lowercase().replace('-', " ");
+    assert!(message.contains("read only"), "{sneaked}");
+    assert!(out[2].is_err());
+    for refused in &out[3..6] {
+        assert!(refused.is_err());
+    }
+    let last = out[6].as_ref().unwrap();
+    assert_eq!(last.results[0].cell(0, 0), Some("1"), "nothing changed");
+    assert_eq!(
+        h.run(tab, count).await.result.unwrap().cell(0, 0),
+        Some("1")
+    );
+    h.run(tab, "DROP TABLE tangul_ai_test").await;
+}
+
 #[tokio::test]
 async fn postgres() {
     let Some(cfg) = config("TANGUL_TEST_PG") else {
@@ -723,6 +772,7 @@ async fn postgres() {
         )),
     )
     .await;
+    board_checks(&mut h, "SELECT tangul_ai_sneak()").await;
     h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak()").await;
 }
 
@@ -765,6 +815,7 @@ async fn mysql() {
         )),
     )
     .await;
+    board_checks(&mut h, "SELECT tangul_ai_sneak()").await;
     h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak").await;
 }
 

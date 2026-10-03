@@ -118,7 +118,7 @@ explicit OK, and keep them covered by tests.
 
 - **One gate.** Every statement to a database passes the engine's gate
   (`crates/engine/src/gate.rs`). Front ends pass only a `Caller` (User, Schedule,
-  Assistant) and an `Approval` (the tab dialog's go-ahead); they never decide
+  Board, Assistant) and an `Approval` (the tab dialog's go-ahead); they never decide
   read-only mode or the time limit themselves. No command, flag or setting skips the gate. The engine reads
   `settings.json` itself.
 - **User (tabs).** In write mode the user writes freely; the "UPDATE/DELETE without
@@ -127,6 +127,10 @@ explicit OK, and keep them covered by tests.
   the statement then has to be run again); a go-ahead never runs a write past it. Tabs (`Command::Execute`) are the user's only.
 - **Schedules.** Only statements on the read allow-list (`assist::guard::not_reads`);
   anything else is refused. Reads run like the assistant's.
+- **Boards.** Their tiles run as `Caller::Board`, with the schedules' rules. One refresh
+  is one `Command::QueryBatch` (readers only, never `Caller::User`): each statement
+  passes the gate on its own, then all run on one spare session in a read-only
+  transaction that is rolled back.
 - **Assistant reads.** Only allow-listed reads run, through
   `EngineHandle::query` (never on a tab's session), in `Mode::RolledBack`: session
   read-only, inside `START TRANSACTION READ ONLY`, always rolled back. One statement
@@ -166,8 +170,8 @@ explicit OK, and keep them covered by tests.
   as before.
 - **Everyone.** `safety.max_query_time` applies to every caller, set on the server and
   enforced by the engine's timer.
-- **Audit.** Assistant and schedule runs (ran, proposed, refused) and every AI tool
-  call (caller `mcp`) go to the `audit` table in `local.db`.
+- **Audit.** Assistant and schedule runs (ran, proposed, refused), what boards had
+  refused, and every AI tool call (caller `mcp`) go to the `audit` table in `local.db`.
 - **Tests.** Changes to the gate, guard, pool or drivers come with tests, including
   live ones (`crates/engine/tests/live.rs`, e.g. `assistant_checks`: a write hidden in
   a read must fail). Aim for ≥ 95% line coverage in core, drivers, engine, assist,

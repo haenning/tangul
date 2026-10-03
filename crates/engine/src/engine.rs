@@ -15,10 +15,14 @@ use crate::audit::{Audit, Trace};
 use crate::gate::{Approval, Caller, Enforced, Gate};
 use crate::pool::{Pool, PoolStats};
 use crate::run::{
-    Events, Job, Running, close_all, execute, finish, run_query, send, send_stats, validate,
+    Events, Job, Running, close_all, execute, finish, run_batch, run_query, send, send_stats,
+    validate,
 };
 use crate::schema::{load_extras, load_schema};
-use crate::{Command, EngineConfig, Event, MAX_CONNECTIONS, QueryError, QueryOptions, QueryOutput};
+use crate::{
+    Command, EngineConfig, Event, MAX_CONNECTIONS, QueryError, QueryOptions, QueryOutput,
+    QueryResult,
+};
 
 pub(crate) struct Engine {
     events: Events,
@@ -89,6 +93,13 @@ impl Engine {
                 options,
                 reply,
             } => self.query(query, conn, sql, options, reply),
+            Command::QueryBatch {
+                query,
+                conn,
+                statements,
+                options,
+                reply,
+            } => self.query_batch(query, conn, statements, options, reply),
             Command::Validate {
                 request,
                 conn,
@@ -311,6 +322,96 @@ impl Engine {
                 Ok(out) => trace.record(&sql, "ran", None, Some(out.elapsed), out.rows),
                 Err(e) => trace.record(&sql, "ran", Some(e.message.clone()), None, None),
             }
+            let _ = reply.send(output);
+            send_stats(&events, conn, &pool);
+        });
+    }
+
+    /// Reads whose results are sent back together on `reply`. Each statement passes
+    /// the gate on its own; what it refuses comes back as that statement's error,
+    /// and the rest run on one session.
+    fn query_batch(
+        &mut self,
+        query: QueryId,
+        conn: ConnId,
+        statements: Vec<String>,
+        options: QueryOptions,
+        reply: oneshot::Sender<Result<Vec<QueryResult>, QueryError>>,
+    ) {
+        let Some(pool) = self.pools.get(&conn).cloned() else {
+            let _ = reply.send(Err(QueryError::new("not connected")));
+            return;
+        };
+        // Tabs are the user's only path; a batch never writes.
+        if options.caller == Caller::User {
+            let _ = reply.send(Err(QueryError::new("only readers run batches")));
+            return;
+        }
+        let trace = Trace {
+            audit: self.audit.clone(),
+            caller: options.caller,
+            target: pool.target(),
+        };
+        // Per statement: what the gate passed, or why not.
+        let mut run = None;
+        let mut passed: Vec<Result<String, QueryError>> = Vec::with_capacity(statements.len());
+        for sql in &statements {
+            passed.push(
+                match self.gate.enforce(
+                    pool.user(),
+                    sql,
+                    pool.lexing(),
+                    options.caller,
+                    options.approval,
+                ) {
+                    Enforced::Run { run: r, sql: text } => {
+                        run = Some(r);
+                        Ok(text)
+                    }
+                    Enforced::Proposed(proposal) => {
+                        trace.record(sql, "proposed", None, None, None);
+                        Err(QueryError {
+                            proposal: Some(proposal),
+                            ..QueryError::new(PROPOSED)
+                        })
+                    }
+                    Enforced::Refused(reason) => {
+                        trace.record(sql, "refused", Some(reason.clone()), None, None);
+                        Err(QueryError::new(reason))
+                    }
+                },
+            );
+        }
+        let Some(run) = run else {
+            // Nothing may run: no session needed.
+            let _ = reply.send(Ok(passed
+                .into_iter()
+                .map(|p| p.map(|_| QueryOutput::default()))
+                .collect()));
+            return;
+        };
+        let (events, running) = (self.events.clone(), self.running.clone());
+        tokio::spawn(async move {
+            let texts: Vec<&str> = passed.iter().filter_map(|p| p.as_deref().ok()).collect();
+            let ran = run_batch(&pool, &running, query, &texts, run, options.row_limit).await;
+            let output = ran.map(|ran| {
+                let mut ran = ran.into_iter();
+                passed
+                    .into_iter()
+                    .zip(&statements)
+                    .map(|(passed, sql)| {
+                        let output = passed.and_then(|_| ran.next().expect("a result per run"));
+                        match &output {
+                            Ok(out) => trace.record(sql, "ran", None, Some(out.elapsed), out.rows),
+                            Err(e) if e.proposal.is_none() => {
+                                trace.record(sql, "ran", Some(e.message.clone()), None, None)
+                            }
+                            Err(_) => {}
+                        }
+                        output
+                    })
+                    .collect()
+            });
             let _ = reply.send(output);
             send_stats(&events, conn, &pool);
         });
