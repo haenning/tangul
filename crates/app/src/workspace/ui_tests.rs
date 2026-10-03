@@ -1800,3 +1800,198 @@ fn schema_only_opens_no_ai_connection(cx: &mut TestAppContext) {
         });
     });
 }
+
+/// A board of `shop` with tiles `t1`…: `sqls` in order, `t1` and `t3` alike when
+/// asked for; opened in its tab.
+fn board_with_tiles(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    sqls: &[&str],
+    cx: &mut TestAppContext,
+) -> String {
+    use tangul_service::boards::{self, Edit};
+    cx.update(|cx| shop_with_ai_user(workspace, None, cx));
+    let id = workspace.update(cx, |ws, _| {
+        let board = boards::create(&mut ws.data.boards, "db", "Signups").unwrap();
+        for (i, sql) in sqls.iter().enumerate() {
+            let tile = boards::tile(&format!("Tile {}", i + 1), sql, None);
+            boards::apply(&mut ws.data.boards, &board.id, Edit::AddTile(tile)).unwrap();
+        }
+        board.id
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        workspace.update(cx, |ws, cx| ws.open_board(&id, window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    id
+}
+
+fn tile_ids(workspace: &Entity<Workspace>, board: &str, cx: &App) -> Vec<String> {
+    let ws = workspace.read(cx);
+    let board = ws.data.boards.get(board).unwrap();
+    board.tiles.iter().map(|t| t.id.clone()).collect()
+}
+
+fn board_tab(workspace: &Entity<Workspace>, cx: &App) -> Entity<crate::board::BoardTab> {
+    let ws = workspace.read(cx);
+    ws.tabs
+        .active()
+        .and_then(|t| t.board())
+        .cloned()
+        .expect("a board tab")
+}
+
+#[gpui_kit::test]
+fn the_boards_panel_lists_the_databases_boards_and_opens_them(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(handle, &workspace, &["select 1"], cx);
+    // Closed, then opened from the panel.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.remove_tab(ws.tabs.active_index(), window, cx)
+        })
+    });
+    step(handle, cx, |window, cx| {
+        window.click(button(Panel::Boards), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("board-row", 0usize), cx)
+    });
+    cx.update(|cx| {
+        assert!(shows(&workspace, Panel::Boards, cx));
+        let tab = board_tab(&workspace, cx);
+        assert_eq!(tab.read(cx).title.as_ref(), "Signups");
+        assert_eq!(tab.read(cx).board().id, id);
+    });
+    // One tab per board: opening it again shows the same one.
+    let open = cx.update(|cx| workspace.read(cx).tabs.items().count());
+    step(handle, cx, |window, cx| {
+        window.click(("board-row", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(workspace.read(cx).tabs.items().count(), open));
+}
+
+#[gpui_kit::test]
+fn board_edit_mode_resizes_moves_and_removes_tiles(cx: &mut TestAppContext) {
+    use tangul_core::board::Width;
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(
+        handle,
+        &workspace,
+        &["select 1", "select 2", "select 3"],
+        cx,
+    );
+    let width = |cx: &mut TestAppContext| {
+        cx.update(|cx| workspace.read(cx).data.boards.get(&id).unwrap().tiles[0].width)
+    };
+    // Not in edit mode: no handles.
+    step(handle, cx, |window, _| {
+        assert!(window.try_find(("tile-grip", 0usize)).is_none())
+    });
+    step(handle, cx, |window, cx| window.click("board-edit", cx));
+
+    step(handle, cx, |window, cx| {
+        window.click(("tile-width", 0usize), cx)
+    });
+    assert_eq!(width(cx), Width::Half);
+    step(handle, cx, |window, cx| {
+        window.click(("tile-width", 0usize), cx)
+    });
+    assert_eq!(width(cx), Width::Full);
+
+    // Dragged onto the first tile: it takes its place.
+    step(handle, cx, |window, cx| {
+        window.drag_to(("tile-grip", 1usize), "tile-t1", cx)
+    });
+    cx.update(|cx| assert_eq!(tile_ids(&workspace, &id, cx), ["t2", "t1", "t3"]));
+
+    step(handle, cx, |window, cx| {
+        window.click(("tile-remove", 1usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(tile_ids(&workspace, &id, cx), ["t2", "t3"]);
+        // The tab shows the board as saved.
+        let tab = board_tab(&workspace, cx);
+        assert_eq!(tab.read(cx).board().tiles.len(), 2);
+    });
+}
+
+#[gpui_kit::test]
+fn board_tiles_show_their_results_and_share_a_statement(cx: &mut TestAppContext) {
+    use tangul_core::ResultSet;
+    use tangul_engine::{QueryError, QueryOutput};
+    let (handle, workspace) = open(cx);
+    board_with_tiles(
+        handle,
+        &workspace,
+        &["select a", "select b", "select a"],
+        cx,
+    );
+    let rows = |n: usize| {
+        let mut result = ResultSet::new(vec![ColumnInfo { name: "x".into() }]);
+        let mut batch = RowBatch::default();
+        for i in 0..n {
+            batch.push_cell(Some(&i.to_string()));
+            batch.finish_row();
+        }
+        result.append(batch);
+        QueryOutput {
+            results: vec![result],
+            rows: Some(n as u64),
+            ..QueryOutput::default()
+        }
+    };
+    // One result per different statement: `select a`, then `select b`.
+    let failed = QueryError {
+        message: "boom".into(),
+        position: None,
+        proposal: None,
+    };
+    let tab = cx.update(|cx| board_tab(&workspace, cx));
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| {
+            t.show_results(vec![Ok(rows(2)), Err(failed)], cx)
+        })
+    });
+    cx.update(|cx| {
+        let result = |tile: &str| tab.read(cx).tile_result(tile).unwrap();
+        assert_eq!(result("t1").read(cx).row_count(cx), Some(2));
+        assert_eq!(result("t3").read(cx).row_count(cx), Some(2));
+        assert_eq!(result("t2").read(cx).row_count(cx), None);
+    });
+}
+
+#[gpui_kit::test]
+fn add_to_board_makes_a_new_board_and_a_tile_opens_in_a_tab(cx: &mut TestAppContext) {
+    use crate::board::Target;
+    use tangul_service::boards;
+    let (handle, workspace) = open(cx);
+    cx.update(|cx| shop_with_ai_user(&workspace, None, cx));
+    step(handle, cx, |window, cx| {
+        let tile = boards::tile("Per day", "select 1", None);
+        workspace.update(cx, |ws, cx| {
+            ws.add_to_board("db", Target::New("Growth".into()), Some(tile), window, cx)
+        })
+    });
+    let board = cx.update(|cx| {
+        let board = board_tab(&workspace, cx).read(cx).board().clone();
+        assert_eq!(board.name, "Growth");
+        assert_eq!(board.database_id, "db");
+        assert_eq!(board.tiles[0].title, "Per day");
+        assert_eq!(workspace.read(cx).data.boards.for_database("db").len(), 1);
+        board
+    });
+    // A tile opens its query in a tab, linked back for "Update tile".
+    step(handle, cx, |window, cx| {
+        window.click(("tile-open", 0usize), cx)
+    });
+    cx.update(|cx| {
+        let query = workspace.read(cx).tabs.active_query().cloned().unwrap();
+        assert_eq!(query.read(cx).title.as_ref(), "Per day");
+        assert_eq!(
+            query.read(cx).board_tile,
+            Some((board.id, "t1".to_string()))
+        );
+    });
+}

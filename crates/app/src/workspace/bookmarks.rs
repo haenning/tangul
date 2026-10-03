@@ -215,6 +215,7 @@ impl Workspace {
             bookmark.id.clone(),
             bookmark.id.clone(),
         );
+        let board_id = bookmark.id.clone();
         let edit_sql = bookmark.sql.clone();
         let metrics_id = bookmark.id.clone();
         let group: SharedString = format!("bookmark-{ix}").into();
@@ -237,6 +238,19 @@ impl Workspace {
                         this.open_metrics(&metrics_id, window, cx)
                     })),
             )
+            .when(self.active_db.is_some(), |this| {
+                this.child(
+                    Button::new(("bookmark-board", ix))
+                        .icon(Icon::new(Lucide::LayoutDashboard))
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Add to board")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.add_bookmark_to_board(&board_id, window, cx)
+                        })),
+                )
+            })
             .child(
                 Button::new(("bookmark-run", ix))
                     .icon(IconName::Play)

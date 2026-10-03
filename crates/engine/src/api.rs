@@ -175,7 +175,7 @@ impl QueryOptions {
 pub type QueryResult = Result<QueryOutput, QueryError>;
 
 /// The whole result of a [`Command::Query`].
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct QueryOutput {
     /// One per statement that returned rows.
     pub results: Vec<ResultSet>,

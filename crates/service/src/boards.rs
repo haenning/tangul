@@ -102,6 +102,38 @@ pub fn tile(title: &str, sql: &str, view: Option<ChartView>) -> Tile {
     }
 }
 
+/// Links from text, one per line: a label and the address last (`Epic
+/// https://…`), or only the address (then it is the label too). Blank lines are
+/// skipped; [`Edit::SetLinks`] checks the addresses.
+pub fn parse_links(text: &str) -> Vec<Link> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| match line.rsplit_once(char::is_whitespace) {
+            Some((label, url)) => Link {
+                label: label.trim().into(),
+                url: url.into(),
+            },
+            None => Link {
+                label: line.into(),
+                url: line.into(),
+            },
+        })
+        .collect()
+}
+
+/// [`parse_links`]' form of `links`, to edit them as text.
+pub fn links_text(links: &[Link]) -> String {
+    links
+        .iter()
+        .map(|l| match l.label == l.url || l.label.is_empty() {
+            true => l.url.clone(),
+            false => format!("{} {}", l.label, l.url),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn edit_board(board: &mut Board, edit: Edit) -> Result<(), String> {
     match edit {
         Edit::Rename(name) => board.name = name_of(&name)?,
@@ -320,6 +352,30 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("file:///etc"));
         assert_eq!(boards.get(&id).unwrap().links.len(), 1, "unchanged");
+    }
+
+    #[test]
+    fn links_are_edited_as_text() {
+        let links = parse_links("  Epic  board https://x.io/1 \n\nhttps://y.io\n");
+        assert_eq!(
+            links,
+            [
+                Link {
+                    label: "Epic  board".into(),
+                    url: "https://x.io/1".into()
+                },
+                Link {
+                    label: "https://y.io".into(),
+                    url: "https://y.io".into()
+                },
+            ]
+        );
+        assert_eq!(
+            links_text(&links),
+            "Epic  board https://x.io/1\nhttps://y.io"
+        );
+        assert_eq!(parse_links(&links_text(&links)), links);
+        assert!(parse_links(" \n").is_empty());
     }
 
     #[test]

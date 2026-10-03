@@ -10,6 +10,7 @@ mod ai_settings;
 mod assist;
 mod assistant;
 mod bars;
+mod boards;
 mod bookmarks;
 mod command_palette;
 mod connections;
@@ -34,7 +35,7 @@ use bars::style_icon;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::MouseButton;
@@ -275,6 +276,7 @@ impl Workspace {
                     sources: Vec::new(),
                     entries: Vec::new(),
                 },
+                boards_archived: false,
             },
             left_split: cx.new(|_| ResizableState::default()),
             right_split: cx.new(|_| ResizableState::default()),
@@ -335,8 +337,7 @@ impl Workspace {
     /// Ids are unique for the whole app run, not per window, so a reopened window
     /// never collides with sessions or queries of a closed one.
     fn next_id(&mut self) -> u64 {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        crate::next_id()
     }
 
     fn active_database(&self) -> Option<&Database> {

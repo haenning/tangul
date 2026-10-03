@@ -20,7 +20,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
-  and `knowledge`: the one pool of what is known about the databases (schema per
+  `boards` (the one API that changes boards, for the UI and later the AI tools, and
+  when a board refreshes), and `knowledge`: the one pool of what is known about the databases (schema per
   user, usage per database). The editor, schema tree, results and the assistant all
   read it; don't keep copies elsewhere
 - `crates/llm`: model providers, no UI, nothing about databases or tangul's tools: one
@@ -44,7 +45,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
     `value_panel.rs`: the value viewer (right sidebar): the inspected cell (A), the
     compared one (B) and their diff; logic in `assist::value`; `tabs.rs`: the kinds of tab (`TabItem`: query,
-    file, AI settings; boards later) and the open ones; `ai.rs`: what the assistant
+    file, AI settings, board) and the open ones; `boards.rs`: opening boards, their
+    changes (through `service::boards`), "Add to board", "Update tile", the Boards panel; `ai.rs`: what the assistant
     and MCP clients share: the connected databases with `ai_tools` on offered to AI
     tools (each on its assistant connection), a `Ctx` per caller, and what their calls
     hand back (history, proposals, shown results); `mcp.rs`: runs the MCP server while
@@ -63,6 +65,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     `theme.appearance` ("auto" follows the system), `theme.dark` and `theme.light` in
     `settings.json` choose. **No color literal anywhere else** (a test checks it):
     views use `cx.theme()` or `crate::theme`
+  - `board/`: a board in a tab (header, tiles as `ResultView`s, edit mode with drag and
+    drop); knows nothing about the workspace: asks for changes with events, refreshes
+    in one batch (`Caller::Board`) only while it is drawn
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
     nothing about tabs, so boards and the assistant can reuse it
