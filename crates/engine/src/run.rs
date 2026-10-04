@@ -11,7 +11,7 @@ use tangul_drivers::{CancelHandle, ExecEvent, SqlError};
 use crate::audit::Trace;
 use crate::gate::{Mode, Run};
 use crate::pool::{Lease, Pool};
-use crate::{Event, Problem, QueryError, QueryEvent, QueryOutput, ROW_LIMIT};
+use crate::{Event, Problem, QueryError, QueryEvent, QueryOutput, QueryResult, ROW_LIMIT};
 
 /// Upper bound for a graceful disconnect; after that the socket is simply dropped.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -166,15 +166,72 @@ pub(crate) async fn run_query(
     run: Run,
     row_limit: usize,
 ) -> Result<QueryOutput, QueryError> {
-    let error = |e: &anyhow::Error| {
-        let (message, position) = describe(e);
-        QueryError {
-            position,
-            ..QueryError::new(message)
-        }
-    };
     let started = Instant::now();
-    let mut lease = pool.acquire(None).await.map_err(|e| error(&e))?;
+    let mut lease = prepare(pool, running, query, run).await?;
+    let result = collect(&mut lease, sql, row_limit, run.timeout).await;
+    running.lock().unwrap().remove(&query);
+    done_with(pool, lease, run.mode).await;
+    let mut output = result?;
+    output.elapsed = started.elapsed();
+    Ok(output)
+}
+
+/// A [`Command::QueryBatch`]: `statements` one after another on one spare session,
+/// in one transaction when `run` rolls back. A statement that fails ends the
+/// transaction (Postgres refuses anything after an error in it); the next one runs
+/// in a new one, so a failing statement costs the others nothing. After a cancel
+/// the rest don't run.
+pub(crate) async fn run_batch(
+    pool: &Arc<Pool>,
+    running: &Running,
+    query: QueryId,
+    statements: &[&str],
+    run: Run,
+    row_limit: usize,
+) -> Result<Vec<QueryResult>, QueryError> {
+    let mut lease = prepare(pool, running, query, run).await?;
+    let cancelled = || {
+        running
+            .lock()
+            .unwrap()
+            .get(&query)
+            .is_some_and(|r| r.cancel_requested)
+    };
+    let mut out = Vec::with_capacity(statements.len());
+    // Why the rest can't run, once they can't.
+    let mut stopped: Option<QueryError> = None;
+    for sql in statements {
+        if stopped.is_none() && cancelled() {
+            stopped = Some(QueryError::new("cancelled"));
+        }
+        if let Some(e) = &stopped {
+            out.push(Err(e.clone()));
+            continue;
+        }
+        let started = Instant::now();
+        let result = collect(&mut lease, sql, row_limit, run.timeout).await;
+        if result.is_err() && run.mode == Mode::RolledBack {
+            stopped = restart(&mut lease).await.err();
+        }
+        out.push(result.map(|output| QueryOutput {
+            elapsed: started.elapsed(),
+            ..output
+        }));
+    }
+    running.lock().unwrap().remove(&query);
+    done_with(pool, lease, run.mode).await;
+    Ok(out)
+}
+
+/// A spare session as `run` says (read-only mode, time limit, the read-only
+/// transaction), registered under `query` for cancelling.
+async fn prepare(
+    pool: &Arc<Pool>,
+    running: &Running,
+    query: QueryId,
+    run: Run,
+) -> Result<Lease, QueryError> {
+    let mut lease = pool.acquire(None).await.map_err(|e| query_error(&e))?;
     let mut synced = match sync_read_only(&mut lease, run.read_only).await {
         Ok(()) => sync_timeout(&mut lease, run.timeout).await,
         Err(e) => Err(e),
@@ -184,7 +241,7 @@ pub(crate) async fn run_query(
     }
     if let Err(e) = synced {
         done_with(pool, lease, run.mode).await;
-        return Err(error(&e));
+        return Err(query_error(&e));
     }
     running.lock().unwrap().insert(
         query,
@@ -193,6 +250,16 @@ pub(crate) async fn run_query(
             cancel_requested: false,
         },
     );
+    Ok(lease)
+}
+
+/// Runs one statement and collects its whole result.
+async fn collect(
+    lease: &mut Lease,
+    sql: &str,
+    row_limit: usize,
+    timeout: Option<Duration>,
+) -> Result<QueryOutput, QueryError> {
     let mut output = QueryOutput::default();
     let mut sink = |ev: ExecEvent| match ev {
         ExecEvent::ResultStart(columns) => output.results.push(ResultSet::new(columns)),
@@ -204,12 +271,33 @@ pub(crate) async fn run_query(
         ExecEvent::StatementDone { rows } => output.rows = Some(rows),
         ExecEvent::Truncated => output.truncated = true,
     };
-    let result = execute_limited(&mut lease, sql, row_limit, run.timeout, &mut sink).await;
-    running.lock().unwrap().remove(&query);
-    done_with(pool, lease, run.mode).await;
-    result.map_err(|e| error(&e))?;
-    output.elapsed = started.elapsed();
+    let result = execute_limited(lease, sql, row_limit, timeout, &mut sink).await;
+    result.map_err(|e| query_error(&e))?;
     Ok(output)
+}
+
+/// Rolls the read-only transaction back and starts a new one.
+async fn restart(lease: &mut Lease) -> Result<(), QueryError> {
+    if lease.session.in_transaction() {
+        lease
+            .session
+            .execute("ROLLBACK", 0, &mut |_| {})
+            .await
+            .map_err(|e| query_error(&e))?;
+    }
+    lease
+        .session
+        .begin_read_only()
+        .await
+        .map_err(|e| query_error(&e))
+}
+
+fn query_error(e: &anyhow::Error) -> QueryError {
+    let (message, position) = describe(e);
+    QueryError {
+        position,
+        ..QueryError::new(message)
+    }
 }
 
 /// After a [`Command::Query`]: rolls back what [`Mode::RolledBack`] started, and gives

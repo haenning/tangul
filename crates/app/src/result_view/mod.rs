@@ -24,7 +24,7 @@ use tangul_assist::dialect::Dialect;
 use tangul_assist::refine::{ColumnFilter, ColumnKind, Refine, Sort, refinable, refined_sql};
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::QueryId;
-use tangul_engine::{ExecEvent, QueryEvent};
+use tangul_engine::{ExecEvent, QueryEvent, QueryOutput};
 
 use crate::InspectValue;
 use crate::assets::Lucide;
@@ -426,6 +426,42 @@ impl ResultView {
             }
         }
         cx.notify();
+    }
+
+    /// Shows the whole result of what [`ResultView::started`] (or
+    /// [`ResultView::started_derived`]) began, which ran elsewhere: as if the engine
+    /// had streamed it. The last result set is shown.
+    pub fn replay(&mut self, output: Result<QueryOutput, String>, cx: &mut Context<Self>) {
+        let (elapsed, error) = match output {
+            Ok(mut out) => {
+                if let Some(result) = out.results.pop()
+                    && !result.columns().is_empty()
+                {
+                    let (columns, batch) = result.into_batch();
+                    self.on_query_event(QueryEvent::Exec(ExecEvent::ResultStart(columns)), cx);
+                    self.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+                }
+                if out.truncated {
+                    self.on_query_event(QueryEvent::Exec(ExecEvent::Truncated), cx);
+                }
+                if let Some(rows) = out.rows {
+                    let done = ExecEvent::StatementDone { rows };
+                    self.on_query_event(QueryEvent::Exec(done), cx);
+                }
+                (out.elapsed, None)
+            }
+            Err(e) => (Duration::ZERO, Some(e)),
+        };
+        self.on_query_event(
+            QueryEvent::Finished {
+                elapsed,
+                error,
+                error_position: None,
+                in_transaction: false,
+                cancelled: false,
+            },
+            cx,
+        );
     }
 
     /// Filters `column` (or removes its filter) and runs the result again.

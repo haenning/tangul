@@ -299,7 +299,7 @@ fn question(ix: usize, text: String, cx: &App) -> AnyElement {
 /// A block of SQL from an answer, with what the user can do with it.
 fn sql_block(key: usize, sql: String, cx: &mut Context<ChatPanel>) -> AnyElement {
     let theme = cx.theme();
-    let (open, insert, copy) = (sql.clone(), sql.clone(), sql.clone());
+    let (open, insert, board, copy) = (sql.clone(), sql.clone(), sql.clone(), sql.clone());
     v_flex()
         .id(("sql-block", key))
         .rounded_md()
@@ -338,6 +338,15 @@ fn sql_block(key: usize, sql: String, cx: &mut Context<ChatPanel>) -> AnyElement
                         .xsmall()
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(ChatPanelEvent::InsertSql(insert.clone()))
+                        })),
+                )
+                .child(
+                    Button::new(("sql-board", key))
+                        .label("Add to board")
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(ChatPanelEvent::AddToBoard(board.clone()))
                         })),
                 )
                 .child(

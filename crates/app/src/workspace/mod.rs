@@ -10,6 +10,7 @@ mod ai_settings;
 mod assist;
 mod assistant;
 mod bars;
+mod boards;
 mod bookmarks;
 mod command_palette;
 mod connections;
@@ -28,13 +29,12 @@ mod value_panel;
 use sidebar::{HistoryList, Panel, Panels, SchemaTree, Side, Sidebar, SidebarRow};
 use value_panel::{Picked, ValueEvent, ValuePanel};
 
-// Shared by the status bar and the bookmarks panel.
-use bars::style_icon;
+use crate::assets::style_icon;
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::MouseButton;
@@ -173,6 +173,9 @@ pub struct Workspace {
     mcp: mcp::Mcp,
     /// The assistant's chat: where its tool calls go.
     assistant: assistant::Assistant,
+    /// The board the assistant was last asked for a tile from, and the question:
+    /// "Add to board" on its answer goes there.
+    board_asked: Option<(String, String)>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -275,6 +278,7 @@ impl Workspace {
                     sources: Vec::new(),
                     entries: Vec::new(),
                 },
+                boards_archived: false,
             },
             left_split: cx.new(|_| ResizableState::default()),
             right_split: cx.new(|_| ResizableState::default()),
@@ -293,6 +297,7 @@ impl Workspace {
             ai_keys: None,
             mcp: mcp::Mcp::default(),
             assistant: assistant::Assistant::default(),
+            board_asked: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![
                 search_sub,
@@ -335,8 +340,7 @@ impl Workspace {
     /// Ids are unique for the whole app run, not per window, so a reopened window
     /// never collides with sessions or queries of a closed one.
     fn next_id(&mut self) -> u64 {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        crate::next_id()
     }
 
     fn active_database(&self) -> Option<&Database> {

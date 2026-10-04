@@ -1,8 +1,9 @@
 //! Everything tangul keeps on disk, without any UI: saved databases and their
 //! secrets, `local.db` (bookmarks, history, learned usage, favorites, schema cache),
-//! `metrics.db` (bookmark runs) and `settings.json`. The app uses it, and so can
+//! `metrics.db` (bookmark runs), `settings.json`, color themes and boards. The app uses it, and so can
 //! other front ends (an MCP server) in their own process.
 
+pub mod boards;
 pub mod config;
 pub mod local;
 pub mod metrics;
@@ -12,6 +13,7 @@ pub mod themes;
 
 use anyhow::Result;
 
+use crate::boards::Boards;
 use crate::local::{Bookmark, Local, bare_sql};
 use crate::metrics::Metrics;
 use crate::profiles::Profiles;
@@ -21,6 +23,7 @@ pub struct Data {
     pub profiles: Profiles,
     pub local: Local,
     pub metrics: Metrics,
+    pub boards: Boards,
 }
 
 impl Data {
@@ -28,10 +31,12 @@ impl Data {
         let profiles = Profiles::load();
         let local = Local::open(profiles.dir());
         let metrics = Metrics::open(profiles.dir());
+        let boards = Boards::open(profiles.dir());
         Self {
             profiles,
             local,
             metrics,
+            boards,
         }
     }
 
@@ -42,6 +47,7 @@ impl Data {
             profiles: Profiles::in_memory(Vec::new()),
             local: Local::open(None),
             metrics: Metrics::open(None),
+            boards: Boards::open(None),
         }
     }
 

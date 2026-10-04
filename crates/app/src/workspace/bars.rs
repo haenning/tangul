@@ -475,16 +475,6 @@ pub(super) fn chart_button(
         .into_any_element()
 }
 
-pub(super) fn style_icon(style: Option<ChartStyle>) -> Lucide {
-    match style {
-        None => Lucide::Table,
-        Some(ChartStyle::Line) => Lucide::ChartLine,
-        Some(ChartStyle::Area | ChartStyle::StackedArea) => Lucide::ChartArea,
-        Some(ChartStyle::Bars) => Lucide::ChartColumn,
-        Some(ChartStyle::StackedBars) => Lucide::ChartColumnStacked,
-    }
-}
-
 pub(super) fn render_details(
     sections: Vec<(&'static str, Vec<(&'static str, String)>)>,
     cx: &App,

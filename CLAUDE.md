@@ -6,7 +6,7 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 
 ## Layout
 
-- `crates/core`: shared types, no I/O (incl. chart settings and learned usage as stored)
+- `crates/core`: shared types, no I/O (incl. chart settings, boards and learned usage as stored)
 - `crates/drivers`: sessions per database (text protocol); a Cargo feature each
 - `crates/engine`: tokio backend thread; front ends talk to it only via `Command` / `Event`
   (streamed into tabs) or `EngineHandle::query` (the whole result, for everything else).
@@ -17,10 +17,11 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
   incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
   the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
-  `settings.json`)
+  `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
-  and `knowledge`: the one pool of what is known about the databases (schema per
+  `boards` (the one API that changes boards, for the UI and later the AI tools, and
+  when a board refreshes), and `knowledge`: the one pool of what is known about the databases (schema per
   user, usage per database). The editor, schema tree, results and the assistant all
   read it; don't keep copies elsewhere
 - `crates/llm`: model providers, no UI, nothing about databases or tangul's tools: one
@@ -44,7 +45,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
     `value_panel.rs`: the value viewer (right sidebar): the inspected cell (A), the
     compared one (B) and their diff; logic in `assist::value`; `tabs.rs`: the kinds of tab (`TabItem`: query,
-    file, AI settings; boards later) and the open ones; `ai.rs`: what the assistant
+    file, AI settings, board) and the open ones; `boards.rs`: opening boards, their
+    changes (through `service::boards`), "Add to board", "Update tile", the Boards panel; `ai.rs`: what the assistant
     and MCP clients share: the connected databases with `ai_tools` on offered to AI
     tools (each on its assistant connection), a `Ctx` per caller, and what their calls
     hand back (history, proposals, shown results); `mcp.rs`: runs the MCP server while
@@ -63,6 +65,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     `theme.appearance` ("auto" follows the system), `theme.dark` and `theme.light` in
     `settings.json` choose. **No color literal anywhere else** (a test checks it):
     views use `cx.theme()` or `crate::theme`
+  - `board/`: a board in a tab (header, tiles as `ResultView`s, edit mode with drag and
+    drop); knows nothing about the workspace: asks for changes with events, refreshes
+    in one batch (`Caller::Board`) only while it is drawn
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
     nothing about tabs, so boards and the assistant can reuse it
@@ -118,7 +123,7 @@ explicit OK, and keep them covered by tests.
 
 - **One gate.** Every statement to a database passes the engine's gate
   (`crates/engine/src/gate.rs`). Front ends pass only a `Caller` (User, Schedule,
-  Assistant) and an `Approval` (the tab dialog's go-ahead); they never decide
+  Board, Assistant) and an `Approval` (the tab dialog's go-ahead); they never decide
   read-only mode or the time limit themselves. No command, flag or setting skips the gate. The engine reads
   `settings.json` itself.
 - **User (tabs).** In write mode the user writes freely; the "UPDATE/DELETE without
@@ -127,6 +132,10 @@ explicit OK, and keep them covered by tests.
   the statement then has to be run again); a go-ahead never runs a write past it. Tabs (`Command::Execute`) are the user's only.
 - **Schedules.** Only statements on the read allow-list (`assist::guard::not_reads`);
   anything else is refused. Reads run like the assistant's.
+- **Boards.** Their tiles run as `Caller::Board`, with the schedules' rules. One refresh
+  is one `Command::QueryBatch` (readers only, never `Caller::User`): each statement
+  passes the gate on its own, then all run on one spare session in a read-only
+  transaction that is rolled back.
 - **Assistant reads.** Only allow-listed reads run, through
   `EngineHandle::query` (never on a tab's session), in `Mode::RolledBack`: session
   read-only, inside `START TRANSACTION READ ONLY`, always rolled back. One statement
@@ -166,8 +175,8 @@ explicit OK, and keep them covered by tests.
   as before.
 - **Everyone.** `safety.max_query_time` applies to every caller, set on the server and
   enforced by the engine's timer.
-- **Audit.** Assistant and schedule runs (ran, proposed, refused) and every AI tool
-  call (caller `mcp`) go to the `audit` table in `local.db`.
+- **Audit.** Assistant and schedule runs (ran, proposed, refused), what boards had
+  refused, and every AI tool call (caller `mcp`) go to the `audit` table in `local.db`.
 - **Tests.** Changes to the gate, guard, pool or drivers come with tests, including
   live ones (`crates/engine/tests/live.rs`, e.g. `assistant_checks`: a write hidden in
   a read must fail). Aim for ≥ 95% line coverage in core, drivers, engine, assist,
@@ -176,7 +185,9 @@ explicit OK, and keep them covered by tests.
 ## Commands
 
 - `make run-dev`: dev databases (Docker) plus the app with dev-only profiles
-- `make test`, `make test-live` (against the dev databases)
+- `make test`, `make test-live` (against the dev databases); without Docker (a cloud
+  session on Debian/Ubuntu): `make test-live-native`, which installs and starts the same
+  databases and SSH bastion with apt (`scripts/dev-db-native.sh`)
 - UI tests (`crates/app/src/workspace/ui_tests.rs`): the real workspace in a headless
   window, driven by clicks and keys via gpui-kit's harness (`test-support`), with
   `Data::in_memory()` and `tangul_engine::detached()`. Give elements you want to find

@@ -42,6 +42,8 @@ pub enum ChatPanelEvent {
     /// SQL from an answer: into a new tab, or into the editor at the cursor.
     OpenSql(String),
     InsertSql(String),
+    /// SQL from an answer onto a board, as a tile or a link.
+    AddToBoard(String),
     OpenSettings,
 }
 

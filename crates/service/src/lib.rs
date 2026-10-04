@@ -1,6 +1,7 @@
 //! What every front end of tangul shares, without UI: which connections are open
-//! and what for ([`connections`]), what is known about them ([`knowledge`]) and
-//! which scheduled bookmark is due ([`schedule`]).
+//! and what for ([`connections`]), what is known about them ([`knowledge`]), which
+//! scheduled bookmark is due ([`schedule`]), and changing and refreshing boards
+//! ([`boards`]).
 //!
 //! Running a statement from anywhere (a tab, a schedule, the assistant):
 //! 1. [`connections::Connections`] for a connection of that purpose (the assistant
@@ -11,6 +12,7 @@
 //!    person's approval (`tangul_engine::gate`). A front end can ask the same
 //!    `tangul_engine::decide` beforehand to show a dialog.
 
+pub mod boards;
 pub mod connections;
 pub mod knowledge;
 pub mod schedule;

@@ -14,7 +14,9 @@ mod schema;
 
 use std::path::PathBuf;
 
-pub use api::{Command, Event, Problem, QueryError, QueryEvent, QueryOptions, QueryOutput};
+pub use api::{
+    Command, Event, Problem, QueryError, QueryEvent, QueryOptions, QueryOutput, QueryResult,
+};
 use engine::Engine;
 pub use gate::{
     Approval, Caller, Decision, Guard, Mode, Proposal, Run, SettingsSource, decide, user_run,
@@ -56,6 +58,30 @@ impl EngineHandle {
             query,
             conn,
             sql: sql.into(),
+            options,
+            reply,
+        });
+        answer
+            .await
+            .unwrap_or_else(|_| Err(QueryError::new("the engine stopped")))
+    }
+
+    /// Runs reads on `conn` in one go (one session, one transaction) and returns a
+    /// result per statement, in order: for a board, instead of a query per tile.
+    /// The error is for the whole batch (not connected, no session, a caller that
+    /// may write). `query` cancels the rest of it.
+    pub async fn query_batch(
+        &self,
+        query: QueryId,
+        conn: ConnId,
+        statements: Vec<String>,
+        options: QueryOptions,
+    ) -> Result<Vec<QueryResult>, QueryError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::QueryBatch {
+            query,
+            conn,
+            statements,
             options,
             reply,
         });

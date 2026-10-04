@@ -12,6 +12,7 @@ pub use gpui_kit::assets::IconName as Lucide;
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
+        Archive,
         ArrowRightLeft,
         Bookmark,
         Braces,
@@ -23,12 +24,17 @@ gpui_kit::assets::icon_assets!(
         Database,
         Equal,
         EqualNot,
+        ExternalLink,
         Funnel,
+        GripVertical,
         Key,
         KeyRound,
+        LayoutDashboard,
         Lightbulb,
         Link,
         ListTree,
+        Maximize2,
+        Minimize2,
         Pencil,
         PencilOff,
         Pin,
@@ -57,5 +63,17 @@ impl AssetSource for AppAssets {
         paths.sort();
         paths.dedup();
         Ok(paths)
+    }
+}
+
+/// The icon of a result shown as the table (`None`) or a chart style.
+pub fn style_icon(style: Option<tangul_core::chart::ChartStyle>) -> Lucide {
+    use tangul_core::chart::ChartStyle;
+    match style {
+        None => Lucide::Table,
+        Some(ChartStyle::Line) => Lucide::ChartLine,
+        Some(ChartStyle::Area | ChartStyle::StackedArea) => Lucide::ChartArea,
+        Some(ChartStyle::Bars) => Lucide::ChartColumn,
+        Some(ChartStyle::StackedBars) => Lucide::ChartColumnStacked,
     }
 }

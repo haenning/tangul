@@ -106,6 +106,8 @@ pub(super) struct Panels {
     pub(super) schema: SchemaTree,
     pub(super) bookmark_search: Entity<InputState>,
     pub(super) history: HistoryList,
+    /// The boards panel shows the archived boards.
+    pub(super) boards_archived: bool,
 }
 
 /// The schema panel: the active connection's tree, search and favorites.
@@ -155,6 +157,7 @@ pub(super) struct HistoryList {
 pub(super) enum Panel {
     Schema,
     Bookmarks,
+    Boards,
     History,
     Value,
     Assistant,
@@ -162,7 +165,12 @@ pub(super) enum Panel {
 
 impl Panel {
     /// The left sidebar's panels.
-    pub(super) const LEFT: &'static [Panel] = &[Panel::Schema, Panel::Bookmarks, Panel::History];
+    pub(super) const LEFT: &'static [Panel] = &[
+        Panel::Schema,
+        Panel::Bookmarks,
+        Panel::Boards,
+        Panel::History,
+    ];
     /// The right sidebar's panels: everything AI goes here too.
     pub(super) const RIGHT: &'static [Panel] = &[Panel::Value, Panel::Assistant];
 
@@ -170,6 +178,7 @@ impl Panel {
         match self {
             Panel::Schema => Lucide::ListTree,
             Panel::Bookmarks => Lucide::Bookmark,
+            Panel::Boards => Lucide::LayoutDashboard,
             Panel::History => Lucide::RotateCcwClock,
             Panel::Value => Lucide::Braces,
             Panel::Assistant => Lucide::Bot,
@@ -180,6 +189,7 @@ impl Panel {
         match self {
             Panel::Schema => "Schema",
             Panel::Bookmarks => "Bookmarks",
+            Panel::Boards => "Boards",
             Panel::History => "History",
             Panel::Value => "Value viewer",
             Panel::Assistant => "Assistant",
@@ -257,6 +267,7 @@ impl Workspace {
         let body = match self.sidebar(side).active {
             Some(Panel::Schema) => self.render_schema_panel(cx).into_any_element(),
             Some(Panel::Bookmarks) => self.render_bookmarks_panel(cx).into_any_element(),
+            Some(Panel::Boards) => self.render_boards_panel(cx).into_any_element(),
             Some(Panel::History) => self.render_history_panel(cx).into_any_element(),
             Some(Panel::Value) => self.render_value_viewer(cx).into_any_element(),
             Some(Panel::Assistant) => self.panels.assistant.clone().into_any_element(),
@@ -446,6 +457,7 @@ mod tests {
     fn cycle_wraps_within_its_panels() {
         let mut s = left();
         assert_eq!(s.cycle(1), Some(Panel::Bookmarks));
+        assert_eq!(s.cycle(1), Some(Panel::Boards));
         assert_eq!(s.cycle(1), Some(Panel::History));
         assert_eq!(s.cycle(1), Some(Panel::Schema));
         assert_eq!(s.cycle(-1), Some(Panel::History));
