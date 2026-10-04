@@ -11,6 +11,7 @@ pub mod edit;
 pub mod format;
 pub mod grammar;
 pub mod guard;
+pub mod hints;
 pub mod join_graph;
 pub mod lexer;
 pub mod nl;

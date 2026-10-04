@@ -83,6 +83,88 @@ impl Dialect for Postgres {
             "cast",
             "round",
             "concat",
+            "date_part",
+            "age",
+            "to_timestamp",
+            "to_date",
+            "greatest",
+            "least",
+            "abs",
+            "replace",
+            "substring",
+            "split_part",
+            "regexp_replace",
+            "row_number",
+            "rank",
+            "dense_rank",
+            "lag",
+            "lead",
+            "first_value",
+            "percentile_cont",
+            "bool_or",
+            "unnest",
+            "jsonb_array_elements",
+        ]
+    }
+
+    fn interval_units(&self) -> &'static [&'static str] {
+        &["DAY", "HOUR", "MINUTE", "MONTH", "YEAR", "SECOND"]
+    }
+
+    fn interval_text_units(&self) -> &'static [&'static str] {
+        &["day", "hour", "minute", "week", "month", "year", "second"]
+    }
+
+    fn date_fields(&self) -> &'static [&'static str] {
+        &[
+            "YEAR", "MONTH", "DAY", "HOUR", "WEEK", "QUARTER", "DOW", "DOY", "EPOCH", "MINUTE",
+            "SECOND", "ISODOW",
+        ]
+    }
+
+    fn cast_types(&self) -> &'static [&'static str] {
+        &[
+            "int",
+            "bigint",
+            "numeric",
+            "text",
+            "date",
+            "timestamp",
+            "timestamptz",
+            "boolean",
+            "varchar",
+            "uuid",
+            "jsonb",
+            "interval",
+            "float8",
+        ]
+    }
+
+    fn string_choices(&self, function: &str, arg: usize) -> &'static [&'static str] {
+        match (function, arg) {
+            ("date_trunc", 0) => &[
+                "day", "week", "month", "hour", "year", "quarter", "minute", "second",
+            ],
+            ("date_part", 0) => &[
+                "year", "month", "day", "hour", "dow", "week", "quarter", "epoch", "minute", "doy",
+            ],
+            ("to_char", 1) => &[
+                "YYYY-MM-DD",
+                "YYYY-MM",
+                "YYYY-MM-DD HH24:MI",
+                "HH24:MI",
+                "Day",
+            ],
+            _ => &[],
+        }
+    }
+
+    fn date_values(&self) -> &'static [&'static str] {
+        &[
+            "CURRENT_DATE",
+            "NOW() - INTERVAL '7 days'",
+            "CURRENT_DATE - INTERVAL '30 days'",
+            "DATE_TRUNC('month', NOW())",
         ]
     }
 

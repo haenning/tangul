@@ -80,6 +80,8 @@ pub struct ConnectionForm {
     ai_access: AiAccess,
     /// AI tools (MCP clients, the assistant) may use this database.
     ai_tools: bool,
+    /// The editor may look at a few hundred rows of a text column to offer values.
+    editor_values: bool,
     /// Set up by "Set up a read-only AI user…", saved with the form.
     ai_account: Option<(DbUser, String)>,
     error: Option<SharedString>,
@@ -192,6 +194,7 @@ impl ConnectionForm {
             ai_access: db.map(|d| d.ai_access).unwrap_or_default(),
             // On for a new database too: the user turns it off.
             ai_tools: db.is_none_or(|d| d.ai_tools),
+            editor_values: db.is_none_or(|d| d.editor_values),
             ai_account: None,
             error: None,
         }
@@ -279,6 +282,7 @@ impl ConnectionForm {
                 ai_values: self.ai_values,
                 ai_access: self.ai_access,
                 ai_tools: self.ai_tools,
+                editor_values: self.editor_values,
                 ssh: ssh.then(|| SshConfig {
                     host: value(&self.ssh_host),
                     port: ssh_port.clone().unwrap_or(22),
@@ -456,6 +460,15 @@ impl Render for ConnectionForm {
         };
         // Also when setting up a new connection, before it has users.
         let db_fields = db_fields
+            .child(
+                Checkbox::new("editor-values")
+                    .label("Suggest values from the data while typing conditions")
+                    .checked(self.editor_values)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.editor_values = *checked;
+                        cx.notify();
+                    })),
+            )
             .child(
                 Checkbox::new("ai-tools")
                     .label("Available to AI tools (MCP clients, the assistant)")

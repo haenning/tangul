@@ -17,6 +17,8 @@ mod connections;
 mod empty_state;
 mod history;
 mod mcp;
+mod quick_values;
+pub use quick_values::LookRequest;
 mod safety;
 mod scheduled;
 mod schema;
@@ -88,7 +90,7 @@ use crate::{
     PrevSidebarPanel, RunAll, ToggleRightSidebar, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
-    completion::SqlCompletion,
+    completion::{Snippets, SqlCompletion},
     connection::{ConnStatus, Connection},
     connection_form::{ConnectionForm, FormMode, FormOutput},
     file_tab::{FileKind, FileTab},
@@ -176,6 +178,8 @@ pub struct Workspace {
     /// The board the assistant was last asked for a tile from, and the question:
     /// "Add to board" on its answer goes there.
     board_asked: Option<(String, String)>,
+    /// The editor's quick looks at column values.
+    quick_looks: quick_values::QuickLooks,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -298,6 +302,7 @@ impl Workspace {
             mcp: mcp::Mcp::default(),
             assistant: assistant::Assistant::default(),
             board_asked: None,
+            quick_looks: quick_values::QuickLooks::start(cx),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![
                 search_sub,

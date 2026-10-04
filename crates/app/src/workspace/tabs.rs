@@ -13,11 +13,14 @@ impl Workspace {
         let conn = self.active_user.as_deref().and_then(|p| self.tab_conn(p));
         let engine = self.engine.clone();
         let tab = cx.new(|cx| QueryTab::new(id, conn, sql, engine, window, cx));
+        let snippets = Snippets::default();
         let provider = Rc::new(SqlCompletion {
             knowledge: self.knowledge.clone(),
             tab: tab.downgrade(),
+            snippets: snippets.clone(),
+            looks: self.quick_looks.requests(),
         });
-        tab.update(cx, |t, cx| t.set_completion(provider, cx));
+        tab.update(cx, |t, cx| t.set_completion(provider, snippets, cx));
         let check = self.question_check();
         tab.update(cx, |t, _| t.set_question_check(check));
         let events = cx.subscribe_in(&tab, window, Self::on_tab_event);

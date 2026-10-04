@@ -188,6 +188,7 @@ mod tests {
             ai_values: Default::default(),
             ai_access: Default::default(),
             ai_tools: true,
+            editor_values: true,
         };
         let profiles = Profiles::in_memory(vec![db(Some("reader"))]);
         assert_eq!(assistant_user(&profiles, "admin"), Ok("reader".into()));
@@ -239,6 +240,7 @@ mod tests {
             ai_values: Default::default(),
             ai_access: Default::default(),
             ai_tools: true,
+            editor_values: true,
         }]);
         let mut c = Connections::default();
         assert_eq!(

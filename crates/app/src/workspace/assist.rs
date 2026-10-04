@@ -3,8 +3,12 @@
 
 use super::*;
 
+/// Most run queries the editor's continuations choose from.
+const HISTORY_PATTERNS: usize = 200;
+
 impl Workspace {
-    /// The database's learned usage, loaded from `local.db` into the pool once.
+    /// The database's learned usage, loaded from `local.db` into the pool once
+    /// (with its most run queries).
     pub(super) fn usage_for(&mut self, db_id: &str) -> Arc<Usage> {
         if let Some(u) = self.knowledge.usage(db_id) {
             return u;
@@ -14,7 +18,15 @@ impl Workspace {
             self.data.local.usage(db_id),
         ));
         self.knowledge.set_usage(db_id, u.clone());
+        self.load_history_patterns(db_id);
         u
+    }
+
+    /// The database's most run queries from `local.db` into the pool (the editor
+    /// continues a statement as one of them was run).
+    pub(super) fn load_history_patterns(&self, db_id: &str) {
+        let patterns = self.data.local.patterns(db_id, HISTORY_PATTERNS);
+        self.knowledge.set_history(db_id, Arc::new(patterns));
     }
 
     /// The schema of `user_id` from the pool; empty until it was opened.
@@ -60,7 +72,7 @@ impl Workspace {
         let Some(ix) = schema.resolve(Some(&table.schema), &table.name) else {
             return Vec::new();
         };
-        let patterns = self.data.local.patterns(db, 200);
+        let patterns = self.data.local.patterns(db, HISTORY_PATTERNS);
         suggest_for_table(ix, &schema, &patterns)
     }
 }

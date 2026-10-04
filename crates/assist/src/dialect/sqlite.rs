@@ -62,6 +62,36 @@ impl Dialect for Sqlite {
             "date",
             "strftime",
             "group_concat",
+            "julianday",
+            "ifnull",
+            "substr",
+            "replace",
+            "abs",
+            "row_number",
+            "rank",
+            "lag",
+            "lead",
+        ]
+    }
+
+    fn cast_types(&self) -> &'static [&'static str] {
+        &["INTEGER", "REAL", "TEXT", "NUMERIC", "BLOB"]
+    }
+
+    fn string_choices(&self, function: &str, arg: usize) -> &'static [&'static str] {
+        match (function, arg) {
+            ("strftime", 0) => &["%Y-%m-%d", "%Y-%m", "%Y-%m-%d %H:%M", "%H:%M", "%w"],
+            ("date" | "datetime", 1) => &["-7 days", "-1 month", "start of month", "+1 day"],
+            _ => &[],
+        }
+    }
+
+    fn date_values(&self) -> &'static [&'static str] {
+        &[
+            "DATE('now')",
+            "DATETIME('now', '-7 days')",
+            "DATE('now', '-30 days')",
+            "DATE('now', 'start of month')",
         ]
     }
 

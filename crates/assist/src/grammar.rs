@@ -53,14 +53,50 @@ pub enum Expect {
     },
     /// Exactly one of these keywords fits (`BY` after `GROUP`, …).
     Words(&'static [&'static str]),
-    /// A name the user makes up (alias, CTE name) or a type: nothing to suggest.
+    /// A name the user makes up (alias, CTE name): nothing to suggest.
     Name,
+    /// A word from the dialect's vocabulary.
+    Vocab(Vocab),
+}
+
+/// Words that depend on the dialect, asked for by [`Expect::Vocab`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vocab {
+    /// After `INTERVAL 1`: `DAY`, `HOUR`, ….
+    IntervalUnit,
+    /// `EXTRACT(|`: `YEAR`, `MONTH`, ….
+    DateField,
+    /// `CAST(x AS |`, `x::|`.
+    Type,
+    /// After an operand and `NOT`: `IN`, `LIKE`, `BETWEEN`, ….
+    Negated,
+}
+
+/// Where the cursor is inside the innermost `CASE`: after which of its words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasePart {
+    Case,
+    When,
+    Then,
+    Else,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct State {
     pub clause: Clause,
     pub expect: Expect,
+    /// Inside a `CASE … END`.
+    pub case: Option<CasePart>,
+    /// After `BETWEEN x`, before its `AND`.
+    pub between: bool,
+}
+
+impl State {
+    fn enter(&mut self, clause: Clause, expect: Expect) {
+        self.clause = clause;
+        self.expect = expect;
+        self.between = false;
+    }
 }
 
 struct Frame {
@@ -69,6 +105,10 @@ struct Frame {
     kind: Paren,
     /// A SELECT started inside: a subquery, not a function call.
     subquery: bool,
+    /// `CAST(`: its `AS` is followed by a type.
+    cast: bool,
+    /// `CASE`s open when it started, restored at `)`.
+    cases: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,8 +210,11 @@ pub fn state_at(sql: &str, tokens: &[Token]) -> State {
     let mut st = State {
         clause: Clause::None,
         expect: Expect::Statement,
+        case: None,
+        between: false,
     };
     let mut stack: Vec<Frame> = Vec::new();
+    let mut cases: Vec<CasePart> = Vec::new();
     let word_at = |i: usize| -> Option<String> {
         tokens
             .get(i)
@@ -224,11 +267,36 @@ pub fn state_at(sql: &str, tokens: &[Token]) -> State {
             let in_call = stack
                 .last()
                 .is_some_and(|f| f.kind == Paren::Expr && !f.subquery);
-            keyword_step(&mut st, &lower, prev, in_call);
+            let in_cast = in_call && stack.last().is_some_and(|f| f.cast);
+            match lower.as_str() {
+                "case" => cases.push(CasePart::Case),
+                "when" | "then" | "else" if !cases.is_empty() => {
+                    *cases.last_mut().unwrap() = match lower.as_str() {
+                        "when" => CasePart::When,
+                        "then" => CasePart::Then,
+                        _ => CasePart::Else,
+                    };
+                }
+                "end" => {
+                    cases.pop();
+                }
+                _ => {}
+            }
+            keyword_step(&mut st, &lower, prev, in_call, in_cast);
+            st.case = cases.last().copied();
         } else {
             match t.kind {
                 TokenKind::Number | TokenKind::String | TokenKind::Param => {
-                    st.expect = Expect::AfterOperand { star: false };
+                    // `INTERVAL 1 |`, `INTERVAL '1' |`: a unit follows; not after
+                    // `INTERVAL '1 day'`, which has one.
+                    let unit = prev == Some("interval")
+                        && !(t.kind == TokenKind::String
+                            && t.text(sql).chars().any(char::is_alphabetic));
+                    st.expect = if unit {
+                        Expect::Vocab(Vocab::IntervalUnit)
+                    } else {
+                        Expect::AfterOperand { star: false }
+                    };
                 }
                 TokenKind::Punct => {
                     let c = t.text(sql);
@@ -250,19 +318,34 @@ pub fn state_at(sql: &str, tokens: &[Token]) -> State {
                                 clause: st.clause,
                                 kind,
                                 subquery: false,
+                                cast: prev == Some("cast"),
+                                cases: cases.len(),
                             });
                             if kind == Paren::InsertColumns {
                                 st.clause = Clause::InsertColumns;
                             }
-                            st.expect = Expect::Operand { first: false };
+                            st.expect = match prev {
+                                Some("extract") => Expect::Vocab(Vocab::DateField),
+                                Some("over") => Expect::Words(&["PARTITION BY", "ORDER BY"]),
+                                Some("exists") => Expect::Words(&["SELECT"]),
+                                _ => Expect::Operand { first: false },
+                            };
                         }
                         ")" => {
-                            let Some(Frame { clause, kind, .. }) = stack.pop() else {
+                            let Some(Frame {
+                                clause,
+                                kind,
+                                cases: open,
+                                ..
+                            }) = stack.pop()
+                            else {
                                 st.expect = Expect::AfterOperand { star: false };
                                 i += 1;
                                 continue;
                             };
                             st.clause = clause;
+                            cases.truncate(open);
+                            st.case = cases.last().copied();
                             st.expect = match kind {
                                 Paren::Expr => Expect::AfterOperand { star: false },
                                 Paren::FromSubquery => Expect::AfterTable { alias: false },
@@ -278,7 +361,7 @@ pub fn state_at(sql: &str, tokens: &[Token]) -> State {
                         }
                         ":" if tokens.get(i + 1).is_some_and(|n| n.is_punct(sql, ':')) => {
                             // Postgres cast `x::type`.
-                            st.expect = Expect::Name;
+                            st.expect = Expect::Vocab(Vocab::Type);
                             i += 2;
                             continue;
                         }
@@ -298,6 +381,8 @@ pub fn state_at(sql: &str, tokens: &[Token]) -> State {
 
 fn after_ident(st: State, star: bool) -> Expect {
     match st.expect {
+        Expect::Vocab(Vocab::DateField) => Expect::Words(&["FROM"]),
+        Expect::Vocab(_) => Expect::AfterOperand { star: false },
         Expect::Table => Expect::AfterTable { alias: false },
         Expect::AfterTable { .. } => Expect::AfterTable { alias: true },
         Expect::Operand { .. } => Expect::AfterOperand { star },
@@ -324,87 +409,52 @@ fn after_comma(clause: Clause) -> Expect {
 }
 
 /// `in_call`: inside a function call's parentheses (`EXTRACT(year FROM d)`).
-fn keyword_step(st: &mut State, kw: &str, prev: Option<&str>, in_call: bool) {
+/// `in_cast`: directly inside `CAST(…)`.
+fn keyword_step(st: &mut State, kw: &str, prev: Option<&str>, in_call: bool, in_cast: bool) {
     let operand = Expect::Operand { first: false };
     let after = Expect::AfterOperand { star: false };
     let in_condition = matches!(st.clause, Clause::Where | Clause::On | Clause::Having);
     match kw {
-        "select" => {
-            *st = State {
-                clause: Clause::Select,
-                expect: Expect::Operand { first: true },
-            }
-        }
+        "select" => st.enter(Clause::Select, Expect::Operand { first: true }),
         "distinct" | "all" if st.clause == Clause::Select => {}
         "distinct" if prev == Some("is") => st.expect = Expect::Words(&["FROM"]),
         "from" if prev == Some("distinct") && in_condition => st.expect = operand,
         // `EXTRACT(year FROM x)`, `SUBSTRING(a FROM 2)`.
         "from" if in_call => st.expect = operand,
         "from" if st.clause == Clause::DeleteFrom => st.expect = Expect::Table,
-        "from" => {
-            *st = State {
-                clause: Clause::From,
-                expect: Expect::Table,
-            }
-        }
-        "join" | "straight_join" | "lateral" => {
-            *st = State {
-                clause: Clause::Join,
-                expect: Expect::Table,
-            }
-        }
+        "from" => st.enter(Clause::From, Expect::Table),
+        "join" | "straight_join" | "lateral" => st.enter(Clause::Join, Expect::Table),
         "left" | "right" | "full" => st.expect = Expect::Words(&["JOIN", "OUTER JOIN"]),
         "inner" | "cross" | "natural" | "outer" => st.expect = Expect::Words(&["JOIN"]),
         "on" if matches!(st.clause, Clause::Values | Clause::InsertInto) => {
             st.expect = Expect::Words(&["CONFLICT", "DUPLICATE KEY UPDATE"])
         }
-        "on" => {
-            *st = State {
-                clause: Clause::On,
-                expect: operand,
-            }
-        }
+        "on" => st.enter(Clause::On, operand),
         "using" if st.clause == Clause::DeleteFrom => st.expect = Expect::Table,
-        "using" => {
-            *st = State {
-                clause: Clause::Using,
-                expect: operand,
-            }
-        }
-        "where" => {
-            *st = State {
-                clause: Clause::Where,
-                expect: operand,
-            }
-        }
-        "having" => {
-            *st = State {
-                clause: Clause::Having,
-                expect: operand,
-            }
-        }
-        "group" | "partition" => {
-            *st = State {
-                clause: Clause::GroupBy,
-                expect: Expect::Words(&["BY"]),
-            }
-        }
-        "order" => {
-            *st = State {
-                clause: Clause::OrderBy,
-                expect: Expect::Words(&["BY"]),
-            }
-        }
+        "using" => st.enter(Clause::Using, operand),
+        "where" => st.enter(Clause::Where, operand),
+        "having" => st.enter(Clause::Having, operand),
+        "group" | "partition" => st.enter(Clause::GroupBy, Expect::Words(&["BY"])),
+        "order" => st.enter(Clause::OrderBy, Expect::Words(&["BY"])),
         "by" => st.expect = operand,
-        "limit" | "offset" | "fetch" => {
-            *st = State {
-                clause: Clause::Limit,
-                expect: operand,
-            }
-        }
+        "limit" | "offset" | "fetch" => st.enter(Clause::Limit, operand),
         "is" => st.expect = Expect::Words(&["NULL", "NOT NULL", "TRUE", "FALSE", "DISTINCT FROM"]),
-        "not" | "and" | "or" | "like" | "ilike" | "in" | "between" | "when" | "then" | "else"
-        | "case" | "exists" | "any" | "some" | "regexp" | "rlike" | "escape" | "interval" => {
+        "not" if prev == Some("is") => {
+            st.expect = Expect::Words(&["NULL", "DISTINCT FROM", "TRUE", "FALSE"])
+        }
+        "not" if matches!(st.expect, Expect::AfterOperand { .. }) => {
+            st.expect = Expect::Vocab(Vocab::Negated)
+        }
+        "between" => {
+            st.expect = operand;
+            st.between = true;
+        }
+        "and" if st.between => {
+            st.expect = operand;
+            st.between = false;
+        }
+        "not" | "and" | "or" | "like" | "ilike" | "in" | "when" | "then" | "else" | "case"
+        | "exists" | "any" | "some" | "regexp" | "rlike" | "escape" | "interval" => {
             st.expect = operand
         }
         "similar" => st.expect = Expect::Words(&["TO"]),
@@ -413,69 +463,22 @@ fn keyword_step(st: &mut State, kw: &str, prev: Option<&str>, in_call: bool) {
         "desc" | "describe" if st.expect == Expect::Statement => st.expect = Expect::Table,
         "desc" => st.expect = after,
         "nulls" => st.expect = Expect::Words(&["FIRST", "LAST"]),
+        "as" if in_cast => st.expect = Expect::Vocab(Vocab::Type),
         "as" => st.expect = Expect::Name,
-        "update" if prev == Some("key") => {
-            *st = State {
-                clause: Clause::Set,
-                expect: operand,
-            }
-        }
+        "update" if prev == Some("key") => st.enter(Clause::Set, operand),
         "update" if matches!(prev, Some("do" | "for")) => st.expect = Expect::Words(&["SET"]),
-        "update" => {
-            *st = State {
-                clause: Clause::Update,
-                expect: Expect::Table,
-            }
-        }
-        "set" => {
-            *st = State {
-                clause: Clause::Set,
-                expect: operand,
-            }
-        }
-        "insert" => {
-            *st = State {
-                clause: Clause::InsertInto,
-                expect: Expect::Words(&["INTO"]),
-            }
-        }
-        "into" => {
-            *st = State {
-                clause: Clause::InsertInto,
-                expect: Expect::Table,
-            }
-        }
-        "values" => {
-            *st = State {
-                clause: Clause::Values,
-                expect: operand,
-            }
-        }
-        "delete" => {
-            *st = State {
-                clause: Clause::DeleteFrom,
-                expect: Expect::Words(&["FROM"]),
-            }
-        }
-        "returning" => {
-            *st = State {
-                clause: Clause::Returning,
-                expect: operand,
-            }
-        }
+        "update" => st.enter(Clause::Update, Expect::Table),
+        "set" => st.enter(Clause::Set, operand),
+        "insert" => st.enter(Clause::InsertInto, Expect::Words(&["INTO"])),
+        "into" => st.enter(Clause::InsertInto, Expect::Table),
+        "values" => st.enter(Clause::Values, operand),
+        "delete" => st.enter(Clause::DeleteFrom, Expect::Words(&["FROM"])),
+        "returning" => st.enter(Clause::Returning, operand),
         "union" | "intersect" | "except" => {
-            *st = State {
-                clause: Clause::None,
-                expect: Expect::Words(&["SELECT", "ALL"]),
-            }
+            st.enter(Clause::None, Expect::Words(&["SELECT", "ALL"]))
         }
         "all" => st.expect = Expect::Words(&["SELECT"]),
-        "with" => {
-            *st = State {
-                clause: Clause::None,
-                expect: Expect::Name,
-            }
-        }
+        "with" => st.enter(Clause::None, Expect::Name),
         "explain" => st.expect = Expect::Statement,
         "table" | "truncate" => st.expect = Expect::Table,
         "do" => st.expect = Expect::Words(&["NOTHING", "UPDATE SET"]),
@@ -736,7 +739,10 @@ mod tests {
             expect("select * from t where extract(year from d) "),
             Expect::AfterOperand { star: false }
         );
-        assert_eq!(expect("select * from t where a::"), Expect::Name);
+        assert_eq!(
+            expect("select * from t where a::"),
+            Expect::Vocab(Vocab::Type)
+        );
         assert_eq!(
             at("select * from t where id in (select id from u) and ").clause,
             Clause::Where
@@ -770,5 +776,87 @@ mod tests {
             Expect::AfterOperand { star: false }
         );
         assert_eq!(at("select extract(year from d) ").clause, Clause::Select);
+    }
+
+    #[test]
+    fn dialect_words() {
+        let unit = Expect::Vocab(Vocab::IntervalUnit);
+        assert_eq!(expect("select now() - interval 1 "), unit);
+        assert_eq!(expect("select now() - interval '7' "), unit);
+        assert_eq!(
+            expect("select now() - interval '7 days' "),
+            Expect::AfterOperand { star: false }
+        );
+        assert_eq!(
+            expect("select now() - interval 1 day "),
+            Expect::AfterOperand { star: false }
+        );
+        assert_eq!(expect("select extract("), Expect::Vocab(Vocab::DateField));
+        assert_eq!(expect("select extract(year "), Expect::Words(&["FROM"]));
+        assert_eq!(
+            expect("select extract(year from d) "),
+            Expect::AfterOperand { star: false }
+        );
+        assert_eq!(expect("select cast(a as "), Expect::Vocab(Vocab::Type));
+        assert_eq!(
+            expect("select cast(a as int) "),
+            Expect::AfterOperand { star: false }
+        );
+        assert_eq!(expect("select a as "), Expect::Name);
+        assert_eq!(
+            expect("select * from t where a not "),
+            Expect::Vocab(Vocab::Negated)
+        );
+        assert_eq!(
+            expect("select * from t where a is not "),
+            Expect::Words(&["NULL", "DISTINCT FROM", "TRUE", "FALSE"])
+        );
+        assert_eq!(
+            expect("select * from t where not "),
+            Expect::Operand { first: false }
+        );
+    }
+
+    #[test]
+    fn subqueries_and_windows() {
+        assert_eq!(
+            expect("select count(*) over ("),
+            Expect::Words(&["PARTITION BY", "ORDER BY"])
+        );
+        let s = at("select count(*) over (partition by a) ");
+        assert_eq!(
+            (s.clause, s.expect),
+            (Clause::Select, Expect::AfterOperand { star: false })
+        );
+        assert_eq!(
+            expect("select * from t where exists ("),
+            Expect::Words(&["SELECT"])
+        );
+    }
+
+    #[test]
+    fn case_and_between() {
+        let case = |sql: &str| at(sql).case;
+        assert_eq!(case("select case "), Some(CasePart::Case));
+        assert_eq!(case("select case when a = 1 "), Some(CasePart::When));
+        assert_eq!(case("select case when a = 1 then 2 "), Some(CasePart::Then));
+        assert_eq!(
+            case("select case when a then case when b then 1 else 2 "),
+            Some(CasePart::Else)
+        );
+        assert_eq!(
+            case("select case when a then case when b then 1 end "),
+            Some(CasePart::Then)
+        );
+        assert_eq!(case("select case when a then 1 end "), None);
+        assert_eq!(
+            case("select coalesce(case when a then 1 "),
+            Some(CasePart::Then)
+        );
+        assert_eq!(case("select coalesce(case when a then 1) "), None);
+
+        assert!(at("select * from t where a between 1 ").between);
+        assert!(!at("select * from t where a between 1 and 2 ").between);
+        assert!(!at("select * from t where a between 1 and 2 and ").between);
     }
 }

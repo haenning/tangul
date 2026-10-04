@@ -103,6 +103,7 @@ impl Workspace {
                 }
                 let usage = Arc::new(Usage::from_stats(now, self.data.local.usage(&db_id)));
                 self.knowledge.set_usage(&db_id, usage.clone());
+                self.load_history_patterns(&db_id);
                 // Related rows (foreign keys, most used first) and UPDATE / DELETE
                 // statements in the result's context menu.
                 if let Some(tab) = &tab {

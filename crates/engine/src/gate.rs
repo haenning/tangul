@@ -36,6 +36,9 @@ pub enum Caller {
     Board,
     /// The AI assistant (agent panel, MCP).
     Assistant,
+    /// The editor sampling a column's values to offer them (like schedules: reads
+    /// only).
+    Editor,
 }
 
 impl Caller {
@@ -45,6 +48,7 @@ impl Caller {
             Caller::Schedule => "schedule",
             Caller::Board => "board",
             Caller::Assistant => "assistant",
+            Caller::Editor => "editor",
         }
     }
 }
@@ -135,7 +139,7 @@ fn decide_with(
 ) -> Decision {
     let run = user_run(settings, db_user);
     match caller {
-        Caller::Schedule | Caller::Board | Caller::Assistant => {
+        Caller::Schedule | Caller::Board | Caller::Editor | Caller::Assistant => {
             let not_reads: Vec<(String, String)> = guard::not_reads_with(sql, lexing)
                 .into_iter()
                 .map(|(keyword, statement)| (keyword, one_line(&statement, STATEMENT_LEN)))
@@ -153,6 +157,7 @@ fn decide_with(
             let place = match caller {
                 Caller::Schedule => Some("on a schedule"),
                 Caller::Board => Some("on a board"),
+                Caller::Editor => Some("for the editor"),
                 Caller::User | Caller::Assistant => None,
             };
             if let Some(place) = place {
@@ -289,7 +294,9 @@ impl Gate {
     ) -> Enforced {
         let sql = match caller {
             Caller::User => sql.to_string(),
-            Caller::Schedule | Caller::Board | Caller::Assistant => guard::read_text(sql, lexing),
+            Caller::Schedule | Caller::Board | Caller::Editor | Caller::Assistant => {
+                guard::read_text(sql, lexing)
+            }
         };
         let run = |run| Enforced::Run {
             run,
@@ -510,9 +517,9 @@ mod tests {
     }
 
     #[test]
-    fn schedules_and_boards_only_read() {
+    fn schedules_boards_and_the_editor_only_read() {
         let g = gate(r#"{"safety": {"read_only_users": ["ro"]}}"#);
-        for caller in [Caller::Schedule, Caller::Board] {
+        for caller in [Caller::Schedule, Caller::Board, Caller::Editor] {
             for user in ["rw", "ro"] {
                 assert!(matches!(
                     g.enforce_default(user, "select * from t -- x", caller, Approval::None),
@@ -548,6 +555,12 @@ mod tests {
             panic!("a board's write ran");
         };
         assert!(reason.contains("on a board"), "{reason}");
+        let Enforced::Refused(reason) =
+            g.enforce_default("rw", "delete from t", Caller::Editor, Approval::None)
+        else {
+            panic!("the editor's write ran");
+        };
+        assert!(reason.contains("for the editor"), "{reason}");
     }
 
     #[test]
