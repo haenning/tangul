@@ -14,6 +14,7 @@ mod boards;
 mod bookmarks;
 mod command_palette;
 mod connections;
+mod database_tabs;
 mod empty_state;
 mod history;
 mod mcp;
@@ -180,6 +181,8 @@ pub struct Workspace {
     board_asked: Option<(String, String)>,
     /// The editor's quick looks at column values.
     quick_looks: quick_values::QuickLooks,
+    /// The other databases' tabs, and saving the pinned ones.
+    db_tabs: database_tabs::DatabaseTabs,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -303,6 +306,7 @@ impl Workspace {
             assistant: assistant::Assistant::default(),
             board_asked: None,
             quick_looks: quick_values::QuickLooks::start(cx),
+            db_tabs: database_tabs::DatabaseTabs::default(),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![
                 search_sub,
@@ -331,9 +335,16 @@ impl Workspace {
                 this.connect(&user_id, cx);
                 this.active_user = Some(user_id);
             }
+            this.database_shown(None, window, cx);
             this.refresh_history(cx);
             this.check_ai_user(cx);
         }
+        // Pinned tabs as they are when the app quits (edits are saved after a pause).
+        let quit = cx.on_app_quit(|ws: &mut Self, cx| {
+            ws.save_pinned_tabs(cx);
+            async {}
+        });
+        this._subscriptions.push(quit);
         this.sync_ai_access(cx);
         this.sync_mcp(cx);
         this.sync_assistant(cx);

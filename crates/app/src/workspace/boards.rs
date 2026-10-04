@@ -23,6 +23,12 @@ const RECENT_QUERIES: usize = 15;
 impl Workspace {
     /// Shows board `id` in its tab (opened if it isn't).
     pub(super) fn open_board(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // A board opens among its database's tabs.
+        if let Some(db) = self.data.boards.get(id).map(|b| b.database_id.clone())
+            && self.active_db.as_deref() != Some(db.as_str())
+        {
+            self.select_database(db, window, cx);
+        }
         let open = self
             .tabs
             .items()

@@ -43,6 +43,8 @@ const EDITOR_SNAP_HIDE: f32 = 60.;
 pub enum TabEvent {
     /// The user wants to run this SQL; the workspace assigns a QueryId.
     Run(String),
+    /// The editor's text changed.
+    Edited,
     /// Check these statements (byte offset in the editor, text) on the server
     /// without running them; the answer goes to `apply_validation(generation, …)`.
     Validate {
@@ -141,6 +143,7 @@ impl QueryTab {
         }
         let subscriptions = vec![
             cx.subscribe(&editor, |_, _, event: &EditorEvent, cx| match event {
+                EditorEvent::Edited => cx.emit(TabEvent::Edited),
                 EditorEvent::Validate {
                     generation,
                     statements,
@@ -494,8 +497,7 @@ impl QueryTab {
         self.editor.read(cx).state.read(cx).cursor()
     }
 
-    /// The view the result is set to, even before a run (tests).
-    #[cfg(test)]
+    /// The view the result is set to, even before a run.
     pub fn chart_view(&self, cx: &App) -> Option<ChartView> {
         self.results.read(cx).chart_view()
     }

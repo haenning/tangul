@@ -41,6 +41,8 @@ pub enum RunTake {
 }
 
 pub enum EditorEvent {
+    /// The text changed.
+    Edited,
     /// Check these statements (byte offset in the editor, text) on the server
     /// without running them; the answer goes to [`SqlEditor::apply_validation`].
     Validate {
@@ -94,6 +96,7 @@ impl SqlEditor {
         let changes = cx.subscribe(&state, |this: &mut Self, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
                 this.place_snippet_cursor(cx);
+                cx.emit(EditorEvent::Edited);
                 this.color_comments(cx);
                 this.revalidate(cx);
             }

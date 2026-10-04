@@ -242,7 +242,7 @@ pub fn rows(tiles: &[Tile]) -> Vec<Row> {
     out
 }
 
-fn view_out<S: Serializer>(view: &Option<ChartView>, s: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn view_out<S: Serializer>(view: &Option<ChartView>, s: S) -> Result<S::Ok, S::Error> {
     match view {
         Some(view) => s.serialize_str(&view.to_key()),
         None => s.serialize_none(),
@@ -250,7 +250,7 @@ fn view_out<S: Serializer>(view: &Option<ChartView>, s: S) -> Result<S::Ok, S::E
 }
 
 /// An unknown chart (from a newer version, or edited by hand) shows the table.
-fn view_in<'de, D: Deserializer<'de>>(d: D) -> Result<Option<ChartView>, D::Error> {
+pub(crate) fn view_in<'de, D: Deserializer<'de>>(d: D) -> Result<Option<ChartView>, D::Error> {
     let key = Option::<String>::deserialize(d)?;
     Ok(key.as_deref().and_then(ChartView::from_key))
 }

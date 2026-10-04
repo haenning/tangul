@@ -1,6 +1,8 @@
 //! The main area's tabs: what kinds there are ([`TabItem`]) and the open ones
-//! ([`Tabs`]): order, the active one, pinning. Opening, closing and running belong
-//! to the workspace.
+//! ([`Tabs`]): order, the active one, pinning. Query and board tabs belong to a
+//! database (the workspace keeps one `Tabs` per database); the others go along
+//! with whichever database is shown. Opening, closing and running belong to the
+//! workspace.
 
 use gpui_kit::*;
 use tangul_core::TabId;
@@ -68,6 +70,12 @@ impl TabItem {
         }
     }
 
+    /// Belongs to a database (query and board tabs); the others go along when
+    /// another database is shown, and are never kept between runs.
+    pub fn of_database(&self) -> bool {
+        matches!(self, TabItem::Query(_) | TabItem::Board(_))
+    }
+
     /// Changes that would be lost on closing (asks first).
     pub fn has_unsaved_changes(&self, cx: &App) -> bool {
         match self {
@@ -103,6 +111,9 @@ impl TabItem {
         }
     }
 }
+
+/// A tab that belongs to no database, on its way to another database's tabs.
+pub struct UnboundTab(OpenTab);
 
 struct OpenTab {
     item: TabItem,
@@ -191,6 +202,46 @@ impl Tabs {
     pub fn toggle_pin(&mut self, ix: usize) {
         if let Some(t) = self.open.get_mut(ix) {
             t.pinned = !t.pinned;
+        }
+    }
+
+    pub fn pin(&mut self, ix: usize) {
+        if let Some(t) = self.open.get_mut(ix) {
+            t.pinned = true;
+        }
+    }
+
+    /// The pinned tabs, in order.
+    pub fn pinned(&self) -> impl Iterator<Item = &TabItem> {
+        self.open.iter().filter(|t| t.pinned).map(|t| &t.item)
+    }
+
+    /// Takes out the tabs that belong to no database, to go along to another
+    /// database's tabs ([`Tabs::adopt`]); whether the active tab was one of them.
+    pub fn take_unbound(&mut self, cx: &App) -> (Vec<UnboundTab>, bool) {
+        let active_unbound = self.active().is_some_and(|t| !t.of_database());
+        let active_id = self.active().map(|t| t.id(cx));
+        let (unbound, bound): (Vec<_>, Vec<_>) = std::mem::take(&mut self.open)
+            .into_iter()
+            .partition(|t| !t.item.of_database());
+        self.open = bound;
+        self.active = active_id
+            .and_then(|id| self.open.iter().position(|t| t.item.id(cx) == id))
+            .unwrap_or(0);
+        (
+            unbound.into_iter().map(UnboundTab).collect(),
+            active_unbound,
+        )
+    }
+
+    /// Adds `tabs` (taken from another database's tabs) at the end; with
+    /// `activate`, the first of them becomes the active tab.
+    pub fn adopt(&mut self, tabs: Vec<UnboundTab>, activate: bool) {
+        let first = self.open.len();
+        let any = !tabs.is_empty();
+        self.open.extend(tabs.into_iter().map(|t| t.0));
+        if activate && any {
+            self.active = first;
         }
     }
 
