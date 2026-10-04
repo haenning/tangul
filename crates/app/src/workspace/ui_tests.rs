@@ -1975,6 +1975,75 @@ fn board_tiles_show_their_results_and_share_a_statement(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn a_tile_is_shown_as_the_chart_chosen_in_edit_mode(cx: &mut TestAppContext) {
+    use tangul_core::ResultSet;
+    use tangul_core::chart::{ChartStyle, ChartView};
+    use tangul_engine::QueryOutput;
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(handle, &workspace, &["select day, signups"], cx);
+    let output = |columns: &[&str], rows: &[&[&str]]| {
+        let mut result = ResultSet::new(
+            columns
+                .iter()
+                .map(|c| ColumnInfo {
+                    name: c.to_string(),
+                })
+                .collect(),
+        );
+        let mut batch = RowBatch::default();
+        for row in rows {
+            for cell in *row {
+                batch.push_cell(Some(cell));
+            }
+            batch.finish_row();
+        }
+        result.append(batch);
+        QueryOutput {
+            results: vec![result],
+            rows: Some(rows.len() as u64),
+            ..QueryOutput::default()
+        }
+    };
+    step(handle, cx, |window, cx| window.click("board-edit", cx));
+    // The menu only in edit mode.
+    step(handle, cx, |window, _| {
+        assert!(window.try_find(("tile-view", 0usize)).is_some())
+    });
+    let tab = cx.update(|cx| board_tab(&workspace, cx));
+    let bars = Some(ChartView {
+        style: ChartStyle::Bars,
+        series: None,
+    });
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.set_tile_view("t1", bars, cx))
+    });
+    cx.update(|cx| {
+        let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
+        assert_eq!(board.tiles[0].view, bars, "saved with the board");
+    });
+    let fits = output(&["day", "signups"], &[&["mon", "3"], &["tue", "5"]]);
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.show_results(vec![Ok(fits)], cx))
+    });
+    step(handle, cx, |window, cx| {
+        let result = tab.read(cx).tile_result("t1").unwrap();
+        let shown = result.read(cx).chart_shown().map(|v| v.style);
+        assert_eq!(shown, Some(ChartStyle::Bars));
+        assert!(window.try_find(("tile-unfit", 0usize)).is_none());
+    });
+    // A result that can't be a chart: the table, and why.
+    let text = output(&["day", "signups"], &[&["mon", "a lot"], &["tue", "5"]]);
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.show_results(vec![Ok(text)], cx))
+    });
+    step(handle, cx, |window, cx| {
+        let result = tab.read(cx).tile_result("t1").unwrap();
+        assert_eq!(result.read(cx).chart_shown(), None);
+        assert!(window.try_find(("tile-unfit", 0usize)).is_some());
+    });
+}
+
+#[gpui_kit::test]
 fn add_to_board_makes_a_new_board_and_a_tile_opens_in_a_tab(cx: &mut TestAppContext) {
     use crate::board::Target;
     use tangul_service::boards;

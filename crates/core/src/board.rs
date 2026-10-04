@@ -125,6 +125,31 @@ pub fn is_web(url: &str) -> bool {
     })
 }
 
+/// What the user typed as a web address, as one that opens: as typed with
+/// `http://` or `https://`, else with `https://` in front when it looks like a host
+/// (`taend.eu`, `www.x.de/path`, `localhost:3000`). `None` for anything else (other
+/// schemes such as `javascript:` or `file:`, spaces, no host).
+pub fn web_address(input: &str) -> Option<String> {
+    let input = input.trim();
+    if is_web(input) {
+        return Some(input.to_string());
+    }
+    if input.is_empty() || input.contains(char::is_whitespace) {
+        return None;
+    }
+    let authority = input.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match authority.split_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        Some(_) => return None,
+        None => authority,
+    };
+    let labels_ok = host
+        .split('.')
+        .all(|l| !l.is_empty() && l.chars().all(|c| c.is_alphanumeric() || c == '-'));
+    let host_ok = labels_ok && (host.contains('.') || host.eq_ignore_ascii_case("localhost"));
+    host_ok.then(|| format!("https://{input}"))
+}
+
 /// When a board's tiles query the database again.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -310,6 +335,30 @@ mod tests {
         assert!(!url("file:///etc/passwd"));
         assert!(!url("javascript:alert(1)"));
         assert!(!url(""));
+        // As typed, without a scheme: https.
+        let typed = |u: &str| web_address(u);
+        assert_eq!(typed("taend.eu").as_deref(), Some("https://taend.eu"));
+        assert_eq!(
+            typed(" www.example.de/a/b?c=1 ").as_deref(),
+            Some("https://www.example.de/a/b?c=1")
+        );
+        assert_eq!(
+            typed("localhost:3000").as_deref(),
+            Some("https://localhost:3000")
+        );
+        assert_eq!(typed("http://x.io").as_deref(), Some("http://x.io"));
+        for bad in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "mailto:a@b.c",
+            "taend",
+            "taend .eu",
+            "a..b",
+            "x.io:abc",
+            "",
+        ] {
+            assert_eq!(typed(bad), None, "{bad}");
+        }
         assert!(link(LinkTo::Bookmark("b1".into())).is_valid());
         assert!(!link(LinkTo::Board(" ".into())).is_valid());
         let query = |sql: &str| LinkTo::Query {

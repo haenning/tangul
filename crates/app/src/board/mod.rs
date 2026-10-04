@@ -443,6 +443,15 @@ impl BoardTab {
         cx.emit(BoardEvent::Edit(Edit::SetRefresh(refresh)));
     }
 
+    /// Shows `tile` as `view` (a chart, or the table with `None`), saved with the
+    /// board.
+    pub fn set_tile_view(&self, tile: &str, view: Option<ChartView>, cx: &mut Context<Self>) {
+        cx.emit(BoardEvent::Edit(Edit::SetView {
+            tile: tile.to_string(),
+            view,
+        }));
+    }
+
     fn open_tile(&self, tile: &str, cx: &mut Context<Self>) {
         if let Some(tile) = self.board.tile(tile) {
             let title = if tile.title.is_empty() {

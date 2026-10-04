@@ -29,8 +29,7 @@ mod value_panel;
 use sidebar::{HistoryList, Panel, Panels, SchemaTree, Side, Sidebar, SidebarRow};
 use value_panel::{Picked, ValueEvent, ValuePanel};
 
-// Shared by the status bar and the bookmarks panel.
-use bars::style_icon;
+use crate::assets::style_icon;
 
 use std::collections::HashMap;
 use std::rc::Rc;

@@ -65,3 +65,15 @@ impl AssetSource for AppAssets {
         Ok(paths)
     }
 }
+
+/// The icon of a result shown as the table (`None`) or a chart style.
+pub fn style_icon(style: Option<tangul_core::chart::ChartStyle>) -> Lucide {
+    use tangul_core::chart::ChartStyle;
+    match style {
+        None => Lucide::Table,
+        Some(ChartStyle::Line) => Lucide::ChartLine,
+        Some(ChartStyle::Area | ChartStyle::StackedArea) => Lucide::ChartArea,
+        Some(ChartStyle::Bars) => Lucide::ChartColumn,
+        Some(ChartStyle::StackedBars) => Lucide::ChartColumnStacked,
+    }
+}
