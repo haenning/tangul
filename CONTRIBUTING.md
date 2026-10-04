@@ -69,9 +69,7 @@ local Postgres or MySQL.
 
 ## Branches and CI
 
-Work happens on `dev`; every push to `dev` opens (or updates) a pull request into `main`
-(`.github/workflows/dev-pr.yml`, using a personal access token from the repository
-secret `DEV_PR_TOKEN`). CI (`.github/workflows/ci.yml`: lint, backend with live database
+Work happens on `dev`; pull requests into `main` are opened by hand. CI (`.github/workflows/ci.yml`: lint, backend with live database
 tests on Linux, app build on macOS) is paused during heavy development and only runs
 when started by hand (Actions → CI → Run workflow). Pull requests into `main` and
 releases run `make license-check` (`.github/workflows/licenses.yml`).
