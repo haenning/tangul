@@ -561,8 +561,7 @@ impl ResultView {
         self.chart_view.map(|v| data.view_or_default(Some(v)))
     }
 
-    /// The view it is set to, with or without a result yet (tests).
-    #[cfg(test)]
+    /// The view it is set to, with or without a result yet.
     pub fn chart_view(&self) -> Option<ChartView> {
         self.chart_view
     }

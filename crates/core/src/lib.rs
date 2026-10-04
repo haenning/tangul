@@ -3,6 +3,7 @@
 pub mod board;
 pub mod chart;
 pub mod llm;
+pub mod pinned;
 mod profile;
 mod result;
 pub mod usage;

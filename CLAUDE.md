@@ -47,7 +47,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
     `value_panel.rs`: the value viewer (right sidebar): the inspected cell (A), the
     compared one (B) and their diff; logic in `assist::value`; `tabs.rs`: the kinds of tab (`TabItem`: query,
-    file, AI settings, board) and the open ones; `boards.rs`: opening boards, their
+    file, AI settings, board) and the open ones; `database_tabs.rs`: tabs belong to
+    their database (switching shows its tabs, the others wait), pinned query and
+    board tabs kept per database in `local.db` and restored when it is first shown; `boards.rs`: opening boards, their
     changes (through `service::boards`), "Add to board", "Update tile", the Boards panel; `ai.rs`: what the assistant
     and MCP clients share: the connected databases with `ai_tools` on offered to AI
     tools (each on its assistant connection), a `Ctx` per caller, and what their calls

@@ -155,9 +155,13 @@ impl Workspace {
 
     /// Closes a tab without asking.
     pub(super) fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let pinned = self.tabs.is_pinned(ix);
         let Some(tab) = self.tabs.remove(ix) else {
             return;
         };
+        if pinned {
+            self.save_pinned_tabs(cx);
+        }
         if let Some(board) = tab.board() {
             board.update(cx, |b, _| b.cancel());
         }
@@ -193,6 +197,7 @@ impl Workspace {
     pub(super) fn toggle_tab_pin(&mut self, id: TabId, cx: &mut Context<Self>) {
         if let Some(ix) = self.tab_index(id, cx) {
             self.tabs.toggle_pin(ix);
+            self.save_pinned_tabs(cx);
             cx.notify();
         }
     }
@@ -228,6 +233,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            // A pinned tab's text is kept between runs.
+            TabEvent::Edited => {
+                let id = tab.read(cx).id;
+                if self
+                    .tab_index(id, cx)
+                    .is_some_and(|ix| self.tabs.is_pinned(ix))
+                {
+                    self.save_pinned_tabs_soon(cx);
+                }
+            }
             TabEvent::Validate {
                 generation,
                 statements,

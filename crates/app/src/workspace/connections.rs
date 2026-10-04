@@ -231,10 +231,16 @@ impl Workspace {
         if needs_connect {
             self.connect(&user_id, cx);
         }
-        self.active_db = Some(db_id);
+        let old = self.active_db.replace(db_id);
+        let same_db = old == self.active_db;
         self.active_user = Some(user_id.clone());
         self.data.local.set_setting(LAST_USER_SETTING, &user_id);
-        self.assign_active_tab(&user_id, window, cx);
+        if same_db {
+            // Another user of the same database: the current tab runs as them.
+            self.assign_active_tab(&user_id, window, cx);
+        } else {
+            self.database_shown(old, window, cx);
+        }
         self.refresh_history(cx);
         self.check_ai_user(cx);
         self.sync_assistant(cx);
@@ -265,8 +271,9 @@ impl Workspace {
         match user {
             Some(user_id) => self.select_user(db_id, user_id, window, cx),
             None => {
-                self.active_db = Some(db_id.clone());
+                let old = self.active_db.replace(db_id.clone());
                 self.active_user = None;
+                self.database_shown(old, window, cx);
                 self.open_form(FormMode::User, Some(db_id), None, window, cx);
             }
         }
@@ -534,8 +541,7 @@ impl Workspace {
                 if let Some(user_id) = self.connections.tab_user(conn).map(str::to_string)
                     && let Some(tc) = self.tab_conn(&user_id)
                 {
-                    let tabs: Vec<_> = self.tabs.queries().cloned().collect();
-                    for tab in tabs {
+                    for tab in self.all_query_tabs() {
                         if tab.read(cx).conn.is_none() {
                             tab.update(cx, |t, cx| t.set_conn(tc.clone(), cx));
                         }

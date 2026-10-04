@@ -2326,3 +2326,216 @@ fn an_answer_to_ask_ai_goes_onto_the_board_it_was_asked_from(cx: &mut TestAppCon
         assert_eq!(board.tiles[1].sql, "select 9");
     });
 }
+
+/// Databases `db1` (user `u1`) and `db2` (user `u2`), none shown yet.
+fn two_databases(workspace: &Entity<Workspace>, cx: &mut App) {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    workspace.update(cx, |ws, _| {
+        for n in [1, 2] {
+            ws.data.profiles.databases.push(Database {
+                id: format!("db{n}"),
+                name: format!("shop{n}"),
+                driver: DriverKind::Postgres,
+                host: "localhost".into(),
+                port: 5432,
+                database: format!("shop{n}"),
+                tls: TlsMode::Disable,
+                users: vec![DbUser {
+                    id: format!("u{n}"),
+                    user: format!("u{n}"),
+                }],
+                ssh: None,
+                assistant_user: None,
+                ai_values: Default::default(),
+                ai_access: Default::default(),
+                ai_tools: true,
+                editor_values: true,
+            });
+        }
+    });
+}
+
+fn show_db(workspace: &Entity<Workspace>, n: u8, window: &mut Window, cx: &mut App) {
+    workspace.update(cx, |ws, cx| {
+        ws.select_user(format!("db{n}"), format!("u{n}"), window, cx)
+    });
+}
+
+/// The shown tabs' titles, `*` marking the pinned ones.
+fn tab_titles(workspace: &Entity<Workspace>, cx: &App) -> Vec<String> {
+    let ws = workspace.read(cx);
+    ws.tabs
+        .items()
+        .enumerate()
+        .map(|(ix, t)| {
+            let pin = if ws.tabs.is_pinned(ix) { "*" } else { "" };
+            format!("{pin}{}", t.title(cx))
+        })
+        .collect()
+}
+
+fn titled_tab(
+    workspace: &Entity<Workspace>,
+    sql: &str,
+    title: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<QueryTab> {
+    let tab = workspace.update(cx, |ws, cx| ws.add_tab(sql, window, cx));
+    tab.update(cx, |t, _| t.title = title.to_string().into());
+    tab
+}
+
+#[gpui_kit::test]
+fn each_database_has_its_own_tabs(cx: &mut TestAppContext) {
+    use crate::ai_settings::Page;
+    let (handle, workspace) = open(cx);
+    cx.update(|cx| two_databases(&workspace, cx));
+    step(handle, cx, |window, cx| {
+        show_db(&workspace, 1, window, cx);
+        titled_tab(&workspace, "select 1", "one", window, cx);
+        titled_tab(&workspace, "select 2", "two", window, cx);
+        workspace.update(cx, |ws, cx| {
+            ws.open_ai_settings(Page::Assistant, window, cx)
+        });
+    });
+    // The other database: none of the first one's tabs; the AI settings go along.
+    step(handle, cx, |window, cx| show_db(&workspace, 2, window, cx));
+    cx.update(|cx| assert_eq!(tab_titles(&workspace, cx), ["AI settings"]));
+    step(handle, cx, |window, cx| {
+        titled_tab(&workspace, "select 3", "three", window, cx);
+    });
+    // Back: the first database's tabs as they were, and only those.
+    step(handle, cx, |window, cx| show_db(&workspace, 1, window, cx));
+    cx.update(|cx| assert_eq!(tab_titles(&workspace, cx), ["one", "two", "AI settings"]));
+    step(handle, cx, |window, cx| show_db(&workspace, 2, window, cx));
+    cx.update(|cx| {
+        assert_eq!(tab_titles(&workspace, cx), ["three", "AI settings"]);
+        // Both databases' query tabs are still there (a bookmark rename reaches them).
+        assert_eq!(workspace.read(cx).all_query_tabs().len(), 3);
+    });
+}
+
+#[gpui_kit::test]
+fn pinned_tabs_are_kept_per_database(cx: &mut TestAppContext) {
+    use crate::ai_settings::Page;
+    use tangul_core::chart::{ChartStyle, ChartView};
+    use tangul_core::pinned::PinnedTab;
+    use tangul_service::boards;
+    let (handle, workspace) = open(cx);
+    cx.update(|cx| two_databases(&workspace, cx));
+    let board = cx.update(|cx| {
+        workspace.update(cx, |ws, _| {
+            boards::create(&mut ws.data.boards, "db1", "Growth")
+                .unwrap()
+                .id
+        })
+    });
+    let bars = Some(ChartView {
+        style: ChartStyle::Bars,
+        series: None,
+    });
+    let pin = |workspace: &Entity<Workspace>, cx: &mut App| {
+        workspace.update(cx, |ws, cx| {
+            let id = ws.tabs.active().unwrap().id(cx);
+            ws.toggle_tab_pin(id, cx);
+        })
+    };
+    let query = step(handle, cx, |window, cx| {
+        show_db(&workspace, 1, window, cx);
+        let query = titled_tab(&workspace, "select 1", "Signups", window, cx);
+        query.update(cx, |t, cx| t.set_chart_view(bars, cx));
+        pin(&workspace, cx);
+        titled_tab(&workspace, "select 9", "scratch", window, cx);
+        workspace.update(cx, |ws, cx| ws.open_board(&board, window, cx));
+        pin(&workspace, cx);
+        workspace.update(cx, |ws, cx| {
+            ws.open_ai_settings(Page::Assistant, window, cx)
+        });
+        pin(&workspace, cx);
+        query
+    });
+    let saved =
+        |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).data.local.pinned_tabs("db1"));
+    let signups = |sql: &str| PinnedTab::Query {
+        title: "Signups".into(),
+        sql: sql.into(),
+        user_id: Some("u1".into()),
+        bookmark_id: None,
+        view: bars,
+    };
+    // Only query and board tabs are kept, in order.
+    assert_eq!(
+        saved(cx),
+        [
+            signups("select 1"),
+            PinnedTab::Board {
+                board_id: board.clone()
+            }
+        ]
+    );
+    // An edit is saved after a pause; passwords never are.
+    step(handle, cx, |window, cx| {
+        QueryTab::insert_item(
+            &query,
+            "; create role x password 'secret'",
+            Vec::new(),
+            window,
+            cx,
+        )
+    });
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    let PinnedTab::Query { sql, .. } = &saved(cx)[0] else {
+        panic!("the query first");
+    };
+    assert!(
+        sql.starts_with("select 1; create role x") && !sql.contains("secret"),
+        "{sql}"
+    );
+
+    // What a previous run kept for db2 comes back the first time it is shown:
+    // pinned, in order; a board that is gone is skipped.
+    cx.update(|cx| {
+        let ws = workspace.read(cx);
+        ws.data.local.set_pinned_tabs(
+            "db2",
+            &[
+                PinnedTab::Board {
+                    board_id: "gone".into(),
+                },
+                PinnedTab::Query {
+                    title: "Orders".into(),
+                    sql: "select 2".into(),
+                    user_id: Some("nobody".into()),
+                    bookmark_id: Some("gone".into()),
+                    view: bars,
+                },
+            ],
+        );
+    });
+    step(handle, cx, |window, cx| show_db(&workspace, 2, window, cx));
+    cx.update(|cx| {
+        assert_eq!(tab_titles(&workspace, cx), ["*Orders", "*AI settings"]);
+        let ws = workspace.read(cx);
+        let tab = ws.tabs.get(0).and_then(|t| t.query()).unwrap().read(cx);
+        assert_eq!(tab.sql(cx), "select 2");
+        assert_eq!(tab.chart_view(cx), bars);
+        assert_eq!(tab.bookmark_id, None);
+    });
+    // Unpinning takes it off the list; showing db2 again doesn't bring it back.
+    cx.update(|cx| {
+        workspace.update(cx, |ws, _| ws.tabs.set_active(0));
+        pin(&workspace, cx);
+    });
+    cx.update(|cx| assert!(workspace.read(cx).data.local.pinned_tabs("db2").is_empty()));
+    step(handle, cx, |window, cx| show_db(&workspace, 1, window, cx));
+    cx.update(|cx| {
+        assert_eq!(
+            tab_titles(&workspace, cx),
+            ["*Signups", "scratch", "*Growth", "*AI settings"]
+        )
+    });
+    step(handle, cx, |window, cx| show_db(&workspace, 2, window, cx));
+    cx.update(|cx| assert_eq!(tab_titles(&workspace, cx), ["Orders", "*AI settings"]));
+}

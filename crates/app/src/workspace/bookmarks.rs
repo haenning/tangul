@@ -68,7 +68,7 @@ impl Workspace {
         // Passwords (`CREATE ROLE … PASSWORD '…'`) are never kept.
         bookmark.sql = tangul_assist::redact::redact(&bookmark.sql).into_owned();
         let title: SharedString = bookmark.name.clone().into();
-        for tab in self.tabs.queries() {
+        for tab in self.all_query_tabs() {
             if tab.read(cx).bookmark_id.as_deref() == Some(bookmark.id.as_str()) {
                 tab.update(cx, |t, _| t.title = title.clone());
             }
@@ -98,7 +98,7 @@ impl Workspace {
         }
         self.refresh_ai_bookmarks();
         self.check_board_links(cx);
-        for tab in self.tabs.queries() {
+        for tab in self.all_query_tabs() {
             if tab.read(cx).bookmark_id.as_deref() == Some(id) {
                 tab.update(cx, |t, _| t.bookmark_id = None);
             }
