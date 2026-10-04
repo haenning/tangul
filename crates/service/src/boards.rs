@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use tangul_core::board::{Board, Link, LinkTo, Refresh, Tile, Width};
+use tangul_core::board::{Board, Link, LinkTo, Refresh, Tile, Width, web_address};
 use tangul_core::chart::ChartView;
 use tangul_data::boards::Boards;
 use tangul_data::profiles::new_id;
@@ -165,7 +165,8 @@ fn link_of(link: Link) -> Result<Link, String> {
         return Err("a link needs a label".into());
     }
     let to = match link.to {
-        LinkTo::Url(url) => LinkTo::Url(url.trim().into()),
+        // `taend.eu` opens as `https://taend.eu`.
+        LinkTo::Url(url) => LinkTo::Url(web_address(&url).unwrap_or(url)),
         LinkTo::Query { sql, view } => LinkTo::Query {
             sql: sql.trim().into(),
             view,
@@ -344,6 +345,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(b.links[2], link("By plan", query("select 1")));
+        let b = apply(
+            &mut boards,
+            &id,
+            Edit::AddLink(link("Site", LinkTo::Url(" taend.eu ".into()))),
+        )
+        .unwrap();
+        assert_eq!(
+            b.links[3],
+            link("Site", LinkTo::Url("https://taend.eu".into()))
+        );
 
         for (bad, why) in [
             (
@@ -357,7 +368,7 @@ mod tests {
             let error = apply(&mut boards, &id, Edit::AddLink(bad)).unwrap_err();
             assert!(error.contains(why), "{error}");
         }
-        assert_eq!(boards.get(&id).unwrap().links.len(), 3, "unchanged");
+        assert_eq!(boards.get(&id).unwrap().links.len(), 4, "unchanged");
     }
 
     #[test]

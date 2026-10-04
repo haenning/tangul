@@ -19,9 +19,11 @@ use tangul_assist::suggest::one_line;
 use tangul_core::board::{LinkTo, Refresh, Row, Tile, Width, is_web, rows};
 use tangul_service::boards::{self, Edit};
 
-use super::form::{AskForm, QueryForm, TileForm};
+use tangul_core::chart::{ChartStyle, ChartView};
+
+use super::form::{AskForm, QueryForm, TileForm, view_label};
 use super::{BoardEvent, BoardTab, link_action, link_icon};
-use crate::assets::Lucide;
+use crate::assets::{Lucide, style_icon};
 
 /// A tile's height; tables scroll inside it.
 const TILE_HEIGHT: f32 = 300.;
@@ -344,14 +346,46 @@ impl BoardTab {
             .xsmall()
             .tooltip("Open in a tab")
             .on_click(cx.listener(move |this, _, _, cx| this.open_tile(&open_id, cx)));
+        // A chart the result doesn't fit is shown as the table; this says why.
+        let unfit = view
+            .filter(|v| v.loaded && tile.view.is_some())
+            .and_then(|v| v.result.read(cx).chart().err());
         let actions = if self.editing {
             let (width_id, label_id, remove_id) = (id.clone(), id.clone(), id.clone());
+            let (view_id, current, this) = (id.clone(), tile.view, cx.entity().downgrade());
+            let shown_as = Button::new(("tile-view", ix))
+                .icon(Icon::new(style_icon(current.map(|v| v.style))))
+                .ghost()
+                .xsmall()
+                .tooltip("Shown as")
+                .dropdown_menu(move |mut menu, _, _| {
+                    let views = std::iter::once(None).chain(ChartStyle::ALL.map(|style| {
+                        Some(ChartView {
+                            style,
+                            series: None,
+                        })
+                    }));
+                    for view in views {
+                        let (this, tile) = (this.clone(), view_id.clone());
+                        menu = menu.item(
+                            PopupMenuItem::new(view_label(view))
+                                .icon(Icon::new(style_icon(view.map(|v| v.style))))
+                                .checked(view.map(|v| v.style) == current.map(|v| v.style))
+                                .on_click(move |_, _, cx| {
+                                    let _ =
+                                        this.update(cx, |b, cx| b.set_tile_view(&tile, view, cx));
+                                }),
+                        );
+                    }
+                    menu
+                });
             let (icon, tooltip, width) = match tile.width {
                 Width::Full => (Lucide::Minimize2, "Half width", Width::Half),
                 Width::Half => (Lucide::Maximize2, "Full width", Width::Full),
             };
             h_flex()
                 .gap_0p5()
+                .child(shown_as)
                 .child(
                     Button::new(("tile-width", ix))
                         .icon(Icon::new(icon))
@@ -439,6 +473,18 @@ impl BoardTab {
                         )
                     }),
             )
+            .when_some(unfit, |this, reason| {
+                this.child(
+                    div()
+                        .id(("tile-unfit", ix))
+                        .test_support()
+                        .text_color(theme.warning)
+                        .child(Icon::new(IconName::TriangleAlert).xsmall())
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(format!("Shown as the table: {reason}")).build(window, cx)
+                        }),
+                )
+            })
             .child(actions);
         let drop_id = id.clone();
         v_flex()

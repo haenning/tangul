@@ -13,7 +13,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_assist::suggest::one_line;
-use tangul_core::board::{Board, Link, LinkTo, Tile};
+use tangul_core::board::{Board, Link, LinkTo, Tile, web_address};
 use tangul_core::chart::{ChartStyle, ChartView};
 
 use super::{link_action, link_icon};
@@ -157,7 +157,10 @@ impl DetailsForm {
             .map(|row| Link {
                 label: row.label.read(cx).value().trim().to_string(),
                 to: match &row.to {
-                    RowTo::Url(url) => LinkTo::Url(url.read(cx).value().trim().to_string()),
+                    RowTo::Url(url) => {
+                        let typed = url.read(cx).value().trim().to_string();
+                        LinkTo::Url(web_address(&typed).unwrap_or(typed))
+                    }
                     RowTo::Bookmark(id, _) => LinkTo::Bookmark(id.clone()),
                     RowTo::Board(id, _) => LinkTo::Board(id.clone()),
                     RowTo::Query { sql, view } => LinkTo::Query {
@@ -173,7 +176,9 @@ impl DetailsForm {
             Some("Every link needs a label".into())
         } else {
             links.iter().find(|l| !l.is_valid()).map(|l| match &l.to {
-                LinkTo::Url(_) => format!("{}: not a web address (https://…)", l.label).into(),
+                LinkTo::Url(_) => {
+                    format!("{}: not a web address (like example.com)", l.label).into()
+                }
                 _ => format!("{}: needs a query", l.label).into(),
             })
         };
