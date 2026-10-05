@@ -125,6 +125,12 @@ impl SqlEditor {
 
     /// The connection's database changed: its comments may be spelled differently,
     /// and its SQL formatted differently.
+    /// What the empty editor shows.
+    pub fn set_placeholder(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.state
+            .update(cx, |s, cx| s.set_placeholder(text, window, cx));
+    }
+
     pub fn set_dialect(&mut self, dialect: &dyn Dialect, cx: &mut Context<Self>) {
         self.format = FormatRules::of(dialect);
         let lexing = dialect.lexing();

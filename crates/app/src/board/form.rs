@@ -747,6 +747,14 @@ impl QueryForm {
         }
     }
 
+    /// Title and SQL as typed so far.
+    pub fn draft(&self, cx: &App) -> (String, String) {
+        (
+            self.title.read(cx).value().trim().to_string(),
+            self.sql.read(cx).value().trim().to_string(),
+        )
+    }
+
     pub fn submit(&mut self, cx: &mut Context<Self>) -> Option<Tile> {
         let sql = self.sql.read(cx).value().trim().to_string();
         if sql.is_empty() {

@@ -599,11 +599,35 @@ impl BoardTab {
                     window.close_dialog(cx);
                 }
             };
+            let in_tab = {
+                let (form, board) = (form.clone(), board.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let (title, sql) = form.read(cx).draft(cx);
+                    let _ =
+                        board.update(cx, |_, cx| cx.emit(BoardEvent::NewTileTab { title, sql }));
+                    window.close_dialog(cx);
+                }
+            };
             dialog
                 .title("New tile")
                 .w(px(560.))
                 .child(form.clone())
-                .footer(footer(save))
+                .footer(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Button::new("tile-in-tab")
+                            .label("Open in a tab")
+                            .icon(Icon::new(Lucide::ExternalLink))
+                            .ghost()
+                            .tooltip(
+                                "Write the query in a query tab, with completion and its result",
+                            )
+                            .on_click(in_tab),
+                    )
+                    .child(footer(save)),
+            )
         });
     }
 

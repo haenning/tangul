@@ -2118,17 +2118,116 @@ fn add_to_board_makes_a_new_board_and_a_tile_opens_in_a_tab(cx: &mut TestAppCont
         assert_eq!(workspace.read(cx).data.boards.for_database("db").len(), 1);
         board
     });
-    // A tile opens its query in a tab, linked back for "Update tile".
+    // A tile opens its query in a tab, linked back to the tile.
     step(handle, cx, |window, cx| {
         window.click(("tile-open", 0usize), cx)
     });
     cx.update(|cx| {
         let query = workspace.read(cx).tabs.active_query().cloned().unwrap();
         assert_eq!(query.read(cx).title.as_ref(), "Per day");
-        assert_eq!(
-            query.read(cx).board_tile,
-            Some((board.id, "t1".to_string()))
-        );
+        let link = query.read(cx).board_tile.clone().unwrap();
+        assert_eq!((link.board, link.tile), (board.id, Some("t1".to_string())));
+    });
+}
+
+#[gpui_kit::test]
+fn a_tiles_tab_saves_to_the_tile_and_a_new_one_adds_a_tile(cx: &mut TestAppContext) {
+    use crate::board::BoardEvent;
+    use crate::query_tab::TabEvent;
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(handle, &workspace, &["select 1"], cx);
+    let board = cx.update(|cx| board_tab(&workspace, cx));
+    let open_tile = |cx: &mut TestAppContext| {
+        step(handle, cx, |_, cx| {
+            board.update(cx, |_, cx| {
+                cx.emit(BoardEvent::OpenTile {
+                    tile: "t1".into(),
+                    title: "Tile 1".into(),
+                    sql: "select 1".into(),
+                    view: None,
+                })
+            })
+        })
+    };
+    open_tile(cx);
+    let (query, tabs) = cx.update(|cx| {
+        let ws = workspace.read(cx);
+        (
+            ws.tabs.active_query().cloned().unwrap(),
+            ws.tabs.items().count(),
+        )
+    });
+    // One tab per tile; titled as the tile, with nothing to save yet.
+    open_tile(cx);
+    cx.update(|cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.tabs.items().count(), tabs);
+        assert_eq!(ws.tabs.active_query(), Some(&query));
+        assert_eq!(query.read(cx).title.as_ref(), "Tile 1");
+        assert!(!query.read(cx).tile_changed(cx));
+    });
+    let sql_of_tile = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            workspace.read(cx).data.boards.get(&id).unwrap().tiles[0]
+                .sql
+                .clone()
+        })
+    };
+    let save = |cx: &mut TestAppContext| {
+        step(handle, cx, |_, cx| {
+            query.update(cx, |_, cx| cx.emit(TabEvent::SaveToBoard))
+        })
+    };
+    // Changed: unsaved until saved, then the tile has it.
+    step(handle, cx, |window, cx| {
+        QueryTab::insert_item(&query, " + 1", Vec::new(), window, cx)
+    });
+    cx.update(|cx| assert!(query.read(cx).tile_changed(cx)));
+    save(cx);
+    let saved = sql_of_tile(cx);
+    assert_eq!(saved, "select 1 + 1");
+    cx.update(|cx| assert!(!query.read(cx).tile_changed(cx)));
+    // A write never goes on the board.
+    step(handle, cx, |window, cx| {
+        QueryTab::insert_item(&query, "; delete from users", Vec::new(), window, cx)
+    });
+    save(cx);
+    assert_eq!(sql_of_tile(cx), saved);
+    // Never pinned.
+    let tab_id = cx.update(|cx| query.read(cx).id);
+    cx.update(|cx| workspace.update(cx, |ws, cx| ws.toggle_tab_pin(tab_id, cx)));
+    cx.update(|cx| assert!(workspace.read(cx).tabs.pinned().next().is_none()));
+
+    // A new tile: written in a tab, added on the first save, titled as the tab.
+    step(handle, cx, |_, cx| {
+        board.update(cx, |_, cx| {
+            cx.emit(BoardEvent::NewTileTab {
+                title: "Orders".into(),
+                sql: String::new(),
+            })
+        })
+    });
+    let new = cx.update(|cx| {
+        let new = workspace.read(cx).tabs.active_query().cloned().unwrap();
+        assert_ne!(new, query);
+        assert_eq!(new.read(cx).title.as_ref(), "Orders");
+        assert_eq!(new.read(cx).board_tile.as_ref().unwrap().tile, None);
+        new
+    });
+    step(handle, cx, |window, cx| {
+        new.update(cx, |t, cx| t.insert_sql("select 2", window, cx))
+    });
+    step(handle, cx, |_, cx| {
+        new.update(cx, |_, cx| cx.emit(TabEvent::SaveToBoard))
+    });
+    cx.update(|cx| {
+        let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
+        assert_eq!(board.tiles.len(), 2);
+        assert_eq!(board.tiles[1].title, "Orders");
+        assert_eq!(board.tiles[1].sql, "select 2");
+        let link = new.read(cx).board_tile.clone().unwrap();
+        assert_eq!(link.tile.as_deref(), Some(board.tiles[1].id.as_str()));
+        assert!(!new.read(cx).tile_changed(cx));
     });
 }
 
