@@ -2044,26 +2044,47 @@ fn a_tile_is_shown_as_the_chart_chosen_in_edit_mode(cx: &mut TestAppContext) {
         assert!(window.try_find(("tile-view", 0usize)).is_some())
     });
     let tab = cx.update(|cx| board_tab(&workspace, cx));
-    let bars = Some(ChartView {
-        style: ChartStyle::Bars,
+    // Not the default (bars for categories), so the pick has to come through.
+    let areas = Some(ChartView {
+        style: ChartStyle::Area,
         series: None,
     });
     step(handle, cx, |_, cx| {
-        tab.update(cx, |t, cx| t.set_tile_view("t1", bars, cx))
+        tab.update(cx, |t, cx| t.set_tile_view("t1", areas, cx))
     });
     cx.update(|cx| {
         let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
-        assert_eq!(board.tiles[0].view, bars, "saved with the board");
+        assert_eq!(board.tiles[0].view, areas, "saved with the board");
     });
     let fits = output(&["day", "signups"], &[&["mon", "3"], &["tue", "5"]]);
     step(handle, cx, |_, cx| {
         tab.update(cx, |t, cx| t.show_results(vec![Ok(fits)], cx))
     });
+    // Picked before the result: "all columns" of one is that one.
     step(handle, cx, |window, cx| {
+        let result = tab.read(cx).tile_result("t1").unwrap();
+        let shown = result.read(cx).chart_shown();
+        assert_eq!(
+            shown,
+            Some(ChartView {
+                style: ChartStyle::Area,
+                series: Some(0)
+            })
+        );
+        assert!(window.try_find(("tile-unfit", 0usize)).is_none());
+    });
+    // Stacked bars of one column: bars.
+    let stacked = Some(ChartView {
+        style: ChartStyle::StackedBars,
+        series: None,
+    });
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.set_tile_view("t1", stacked, cx))
+    });
+    step(handle, cx, |_, cx| {
         let result = tab.read(cx).tile_result("t1").unwrap();
         let shown = result.read(cx).chart_shown().map(|v| v.style);
         assert_eq!(shown, Some(ChartStyle::Bars));
-        assert!(window.try_find(("tile-unfit", 0usize)).is_none());
     });
     // A result that can't be a chart: the table, and why.
     let text = output(&["day", "signups"], &[&["mon", "a lot"], &["tue", "5"]]);

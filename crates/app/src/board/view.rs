@@ -2,6 +2,7 @@
 //! the tiles in rows, full or half width; in edit mode with handles to drag them,
 //! their width, labels and removing them.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::{
@@ -24,6 +25,7 @@ use tangul_core::chart::{ChartStyle, ChartView};
 use super::form::{AskForm, QueryForm, TileForm, view_label};
 use super::{BoardEvent, BoardTab, link_action, link_icon};
 use crate::assets::{Lucide, style_icon};
+use crate::result_view::{SetView, chart_menu};
 
 /// A tile's height; tables scroll inside it.
 const TILE_HEIGHT: f32 = 300.;
@@ -352,32 +354,43 @@ impl BoardTab {
             .and_then(|v| v.result.read(cx).chart().err());
         let actions = if self.editing {
             let (width_id, label_id, remove_id) = (id.clone(), id.clone(), id.clone());
-            let (view_id, current, this) = (id.clone(), tile.view, cx.entity().downgrade());
+            // With a result: the status bar's menu, of what it fits. Before one: the
+            // table and every style, fitted to the result once it is there.
+            let (chart, shown) = match view.filter(|v| v.loaded) {
+                Some(v) => {
+                    let r = v.result.read(cx);
+                    (r.chart().ok(), r.chart_shown())
+                }
+                None => (None, tile.view),
+            };
+            let (view_id, this) = (id.clone(), cx.entity().downgrade());
+            let set: SetView = Rc::new(move |view, cx| {
+                let _ = this.update(cx, |b, cx| b.set_tile_view(&view_id, view, cx));
+            });
             let shown_as = Button::new(("tile-view", ix))
-                .icon(Icon::new(style_icon(current.map(|v| v.style))))
+                .icon(Icon::new(style_icon(shown.map(|v| v.style))))
                 .ghost()
                 .xsmall()
                 .tooltip("Shown as")
-                .dropdown_menu(move |mut menu, _, _| {
-                    let views = std::iter::once(None).chain(ChartStyle::ALL.map(|style| {
-                        Some(ChartView {
-                            style,
-                            series: None,
+                .dropdown_menu(move |menu, window, cx| match &chart {
+                    Some(data) => chart_menu(menu, data, shown, set.clone(), window, cx),
+                    None => {
+                        let views = std::iter::once(None).chain(ChartStyle::ALL.map(|style| {
+                            Some(ChartView {
+                                style,
+                                series: None,
+                            })
+                        }));
+                        views.fold(menu, |menu, view| {
+                            let set = set.clone();
+                            menu.item(
+                                PopupMenuItem::new(view_label(view))
+                                    .icon(Icon::new(style_icon(view.map(|v| v.style))))
+                                    .checked(view.map(|v| v.style) == shown.map(|v| v.style))
+                                    .on_click(move |_, _, cx| set(view, cx)),
+                            )
                         })
-                    }));
-                    for view in views {
-                        let (this, tile) = (this.clone(), view_id.clone());
-                        menu = menu.item(
-                            PopupMenuItem::new(view_label(view))
-                                .icon(Icon::new(style_icon(view.map(|v| v.style))))
-                                .checked(view.map(|v| v.style) == current.map(|v| v.style))
-                                .on_click(move |_, _, cx| {
-                                    let _ =
-                                        this.update(cx, |b, cx| b.set_tile_view(&tile, view, cx));
-                                }),
-                        );
                     }
-                    menu
                 });
             let (icon, tooltip, width) = match tile.width {
                 Width::Full => (Lucide::Minimize2, "Half width", Width::Half),

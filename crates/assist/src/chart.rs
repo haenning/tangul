@@ -123,15 +123,33 @@ impl ChartData {
         ChartView { style, series }
     }
 
-    /// `view` if it fits this result, otherwise the default.
+    /// `view` if it fits this result, or the nearest view that does, otherwise the
+    /// default. Views are picked before the result is known (boards, forms, AI
+    /// tools), so "all columns" of a result with one is that one, and a stacked
+    /// style of a single column is the same style unstacked.
     pub fn view_or_default(&self, view: Option<ChartView>) -> ChartView {
-        view.filter(|&v| self.fits(v))
+        view.and_then(|v| self.nearest(v))
             .unwrap_or_else(|| self.default_view())
     }
 
+    fn nearest(&self, view: ChartView) -> Option<ChartView> {
+        if self.fits(view) {
+            return Some(view);
+        }
+        let series = match view.series {
+            None if self.series.len() < 2 => 0,
+            None => return None,
+            Some(i) => i,
+        };
+        let single = ChartView {
+            style: view.style.unstacked(),
+            series: Some(series),
+        };
+        self.fits(single).then_some(single)
+    }
+
     /// The view asked for as a style and a column name (`None`: all columns,
-    /// or the only one); the default view when the result has no such column or
-    /// the style doesn't fit it.
+    /// or the only one); the default view when the result has no such column.
     pub fn view_for(&self, style: ChartStyle, column: Option<&str>) -> ChartView {
         let series = match column {
             Some(name) => {
@@ -373,11 +391,19 @@ mod tests {
         assert!(c.fits(revenue));
         assert_eq!(c.view_label(revenue), "Line · revenue");
         assert_eq!(c.for_view(revenue).series[0].name, "revenue");
-        // Stacking is for all columns only.
-        assert!(!c.fits(ChartView {
+        // Stacking is for all columns only; one column of it is unstacked.
+        let stacked_one = ChartView {
             style: ChartStyle::StackedBars,
-            series: Some(0)
-        }));
+            series: Some(1),
+        };
+        assert!(!c.fits(stacked_one));
+        assert_eq!(
+            c.view_or_default(Some(stacked_one)),
+            ChartView {
+                style: ChartStyle::Bars,
+                series: Some(1)
+            }
+        );
         assert!(c.grouped && !c.unsorted);
         assert_eq!(c.x, ["paid", "NULL"]);
         assert_eq!(c.series[1].name, "revenue");
@@ -403,13 +429,30 @@ mod tests {
             series: Some(0),
         };
         assert_eq!(c.default_view(), line);
-        assert_eq!(
-            c.view_or_default(Some(ChartView {
-                style: ChartStyle::StackedBars,
-                series: None
-            })),
-            line
-        );
+        // Picked without the result: "all columns" is the only one, unstacked.
+        for (style, shown) in [
+            (ChartStyle::Line, ChartStyle::Line),
+            (ChartStyle::Area, ChartStyle::Area),
+            (ChartStyle::StackedArea, ChartStyle::Area),
+            (ChartStyle::Bars, ChartStyle::Bars),
+            (ChartStyle::StackedBars, ChartStyle::Bars),
+        ] {
+            let all = ChartView {
+                style,
+                series: None,
+            };
+            let single = ChartView {
+                style: shown,
+                series: Some(0),
+            };
+            assert_eq!(c.view_or_default(Some(all)), single);
+        }
+        // A column it doesn't have: the default.
+        let missing = ChartView {
+            style: ChartStyle::Bars,
+            series: Some(3),
+        };
+        assert_eq!(c.view_or_default(Some(missing)), line);
         assert_eq!(c.view_label(line), "Line");
         assert!(!c.grouped && c.unsorted);
         // Numbers in column 0 are labels.
@@ -459,12 +502,12 @@ mod tests {
             c.view_for(ChartStyle::StackedBars, None),
             view(ChartStyle::StackedBars, None)
         );
-        // A column the result doesn't have, or a style that doesn't fit one
-        // column: the default view.
+        // A column the result doesn't have: the default view.
         assert_eq!(c.view_for(ChartStyle::Bars, Some("nope")), c.default_view());
+        // Stacking one column: unstacked.
         assert_eq!(
             c.view_for(ChartStyle::StackedArea, Some("orders")),
-            c.default_view()
+            view(ChartStyle::Area, Some(0))
         );
         // With one value column, no column means that one.
         let one = result(

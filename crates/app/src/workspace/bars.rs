@@ -3,6 +3,7 @@
 
 use super::ai::Ceilings;
 use super::*;
+use crate::result_view::{SetView, chart_menu};
 
 impl Workspace {
     /// Zed-style title bar content: database switcher, then user switcher.
@@ -405,72 +406,10 @@ pub(super) fn chart_button(
     } else {
         button.ghost().tooltip("Show as chart")
     };
+    let set: SetView = Rc::new(move |view, cx| tab.update(cx, |t, cx| t.set_chart_view(view, cx)));
     button
-        .dropdown_menu(move |mut menu, window, cx| {
-            let item = |label: String, view: Option<ChartView>| {
-                let tab = tab.clone();
-                PopupMenuItem::new(label)
-                    .icon(Icon::new(style_icon(view.map(|v| v.style))))
-                    .checked(shown == view)
-                    .on_click(move |_, _, cx| tab.update(cx, |t, cx| t.set_chart_view(view, cx)))
-            };
-            menu = menu.item(item("Table".into(), None));
-            let multi = data.multi_styles();
-            if !multi.is_empty() {
-                menu = menu.separator().label("All columns");
-                for style in multi {
-                    let view = ChartView {
-                        style,
-                        series: None,
-                    };
-                    menu = menu.item(item(style.label().into(), Some(view)));
-                }
-            }
-            menu = menu.separator().label("Single column");
-            for style in data.single_styles() {
-                let label = style.single_label();
-                if data.series.len() < 2 {
-                    let view = ChartView {
-                        style,
-                        series: Some(0),
-                    };
-                    menu = menu.item(item(label.into(), Some(view)));
-                    continue;
-                }
-                // Several value columns: pick which one.
-                let columns: Vec<(String, ChartView)> = data
-                    .series
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| {
-                        let view = ChartView {
-                            style,
-                            series: Some(i),
-                        };
-                        (s.name.clone(), view)
-                    })
-                    .collect();
-                let tab = tab.clone();
-                menu = menu.submenu_with_icon(
-                    Some(Icon::new(style_icon(Some(style)))),
-                    label,
-                    window,
-                    cx,
-                    move |menu, _, _| {
-                        columns.iter().fold(menu, |menu, (name, view)| {
-                            let (tab, view) = (tab.clone(), *view);
-                            menu.item(
-                                PopupMenuItem::new(name.clone())
-                                    .checked(shown == Some(view))
-                                    .on_click(move |_, _, cx| {
-                                        tab.update(cx, |t, cx| t.set_chart_view(Some(view), cx))
-                                    }),
-                            )
-                        })
-                    },
-                );
-            }
-            menu
+        .dropdown_menu(move |menu, window, cx| {
+            chart_menu(menu, &data, shown, set.clone(), window, cx)
         })
         .into_any_element()
 }
