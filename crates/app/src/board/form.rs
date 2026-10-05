@@ -607,7 +607,12 @@ impl Render for AddForm {
         if !self.with_tile {
             return v_flex()
                 .gap_2()
-                .child(Input::new(&self.new_name))
+                .child(
+                    div()
+                        .id("new-board-name")
+                        .test_support()
+                        .child(Input::new(&self.new_name)),
+                )
                 .when_some(self.error.clone(), |this, error| {
                     this.child(div().text_sm().text_color(theme.danger).child(error))
                 });

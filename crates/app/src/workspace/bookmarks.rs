@@ -1,6 +1,7 @@
 //! Bookmarks: the dialog, saving, deleting, opening, and the sidebar panel.
 
 use super::*;
+use crate::ui::enter_saves;
 
 impl Workspace {
     /// Asks for a name and saves `sql` as a bookmark (updating `existing` if set).
@@ -43,19 +44,24 @@ impl Workspace {
                     window.close_dialog(cx);
                 }
             };
-            dialog.title(title).w(px(460.)).child(form.clone()).footer(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        Button::new("cancel")
-                            .label("Cancel")
-                            .ghost()
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(Button::new("save").label("Save").primary().on_click(save)),
-            )
+            dialog
+                .on_ok(enter_saves(save.clone()))
+                .title(title)
+                .w(px(460.))
+                .child(form.clone())
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("save").label("Save").primary().on_click(save)),
+                )
         });
     }
 

@@ -2447,6 +2447,34 @@ fn an_answer_to_ask_ai_goes_onto_the_board_it_was_asked_from(cx: &mut TestAppCon
     });
 }
 
+#[gpui_kit::test]
+fn enter_in_the_new_board_dialog_creates_the_board(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    cx.update(|cx| shop_with_ai_user(&workspace, None, cx));
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.new_board(window, cx))
+    });
+    step(handle, cx, |window, cx| window.click("new-board-name", cx));
+    step(handle, cx, |window, cx| window.input("Growth", cx));
+    step(handle, cx, |window, cx| window.press("enter", cx));
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("add").is_none(), "closed");
+        let boards = workspace.read(cx).data.boards.for_database("db");
+        assert_eq!(boards.len(), 1, "created");
+        assert_eq!(boards[0].name, "Growth");
+    });
+    // Without a name: the dialog stays, with the reason.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.new_board(window, cx))
+    });
+    step(handle, cx, |window, cx| window.click("new-board-name", cx));
+    step(handle, cx, |window, cx| window.press("enter", cx));
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("add").is_some(), "still open");
+        assert_eq!(workspace.read(cx).data.boards.for_database("db").len(), 1);
+    });
+}
+
 /// Databases `db1` (user `u1`) and `db2` (user `u2`), none shown yet.
 fn two_databases(workspace: &Entity<Workspace>, cx: &mut App) {
     use tangul_core::{Database, DbUser, DriverKind, TlsMode};

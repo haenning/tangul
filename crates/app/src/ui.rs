@@ -109,6 +109,18 @@ impl Render for TextCard {
     }
 }
 
+/// A form dialog's Enter: does what its main button does. The dialog's default
+/// (`on_ok` unset) only closes it, dropping what was typed. `save` closes the
+/// dialog itself once it succeeds, so a form with an error stays open.
+pub fn enter_saves(
+    save: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) -> bool + 'static {
+    move |event, window, cx| {
+        save(event, window, cx);
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_long;
