@@ -1,9 +1,12 @@
 //! Small UI pieces shared by views: text in tooltips and cards that wraps instead
-//! of running across the window.
+//! of running across the window, warnings and errors as cards, and menu rows with
+//! a title and a short description.
 
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
+    h_flex,
+    menu::PopupMenuItem,
     tooltip::Tooltip,
     v_flex,
 };
@@ -108,6 +111,141 @@ impl Render for TextCard {
             })
     }
 }
+
+/// How serious an [`alert_card`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// Something to look at (yellow, a triangle).
+    Warning,
+    /// Something that doesn't work (red, an "i").
+    Error,
+}
+
+/// A warning or error as a card: border and icon in its color, the background a
+/// tenth of it, the icon on top and the reason below in the text color. The one
+/// way warnings look, wherever they are.
+pub fn alert_card(severity: Severity, text: impl Into<SharedString>, cx: &App) -> Div {
+    let theme = cx.theme();
+    let (color, icon) = match severity {
+        Severity::Warning => (theme.warning, IconName::TriangleAlert),
+        Severity::Error => (theme.danger, IconName::Info),
+    };
+    // Opaque underneath, so the tint looks the same over anything.
+    div().rounded(theme.radius).bg(theme.popover).child(
+        v_flex()
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(color)
+            .bg(color.opacity(0.1))
+            .child(Icon::new(icon).small().text_color(color))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.foreground)
+                    .whitespace_normal()
+                    .child(text.into()),
+            ),
+    )
+}
+
+/// A tooltip that is an [`alert_card`], wrapped at [`TEXT_WIDTH`].
+pub fn alert_tooltip(
+    severity: Severity,
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| {
+        let text = text.clone();
+        cx.new(|_| AlertTip { severity, text }).into()
+    }
+}
+
+struct AlertTip {
+    severity: Severity,
+    text: SharedString,
+}
+
+impl Render for AlertTip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        alert_card(self.severity, self.text.clone(), cx)
+            .max_w(px(TEXT_WIDTH))
+            .shadow_md()
+    }
+}
+
+/// A menu row: a short title and, below it, what it means in a few words. Give it
+/// `.checked()` and `.on_click()` like any item.
+pub fn menu_choice(
+    title: impl Into<SharedString>,
+    description: Option<&'static str>,
+) -> PopupMenuItem {
+    let title = title.into();
+    PopupMenuItem::element(move |_, cx| {
+        v_flex()
+            .child(title.clone())
+            .when_some(description, |this, d| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(d),
+                )
+            })
+    })
+}
+
+/// A menu section's heading; with `info`, an (i) at the right that explains it on
+/// hover.
+pub fn menu_section(title: &'static str, info: Option<&'static str>) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, cx| {
+        let muted = cx.theme().muted_foreground;
+        h_flex()
+            .w(px(TEXT_WIDTH))
+            .gap_2()
+            .items_center()
+            .text_xs()
+            .text_color(muted)
+            .child(div().flex_1().child(title))
+            .when_some(info, |this, info| {
+                this.child(
+                    div()
+                        .id(SharedString::from(format!("info-{title}")))
+                        .test_support()
+                        .child(Icon::new(IconName::Info).xsmall().text_color(muted))
+                        .tooltip(wrapped_tooltip(info)),
+                )
+            })
+    })
+    .disabled(true)
+}
+
+/// A warning or error card as a menu row (not clickable).
+pub fn menu_alert(severity: Severity, text: impl Into<SharedString>) -> PopupMenuItem {
+    let text = text.into();
+    PopupMenuItem::element(move |_, cx| {
+        div()
+            .id("menu-alert")
+            .test_support()
+            .w(px(TEXT_WIDTH))
+            .child(alert_card(severity, text.clone(), cx))
+    })
+    .disabled(true)
+}
+
+/// The AI menus (title bar, AI settings): "Your user" as the AI's user, in a few
+/// words.
+pub const YOUR_USER: &str = "Reads what you can read";
+
+/// The (i) of "AI connects as".
+pub const USER_INFO: &str = "The database user the AI's queries run as. A user that can only read on the \
+     server is the safest.";
+
+/// The (i) of the column values: what they don't limit.
+pub const VALUES_INFO: &str = "Profiles the AI may take of a column's values. They don't limit the AI's own \
+     queries; the rights of its database user do.";
 
 /// A form dialog's Enter: does what its main button does. The dialog's default
 /// (`on_ok` unset) only closes it, dropping what was typed. `save` closes the

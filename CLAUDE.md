@@ -71,6 +71,10 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     `theme.appearance` ("auto" follows the system), `theme.dark` and `theme.light` in
     `settings.json` choose. **No color literal anywhere else** (a test checks it):
     views use `cx.theme()` or `crate::theme`
+  - `ui.rs`: small pieces every view uses. Warnings and errors are always an
+    `alert_card` (border and icon in the color, background a tenth of it, the reason
+    below); menu options are a short title with an optional few-word description
+    (`menu_choice`), explanations behind an (i) (`menu_section`), not as paragraphs
   - `board/`: a board in a tab (header, tiles as `ResultView`s, edit mode with drag and
     drop); knows nothing about the workspace: asks for changes with events, refreshes
     in one batch (`Caller::Board`) only while it is drawn

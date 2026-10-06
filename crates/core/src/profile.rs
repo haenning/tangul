@@ -221,11 +221,21 @@ impl ValueAccess {
         self == ValueAccess::Values
     }
 
-    pub fn label(self) -> &'static str {
+    /// Its name in menus.
+    pub fn title(self) -> &'static str {
         match self {
-            ValueAccess::None => "No value profiles",
-            ValueAccess::Statistics => "Statistics: NULL share, distinct count",
-            ValueAccess::Values => "Values: range and most frequent values",
+            ValueAccess::None => "None",
+            ValueAccess::Statistics => "Statistics",
+            ValueAccess::Values => "Values",
+        }
+    }
+
+    /// What the AI gets with it, in a few words.
+    pub fn description(self) -> &'static str {
+        match self {
+            ValueAccess::None => "Only names and types",
+            ValueAccess::Statistics => "Share of NULLs and distinct counts",
+            ValueAccess::Values => "Ranges and most frequent values",
         }
     }
 }
@@ -259,10 +269,19 @@ impl AiAccess {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    /// Its name in menus.
+    pub fn title(self) -> &'static str {
         match self {
-            AiAccess::Data => "Data: reads through the gate",
-            AiAccess::Schema => "Schema only: the AI sees no data",
+            AiAccess::Data => "All data",
+            AiAccess::Schema => "Schema only",
+        }
+    }
+
+    /// What the AI may do with it, in a few words.
+    pub fn description(self) -> &'static str {
+        match self {
+            AiAccess::Data => "AI can run read-only queries",
+            AiAccess::Schema => "Table contents stay hidden from the AI",
         }
     }
 }
@@ -295,4 +314,23 @@ fn yes() -> bool {
 
 fn is_true(b: &bool) -> bool {
     *b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_texts_are_short_and_distinct() {
+        let access = AiAccess::ALL.map(|a| (a.title(), a.description()));
+        let values = ValueAccess::ALL.map(|v| (v.title(), v.description()));
+        for (title, description) in access.iter().chain(values.iter()) {
+            assert!(!title.is_empty() && title.len() <= 12, "{title}");
+            assert!(
+                !description.is_empty() && description.len() <= 40,
+                "{description}"
+            );
+        }
+        assert_ne!(access[0], access[1]);
+    }
 }

@@ -1,6 +1,7 @@
 //! The schema sidebar: tree, search, favorites and actions on tables.
 
 use super::*;
+use crate::ui::{Severity, alert_card};
 
 impl Workspace {
     /// `schema.table`, quoted only where needed.
@@ -647,7 +648,7 @@ impl Workspace {
                 Some(body.child(message("Connecting…".into())).into_any_element())
             }
             Some((ConnStatus::Failed(e), _)) => Some(
-                body.child(div().text_sm().text_color(theme.danger).child(e.clone()))
+                body.child(alert_card(Severity::Error, e.clone(), cx))
                     .child(connect("Retry"))
                     .into_any_element(),
             ),

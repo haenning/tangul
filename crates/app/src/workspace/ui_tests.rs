@@ -626,9 +626,21 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
         workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 3, cx));
     });
     // One piece of advice: the red one replaces the note.
-    step(handle, cx, |window, cx| {
+    step(handle, cx, |window, _| {
         assert!(window.find("ai-user-warning").visible());
         assert!(window.try_find("ai-user-note").is_none());
+    });
+    // The menu: the warning as a card on top, sections with an (i).
+    step(handle, cx, |window, cx| {
+        window.click("ai-user-switcher", cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("menu-alert").visible());
+        assert!(window.try_find("info-AI connects as").is_some());
+        assert!(window.try_find("info-Column values for the AI").is_some());
+        window.press("escape", cx);
+    });
+    step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 0, cx));
     });
     // Read-only on the server: no advice.

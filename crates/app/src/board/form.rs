@@ -17,6 +17,7 @@ use tangul_core::board::{Board, Link, LinkTo, Tile, web_address};
 use tangul_core::chart::{ChartStyle, ChartView};
 
 use super::{link_action, link_icon};
+use crate::ui::{Severity, alert_card};
 
 /// What the details form gives back.
 pub struct Details {
@@ -408,7 +409,6 @@ impl Render for DetailsForm {
             .map(|(i, row)| self.render_link(i, row, cx))
             .collect();
         let (this, choices) = (cx.entity().downgrade(), self.choices.clone());
-        let danger = cx.theme().danger;
         v_flex()
             .gap_2()
             .child(label("Name", cx))
@@ -438,7 +438,7 @@ impl Render for DetailsForm {
                 ),
             )
             .when_some(self.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(danger).child(error))
+                this.child(alert_card(Severity::Error, error, cx))
             })
     }
 }
@@ -614,7 +614,7 @@ impl Render for AddForm {
                         .child(Input::new(&self.new_name)),
                 )
                 .when_some(self.error.clone(), |this, error| {
-                    this.child(div().text_sm().text_color(theme.danger).child(error))
+                    this.child(alert_card(Severity::Error, error, cx))
                 });
         }
         let kind = |id: &'static str, label: &'static str, link: bool| {
@@ -680,7 +680,7 @@ impl Render for AddForm {
                 this.child(Input::new(&self.new_name))
             })
             .when_some(self.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(theme.danger).child(error))
+                this.child(alert_card(Severity::Error, error, cx))
             })
     }
 }
@@ -778,7 +778,6 @@ impl QueryForm {
 
 impl Render for QueryForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let danger = cx.theme().danger;
         v_flex()
             .gap_2()
             .child(Input::new(&self.title))
@@ -790,7 +789,7 @@ impl Render for QueryForm {
                 |f: &mut Self, v| f.view = v,
             ))
             .when_some(self.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(danger).child(error))
+                this.child(alert_card(Severity::Error, error, cx))
             })
     }
 }

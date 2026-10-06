@@ -69,7 +69,7 @@ impl Workspace {
                     .assistant_user
                     .as_deref()
                     .filter(|id| db.user(id).is_none())
-                    .map(|id| format!("Its AI user {id} no longer exists: choose another."));
+                    .map(|_| "The AI's user no longer exists. Choose another.".to_string());
                 let writable = self
                     .knowledge
                     .ai_writable(&db.id)
