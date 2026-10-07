@@ -50,7 +50,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     file, AI settings, board) and the open ones; `database_tabs.rs`: tabs belong to
     their database (switching shows its tabs, the others wait), pinned query and
     board tabs kept per database in `local.db` and restored when it is first shown; `boards.rs`: opening boards, their
-    changes (through `service::boards`), "Add to board", "Update tile", the Boards panel; `ai.rs`: what the assistant
+    changes (through `service::boards`), "Add to board", a tile's own query tab (from the
+    tile, or for a new one; saving there writes the tile, reads only; never pinned), the
+    Boards panel; `ai.rs`: what the assistant
     and MCP clients share: the connected databases with `ai_tools` on offered to AI
     tools (each on its assistant connection), a `Ctx` per caller, and what their calls
     hand back (history, proposals, shown results); `mcp.rs`: runs the MCP server while
@@ -69,6 +71,13 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     `theme.appearance` ("auto" follows the system), `theme.dark` and `theme.light` in
     `settings.json` choose. **No color literal anywhere else** (a test checks it):
     views use `cx.theme()` or `crate::theme`
+  - `ui.rs`: small pieces every view uses. Warnings and errors are always an
+    `alert_card` (border and icon in the color, background a tenth of it, the reason
+    below). Menu options (`menu_choice`) are a short, self-explanatory title; at best
+    it says enough and needs nothing more. Only where the title alone doesn't make the
+    option clear, a few words below it in the muted color, e.g. "Schema only" /
+    "Table contents stay hidden from the AI" (not "Your user" / "Uses your user").
+    Longer explanations go behind an (i) (`menu_section`), never as paragraphs
   - `board/`: a board in a tab (header, tiles as `ResultView`s, edit mode with drag and
     drop); knows nothing about the workspace: asks for changes with events, refreshes
     in one batch (`Caller::Board`) only while it is drawn

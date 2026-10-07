@@ -14,6 +14,7 @@ use tangul_core::{
     AiAccess, Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode, ValueAccess,
 };
 
+use crate::ui::{Severity, alert_card};
 use tangul_assist::dialect::dialect_for;
 use tangul_data::profiles::{new_id, new_password};
 
@@ -484,11 +485,12 @@ impl Render for ConnectionForm {
                         .gap_2()
                         .items_center()
                         .flex_wrap()
-                        .child(div().text_xs().child("AI sees"))
+                        .child(div().text_xs().child("AI access"))
                         .children(AiAccess::ALL.map(|access| {
                             let b =
                                 Button::new(SharedString::from(format!("ai-access-{access:?}")))
-                                    .label(access.label())
+                                    .label(access.title())
+                                    .tooltip(access.description())
                                     .xsmall();
                             let b = if self.ai_access == access {
                                 b.primary()
@@ -507,12 +509,10 @@ impl Render for ConnectionForm {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(if self.ai_access.is_data() {
-                        "The assistant's provider and the MCP server: AI settings (the \
-                         title bar's AI menu → Show settings)."
+                        "Model provider and MCP server: in the AI settings."
                     } else {
-                        "Schema only: AI tools get its structure (tables, columns, keys, \
-                         comments), never a row, and no AI connection is opened. Queries \
-                         they write open in a tab for you to run."
+                        "Table contents stay hidden from the AI; queries it writes open in \
+                         a tab for you to run."
                     }),
             );
         let can_set_up = self.mode == FormMode::EditDatabase
@@ -531,8 +531,8 @@ impl Render for ConnectionForm {
                             .gap_2()
                             .items_center()
                             .flex_wrap()
-                            .child(div().text_xs().child("AI uses"))
-                            .child(assistant_button(None, "Selected user".into(), &current, cx))
+                            .child(div().text_xs().child("AI connects as"))
+                            .child(assistant_button(None, "Your user".into(), &current, cx))
                             .children(users.iter().map(|u| {
                                 assistant_button(Some(u.id.clone()), u.user.clone(), &current, cx)
                             })),
@@ -542,11 +542,10 @@ impl Render for ConnectionForm {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(if current.is_none() {
-                                "Selected user: the AI reads with your user's rights. A user \
-                                 that may only read on the server is the safer choice."
+                                "Reads what you can read. A user that can only read on the \
+                                 server is safer."
                             } else {
-                                "The AI connects only as this user; if it can't, tangul says \
-                                 so and never uses yours instead."
+                                "The AI connects only as this user, never as yours."
                             }),
                     )
                     .when(can_set_up, |this| {
@@ -584,12 +583,13 @@ impl Render for ConnectionForm {
                             .gap_2()
                             .items_center()
                             .flex_wrap()
-                            .child(div().text_xs().child("Value profiles"))
+                            .child(div().text_xs().child("Column values"))
                             .children(ValueAccess::ALL.map(|access| {
                                 let b = Button::new(SharedString::from(format!(
                                     "ai-values-{access:?}"
                                 )))
-                                .label(access.label())
+                                .label(access.title())
+                                .tooltip(access.description())
                                 .xsmall();
                                 let b = if self.ai_values == access {
                                     b.primary()
@@ -625,7 +625,7 @@ impl Render for ConnectionForm {
             .children(
                 self.error
                     .clone()
-                    .map(|e| div().text_sm().text_color(cx.theme().danger).child(e)),
+                    .map(|e| alert_card(Severity::Error, e, cx)),
             )
     }
 }

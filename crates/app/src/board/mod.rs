@@ -32,8 +32,10 @@ use crate::result_view::{ResultEvent, ResultView};
 pub enum BoardEvent {
     /// Change the board (and save it).
     Edit(Edit),
-    /// Open a tile's query in a tab, shown as the tile shows it.
+    /// Open a tile's query in a tab, shown as the tile shows it; saving there
+    /// writes the tile.
     OpenTile {
+        tile: String,
         title: String,
         sql: String,
         view: Option<ChartView>,
@@ -50,6 +52,9 @@ pub enum BoardEvent {
     OpenLink(usize),
     /// Edit the board's name, description and links.
     EditDetails,
+    /// Write a new tile's query in a tab (title and SQL so far); saving there adds
+    /// it to the board.
+    NewTileTab { title: String, sql: String },
     /// Ask the assistant for a tile's query.
     AskAi(String),
     /// A whole refresh failed on this connection (gone, never connected): the
@@ -460,6 +465,7 @@ impl BoardTab {
                 tile.title.clone()
             };
             cx.emit(BoardEvent::OpenTile {
+                tile: tile.id.clone(),
                 title,
                 sql: tile.sql.clone(),
                 view: tile.view,

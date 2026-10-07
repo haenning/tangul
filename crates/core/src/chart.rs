@@ -55,6 +55,15 @@ impl ChartStyle {
         matches!(self, ChartStyle::StackedArea | ChartStyle::StackedBars)
     }
 
+    /// The same without stacking: stacked areas are areas, stacked bars are bars.
+    pub fn unstacked(self) -> Self {
+        match self {
+            ChartStyle::StackedArea => ChartStyle::Area,
+            ChartStyle::StackedBars => ChartStyle::Bars,
+            style => style,
+        }
+    }
+
     /// Stable name for storing a view, and for the AI tools: `line`, `stacked_bars`, …
     pub fn key(self) -> &'static str {
         match self {
@@ -110,5 +119,14 @@ mod tests {
         assert_eq!(ChartView::from_key("bars:x"), None);
         assert_eq!(ChartView::from_key("pie"), None);
         assert_eq!(ChartView::from_key(""), None);
+    }
+
+    #[test]
+    fn unstacked_keeps_the_kind() {
+        assert_eq!(ChartStyle::StackedArea.unstacked(), ChartStyle::Area);
+        assert_eq!(ChartStyle::StackedBars.unstacked(), ChartStyle::Bars);
+        for style in ChartStyle::SINGLE {
+            assert_eq!(style.unstacked(), style);
+        }
     }
 }

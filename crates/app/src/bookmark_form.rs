@@ -13,6 +13,7 @@ use tangul_assist::chart::ChartView;
 use tangul_assist::guard;
 
 use crate::settings;
+use crate::ui::{Severity, alert_card};
 use tangul_data::local::Bookmark;
 use tangul_data::profiles::new_id;
 use tangul_service::schedule;
@@ -171,7 +172,7 @@ impl Render for BookmarkForm {
             .children(
                 self.error
                     .clone()
-                    .map(|e| div().text_sm().text_color(theme.danger).child(e)),
+                    .map(|e| alert_card(Severity::Error, e, cx)),
             )
     }
 }

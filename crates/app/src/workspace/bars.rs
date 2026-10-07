@@ -3,6 +3,11 @@
 
 use super::ai::Ceilings;
 use super::*;
+use crate::result_view::{SetView, chart_menu};
+use crate::ui::{
+    Severity, USER_INFO, VALUES_INFO, YOUR_USER, alert_tooltip, menu_alert, menu_choice,
+    menu_section,
+};
 
 impl Workspace {
     /// Zed-style title bar content: database switcher, then user switcher.
@@ -62,10 +67,11 @@ impl Workspace {
             let checked = self.knowledge.ai_writable(&db.id);
             let writable = checked.filter(|n| *n > 0);
             let problem = match missing {
-                Some(id) => Some(format!(
-                    "The AI's user {id} no longer exists, so the AI can't use this \
-                     database. Choose its user below."
-                )),
+                Some(_) => Some(
+                    "The AI's user no longer exists, so the AI can't use this database. \
+                     Choose another below."
+                        .to_string(),
+                ),
                 None => self.ai_problems.get(&db.id).cloned(),
             };
             let alerts: Vec<String> = problem
@@ -78,12 +84,23 @@ impl Workspace {
             // known, what it means.
             let note = (ai_user.is_none() && checked.is_none() && !schema_only)
                 .then(|| SAME_USER_NOTE.to_string());
+            // The menu's cards: each problem on its own.
+            let alerts: Vec<(Severity, String)> = if schema_only {
+                Vec::new()
+            } else {
+                alerts
+                    .iter()
+                    .map(|a| (Severity::Error, a.clone()))
+                    .chain(note.clone().map(|n| (Severity::Warning, n)))
+                    .collect()
+            };
             let (color, tooltip): (Hsla, SharedString) = match (&warning, &note) {
                 (Some(w), _) => (theme.danger, w.clone().into()),
                 (None, Some(n)) => (theme.warning, n.clone().into()),
-                (None, None) if schema_only => {
-                    (theme.muted_foreground, AiAccess::Schema.label().into())
-                }
+                (None, None) if schema_only => (
+                    theme.muted_foreground,
+                    AiAccess::Schema.description().into(),
+                ),
                 (None, None) => (
                     theme.muted_foreground,
                     "The database user the AI connects as".into(),
@@ -104,28 +121,24 @@ impl Workspace {
                 .when(warning.is_none() && note.is_none(), |b| {
                     b.tooltip(tooltip.clone())
                 })
-                .dropdown_menu({
-                    let (warning, note) = (warning.clone(), note.clone());
-                    move |menu, _, _| {
-                        ai_menu(
-                            menu,
-                            &db_id,
-                            &users,
-                            ai_user.as_deref(),
-                            values,
-                            access,
-                            warning.as_deref(),
-                            note.as_deref(),
-                            &weak,
-                        )
-                    }
+                .dropdown_menu(move |menu, _, _| {
+                    ai_menu(
+                        menu,
+                        &db_id,
+                        &users,
+                        ai_user.as_deref(),
+                        values,
+                        access,
+                        &alerts,
+                        &weak,
+                    )
                 });
             match (&warning, &note) {
                 // Pulses three times when the answer comes, then stays red.
                 (Some(_), _) => div()
                     .id("ai-user-warning")
                     .test_support()
-                    .tooltip(wrapped_tooltip(tooltip))
+                    .tooltip(alert_tooltip(Severity::Error, tooltip))
                     .child(div().child(button).with_animation(
                         ("ai-user-pulse", self.ai_warning_pulse as usize),
                         Animation::new(Duration::from_millis(1800)),
@@ -135,7 +148,7 @@ impl Workspace {
                 (None, Some(_)) => div()
                     .id("ai-user-note")
                     .test_support()
-                    .tooltip(wrapped_tooltip(tooltip))
+                    .tooltip(alert_tooltip(Severity::Warning, tooltip))
                     .child(button)
                     .into_any_element(),
                 (None, None) => button.into_any_element(),
@@ -405,72 +418,10 @@ pub(super) fn chart_button(
     } else {
         button.ghost().tooltip("Show as chart")
     };
+    let set: SetView = Rc::new(move |view, cx| tab.update(cx, |t, cx| t.set_chart_view(view, cx)));
     button
-        .dropdown_menu(move |mut menu, window, cx| {
-            let item = |label: String, view: Option<ChartView>| {
-                let tab = tab.clone();
-                PopupMenuItem::new(label)
-                    .icon(Icon::new(style_icon(view.map(|v| v.style))))
-                    .checked(shown == view)
-                    .on_click(move |_, _, cx| tab.update(cx, |t, cx| t.set_chart_view(view, cx)))
-            };
-            menu = menu.item(item("Table".into(), None));
-            let multi = data.multi_styles();
-            if !multi.is_empty() {
-                menu = menu.separator().label("All columns");
-                for style in multi {
-                    let view = ChartView {
-                        style,
-                        series: None,
-                    };
-                    menu = menu.item(item(style.label().into(), Some(view)));
-                }
-            }
-            menu = menu.separator().label("Single column");
-            for style in data.single_styles() {
-                let label = style.single_label();
-                if data.series.len() < 2 {
-                    let view = ChartView {
-                        style,
-                        series: Some(0),
-                    };
-                    menu = menu.item(item(label.into(), Some(view)));
-                    continue;
-                }
-                // Several value columns: pick which one.
-                let columns: Vec<(String, ChartView)> = data
-                    .series
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| {
-                        let view = ChartView {
-                            style,
-                            series: Some(i),
-                        };
-                        (s.name.clone(), view)
-                    })
-                    .collect();
-                let tab = tab.clone();
-                menu = menu.submenu_with_icon(
-                    Some(Icon::new(style_icon(Some(style)))),
-                    label,
-                    window,
-                    cx,
-                    move |menu, _, _| {
-                        columns.iter().fold(menu, |menu, (name, view)| {
-                            let (tab, view) = (tab.clone(), *view);
-                            menu.item(
-                                PopupMenuItem::new(name.clone())
-                                    .checked(shown == Some(view))
-                                    .on_click(move |_, _, cx| {
-                                        tab.update(cx, |t, cx| t.set_chart_view(Some(view), cx))
-                                    }),
-                            )
-                        })
-                    },
-                );
-            }
-            menu
+        .dropdown_menu(move |menu, window, cx| {
+            chart_menu(menu, &data, shown, set.clone(), window, cx)
         })
         .into_any_element()
 }
@@ -570,10 +521,10 @@ impl Access {
         match (self.ceilings.assistant, self.ceilings.mcp) {
             (AiAccess::Data, AiAccess::Data) => None,
             (AiAccess::Schema, AiAccess::Schema) => {
-                Some("The AI settings limit the assistant and MCP clients to the schema.")
+                Some("Assistant and MCP clients: schema only (AI settings)")
             }
-            (AiAccess::Schema, _) => Some("The AI settings limit the assistant to the schema."),
-            (_, AiAccess::Schema) => Some("The AI settings limit MCP clients to the schema."),
+            (AiAccess::Schema, _) => Some("Assistant: schema only (AI settings)"),
+            (_, AiAccess::Schema) => Some("MCP clients: schema only (AI settings)"),
         }
     }
 
@@ -584,8 +535,8 @@ impl Access {
 }
 
 /// What the AI sees of the database, its database user (the tab's user when none is
-/// set) and whether it may read column values. `warning`: what is wrong (red);
-/// `note`: what the choice means.
+/// set) and the column values it may profile. `alerts`: what is wrong, as cards on
+/// top.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ai_menu(
     mut menu: PopupMenu,
@@ -594,41 +545,20 @@ pub(super) fn ai_menu(
     current: Option<&str>,
     values: ValueAccess,
     access: Access,
-    warning: Option<&str>,
-    note: Option<&str>,
+    alerts: &[(Severity, String)],
     workspace: &WeakEntity<Workspace>,
 ) -> PopupMenu {
-    for (text, danger) in [(warning, true), (note, false)] {
-        let Some(text) = text else {
-            continue;
-        };
-        // Wrapped to the menu's width, not one long line out of it.
-        let text: SharedString = text.to_string().into();
-        menu = menu
-            .item(PopupMenuItem::element(move |_, cx| {
-                let theme = cx.theme();
-                // A fixed width: a flex row doesn't shrink its text to a max width.
-                h_flex()
-                    .w(px(TEXT_WIDTH))
-                    .gap_2()
-                    .items_start()
-                    .text_color(if danger { theme.danger } else { theme.warning })
-                    .child(Icon::new(IconName::TriangleAlert).xsmall().mt_0p5())
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .child(text.clone()),
-                    )
-            }))
-            .separator();
+    for (severity, text) in alerts {
+        menu = menu.item(menu_alert(*severity, text.clone()));
     }
-    menu = menu.label("The AI sees");
+    if !alerts.is_empty() {
+        menu = menu.separator();
+    }
+    menu = menu.item(menu_section("AI access", None));
     for level in AiAccess::ALL {
         let (ws, db_id) = (workspace.clone(), db_id.to_string());
         menu = menu.item(
-            PopupMenuItem::new(level.label())
+            menu_choice(level.title(), Some(level.description()))
                 .checked(access.database == level)
                 .on_click(move |_, window, cx| {
                     let _ = ws.update(cx, |ws, cx| ws.set_ai_access(&db_id, level, window, cx));
@@ -639,7 +569,7 @@ pub(super) fn ai_menu(
         menu = menu.item(menu_note(limit));
     }
     let ws = workspace.clone();
-    let settings = PopupMenuItem::new("Show settings")
+    let settings = PopupMenuItem::new("AI settings…")
         .icon(IconName::Settings)
         .on_click(move |_, window, cx| {
             let _ = ws.update(cx, |ws, cx| {
@@ -648,18 +578,20 @@ pub(super) fn ai_menu(
         });
     // Schema only: no AI user and no values to choose.
     if !access.data() {
-        return menu.item(menu_note(SCHEMA_NOTE)).separator().item(settings);
+        return menu.separator().item(settings);
     }
-    menu = menu.separator().label("The AI connects as");
-    let choices = std::iter::once((None, "Same as your user".to_string())).chain(
+    menu = menu
+        .separator()
+        .item(menu_section("AI connects as", Some(USER_INFO)));
+    let choices = std::iter::once((None, "Your user".to_string(), Some(YOUR_USER))).chain(
         users
             .iter()
-            .map(|(id, name)| (Some(id.clone()), name.clone())),
+            .map(|(id, name)| (Some(id.clone()), name.clone(), None)),
     );
-    for (id, name) in choices {
+    for (id, name, description) in choices {
         let (ws, db_id, chosen) = (workspace.clone(), db_id.to_string(), id.clone());
         menu = menu.item(
-            PopupMenuItem::new(name)
+            menu_choice(name, description)
                 .checked(current == id.as_deref())
                 .on_click(move |_, window, cx| {
                     let _ = ws.update(cx, |ws, cx| {
@@ -668,18 +600,20 @@ pub(super) fn ai_menu(
                 }),
         );
     }
-    menu = menu.separator().label("Value profiles for the AI");
+    menu = menu
+        .separator()
+        .item(menu_section("Column values for the AI", Some(VALUES_INFO)));
     for access in ValueAccess::ALL {
         let (ws, db_id) = (workspace.clone(), db_id.to_string());
         menu = menu.item(
-            PopupMenuItem::new(access.label())
+            menu_choice(access.title(), Some(access.description()))
                 .checked(values == access)
                 .on_click(move |_, window, cx| {
                     let _ = ws.update(cx, |ws, cx| ws.set_ai_values(&db_id, access, window, cx));
                 }),
         );
     }
-    menu.item(menu_note(VALUES_NOTE)).separator().item(settings)
+    menu.separator().item(settings)
 }
 
 /// A line of small print in a menu, wrapped to its width.
@@ -692,28 +626,19 @@ fn menu_note(text: &'static str) -> PopupMenuItem {
             .text_color(cx.theme().muted_foreground)
             .child(text)
     })
+    .disabled(true)
 }
 
-/// Under the access levels when the AI sees only the schema.
-const SCHEMA_NOTE: &str = "The AI gets the structure (tables, columns, keys, comments), \
-    never a row, and no AI connection is opened. Queries it writes open in a tab for you \
-    to run.";
-
-/// Under the value profile levels: what they don't limit.
-const VALUES_NOTE: &str = "The AI's own queries return rows whatever this says; the \
-    grants of its database user decide what it can read.";
-
 /// What the title bar says while the AI connects as your own user.
-const SAME_USER_NOTE: &str = "The AI connects as your own user: it can read whatever you \
-    can, and what it reads goes to the AI model. tangul never runs its writes, but a user \
-    that may only read on the server is the safer choice.";
+const SAME_USER_NOTE: &str = "The AI uses your user: it can read what you can, and what \
+    it reads goes to the AI model. A user that can only read on the server is safer.";
 
 /// What the title bar says when the AI's user may change or drop tables.
 pub(super) fn ai_user_warning(tables: u64) -> String {
     let noun = if tables == 1 { "table" } else { "tables" };
     format!(
-        "Your current AI user can change or drop {tables} {noun}. It is strongly \
-         recommended to use a user that is read-only on the server."
+        "The AI's user can change or drop {tables} {noun}. Use a user that can only \
+         read on the server."
     )
 }
 
@@ -785,8 +710,8 @@ mod tests {
     fn the_warning_and_its_pulse() {
         assert_eq!(
             ai_user_warning(1),
-            "Your current AI user can change or drop 1 table. It is strongly recommended \
-             to use a user that is read-only on the server."
+            "The AI's user can change or drop 1 table. Use a user that can only read on \
+             the server."
         );
         assert!(ai_user_warning(3).contains("3 tables"));
         // Starts and ends fully visible, dims in between.

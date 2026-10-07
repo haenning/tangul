@@ -26,7 +26,7 @@ use tangul_core::{ConnId, QueryId, ResultSet, TabId};
 use tangul_engine::{Command, EngineHandle, Problem, QueryEvent, QueryOutput};
 
 use crate::{
-    BookmarkQuery, FormatQuery, RunAll, RunQuery,
+    BookmarkQuery, FormatQuery, RunAll, RunQuery, SaveFile,
     assets::Lucide,
     completion::Snippets,
     connection::{ConnStatus, Connection},
@@ -53,6 +53,8 @@ pub enum TabEvent {
     },
     /// The user wants to save the editor's SQL as a bookmark.
     Bookmark(String),
+    /// Save the query and the chart shown to the tab's board tile.
+    SaveToBoard,
     /// Open (and run) a query for rows related to the selected ones, on this tab's
     /// connection.
     OpenRelated {
@@ -91,6 +93,17 @@ pub enum TabEvent {
     Ask(String),
 }
 
+/// The board tile a tab writes: its query, and the chart shown, go there on save.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardTile {
+    pub board: String,
+    pub board_name: String,
+    /// `None`: a new tile, added to the board on the first save.
+    pub tile: Option<String>,
+    /// What the tile has now (SQL, view): anything else is unsaved.
+    pub saved: Option<(String, Option<ChartView>)>,
+}
+
 /// Whether text about to run on a connection (its id and dialect) is surely a
 /// question for the assistant.
 pub type QuestionCheck = Rc<dyn Fn(&str, ConnId, &dyn Dialect, &App) -> bool>;
@@ -106,9 +119,8 @@ pub struct QueryTab {
     pub bookmark_id: Option<String>,
     /// Times the last query was run successfully, when it is worth bookmarking.
     pub bookmark_hint: Option<u32>,
-    /// The board tile (board id, tile id) its query was opened from: "Update tile"
-    /// writes the query back there.
-    pub board_tile: Option<(String, String)>,
+    /// The board tile it writes (save: ⌘S); such a tab is never pinned.
+    pub board_tile: Option<BoardTile>,
     /// Editor/results split. The editor is the first panel; height 0 means hidden.
     split: Entity<ResizableState>,
     /// Editor height to come back to when it is shown again after being hidden.
@@ -497,6 +509,51 @@ impl QueryTab {
         self.editor.read(cx).state.read(cx).cursor()
     }
 
+    /// Makes this the tab of a board tile (see [`BoardTile`]).
+    pub fn set_board_tile(&mut self, tile: BoardTile, window: &mut Window, cx: &mut Context<Self>) {
+        let hint = format!(
+            "The tile's query: write it here, run it (⌘↵) and pick a chart; \
+             save (⌘S) puts both on “{}”",
+            tile.board_name
+        );
+        self.editor
+            .update(cx, |e, cx| e.set_placeholder(hint, window, cx));
+        self.board_tile = Some(tile);
+        cx.notify();
+    }
+
+    /// The view a save gives the tile: the one drawn once there is a result, the
+    /// one set before.
+    pub fn view_to_save(&self, cx: &App) -> Option<ChartView> {
+        if self.row_count(cx).is_some() {
+            self.chart_shown(cx)
+        } else {
+            self.chart_view(cx)
+        }
+    }
+
+    /// The tab's board tile differs from what the tab has (or is new).
+    pub fn tile_changed(&self, cx: &App) -> bool {
+        let Some(tile) = &self.board_tile else {
+            return false;
+        };
+        let Some((sql, view)) = &tile.saved else {
+            return true;
+        };
+        // The saved view as the result draws it, like the view to save.
+        let view = match self.chart(cx) {
+            Ok(data) if self.row_count(cx).is_some() => view.map(|v| data.view_or_default(Some(v))),
+            _ => *view,
+        };
+        sql.trim() != self.sql(cx).trim() || view != self.view_to_save(cx)
+    }
+
+    fn save_to_board(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
+        if self.board_tile.is_some() {
+            cx.emit(TabEvent::SaveToBoard);
+        }
+    }
+
     /// The view the result is set to, even before a run.
     pub fn chart_view(&self, cx: &App) -> Option<ChartView> {
         self.results.read(cx).chart_view()
@@ -582,6 +639,28 @@ impl QueryTab {
                 )
             })
             .child(div().flex_1())
+            .children(self.board_tile.as_ref().map(|tile| {
+                let changed = self.tile_changed(cx);
+                let button = Button::new("save-to-board")
+                    .icon(Icon::new(Lucide::LayoutDashboard))
+                    .label(if tile.tile.is_some() {
+                        "Update tile"
+                    } else {
+                        "Add to board"
+                    })
+                    .small()
+                    .disabled(!changed || self.sql(cx).trim().is_empty())
+                    .tooltip(format!(
+                        "Save the query and the chart shown to “{}” (⌘S)",
+                        tile.board_name
+                    ))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(TabEvent::SaveToBoard)));
+                if changed {
+                    button.primary()
+                } else {
+                    button.ghost()
+                }
+            }))
             .child({
                 let hidden = self.editor_hidden(cx);
                 Button::new("toggle-editor")
@@ -632,6 +711,7 @@ impl Render for QueryTab {
             .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::bookmark))
             .on_action(cx.listener(Self::format))
+            .on_action(cx.listener(Self::save_to_board))
             .child(self.render_toolbar(cx))
             .child(
                 div().flex_1().min_h_0().child(

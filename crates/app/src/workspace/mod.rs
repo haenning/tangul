@@ -102,7 +102,7 @@ use crate::{
     result_view::CellValue,
     settings,
     tabs::{TabItem, Tabs},
-    ui::{TEXT_WIDTH, TextCard, wrapped_tooltip},
+    ui::{TEXT_WIDTH, TextCard},
 };
 
 const SIDEBAR_WIDTH: f32 = 260.;

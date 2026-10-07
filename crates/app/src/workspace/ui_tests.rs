@@ -626,9 +626,21 @@ fn an_ai_user_that_may_write_turns_the_robot_red(cx: &mut TestAppContext) {
         workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 3, cx));
     });
     // One piece of advice: the red one replaces the note.
-    step(handle, cx, |window, cx| {
+    step(handle, cx, |window, _| {
         assert!(window.find("ai-user-warning").visible());
         assert!(window.try_find("ai-user-note").is_none());
+    });
+    // The menu: the warning as a card on top, sections with an (i).
+    step(handle, cx, |window, cx| {
+        window.click("ai-user-switcher", cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("menu-alert").visible());
+        assert!(window.try_find("info-AI connects as").is_some());
+        assert!(window.try_find("info-Column values for the AI").is_some());
+        window.press("escape", cx);
+    });
+    step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| ws.set_ai_writable("db", 0, cx));
     });
     // Read-only on the server: no advice.
@@ -2044,26 +2056,47 @@ fn a_tile_is_shown_as_the_chart_chosen_in_edit_mode(cx: &mut TestAppContext) {
         assert!(window.try_find(("tile-view", 0usize)).is_some())
     });
     let tab = cx.update(|cx| board_tab(&workspace, cx));
-    let bars = Some(ChartView {
-        style: ChartStyle::Bars,
+    // Not the default (bars for categories), so the pick has to come through.
+    let areas = Some(ChartView {
+        style: ChartStyle::Area,
         series: None,
     });
     step(handle, cx, |_, cx| {
-        tab.update(cx, |t, cx| t.set_tile_view("t1", bars, cx))
+        tab.update(cx, |t, cx| t.set_tile_view("t1", areas, cx))
     });
     cx.update(|cx| {
         let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
-        assert_eq!(board.tiles[0].view, bars, "saved with the board");
+        assert_eq!(board.tiles[0].view, areas, "saved with the board");
     });
     let fits = output(&["day", "signups"], &[&["mon", "3"], &["tue", "5"]]);
     step(handle, cx, |_, cx| {
         tab.update(cx, |t, cx| t.show_results(vec![Ok(fits)], cx))
     });
+    // Picked before the result: "all columns" of one is that one.
     step(handle, cx, |window, cx| {
+        let result = tab.read(cx).tile_result("t1").unwrap();
+        let shown = result.read(cx).chart_shown();
+        assert_eq!(
+            shown,
+            Some(ChartView {
+                style: ChartStyle::Area,
+                series: Some(0)
+            })
+        );
+        assert!(window.try_find(("tile-unfit", 0usize)).is_none());
+    });
+    // Stacked bars of one column: bars.
+    let stacked = Some(ChartView {
+        style: ChartStyle::StackedBars,
+        series: None,
+    });
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.set_tile_view("t1", stacked, cx))
+    });
+    step(handle, cx, |_, cx| {
         let result = tab.read(cx).tile_result("t1").unwrap();
         let shown = result.read(cx).chart_shown().map(|v| v.style);
         assert_eq!(shown, Some(ChartStyle::Bars));
-        assert!(window.try_find(("tile-unfit", 0usize)).is_none());
     });
     // A result that can't be a chart: the table, and why.
     let text = output(&["day", "signups"], &[&["mon", "a lot"], &["tue", "5"]]);
@@ -2097,17 +2130,116 @@ fn add_to_board_makes_a_new_board_and_a_tile_opens_in_a_tab(cx: &mut TestAppCont
         assert_eq!(workspace.read(cx).data.boards.for_database("db").len(), 1);
         board
     });
-    // A tile opens its query in a tab, linked back for "Update tile".
+    // A tile opens its query in a tab, linked back to the tile.
     step(handle, cx, |window, cx| {
         window.click(("tile-open", 0usize), cx)
     });
     cx.update(|cx| {
         let query = workspace.read(cx).tabs.active_query().cloned().unwrap();
         assert_eq!(query.read(cx).title.as_ref(), "Per day");
-        assert_eq!(
-            query.read(cx).board_tile,
-            Some((board.id, "t1".to_string()))
-        );
+        let link = query.read(cx).board_tile.clone().unwrap();
+        assert_eq!((link.board, link.tile), (board.id, Some("t1".to_string())));
+    });
+}
+
+#[gpui_kit::test]
+fn a_tiles_tab_saves_to_the_tile_and_a_new_one_adds_a_tile(cx: &mut TestAppContext) {
+    use crate::board::BoardEvent;
+    use crate::query_tab::TabEvent;
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(handle, &workspace, &["select 1"], cx);
+    let board = cx.update(|cx| board_tab(&workspace, cx));
+    let open_tile = |cx: &mut TestAppContext| {
+        step(handle, cx, |_, cx| {
+            board.update(cx, |_, cx| {
+                cx.emit(BoardEvent::OpenTile {
+                    tile: "t1".into(),
+                    title: "Tile 1".into(),
+                    sql: "select 1".into(),
+                    view: None,
+                })
+            })
+        })
+    };
+    open_tile(cx);
+    let (query, tabs) = cx.update(|cx| {
+        let ws = workspace.read(cx);
+        (
+            ws.tabs.active_query().cloned().unwrap(),
+            ws.tabs.items().count(),
+        )
+    });
+    // One tab per tile; titled as the tile, with nothing to save yet.
+    open_tile(cx);
+    cx.update(|cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.tabs.items().count(), tabs);
+        assert_eq!(ws.tabs.active_query(), Some(&query));
+        assert_eq!(query.read(cx).title.as_ref(), "Tile 1");
+        assert!(!query.read(cx).tile_changed(cx));
+    });
+    let sql_of_tile = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            workspace.read(cx).data.boards.get(&id).unwrap().tiles[0]
+                .sql
+                .clone()
+        })
+    };
+    let save = |cx: &mut TestAppContext| {
+        step(handle, cx, |_, cx| {
+            query.update(cx, |_, cx| cx.emit(TabEvent::SaveToBoard))
+        })
+    };
+    // Changed: unsaved until saved, then the tile has it.
+    step(handle, cx, |window, cx| {
+        QueryTab::insert_item(&query, " + 1", Vec::new(), window, cx)
+    });
+    cx.update(|cx| assert!(query.read(cx).tile_changed(cx)));
+    save(cx);
+    let saved = sql_of_tile(cx);
+    assert_eq!(saved, "select 1 + 1");
+    cx.update(|cx| assert!(!query.read(cx).tile_changed(cx)));
+    // A write never goes on the board.
+    step(handle, cx, |window, cx| {
+        QueryTab::insert_item(&query, "; delete from users", Vec::new(), window, cx)
+    });
+    save(cx);
+    assert_eq!(sql_of_tile(cx), saved);
+    // Never pinned.
+    let tab_id = cx.update(|cx| query.read(cx).id);
+    cx.update(|cx| workspace.update(cx, |ws, cx| ws.toggle_tab_pin(tab_id, cx)));
+    cx.update(|cx| assert!(workspace.read(cx).tabs.pinned().next().is_none()));
+
+    // A new tile: written in a tab, added on the first save, titled as the tab.
+    step(handle, cx, |_, cx| {
+        board.update(cx, |_, cx| {
+            cx.emit(BoardEvent::NewTileTab {
+                title: "Orders".into(),
+                sql: String::new(),
+            })
+        })
+    });
+    let new = cx.update(|cx| {
+        let new = workspace.read(cx).tabs.active_query().cloned().unwrap();
+        assert_ne!(new, query);
+        assert_eq!(new.read(cx).title.as_ref(), "Orders");
+        assert_eq!(new.read(cx).board_tile.as_ref().unwrap().tile, None);
+        new
+    });
+    step(handle, cx, |window, cx| {
+        new.update(cx, |t, cx| t.insert_sql("select 2", window, cx))
+    });
+    step(handle, cx, |_, cx| {
+        new.update(cx, |_, cx| cx.emit(TabEvent::SaveToBoard))
+    });
+    cx.update(|cx| {
+        let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
+        assert_eq!(board.tiles.len(), 2);
+        assert_eq!(board.tiles[1].title, "Orders");
+        assert_eq!(board.tiles[1].sql, "select 2");
+        let link = new.read(cx).board_tile.clone().unwrap();
+        assert_eq!(link.tile.as_deref(), Some(board.tiles[1].id.as_str()));
+        assert!(!new.read(cx).tile_changed(cx));
     });
 }
 
@@ -2324,6 +2456,34 @@ fn an_answer_to_ask_ai_goes_onto_the_board_it_was_asked_from(cx: &mut TestAppCon
         assert_eq!(board.tiles.len(), 2);
         assert_eq!(board.tiles[1].title, "Signups per day");
         assert_eq!(board.tiles[1].sql, "select 9");
+    });
+}
+
+#[gpui_kit::test]
+fn enter_in_the_new_board_dialog_creates_the_board(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    cx.update(|cx| shop_with_ai_user(&workspace, None, cx));
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.new_board(window, cx))
+    });
+    step(handle, cx, |window, cx| window.click("new-board-name", cx));
+    step(handle, cx, |window, cx| window.input("Growth", cx));
+    step(handle, cx, |window, cx| window.press("enter", cx));
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("add").is_none(), "closed");
+        let boards = workspace.read(cx).data.boards.for_database("db");
+        assert_eq!(boards.len(), 1, "created");
+        assert_eq!(boards[0].name, "Growth");
+    });
+    // Without a name: the dialog stays, with the reason.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.new_board(window, cx))
+    });
+    step(handle, cx, |window, cx| window.click("new-board-name", cx));
+    step(handle, cx, |window, cx| window.press("enter", cx));
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("add").is_some(), "still open");
+        assert_eq!(workspace.read(cx).data.boards.for_database("db").len(), 1);
     });
 }
 

@@ -13,6 +13,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    menu::{PopupMenu, PopupMenuItem},
     table::{DataTable, TableEvent, TableState},
     v_flex,
 };
@@ -27,11 +28,91 @@ use tangul_core::QueryId;
 use tangul_engine::{ExecEvent, QueryEvent, QueryOutput};
 
 use crate::InspectValue;
-use crate::assets::Lucide;
+use crate::assets::{Lucide, style_icon};
 use crate::chart::{self, ResultChart};
 use crate::settings;
 use filter::FilterPanel;
 use grid::ResultsDelegate;
+
+/// Shows a result as the view picked (`None`: the table).
+pub type SetView = Rc<dyn Fn(Option<ChartView>, &mut App)>;
+
+/// The table and every chart `data` fits, `shown` checked: all value columns in
+/// one style, and one column at a time. `set` applies the pick. The one menu of
+/// views, for the status bar and board tiles alike.
+pub fn chart_menu(
+    mut menu: PopupMenu,
+    data: &ChartData,
+    shown: Option<ChartView>,
+    set: SetView,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let item = |label: String, view: Option<ChartView>, icon: bool| {
+        let set = set.clone();
+        PopupMenuItem::new(label)
+            .when(icon, |item| {
+                item.icon(Icon::new(style_icon(view.map(|v| v.style))))
+            })
+            .checked(shown == view)
+            .on_click(move |_, _, cx| set(view, cx))
+    };
+    menu = menu.item(item("Table".into(), None, true));
+    let multi = data.multi_styles();
+    if !multi.is_empty() {
+        menu = menu.separator().label("All columns");
+        for style in multi {
+            let view = ChartView {
+                style,
+                series: None,
+            };
+            menu = menu.item(item(style.label().into(), Some(view), true));
+        }
+    }
+    menu = menu.separator().label("Single column");
+    for style in data.single_styles() {
+        let label = style.single_label();
+        if data.series.len() < 2 {
+            let view = ChartView {
+                style,
+                series: Some(0),
+            };
+            menu = menu.item(item(label.into(), Some(view), true));
+            continue;
+        }
+        // Several value columns: pick which one.
+        let columns: Vec<(String, ChartView)> = data
+            .series
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let view = ChartView {
+                    style,
+                    series: Some(i),
+                };
+                (s.name.clone(), view)
+            })
+            .collect();
+        let set = set.clone();
+        menu = menu.submenu_with_icon(
+            Some(Icon::new(style_icon(Some(style)))),
+            label,
+            window,
+            cx,
+            move |menu, _, _| {
+                columns.iter().fold(menu, |menu, (name, view)| {
+                    let (set, view) = (set.clone(), *view);
+                    menu.item(
+                        PopupMenuItem::new(name.clone())
+                            .checked(shown == Some(view))
+                            .on_click(move |_, _, cx| set(Some(view), cx)),
+                    )
+                })
+            },
+        );
+    }
+    menu
+}
 
 /// What the result asks of whoever runs its queries.
 #[derive(Clone)]
