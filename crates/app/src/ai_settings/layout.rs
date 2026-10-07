@@ -2,10 +2,10 @@
 //! databases' AI settings, the latest tool calls).
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    menu::{DropdownMenu as _, PopupMenuItem},
+    menu::DropdownMenu as _,
     switch::Switch,
     v_flex,
 };
@@ -15,6 +15,9 @@ use tangul_core::{AiAccess, ValueAccess};
 
 use super::{AiSettingsEvent, AiSettingsTab, CALLS_COLLAPSED, CALLS_PAGE, CallsView};
 use crate::settings;
+use crate::ui::{
+    Severity, USER_INFO, VALUES_INFO, YOUR_USER, alert_card, menu_choice, menu_section,
+};
 
 /// A titled group of rows.
 pub(super) fn section(
@@ -130,14 +133,20 @@ impl AiSettingsTab {
                         .xsmall()
                         .outline()
                         .dropdown_menu(move |mut menu, _, _| {
-                            menu = menu.label("The AI connects as");
-                            let choices = std::iter::once((None, "Same as your user".to_string()))
-                                .chain(users.iter().map(|(id, n)| (Some(id.clone()), n.clone())));
-                            for (user, name) in choices {
+                            menu = menu.item(menu_section("AI connects as", Some(USER_INFO)));
+                            let choices =
+                                std::iter::once((None, "Your user".to_string(), Some(YOUR_USER)))
+                                    .chain(
+                                        users
+                                            .iter()
+                                            .map(|(id, n)| (Some(id.clone()), n.clone(), None)),
+                                    );
+                            for (user, name, description) in choices {
                                 let (weak, database) = (weak.clone(), id.clone());
                                 menu = menu.item(
-                                    PopupMenuItem::new(name).checked(current == user).on_click(
-                                        move |_, _, cx| {
+                                    menu_choice(name, description)
+                                        .checked(current == user)
+                                        .on_click(move |_, _, cx| {
                                             let (database, user) = (database.clone(), user.clone());
                                             let _ = weak.update(cx, |_, cx| {
                                                 cx.emit(AiSettingsEvent::SetAiUser {
@@ -145,24 +154,24 @@ impl AiSettingsTab {
                                                     user,
                                                 })
                                             });
-                                        },
-                                    ),
+                                        }),
                                 );
                             }
                             menu
                         });
                     let (weak, id, values) = (cx.entity().downgrade(), db.id.clone(), db.values);
                     let values_menu = Button::new(("ai-values", ix))
-                        .label(values.label())
+                        .label(values.title())
                         .icon(IconName::ChevronDown)
                         .xsmall()
                         .outline()
                         .dropdown_menu(move |mut menu, _, _| {
-                            menu = menu.label("Value profiles for the AI");
+                            menu = menu
+                                .item(menu_section("Column values for the AI", Some(VALUES_INFO)));
                             for access in ValueAccess::ALL {
                                 let (weak, database) = (weak.clone(), id.clone());
                                 menu = menu.item(
-                                    PopupMenuItem::new(access.label())
+                                    menu_choice(access.title(), Some(access.description()))
                                         .checked(values == access)
                                         .on_click(move |_, _, cx| {
                                             let database = database.clone();
@@ -179,16 +188,16 @@ impl AiSettingsTab {
                         });
                     let (weak, id, access) = (cx.entity().downgrade(), db.id.clone(), db.access);
                     let access_menu = Button::new(("ai-access", ix))
-                        .label(access.label())
+                        .label(access.title())
                         .icon(IconName::ChevronDown)
                         .xsmall()
                         .outline()
                         .dropdown_menu(move |mut menu, _, _| {
-                            menu = menu.label("The AI sees");
+                            menu = menu.item(menu_section("AI access", None));
                             for level in AiAccess::ALL {
                                 let (weak, database) = (weak.clone(), id.clone());
                                 menu = menu.item(
-                                    PopupMenuItem::new(level.label())
+                                    menu_choice(level.title(), Some(level.description()))
                                         .checked(access == level)
                                         .on_click(move |_, _, cx| {
                                             let database = database.clone();
@@ -247,27 +256,19 @@ impl AiSettingsTab {
                                     .flex_wrap()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("Sees")
+                                    .child("AI access")
                                     .child(access_menu)
                                     // Schema only: no AI user, no values.
                                     .when(access.is_data(), |this| {
                                         this.child("Connects as")
                                             .child(user_menu)
-                                            .child("Value profiles")
+                                            .child("Column values")
                                             .child(values_menu)
                                     }),
                             )
                         })
                         .when_some(db.warning.clone(), |this, w| {
-                            this.child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_start()
-                                    .text_xs()
-                                    .text_color(theme.danger)
-                                    .child(Icon::new(IconName::TriangleAlert).xsmall().mt_0p5())
-                                    .child(div().flex_1().whitespace_normal().child(w)),
-                            )
+                            this.child(alert_card(Severity::Error, w, cx))
                         })
                         .into_any_element()
                 })

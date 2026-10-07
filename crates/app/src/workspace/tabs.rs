@@ -195,7 +195,10 @@ impl Workspace {
     }
 
     pub(super) fn toggle_tab_pin(&mut self, id: TabId, cx: &mut Context<Self>) {
-        if let Some(ix) = self.tab_index(id, cx) {
+        let from_tile = self
+            .query_tab(id, cx)
+            .is_some_and(|t| t.read(cx).board_tile.is_some());
+        if let Some(ix) = self.tab_index(id, cx).filter(|_| !from_tile) {
             self.tabs.toggle_pin(ix);
             self.save_pinned_tabs(cx);
             cx.notify();
@@ -235,6 +238,10 @@ impl Workspace {
         match event {
             // A pinned tab's text is kept between runs.
             TabEvent::Edited => {
+                // The tab bar's unsaved mark of a board tile's tab.
+                if tab.read(cx).board_tile.is_some() {
+                    cx.notify();
+                }
                 let id = tab.read(cx).id;
                 if self
                     .tab_index(id, cx)
@@ -307,6 +314,10 @@ impl Workspace {
                         t.set_conn(conn, cx);
                     }
                 });
+            }
+            TabEvent::SaveToBoard => {
+                let id = tab.read(cx).id;
+                self.save_tab_to_board(id, window, cx);
             }
             TabEvent::Bookmark(sql) => {
                 let existing = tab.read(cx).bookmark_id.clone();
@@ -481,6 +492,10 @@ impl Workspace {
                 .gap_1()
                 .items_center()
                 .when(pinned, |this| this.child(Icon::new(Lucide::Pin).xsmall()))
+                // A board tile's own tab.
+                .when(from_tile, |this| {
+                    this.child(Icon::new(Lucide::LayoutDashboard).xsmall())
+                })
                 .child(label.clone())
                 .context_menu({
                     let weak = weak.clone();
@@ -556,12 +571,16 @@ pub(super) fn tab_menu(
             let _ = ws.update(cx, |ws, cx| f(ws, tab, window, cx));
         })
     };
-    let menu = menu
-        .item(item("Close", Workspace::close_tab_by_id))
-        .item(item(
+    let menu = menu.item(item("Close", Workspace::close_tab_by_id));
+    // A board tile's tab is never pinned (nor kept between runs).
+    let menu = if from_tile {
+        menu
+    } else {
+        menu.item(item(
             if pinned { "Unpin" } else { "Pin" },
             |ws, tab, _, cx| ws.toggle_tab_pin(tab, cx),
-        ));
+        ))
+    };
     let menu = if bookmarked {
         menu.item(item("Remove bookmark", Workspace::toggle_tab_bookmark))
     } else if has_sql {
@@ -569,13 +588,8 @@ pub(super) fn tab_menu(
     } else {
         menu
     };
-    let menu = if has_sql {
+    if has_sql && !from_tile {
         menu.item(item("Add to board…", Workspace::add_tab_to_board))
-    } else {
-        menu
-    };
-    if from_tile && has_sql {
-        menu.item(item("Update tile", Workspace::update_tile_from_tab))
     } else {
         menu
     }

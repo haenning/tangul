@@ -1,7 +1,9 @@
 //! Boards: opening them in tabs, applying their changes (through
-//! `tangul_service::boards`), "Add to board" and "Update tile" from a query tab or
-//! a bookmark, and the sidebar panel.
+//! `tangul_service::boards`), "Add to board" from a query tab or a bookmark, a
+//! tile's own query tab (opened from the tile or for a new one; saving there writes
+//! the tile), and the sidebar panel.
 
+use tangul_assist::guard;
 use tangul_core::board::{Board, Link, LinkTo, Tile};
 use tangul_service::boards::{self, Edit};
 
@@ -9,6 +11,8 @@ use super::*;
 use crate::board::{
     AddForm, Adding, BoardEvent, BoardTab, BookmarkChoice, Choices, DetailsForm, Target,
 };
+use crate::query_tab::BoardTile;
+use crate::ui::enter_saves;
 
 /// What "Add to board" adds: a tile, or the same as a link (chosen in the dialog).
 #[derive(Clone)]
@@ -119,19 +123,56 @@ impl Workspace {
         };
         match event.clone() {
             BoardEvent::Edit(edit) => self.edit_board(&board_id, edit, window, cx),
-            BoardEvent::OpenTile { title, sql, view } => {
-                let tile = tab
-                    .read(cx)
-                    .board()
-                    .tiles
-                    .iter()
-                    .find(|t| t.sql == sql)
-                    .map(|t| t.id.clone());
+            BoardEvent::OpenTile {
+                tile,
+                title,
+                sql,
+                view,
+            } => {
+                // One tab per tile.
+                let open = self.tabs.items().position(|t| {
+                    t.query().is_some_and(|q| {
+                        q.read(cx).board_tile.as_ref().is_some_and(|b| {
+                            b.board == board_id && b.tile.as_deref() == Some(&tile)
+                        })
+                    })
+                });
+                if let Some(ix) = open {
+                    self.tabs.set_active(ix);
+                    if let Some(tab) = self.tabs.active().cloned() {
+                        tab.focus(window, cx);
+                    }
+                    cx.notify();
+                    return;
+                }
+                let link = BoardTile {
+                    board: board_id,
+                    board_name: tab.read(cx).board().name.clone(),
+                    tile: Some(tile),
+                    saved: Some((sql.clone(), view)),
+                };
                 let query = self.open_query_on(&db_id, &title, &sql, true, window, cx);
                 query.update(cx, |t, cx| {
                     t.set_chart_view(view, cx);
-                    t.board_tile = tile.map(|tile| (board_id, tile));
+                    t.set_board_tile(link, window, cx);
                 });
+            }
+            BoardEvent::NewTileTab { title, sql } => {
+                let link = BoardTile {
+                    board: board_id,
+                    board_name: tab.read(cx).board().name.clone(),
+                    tile: None,
+                    saved: None,
+                };
+                let title = if title.is_empty() {
+                    "New tile".to_string()
+                } else {
+                    title
+                };
+                // Run straight away only what only reads.
+                let run = !sql.is_empty() && guard::not_reads(&sql).is_empty();
+                let query = self.open_query_on(&db_id, &title, &sql, run, window, cx);
+                query.update(cx, |t, cx| t.set_board_tile(link, window, cx));
             }
             BoardEvent::OpenSql { title, sql, run } => {
                 self.open_query_on(&db_id, &title, &sql, run, window, cx);
@@ -291,6 +332,7 @@ impl Workspace {
                 }
             };
             dialog
+                .on_ok(enter_saves(save.clone()))
                 .title("Board details")
                 .w(px(560.))
                 .child(form.clone())
@@ -353,8 +395,22 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Hands the open tab of `board` (if any) the board as it is now.
+    /// Hands the open tab of `board` (if any) the board as it is now, and its
+    /// tiles' tabs their titles.
     fn show_board(&mut self, board: Board, window: &mut Window, cx: &mut Context<Self>) {
+        for query in self.tabs.queries() {
+            query.update(cx, |t, cx| {
+                let Some(link) = t.board_tile.as_mut().filter(|l| l.board == board.id) else {
+                    return;
+                };
+                link.board_name = board.name.clone();
+                let tile = link.tile.as_deref().and_then(|id| board.tile(id));
+                if let Some(tile) = tile.filter(|tile| !tile.title.is_empty()) {
+                    t.title = tile.title.clone().into();
+                }
+                cx.notify();
+            });
+        }
         let tab = self
             .tabs
             .items()
@@ -491,28 +547,33 @@ impl Workspace {
                     window.close_dialog(cx);
                 }
             };
-            dialog.title(title).w(px(420.)).child(form.clone()).footer(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        Button::new("cancel")
-                            .label("Cancel")
-                            .ghost()
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        Button::new("add")
-                            .label(if title == "New board" {
-                                "Create"
-                            } else {
-                                "Add"
-                            })
-                            .primary()
-                            .on_click(save),
-                    ),
-            )
+            dialog
+                .on_ok(enter_saves(save.clone()))
+                .title(title)
+                .w(px(420.))
+                .child(form.clone())
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("add")
+                                .label(if title == "New board" {
+                                    "Create"
+                                } else {
+                                    "Add"
+                                })
+                                .primary()
+                                .on_click(save),
+                        ),
+                )
         });
     }
 
@@ -583,8 +644,10 @@ impl Workspace {
         self.check_board_links(cx);
     }
 
-    /// "Update tile": the tab's query and chart back into the tile it came from.
-    pub(super) fn update_tile_from_tab(
+    /// Saves the tab of a board tile: its query and the chart shown into the tile,
+    /// or a new tile on the first save (titled as the tab). Only reads: a board
+    /// would refuse anything else on every refresh.
+    pub(super) fn save_tab_to_board(
         &mut self,
         id: TabId,
         window: &mut Window,
@@ -593,15 +656,62 @@ impl Workspace {
         let Some(tab) = self.query_tab(id, cx) else {
             return;
         };
-        let (link, sql, view) = {
+        let (link, sql, view, title) = {
             let t = tab.read(cx);
-            (t.board_tile.clone(), t.sql(cx), t.chart_shown(cx))
+            let sql = t.sql(cx).trim().to_string();
+            (
+                t.board_tile.clone(),
+                sql,
+                t.view_to_save(cx),
+                t.title.to_string(),
+            )
         };
-        let Some((board, tile)) = link else {
+        let Some(mut link) = link else {
             return;
         };
-        let edit = Edit::SetQuery { tile, sql, view };
-        self.edit_board(&board, edit, window, cx);
+        if sql.is_empty() {
+            return;
+        }
+        if let Some((keyword, _)) = guard::not_reads(&sql).into_iter().next() {
+            let text = format!("A board runs only queries that read; this one has {keyword}");
+            window.push_notification(Notification::error(text), cx);
+            return;
+        }
+        let Some(board) = self.data.boards.get(&link.board).cloned() else {
+            let text = format!("The board “{}” no longer exists", link.board_name);
+            window.push_notification(Notification::error(text), cx);
+            tab.update(cx, |t, cx| {
+                t.board_tile = None;
+                cx.notify();
+            });
+            return;
+        };
+        // A tile removed meanwhile comes back as a new one.
+        let existing = link.tile.clone().filter(|t| board.tile(t).is_some());
+        let edit = match existing.clone() {
+            Some(tile) => Edit::SetQuery {
+                tile,
+                sql: sql.clone(),
+                view,
+            },
+            None => Edit::AddTile(boards::tile(&title, &sql, view)),
+        };
+        match boards::apply(&mut self.data.boards, &link.board, edit) {
+            Ok(board) => {
+                link.tile = existing.or_else(|| board.tiles.last().map(|t| t.id.clone()));
+                link.saved = Some((sql, view));
+                tab.update(cx, |t, cx| {
+                    t.board_tile = Some(link);
+                    cx.notify();
+                });
+                self.show_board(board, window, cx);
+            }
+            Err(e) => window.push_notification(
+                Notification::error(format!("Could not change the board: {e}")),
+                cx,
+            ),
+        }
+        cx.notify();
     }
 
     pub(super) fn delete_board(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {

@@ -84,10 +84,14 @@ impl TabItem {
         }
     }
 
-    /// Marked with a dot in the tab bar: unsaved, or a transaction is open.
+    /// Marked with a dot in the tab bar: unsaved (a board tile's too), or a
+    /// transaction is open.
     pub fn is_dirty(&self, cx: &App) -> bool {
         match self {
-            TabItem::Query(t) => t.read(cx).in_transaction(),
+            TabItem::Query(t) => {
+                let t = t.read(cx);
+                t.in_transaction() || t.tile_changed(cx)
+            }
             TabItem::File(t) => t.read(cx).has_unsaved_changes(cx),
             TabItem::AiSettings(_) | TabItem::Board(_) => false,
         }
