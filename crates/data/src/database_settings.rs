@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tangul_core::ai_view::{AiColumns, DatabaseSettings, ListKind};
+use tangul_core::ai_view::{AiColumns, DatabaseAi, DatabaseSettings, ListKind};
 
 const DIR: &str = "databases";
 
@@ -36,9 +36,11 @@ pub fn load(config_dir: Option<&Path>, id: &str) -> (DatabaseSettings, Option<St
 /// Every column hidden: what AI tools get while the file is broken.
 fn closed() -> DatabaseSettings {
     DatabaseSettings {
-        ai: AiColumns {
-            kind: ListKind::Whitelist,
-            ..AiColumns::default()
+        ai: DatabaseAi {
+            content_blocking: AiColumns {
+                kind: ListKind::Whitelist,
+                ..AiColumns::default()
+            },
         },
     }
 }
@@ -80,14 +82,22 @@ mod tests {
         assert!(text.contains("\"redact\": []"), "{text}");
         assert_eq!(load(Some(&d), "db1"), (DatabaseSettings::default(), None));
 
-        std::fs::write(&file, r#"{"ai": {"hide": ["*.ssn"]}}"#).unwrap();
+        std::fs::write(
+            &file,
+            r#"{"ai": {"content_blocking": {"hide": ["*.ssn"]}}}"#,
+        )
+        .unwrap();
         create_if_missing(&d, "db1").unwrap();
-        assert_eq!(load(Some(&d), "db1").0.ai.hide, ["*.ssn"], "kept");
+        assert_eq!(
+            load(Some(&d), "db1").0.ai.content_blocking.hide,
+            ["*.ssn"],
+            "kept"
+        );
 
         std::fs::write(&file, "{ broken").unwrap();
         let (settings, problem) = load(Some(&d), "db1");
-        assert_eq!(settings.ai.kind, ListKind::Whitelist);
-        assert!(settings.ai.show.is_empty());
+        assert_eq!(settings.ai.content_blocking.kind, ListKind::Whitelist);
+        assert!(settings.ai.content_blocking.show.is_empty());
         assert!(problem.unwrap().contains("db1.json"));
         let _ = std::fs::remove_dir_all(&d);
     }

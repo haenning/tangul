@@ -21,11 +21,13 @@ save; there is nothing to restart.
 ```json
 {
   "ai": {
-    "type": "blacklist",
-    "redact": ["*.email", "*.phone", "orders.adr*", "billing_*"],
-    "hide": ["*.ssn", "audit_*"],
-    "show": [],
-    "block_queries": "none"
+    "content_blocking": {
+      "type": "blacklist",
+      "redact": ["*.email", "*.phone", "orders.adr*", "billing_*"],
+      "hide": ["*.ssn", "audit_*"],
+      "show": [],
+      "block_queries": "none"
+    }
   }
 }
 ```
@@ -58,7 +60,7 @@ When a column matches more than one list, the strictest wins: hidden, then redac
 then visible.
 
 ```json
-{ "ai": { "type": "whitelist", "show": ["orders", "products", "users.id"], "redact": ["orders.adr*"] } }
+{ "ai": { "content_blocking": { "type": "whitelist", "show": ["orders", "products", "users.id"], "redact": ["orders.adr*"] } } }
 ```
 
 ## Renamed and computed columns

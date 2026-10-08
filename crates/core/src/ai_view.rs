@@ -5,11 +5,13 @@
 //! ```json
 //! {
 //!   "ai": {
-//!     "type": "blacklist",
-//!     "redact": ["*.name", "orders.adr*", "billing_*"],
-//!     "hide": ["*.ssn", "audit_*"],
-//!     "show": [],
-//!     "block_queries": "none"
+//!     "content_blocking": {
+//!       "type": "blacklist",
+//!       "redact": ["*.name", "orders.adr*", "billing_*"],
+//!       "hide": ["*.ssn", "audit_*"],
+//!       "show": [],
+//!       "block_queries": "none"
+//!     }
 //!   }
 //! }
 //! ```
@@ -24,7 +26,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseSettings {
-    pub ai: AiColumns,
+    pub ai: DatabaseAi,
+}
+
+/// What AI tools may do with this database.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DatabaseAi {
+    pub content_blocking: AiColumns,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,17 +82,20 @@ mod tests {
     #[test]
     fn reads_the_file_and_defaults_what_is_missing() {
         let s: DatabaseSettings = serde_json::from_str(
-            r#"{"ai": {"type": "whitelist", "show": ["orders"],
-                "block_queries": "redacted_and_hidden"}}"#,
+            r#"{"ai": {"content_blocking": {"type": "whitelist", "show": ["orders"],
+                "block_queries": "redacted_and_hidden"}}}"#,
         )
         .unwrap();
-        assert_eq!(s.ai.kind, ListKind::Whitelist);
-        assert_eq!(s.ai.show, ["orders"]);
-        assert_eq!(s.ai.block_queries, BlockQueries::RedactedAndHidden);
-        assert!(s.ai.redact.is_empty());
-        assert!(!s.ai.is_open());
+        assert_eq!(s.ai.content_blocking.kind, ListKind::Whitelist);
+        assert_eq!(s.ai.content_blocking.show, ["orders"]);
+        assert_eq!(
+            s.ai.content_blocking.block_queries,
+            BlockQueries::RedactedAndHidden
+        );
+        assert!(s.ai.content_blocking.redact.is_empty());
+        assert!(!s.ai.content_blocking.is_open());
         let empty: DatabaseSettings = serde_json::from_str("{}").unwrap();
-        assert!(empty.ai.is_open());
+        assert!(empty.ai.content_blocking.is_open());
         let json = serde_json::to_string(&empty).unwrap();
         assert!(json.contains(r#""type":"blacklist""#), "{json}");
         assert!(json.contains(r#""block_queries":"none""#), "{json}");

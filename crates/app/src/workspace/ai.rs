@@ -240,7 +240,8 @@ impl Workspace {
         let dialect = dialect_for(db.driver);
         let columns = database_settings::load(self.data.profiles.dir(), &db.id)
             .0
-            .ai;
+            .ai
+            .content_blocking;
         let schema = self
             .knowledge
             .schema(user_id)
@@ -293,7 +294,10 @@ impl Workspace {
                 .clone();
             // Each database's settings as they are now: a saved change applies at once.
             for e in &mut exposed {
-                e.columns = database_settings::load(dir.as_deref(), &e.database).0.ai;
+                e.columns = database_settings::load(dir.as_deref(), &e.database)
+                    .0
+                    .ai
+                    .content_blocking;
             }
             let ceiling = ceilings
                 .read()

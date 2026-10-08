@@ -196,7 +196,7 @@ explicit OK, and keep them covered by tests.
   can't connect is shown to the user, and the AI has no connection: it never connects
   as anyone else instead.
 - **What AI tools see of rows.** Per database, in its own settings file
-  (`core::ai_view`, `databases/<id>.json`; no UI yet): `type` blacklist or whitelist,
+  (`core::ai_view`, `databases/<id>.json` under `ai.content_blocking`; no UI yet): `type` blacklist or whitelist,
   `redact`, `hide` and `show` lists of patterns (with a dot a column: `*.email`,
   `orders.adr*`, `schema.table.column`; without one a table; `*` only, case ignored),
   `block_queries`. `assist::ai_view::plan` checks every AI read before it
