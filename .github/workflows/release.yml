@@ -2,6 +2,11 @@ name: Release
 
 # Push a tag like v0.2.0 (matching the version in Cargo.toml) to build a universal
 # macOS DMG and publish it as a GitHub release. See CONTRIBUTING.md → Releases.
+#
+# Signed with the Developer ID certificate, hardened runtime, notarized and stapled
+# (secrets in the `release` environment: scripts/release-keychain.sh lists them).
+# Missing secrets fail the job before anything is built, unless the repository
+# variable UNSIGNED_RELEASE is "true": then it is ad-hoc signed as before.
 on:
   push:
     tags: ["v*"]
@@ -22,6 +27,11 @@ jobs:
     # macOS 26 image: Xcode 26's actool compiles the Icon Composer icon (light/dark).
     # bundle-macos.sh falls back to the PNG icon if it isn't available.
     runs-on: macos-26
+    environment: release
+    # Notarization usually takes minutes, sometimes more.
+    timeout-minutes: 90
+    env:
+      SIGNED: ${{ vars.UNSIGNED_RELEASE != 'true' }}
     steps:
       - uses: actions/checkout@v4
       - name: Metal toolchain (GPUI compiles its shaders at build time)
@@ -41,11 +51,42 @@ jobs:
           tool: cargo-deny,cargo-about
       - name: Licenses (the app ships THIRD_PARTY_LICENSES.md)
         run: make license-check
+      - name: Signing certificate and notary key (temporary keychain)
+        if: env.SIGNED == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: scripts/release-keychain.sh setup
       - name: Build universal app + DMG
         run: scripts/bundle-macos.sh --universal
+      - name: Notarize and staple
+        if: env.SIGNED == 'true'
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: scripts/notarize-macos.sh target/bundle/tangul-*-universal.dmg
+      - name: Verify signature and notarization
+        if: env.SIGNED == 'true'
+        run: |
+          app=target/bundle/tangul.app
+          dmg=$(ls target/bundle/tangul-*-universal.dmg)
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl -a -t exec -vv "$app"
+          spctl -a -t open --context context:primary-signature -vv "$dmg"
+          xcrun stapler validate "$dmg"
+          # The designated requirement names the Team ID: what keeps the Keychain's
+          # "Always Allow" across releases.
+          codesign -d -r- "$app"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" target/bundle/tangul-*-universal.dmg \
             --title "tangul $GITHUB_REF_NAME" --generate-notes
+      - name: Remove the keychain and keys
+        if: always()
+        run: scripts/release-keychain.sh cleanup || true

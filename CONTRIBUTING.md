@@ -86,9 +86,21 @@ Merge `dev` into `main` first (its pull request), then run `make release`. It
    `vX.Y.Z` and pushes both,
 4. merges `main` into `dev`, so `dev` has the version too.
 
-The tag starts the Release workflow: it builds the universal DMG and publishes it as a
-GitHub release with generated notes. It checks that the tag matches the `Cargo.toml`
-version. The internal crates depend on each other by path only, so the workspace
+The tag starts the Release workflow: it runs CI, builds the universal DMG, signs it
+with the Developer ID certificate (hardened runtime), notarizes and staples it,
+verifies all of that and publishes it as a GitHub release with generated notes. It
+checks that the tag matches the `Cargo.toml` version.
+
+Signing needs these secrets in the `release` environment (Settings → Environments →
+`release`, deployments only from tags `v*`): `MACOS_CERTIFICATE_P12` (the exported
+`.p12`, base64), `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`
+(`Developer ID Application: Name (TEAMID)`), `NOTARY_API_KEY_P8` (the App Store
+Connect API key's `.p8`), `NOTARY_KEY_ID` and `NOTARY_ISSUER_ID`. Without them the job
+fails before building, unless the repository variable `UNSIGNED_RELEASE` is `true`
+(ad-hoc signed, as before). `scripts/release-keychain.sh` puts the certificate into a
+temporary keychain and removes it at the end; `scripts/notarize-macos.sh` notarizes.
+The bundle id `io.github.haenning.tangul` must never change: macOS ties Keychain
+access to it and the Team ID. The internal crates depend on each other by path only, so the workspace
 version is the one place it is set.
 
 The app icon is `packaging/macos/tangul.icon`, an Icon Composer document (open it with
