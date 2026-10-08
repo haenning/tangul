@@ -53,7 +53,7 @@ const CHART_FONT_SIZE_RANGE: (f32, f32) = (6., 16.);
 const MONITOR_INTERVAL_RANGE: (Duration, Duration) =
     (Duration::from_secs(5 * 60), Duration::from_secs(24 * 3600));
 
-#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub editor: FontSettings,
@@ -70,7 +70,7 @@ pub struct Settings {
 
 /// The color themes (see [`crate::themes`]): one for dark, one for light, and
 /// which of them shows.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeSettings {
     pub appearance: Appearance,
@@ -91,7 +91,7 @@ impl Default for ThemeSettings {
 }
 
 /// Which theme shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
     /// As the system: dark or light, switching when it does.
@@ -116,7 +116,7 @@ impl Appearance {
 
 /// The in-app assistant: the model provider it talks to. API keys are in the
 /// Keychain, never in this file.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiSettings {
     /// `null` until one is chosen: the assistant can't answer yet.
@@ -166,7 +166,7 @@ impl AiSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderSettings {
     pub model: Option<String>,
@@ -176,7 +176,7 @@ pub struct ProviderSettings {
 
 /// The MCP server: MCP clients (Claude Code, …) use tangul's AI tools on the
 /// databases available to them while the app runs.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpSettings {
     pub enabled: bool,
@@ -198,18 +198,24 @@ impl Default for McpSettings {
 }
 
 /// Scheduled bookmark runs and the metrics kept of bookmark runs.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MonitoringSettings {
     /// About how often a scheduled bookmark runs; kept between 5m and 1d.
-    #[serde(deserialize_with = "required_duration")]
+    #[serde(
+        deserialize_with = "required_duration",
+        serialize_with = "write_duration"
+    )]
     pub interval: Duration,
     /// Whether a new bookmark starts out scheduled (if it only reads).
     pub schedule_new_bookmarks: bool,
     /// Most runs kept per bookmark; `null` for no limit.
     pub max_points: Option<u64>,
     /// Runs older than this are dropped; `null` keeps them.
-    #[serde(deserialize_with = "duration")]
+    #[serde(
+        deserialize_with = "duration",
+        serialize_with = "write_optional_duration"
+    )]
     pub max_age: Option<Duration>,
     /// Most space all kept runs may take, in MB; `null` for no limit.
     pub max_mb: Option<f64>,
@@ -236,7 +242,7 @@ impl MonitoringSettings {
 }
 
 /// Guardrails against running the wrong statement.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SafetySettings {
     /// Database user names in read-only mode: statements that change data ask for
@@ -247,11 +253,17 @@ pub struct SafetySettings {
     /// After read-only mode was turned off for a user, turn it back on this long
     /// after the last statement that changed data (or after turning it off, if
     /// none ran). Written like `"30s"`, `"5m"` or `"1h"`; `null` never does.
-    #[serde(deserialize_with = "duration")]
+    #[serde(
+        deserialize_with = "duration",
+        serialize_with = "write_optional_duration"
+    )]
     pub relock_after: Option<Duration>,
     /// Every statement (typed, bookmarked or scheduled) is stopped after this
     /// long, by the server and by the app; `null` for no limit.
-    #[serde(deserialize_with = "duration")]
+    #[serde(
+        deserialize_with = "duration",
+        serialize_with = "write_optional_duration"
+    )]
     pub max_query_time: Option<Duration>,
 }
 
@@ -264,6 +276,30 @@ impl Default for SafetySettings {
             max_query_time: Some(Duration::from_secs(60)),
         }
     }
+}
+
+/// `d` as written in the file: in its largest whole unit (`"60s"` is `"1m"`).
+fn duration_text(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0 => "0s".into(),
+        _ if s.is_multiple_of(24 * 3600) => format!("{}d", s / (24 * 3600)),
+        _ if s.is_multiple_of(3600) => format!("{}h", s / 3600),
+        _ if s.is_multiple_of(60) => format!("{}m", s / 60),
+        _ => format!("{s}s"),
+    }
+}
+
+fn write_duration<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&duration_text(*d))
+}
+
+fn write_optional_duration<S: Serializer>(d: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
+    d.map(duration_text).serialize(s)
+}
+
+fn write_color<S: Serializer>(c: &Option<Rgb>, s: S) -> Result<S::Ok, S::Error> {
+    c.map(Rgb::to_hex).serialize(s)
 }
 
 fn required_duration<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
@@ -302,7 +338,7 @@ impl Settings {
 }
 
 /// Font of one part of the app; unset values keep the default.
-#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontSettings {
     /// In pixels.
@@ -325,11 +361,11 @@ impl FontSettings {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChartSettings {
     /// Hex color (`"#2563eb"`) of the first series; the theme's when unset.
-    #[serde(deserialize_with = "color")]
+    #[serde(deserialize_with = "color", serialize_with = "write_color")]
     pub primary_color: Option<Rgb>,
     #[serde(flatten)]
     pub font: FontSettings,
@@ -464,54 +500,20 @@ pub fn path() -> Option<PathBuf> {
     config_dir().map(|d| d.join(FILE))
 }
 
-/// Every key the file can have, at its default (`null`: unset, the app's own).
+/// Every key the file can have, at its default (`null`: unset, the app's own),
+/// from [`Settings::default`] so no setting is missing; every provider listed.
 pub fn defaults() -> serde_json::Value {
-    serde_json::json!({
-        "version": crate::migrations::current(crate::migrations::SETTINGS),
-        "editor": {
-            "font_size": null,
-            "font_family": null,
-        },
-        "table": {
-            "font_size": null,
-            "font_family": null,
-        },
-        "chart": {
-            "primary_color": null,
-            "font_size": null,
-            "font_family": null,
-        },
-        "safety": {
-            "read_only_users": [],
-            "confirm_unfiltered_writes": true,
-            "relock_after": null,
-            "max_query_time": "60s",
-        },
-        "monitoring": {
-            "interval": "1d",
-            "schedule_new_bookmarks": false,
-            "max_points": 10000,
-            "max_age": "365d",
-            "max_mb": 50,
-        },
-        "theme": {
-            "appearance": "auto",
-            "dark": "Tangul Dark",
-            "light": "Tangul Light",
-        },
-        "mcp": {
-            "enabled": false,
-            "port": 7433,
-            "access": "data",
-        },
-        "ai": {
-            "provider": null,
-            "providers": {},
-            "max_tool_rounds": 12,
-            "questions_in_editor": true,
-            "access": "data",
-        },
-    })
+    let mut settings = Settings::default();
+    for kind in ProviderKind::ALL {
+        settings.ai.providers.entry(kind).or_default();
+    }
+    let version = serde_json::json!({
+        crate::upgrade::VERSION: crate::migrations::current(crate::migrations::SETTINGS)
+    });
+    crate::upgrade::merge(
+        &version,
+        &serde_json::to_value(settings).unwrap_or_default(),
+    )
 }
 
 /// `text` with every key of this version: the user's values kept, missing ones at
@@ -912,6 +914,54 @@ mod tests {
         assert!(Settings::parse(r#"{"monitoring": {"interval": null}}"#).is_err());
     }
 
+    /// The keys of `value`, nested ones as `a.b`.
+    fn keys(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+        if let Some(object) = value.as_object() {
+            for (key, value) in object {
+                let path = format!("{prefix}{key}");
+                keys(value, &format!("{path}."), out);
+                out.push(path);
+            }
+        }
+        out.sort();
+    }
+
+    #[test]
+    fn docs_show_every_key() {
+        let doc = include_str!("../../../docs/settings.md");
+        let block = |after: &str| -> serde_json::Value {
+            let from = doc.find(after).unwrap();
+            let start = from + doc[from..].find("```json").unwrap() + "```json".len();
+            serde_json::from_str(&doc[start..start + doc[start..].find("```").unwrap()]).unwrap()
+        };
+        for (heading, defaults) in [
+            ("## `settings.json`", defaults()),
+            (
+                "## `databases/<id>.json`",
+                crate::database_settings::defaults(),
+            ),
+        ] {
+            let (mut documented, mut real) = (Vec::new(), Vec::new());
+            keys(&block(heading), "", &mut documented);
+            keys(&defaults, "", &mut real);
+            assert_eq!(documented, real, "docs/settings.md, {heading}");
+        }
+    }
+
+    #[test]
+    fn durations_are_written_in_their_largest_whole_unit() {
+        for (secs, text) in [
+            (0, "0s"),
+            (90, "90s"),
+            (300, "5m"),
+            (7200, "2h"),
+            (86400 * 365, "365d"),
+        ] {
+            assert_eq!(duration_text(Duration::from_secs(secs)), text);
+            assert_eq!(parse_duration(text), Ok(Duration::from_secs(secs)));
+        }
+    }
+
     #[test]
     fn unknown_keys_and_broken_json() {
         assert!(Settings::parse(r#"{"other": 1}"#).is_ok());
@@ -922,7 +972,19 @@ mod tests {
     #[test]
     fn defaults_read_as_the_default_settings_and_upgrades_keep_values() {
         let text = crate::upgrade::pretty(&defaults());
-        assert_eq!(Settings::parse(&text).unwrap(), Settings::default());
+        let mut read = Settings::parse(&text).unwrap();
+        // Every provider is listed, with nothing set: the same as not listed.
+        for kind in ProviderKind::ALL {
+            assert_eq!(
+                read.ai.providers.remove(&kind),
+                Some(ProviderSettings::default())
+            );
+        }
+        assert_eq!(read, Settings::default());
+        assert!(
+            text.contains("\"base_url\": null") && text.contains("\"max_query_time\": \"1m\""),
+            "{text}"
+        );
         let up = upgrade(r#"{"mcp": {"port": 9000}, "mine": 1}"#).unwrap();
         let s = Settings::parse(&up).unwrap();
         assert_eq!(s.mcp.port, 9000);

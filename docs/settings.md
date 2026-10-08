@@ -31,7 +31,7 @@ the editor, so you look before you save.
     "read_only_users": [],
     "confirm_unfiltered_writes": true,
     "relock_after": null,
-    "max_query_time": "60s"
+    "max_query_time": "1m"
   },
   "monitoring": {
     "interval": "1d",
@@ -44,7 +44,12 @@ the editor, so you look before you save.
   "mcp": { "enabled": false, "port": 7433, "access": "data" },
   "ai": {
     "provider": null,
-    "providers": {},
+    "providers": {
+      "anthropic": { "model": null, "base_url": null },
+      "openai": { "model": null, "base_url": null },
+      "gemini": { "model": null, "base_url": null },
+      "ollama": { "model": null, "base_url": null }
+    },
     "max_tool_rounds": 12,
     "questions_in_editor": true,
     "access": "data"
