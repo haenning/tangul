@@ -42,7 +42,7 @@ use tangul_core::llm::ProviderKind;
 
 use crate::config::config_dir;
 
-const FILE: &str = "settings.json";
+pub(crate) const FILE: &str = "settings.json";
 /// A typo can't make the editor unusable.
 const FONT_SIZE_RANGE: (f32, f32) = (8., 32.);
 /// Grid rows have a fixed height; larger text would be cut off.
@@ -464,59 +464,81 @@ pub fn path() -> Option<PathBuf> {
     config_dir().map(|d| d.join(FILE))
 }
 
-/// Writes the file with the current values if it doesn't exist yet, so there is
-/// something to edit; the editor font comes from the app's theme. Returns its path.
+/// Every key the file can have, at its default (`null`: unset, the app's own).
+pub fn defaults() -> serde_json::Value {
+    serde_json::json!({
+        "editor": {
+            "font_size": null,
+            "font_family": null,
+        },
+        "table": {
+            "font_size": null,
+            "font_family": null,
+        },
+        "chart": {
+            "primary_color": null,
+            "font_size": null,
+            "font_family": null,
+        },
+        "safety": {
+            "read_only_users": [],
+            "confirm_unfiltered_writes": true,
+            "relock_after": null,
+            "max_query_time": "60s",
+        },
+        "monitoring": {
+            "interval": "1d",
+            "schedule_new_bookmarks": false,
+            "max_points": 10000,
+            "max_age": "365d",
+            "max_mb": 50,
+        },
+        "theme": {
+            "appearance": "auto",
+            "dark": "Tangul Dark",
+            "light": "Tangul Light",
+        },
+        "mcp": {
+            "enabled": false,
+            "port": 7433,
+            "access": "data",
+        },
+        "ai": {
+            "provider": null,
+            "providers": {},
+            "max_tool_rounds": 12,
+            "questions_in_editor": true,
+            "access": "data",
+        },
+    })
+}
+
+/// `text` with every key of this version: the user's values kept, missing ones at
+/// their default, unknown ones kept.
+pub fn upgrade(text: &str) -> Result<String, String> {
+    let user = crate::upgrade::parse(text)?;
+    if !user.is_object() {
+        return Err("settings.json must contain a JSON object".into());
+    }
+    Ok(crate::upgrade::pretty(&crate::upgrade::merge(
+        &defaults(),
+        &user,
+    )))
+}
+
+/// Writes the file with the defaults if it doesn't exist yet, so there is something
+/// to edit; the editor font comes from the app's theme. Returns its path.
 pub fn create_if_missing(editor_font_size: f32, editor_font_family: &str) -> Option<PathBuf> {
     let path = path()?;
     if !path.exists() {
-        let defaults = serde_json::json!({
-            "editor": {
-                "font_size": editor_font_size,
-                "font_family": editor_font_family,
-            },
-            "table": {
-                "font_size": null,
-                "font_family": null,
-            },
-            "chart": {
-                "primary_color": null,
-                "font_size": null,
-                "font_family": null,
-            },
-            "safety": {
-                "read_only_users": [],
-                "confirm_unfiltered_writes": true,
-                "relock_after": null,
-                "max_query_time": "60s",
-            },
-            "monitoring": {
-                "interval": "1d",
-                "schedule_new_bookmarks": false,
-                "max_points": 10000,
-                "max_age": "365d",
-                "max_mb": 50,
-            },
-            "theme": {
-                "appearance": "auto",
-                "dark": "Tangul Dark",
-                "light": "Tangul Light",
-            },
-            "mcp": {
-                "enabled": false,
-                "port": 7433,
-                "access": "data",
-            },
-            "ai": {
-                "provider": null,
-                "providers": {},
-                "max_tool_rounds": 12,
-                "questions_in_editor": true,
-                "access": "data",
-            },
+        let mut defaults = defaults();
+        defaults["editor"] = serde_json::json!({
+            "font_size": editor_font_size,
+            "font_family": editor_font_family,
         });
         let write = || -> std::io::Result<()> {
             std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
-            std::fs::write(&path, serde_json::to_string_pretty(&defaults)? + "\n")
+            std::fs::write(&path, crate::upgrade::pretty(&defaults))
         };
         if let Err(e) = write() {
             eprintln!("could not create {}: {e}", path.display());
@@ -901,5 +923,21 @@ mod tests {
         assert!(Settings::parse(r#"{"other": 1}"#).is_ok());
         assert!(Settings::parse(r#"{"editor": "#).is_err());
         assert!(Settings::parse(r#"{"editor": {"font_size": "big"}}"#).is_err());
+    }
+
+    #[test]
+    fn defaults_read_as_the_default_settings_and_upgrades_keep_values() {
+        let text = crate::upgrade::pretty(&defaults());
+        assert_eq!(Settings::parse(&text).unwrap(), Settings::default());
+        let up = upgrade(r#"{"mcp": {"port": 9000}, "mine": 1}"#).unwrap();
+        let s = Settings::parse(&up).unwrap();
+        assert_eq!(s.mcp.port, 9000);
+        assert_eq!(s.monitoring, MonitoringSettings::default());
+        assert!(
+            up.contains("\"mine\": 1") && up.contains("\"relock_after\": null"),
+            "{up}"
+        );
+        assert_eq!(upgrade("").unwrap(), text);
+        assert!(upgrade("[]").is_err() && upgrade("{ nope").is_err());
     }
 }

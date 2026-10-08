@@ -41,6 +41,25 @@ impl FileKind {
             }
         }
     }
+
+    /// Every key at its default; `None` for files without defaults (themes).
+    fn defaults(self) -> Option<String> {
+        let value = match self {
+            FileKind::Settings => settings::defaults(),
+            FileKind::Database => tangul_data::database_settings::defaults(),
+            FileKind::Theme => return None,
+        };
+        Some(tangul_data::upgrade::pretty(&value))
+    }
+
+    /// `text` in this version's layout, keeping what the user set.
+    fn upgrade(self, text: &str) -> Option<Result<String, String>> {
+        match self {
+            FileKind::Settings => Some(settings::upgrade(text)),
+            FileKind::Database => Some(tangul_data::database_settings::upgrade(text)),
+            FileKind::Theme => None,
+        }
+    }
 }
 
 pub struct FileTab {
@@ -95,6 +114,11 @@ impl FileTab {
         &self.path
     }
 
+    #[cfg(test)]
+    pub fn text(&self, cx: &App) -> String {
+        self.editor.read(cx).value().to_string()
+    }
+
     pub fn has_unsaved_changes(&self, cx: &App) -> bool {
         self.saved != self.editor.read(cx).value().as_ref()
     }
@@ -102,6 +126,30 @@ impl FileTab {
     pub fn focus(tab: &Entity<Self>, window: &mut Window, cx: &mut App) {
         let editor = tab.read(cx).editor.clone();
         editor.update(cx, |e, cx| e.focus(window, cx));
+    }
+
+    /// Puts `text` into the editor, unsaved: the user looks at it, then saves.
+    fn replace_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |e, cx| e.set_value(text, window, cx));
+        cx.notify();
+    }
+
+    fn revert_to_default(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.kind.defaults() {
+            self.replace_text(text, window, cx);
+        }
+    }
+
+    fn upgrade(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).value().to_string();
+        match self.kind.upgrade(&text) {
+            Some(Ok(new)) => self.replace_text(new, window, cx),
+            Some(Err(e)) => {
+                window.push_notification(Notification::error(format!("Could not upgrade: {e}")), cx)
+            }
+            None => {}
+        }
     }
 
     fn save_action(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
@@ -166,6 +214,28 @@ impl Render for FileTab {
                             .text_color(color)
                             .child(status),
                     )
+                    .when(self.kind.defaults().is_some(), |bar| {
+                        bar.child(
+                            Button::new("revert-file")
+                                .label("Revert to default")
+                                .small()
+                                .ghost()
+                                .tooltip("Every option at its default, unsaved")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.revert_to_default(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("upgrade-file")
+                                .label("Upgrade")
+                                .small()
+                                .ghost()
+                                .tooltip("This version's layout, keeping your values, unsaved")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.upgrade(window, cx);
+                                })),
+                        )
+                    })
                     .child(
                         Button::new("save-file")
                             .label("Save")

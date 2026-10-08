@@ -18,7 +18,10 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
   the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
   `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there;
-  each database's own settings: `database_settings.rs`, `databases/<id>.json` there)
+  each database's own settings: `database_settings.rs`, `databases/<id>.json` there;
+  `upgrade.rs`: every settings file brought to the current layout at start, the user's
+  values kept, the old text as `.bak`; a new key or a changed layout goes into the
+  file's `defaults()` / `upgrade()` and into `docs/settings.md`)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
   `boards` (the one API that changes boards, for the UI and the AI tools, and when a

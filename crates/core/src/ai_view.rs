@@ -30,9 +30,11 @@ pub struct DatabaseSettings {
     pub ai: DatabaseAi,
 }
 
-/// What AI tools may do with this database.
+/// What AI tools may do with this database. Unknown keys here and in
+/// [`AiColumns`] are an error, so a misspelt or outdated rule hides everything
+/// instead of being ignored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DatabaseAi {
     pub content_blocking: AiColumns,
 }
@@ -104,6 +106,20 @@ mod tests {
         };
         assert!(c.is_open());
         assert!(!AiColumns::closed().is_open());
+    }
+
+    #[test]
+    fn unknown_or_outdated_keys_fail_instead_of_opening() {
+        for text in [
+            r#"{"ai": {"type": "blacklist", "redact": ["*.email"]}}"#,
+            r#"{"ai": {"content_blocking": {"hdie": ["*"]}}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<DatabaseSettings>(text).is_err(),
+                "{text}"
+            );
+        }
+        assert!(serde_json::from_str::<DatabaseSettings>(r#"{"later": 1}"#).is_ok());
     }
 
     #[test]

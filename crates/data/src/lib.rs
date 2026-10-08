@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod profiles;
 pub mod settings;
 pub mod themes;
+pub mod upgrade;
 
 use anyhow::Result;
 

@@ -52,6 +52,13 @@ pub(crate) fn next_id() -> u64 {
 }
 
 fn main() {
+    // Settings files written by an older version get this version's layout first
+    // (the old text stays next to each as `.bak`), before anything reads them.
+    if let Some(dir) = tangul_data::config::config_dir() {
+        for problem in tangul_data::upgrade::upgrade_all(&dir) {
+            eprintln!("could not upgrade {problem}");
+        }
+    }
     // The engine owns its own tokio runtime thread; the UI only exchanges messages.
     let (engine, events) = tangul_engine::start();
 

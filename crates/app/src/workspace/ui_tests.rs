@@ -3202,3 +3202,44 @@ fn an_empty_tab_shows_hints_until_something_is_typed(cx: &mut TestAppContext) {
     });
     cx.update(|cx| assert!(!tab.read(cx).hints_shown(cx)));
 }
+
+#[gpui_kit::test]
+fn a_settings_file_is_upgraded_or_reverted_in_the_editor_unsaved(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let dir = std::env::temp_dir().join(format!("tangul-file-tab-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db1.json");
+    let old = r#"{"ai": {"type": "blacklist", "redact": ["*.company_id"], "show": []}}"#;
+    std::fs::write(&path, old).unwrap();
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_file(
+                path.clone(),
+                crate::file_tab::FileKind::Database,
+                window,
+                cx,
+            )
+        })
+    });
+    let tab = workspace.read_with(cx, |ws, _| {
+        ws.tabs.active().and_then(|t| t.file()).cloned().unwrap()
+    });
+    let parsed = |cx: &mut TestAppContext| -> tangul_core::ai_view::DatabaseSettings {
+        let text = tab.read_with(cx, |t, cx| t.text(cx));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
+    };
+
+    step(handle, cx, |window, cx| window.click("upgrade-file", cx));
+    assert_eq!(parsed(cx).ai.content_blocking.redact, ["*.company_id"]);
+    assert!(tab.read_with(cx, |t, cx| t.has_unsaved_changes(cx)));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        old,
+        "not saved yet"
+    );
+
+    step(handle, cx, |window, cx| window.click("revert-file", cx));
+    assert_eq!(parsed(cx), Default::default());
+    let _ = std::fs::remove_dir_all(&dir);
+}

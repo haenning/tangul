@@ -10,7 +10,7 @@ out of your way.
 
 ![tangul](docs/screenshot.png)
 
-**[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)** · **[Testing](docs/TESTING.md)**
+**[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)** · **[Testing](docs/TESTING.md)** · **[Settings](docs/settings.md)**
 
 [![tests](https://github.com/haenning/tangul/raw/badges/tests.svg)](docs/TESTING.md)
 [![coverage](https://github.com/haenning/tangul/raw/badges/coverage.svg)](https://github.com/haenning/tangul/blob/badges/summary.md)
@@ -145,7 +145,7 @@ to point at production.
 | `⌘D` | Bookmark the query |
 | `⌘B` | Show or hide the sidebar |
 | `⌘⇧P` | Command palette |
-| `⌘,` | Settings (`settings.json` in a tab, `⌘S` saves) |
+| `⌘,` | Settings (`settings.json` in a tab, `⌘S` saves; [all keys](docs/settings.md)) |
 
 ## Status
 
