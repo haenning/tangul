@@ -8,7 +8,7 @@
 //!     "content_blocking": {
 //!       "redact": ["*.name", "orders.adr*", "billing_*"],
 //!       "hide": ["*.ssn", "audit_*"],
-//!       "block_queries": "none"
+//!       "block_queries": ["redacted"]
 //!     }
 //!   }
 //! }
@@ -44,7 +44,8 @@ pub struct AiColumns {
     /// What matches is redacted, unless hidden too (the stricter wins).
     pub redact: Vec<String>,
     pub hide: Vec<String>,
-    pub block_queries: BlockQueries,
+    /// Columns in these modes may only be selected (empty: used anywhere).
+    pub block_queries: Vec<Blocked>,
 }
 
 impl AiColumns {
@@ -63,15 +64,13 @@ impl AiColumns {
     }
 }
 
-/// Which columns queries may only read (select), never filter, join, sort or
-/// group by: those leak values bit by bit (`WHERE email LIKE 'a%'`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Columns queries may only read (select), never filter, join, sort or group by:
+/// those leak values bit by bit (`WHERE email LIKE 'a%'`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BlockQueries {
-    #[default]
-    None,
+pub enum Blocked {
     Redacted,
-    RedactedAndHidden,
+    Hidden,
 }
 
 #[cfg(test)]
@@ -82,19 +81,19 @@ mod tests {
     fn reads_the_file_and_defaults_what_is_missing() {
         let s: DatabaseSettings = serde_json::from_str(
             r#"{"ai": {"content_blocking": {"hide": ["*", "!orders.*.*"],
-                "block_queries": "redacted_and_hidden"}}}"#,
+                "block_queries": ["redacted", "hidden"]}}}"#,
         )
         .unwrap();
         let c = &s.ai.content_blocking;
         assert_eq!(c.hide, ["*", "!orders.*.*"]);
-        assert_eq!(c.block_queries, BlockQueries::RedactedAndHidden);
+        assert_eq!(c.block_queries, [Blocked::Redacted, Blocked::Hidden]);
         assert!(c.redact.is_empty());
         assert!(!c.is_open());
         let empty: DatabaseSettings = serde_json::from_str("{}").unwrap();
         assert!(empty.ai.content_blocking.is_open());
         let json = serde_json::to_string(&empty).unwrap();
         assert!(json.contains(r#""hide":[]"#), "{json}");
-        assert!(json.contains(r#""block_queries":"none""#), "{json}");
+        assert!(json.contains(r#""block_queries":[]"#), "{json}");
     }
 
     #[test]

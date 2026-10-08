@@ -1003,7 +1003,7 @@ async fn redacted_and_hidden_columns_as_ai_tools_see_them() {
     let columns: AiColumns = serde_json::from_value(json!({
         "redact": ["*.email"],
         "hide": ["orders.total"],
-        "block_queries": "redacted"
+        "block_queries": ["redacted"]
     }))
     .unwrap();
     let (dir, ctx) = shop_seen("ai-view", ValueAccess::Values, columns).await;

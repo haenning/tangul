@@ -17,7 +17,7 @@ apply to the AI's next query once saved.
     "content_blocking": {
       "redact": ["*.email", "*.phone", "orders.adr*"],
       "hide": ["*.ssn", "audit_*"],
-      "block_queries": "none"
+      "block_queries": []
     }
   }
 }
@@ -62,12 +62,12 @@ values), no functions in `FROM`.
 ## `block_queries`
 
 Filtering on a redacted column (`WHERE email LIKE 'a%'`) reveals it bit by bit.
+Columns of the modes listed (`"redacted"`, `"hidden"`) may only be selected, never
+used to filter, join, sort or group. Empty (the default): used anywhere.
 
-| Value | Redacted and hidden columns may be |
-|---|---|
-| `none` (default) | used anywhere |
-| `redacted` | redacted ones only selected; hidden ones anywhere |
-| `redacted_and_hidden` | only selected |
+```json
+"block_queries": ["redacted", "hidden"]
+```
 
 A refused query tells the AI which column and why.
 

@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use tangul_core::ai_view::{AiColumns, BlockQueries};
+use tangul_core::ai_view::{AiColumns, Blocked};
 use tangul_core::{ColumnInfo, ResultSet, RowBatch};
 
 use crate::analyze::{TableRef, analyze, is_reserved, significant_with};
@@ -122,7 +122,7 @@ fn glob(pattern: &str, text: &str) -> bool {
 pub struct Rules {
     redact: Vec<Pattern>,
     hide: Vec<Pattern>,
-    block: BlockQueries,
+    block: Vec<Blocked>,
     open: bool,
 }
 
@@ -132,7 +132,7 @@ impl Rules {
         Self {
             redact: patterns(&settings.redact),
             hide: patterns(&settings.hide),
-            block: settings.block_queries,
+            block: settings.block_queries.clone(),
             open: settings.is_open(),
         }
     }
@@ -162,11 +162,12 @@ impl Rules {
 
     /// Whether `block_queries` keeps columns in `mode` out of conditions.
     fn blocks(&self, mode: Mode) -> bool {
-        match self.block {
-            BlockQueries::None => false,
-            BlockQueries::Redacted => mode == Mode::Redacted,
-            BlockQueries::RedactedAndHidden => mode >= Mode::Redacted,
-        }
+        let blocked = match mode {
+            Mode::Visible => return false,
+            Mode::Redacted => Blocked::Redacted,
+            Mode::Hidden => Blocked::Hidden,
+        };
+        self.block.contains(&blocked)
     }
 }
 
@@ -378,7 +379,7 @@ fn plan_at(
     // The top-level select lists, one per UNION branch.
     let branches = s.branches(ctes.main);
     let items: Vec<(usize, usize)> = branches.iter().flat_map(|b| b.items.clone()).collect();
-    if rules.block != BlockQueries::None {
+    if !rules.block.is_empty() {
         for (i, name, mode) in &uses {
             if rules.blocks(*mode) && !within_item(*i, &items) {
                 return Err(format!(
@@ -1210,7 +1211,7 @@ mod tests {
     fn block_queries_keeps_redacted_columns_out_of_conditions() {
         let block = |level: &str| {
             rules(&format!(
-                r#"{{"redact": ["*.email"], "hide": ["*.ssn"], "block_queries": "{level}"}}"#
+                r#"{{"redact": ["*.email"], "hide": ["*.ssn"], "block_queries": {level}}}"#
             ))
         };
         let run = |sql: &str, r: &Rules| plan(sql, &shop(), r, Lexing::default()).map(|_| ());
@@ -1223,18 +1224,21 @@ mod tests {
             "select id from users where length(email) = 12",
         ];
         for sql in filters {
-            assert!(run(sql, &block("none")).is_ok(), "{sql}");
-            let err = run(sql, &block("redacted")).unwrap_err();
+            assert!(run(sql, &block("[]")).is_ok(), "{sql}");
+            assert!(run(sql, &block(r#"["hidden"]"#)).is_ok(), "{sql}");
+            let err = run(sql, &block(r#"["redacted"]"#)).unwrap_err();
             assert!(
                 err.starts_with("email is redacted for AI tools"),
                 "{sql}: {err}"
             );
         }
-        assert!(run("select email from users", &block("redacted")).is_ok());
+        assert!(run("select email from users", &block(r#"["redacted"]"#)).is_ok());
         let hidden = "select id from users where ssn = '1'";
-        assert!(run(hidden, &block("redacted")).is_ok());
-        let err = run(hidden, &block("redacted_and_hidden")).unwrap_err();
-        assert!(err.starts_with("ssn is hidden"), "{err}");
+        assert!(run(hidden, &block(r#"["redacted"]"#)).is_ok());
+        for level in [r#"["hidden"]"#, r#"["redacted", "hidden"]"#] {
+            let err = run(hidden, &block(level)).unwrap_err();
+            assert!(err.starts_with("ssn is hidden"), "{err}");
+        }
     }
 
     #[test]
