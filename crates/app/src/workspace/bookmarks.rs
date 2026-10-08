@@ -1,7 +1,7 @@
 //! Bookmarks: the dialog, saving, deleting, opening, and the sidebar panel.
 
 use super::*;
-use crate::ui::enter_saves;
+use crate::ui::{enter_saves, hover_actions};
 
 impl Workspace {
     /// Asks for a name and saves `sql` as a bookmark (updating `existing` if set).
@@ -230,10 +230,7 @@ impl Workspace {
             let every = settings::current(cx).monitoring.interval();
             format!("Runs about every {}", schedule::human_duration(every))
         });
-        let actions = h_flex()
-            .gap_0p5()
-            .invisible()
-            .group_hover(group.clone(), |s| s.visible())
+        let actions = hover_actions(group.clone(), theme.sidebar_accent)
             .child(
                 Button::new(("bookmark-metrics", ix))
                     .icon(Icon::new(Lucide::ChartLine))
@@ -300,6 +297,7 @@ impl Workspace {
         h_flex()
             .id(("bookmark-row", ix))
             .group(group)
+            .relative()
             .w_full()
             .h(px(BOOKMARK_ROW_HEIGHT))
             .px_2()

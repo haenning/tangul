@@ -2013,6 +2013,24 @@ fn the_boards_panel_lists_the_databases_boards_and_opens_them(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+fn a_row_uses_its_full_width_until_it_is_hovered(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    board_with_tiles(handle, &workspace, &["select 1"], cx);
+    step(handle, cx, |window, cx| {
+        window.click(button(Panel::Boards), cx)
+    });
+    step(handle, cx, |window, _| {
+        let row = window.find(("board-row", 0usize)).bounds();
+        let name = window.find(("board-name", 0usize)).bounds();
+        // Only the row's padding is left over: the hover buttons reserve no room.
+        assert!(
+            row.right() - name.right() <= px(12.),
+            "name {name:?} in row {row:?}"
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn board_edit_mode_resizes_moves_and_removes_tiles(cx: &mut TestAppContext) {
     use tangul_core::board::Width;
     let (handle, workspace) = open(cx);

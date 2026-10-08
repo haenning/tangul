@@ -369,6 +369,25 @@ pub fn enter_saves(
     }
 }
 
+/// Buttons over the right end of a row, shown while `group` is hovered: they take
+/// no room from the name the rest of the time. `bg` is the hovered row's
+/// background, so they cover the name's end cleanly. The row must be `.relative()`
+/// with `.group(group)` and a right padding of `px_2`.
+pub fn hover_actions(group: SharedString, bg: Hsla) -> Div {
+    h_flex()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        // The row's right padding (`pr_2`).
+        .right(px(8.))
+        .pl_1()
+        .gap_0p5()
+        .items_center()
+        .bg(bg)
+        .invisible()
+        .group_hover(group, |s| s.visible())
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_long;

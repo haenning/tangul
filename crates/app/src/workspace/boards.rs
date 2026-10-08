@@ -12,7 +12,7 @@ use crate::board::{
     AddForm, Adding, BoardEvent, BoardTab, BookmarkChoice, Choices, DetailsForm, Target,
 };
 use crate::query_tab::BoardTile;
-use crate::ui::enter_saves;
+use crate::ui::{enter_saves, hover_actions};
 
 /// What "Add to board" adds: a tile, or the same as a link (chosen in the dialog).
 #[derive(Clone)]
@@ -841,10 +841,7 @@ impl Workspace {
             1 => "1 tile".to_string(),
             n => format!("{n} tiles"),
         };
-        let actions = h_flex()
-            .gap_0p5()
-            .invisible()
-            .group_hover(group.clone(), |s| s.visible())
+        let actions = hover_actions(group.clone(), theme.sidebar_accent)
             .child(
                 Button::new(("board-archive", ix))
                     .icon(Icon::new(Lucide::Archive))
@@ -871,6 +868,7 @@ impl Workspace {
             .id(("board-row", ix))
             .test_support()
             .group(group)
+            .relative()
             .w_full()
             .h(px(BOOKMARK_ROW_HEIGHT))
             .px_2()
@@ -888,7 +886,14 @@ impl Workspace {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().truncate().child(board.name.clone()))
+                    .child(
+                        div()
+                            .id(("board-name", ix))
+                            .test_support()
+                            .text_sm()
+                            .truncate()
+                            .child(board.name.clone()),
+                    )
                     .child(
                         div()
                             .text_xs()

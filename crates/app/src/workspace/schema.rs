@@ -1,7 +1,7 @@
 //! The schema sidebar: tree, search, favorites and actions on tables.
 
 use super::*;
-use crate::ui::{Severity, alert_card};
+use crate::ui::{Severity, alert_card, hover_actions};
 
 impl Workspace {
     /// `schema.table`, quoted only where needed.
@@ -815,24 +815,6 @@ pub(super) fn table_menu(
         .separator()
         .item(copy("Copy name", table.name.clone()))
         .item(copy("Copy qualified name", name))
-}
-
-/// Buttons over the right end of a row, shown while `group` is hovered: they take
-/// no room from the name the rest of the time. `bg` is the hovered row's
-/// background, so they cover the name's end cleanly.
-fn hover_actions(group: SharedString, bg: Hsla) -> Div {
-    h_flex()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        // The row's right padding (`pr_2`): a favorite's star stays in place.
-        .right(px(8.))
-        .pl_1()
-        .gap_0p5()
-        .items_center()
-        .bg(bg)
-        .invisible()
-        .group_hover(group, |s| s.visible())
 }
 
 fn kind_icon(kind: TableKind) -> Icon {
