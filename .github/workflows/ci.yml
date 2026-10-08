@@ -25,6 +25,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # No debug info: coverage doesn't need it, and it makes linking and the cache
+  # much bigger.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
   # What GPUI links against on Linux.
   LINUX_LIBS: >-
     libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev
@@ -43,6 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks
+          cache-on-failure: true
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny,cargo-machete
@@ -59,7 +64,8 @@ jobs:
 
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A build without cache (the first run, a changed Cargo.lock) takes most of it.
+    timeout-minutes: 50
     permissions:
       contents: write # the badges branch, on dev
     steps:
@@ -78,6 +84,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: tests
+          # Keep the build even when a test fails, so the next run starts warm.
+          cache-on-failure: true
       - name: Tests with coverage (incl. live and UI tests)
         env:
           TANGUL_TEST_PG: postgres:@127.0.0.1:55432/postgres
