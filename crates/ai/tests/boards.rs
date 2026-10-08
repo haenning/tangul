@@ -15,6 +15,8 @@ use tangul_service::knowledge::Knowledge;
 
 fn exposed(access: AiAccess) -> Exposed {
     Exposed {
+        database: String::new(),
+        columns: Default::default(),
         name: "shop".into(),
         user: "u1".into(),
         conn: Some(ConnId(1)),

@@ -16,6 +16,7 @@ use tangul_ai::{
 };
 use tangul_assist::dialect::dialect_for;
 use tangul_assist::schema::SchemaIndex;
+use tangul_core::ai_view::AiColumns;
 use tangul_core::chart::ChartStyle;
 use tangul_core::{AiAccess, ConnId, ConnectConfig, DriverKind, TlsMode, ValueAccess};
 use tangul_engine::{Command, EngineConfig, Event};
@@ -52,6 +53,11 @@ async fn shop(name: &str) -> (PathBuf, Ctx) {
 
 /// [`shop`], where the assistant may read `values` from the rows.
 async fn shop_with(name: &str, values: ValueAccess) -> (PathBuf, Ctx) {
+    shop_seen(name, values, Default::default()).await
+}
+
+/// [`shop_with`], AI tools seeing its rows as `columns` say.
+async fn shop_seen(name: &str, values: ValueAccess, columns: AiColumns) -> (PathBuf, Ctx) {
     let dir = std::env::temp_dir().join(format!("tangul-ai-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -96,6 +102,8 @@ async fn shop_with(name: &str, values: ValueAccess) -> (PathBuf, Ctx) {
     // the tab's, so a query on it would fail.
     knowledge.set_schema("u1", "db1", ConnId(99), Arc::new(schema));
     let exposed = Exposed {
+        database: String::new(),
+        columns,
         name: "shop".into(),
         user: "u1".into(),
         conn: Some(conn),
@@ -988,4 +996,76 @@ async fn a_write_asked_for_by_the_model_is_refused_and_nothing_changes() {
     assert!(results(2).ends_with(r#""content":"n\n4\n(1 row)","is_error":false}]}]"#));
     assert!(seen[0].system.contains("working on shop"));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redacted_and_hidden_columns_as_ai_tools_see_them() {
+    let columns: AiColumns = serde_json::from_value(json!({
+        "redact_columns": ["email"],
+        "hide_columns": ["orders.total"],
+        "block_queries": "redacted"
+    }))
+    .unwrap();
+    let (dir, ctx) = shop_seen("ai-view", ValueAccess::Values, columns).await;
+    let text = call(
+        &ctx,
+        "run_readonly",
+        json!({"sql": "SELECT u.id, u.email AS contact, o.total FROM users u JOIN orders o ON o.user_id = u.id ORDER BY o.id LIMIT 2"}),
+    )
+    .await
+    .unwrap();
+    assert!(text.contains("⟦redacted⟧"), "{text}");
+    assert!(!text.contains("ann@example.com"), "{text}");
+    assert!(!text.contains("25.5"), "{text}");
+    assert!(
+        text.ends_with(
+            "Values of contact are redacted for AI tools (⟦redacted⟧); the user sees them. \
+             Left out, hidden from AI tools: total."
+        ),
+        "{text}"
+    );
+    // Filtering on a redacted column is refused here (block_queries).
+    let err = call(
+        &ctx,
+        "run_readonly",
+        json!({"sql": "SELECT id FROM users WHERE email LIKE 'a%'"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("email is redacted for AI tools"),
+        "{err}"
+    );
+    // Not a table of the database.
+    let err = call(
+        &ctx,
+        "run_readonly",
+        json!({"sql": "SELECT * FROM sqlite_master"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("sqlite_master: not a table"),
+        "{err}"
+    );
+    // No profile of what is redacted, and describe_table says so.
+    let err = call(
+        &ctx,
+        "column_profile",
+        json!({"table": "users", "column": "email"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("is redacted for AI tools"),
+        "{err}"
+    );
+    let users = call(&ctx, "describe_table", json!({"table": "users"}))
+        .await
+        .unwrap();
+    assert!(
+        users.contains("email text not null (redacted for AI tools)"),
+        "{users}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

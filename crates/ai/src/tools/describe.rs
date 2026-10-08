@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tangul_assist::ai_view::Mode;
 use tangul_assist::join_graph::{JoinGraph, JoinSource};
 use tangul_assist::schema::SchemaIndex;
 use tangul_assist::usage::Usage;
@@ -59,6 +60,9 @@ pub(crate) struct Column {
     pub enum_values: Option<Vec<String>>,
     /// The column it references (a single-column foreign key): `table.column`.
     pub references: Option<String>,
+    /// `redacted` or `hidden` for AI tools (the database's settings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_view: Option<&'static str>,
 }
 
 pub(crate) fn describe(schema: &SchemaIndex, usage: &Usage, ix: usize) -> Description {
@@ -98,6 +102,7 @@ pub(crate) fn describe(schema: &SchemaIndex, usage: &Usage, ix: usize) -> Descri
                         f.ref_columns[0]
                     )
                 }),
+            ai_view: None,
         })
         .collect();
     let referenced_by = info
@@ -195,6 +200,11 @@ pub(crate) fn text(d: &Description) -> String {
         if let Some(values) = &c.enum_values {
             line.push_str(&format!(" {{{}}}", values.join(", ")));
         }
+        match c.ai_view {
+            Some("hidden") => line.push_str(" (hidden from AI tools: left out of results)"),
+            Some(view) => line.push_str(&format!(" ({view} for AI tools)")),
+            None => {}
+        }
         if let Some(comment) = &c.comment {
             line.push_str(&format!(" — {comment}"));
         }
@@ -261,7 +271,12 @@ impl Tool for DescribeTable {
         let Input { table, connection } = input(value)?;
         let conn = ctx.conn(connection.as_deref())?;
         let ix = resolve_table(&conn.schema, &table)?;
-        let d = describe(&conn.schema, &conn.usage, ix);
+        let mut d = describe(&conn.schema, &conn.usage, ix);
+        let table = conn.schema.table(ix);
+        for c in &mut d.columns {
+            let mode = conn.mode(&table.schema, &table.name, &c.name);
+            c.ai_view = (mode != Mode::Visible).then(|| mode.word());
+        }
         let text = text(&d);
         Ok(ToolOutput::new(&d, text))
     }

@@ -159,6 +159,8 @@ fn shop() -> SchemaInfo {
 
 fn exposed(name: &str, user: &str) -> Exposed {
     Exposed {
+        database: String::new(),
+        columns: Default::default(),
         name: name.into(),
         user: user.into(),
         conn: Some(ConnId(1)),

@@ -366,6 +366,13 @@ impl Workspace {
                 let Some(conn) = tab.read(cx).conn_id(cx) else {
                     return;
                 };
+                // `-- ai view`: as AI tools would see it, refused where they would be.
+                let user_id = self.connections.tab_user(conn).unwrap_or_default();
+                if let Some(Err(reason)) = self.ai_view_plan(user_id, sql) {
+                    let text = format!("AI tools would be refused: {reason}");
+                    window.push_notification(Notification::error(text), cx);
+                    return;
+                }
                 if let Some(link) = tab.read(cx).board_tile.clone() {
                     self.tile_run(&link, window, cx);
                 }
@@ -417,6 +424,9 @@ impl Workspace {
                 t.title = bookmark.name.into();
                 t.bookmark_id = Some(bookmark.id);
             });
+        }
+        if let Some(Ok(plan)) = self.ai_view_plan(&user_id, sql) {
+            self.router.view_as_ai(query, plan);
         }
         self.router.started(
             query,

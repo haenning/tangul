@@ -3,10 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tangul_assist::ai_view::{self, Mode, Plan, Rules};
 use tangul_assist::lexer::fingerprint;
 use tangul_assist::schema::SchemaIndex;
 use tangul_assist::slice::KnownValues;
 use tangul_assist::usage::Usage;
+use tangul_core::ai_view::AiColumns;
 use tangul_core::board::{Board, Tile};
 use tangul_core::chart::ChartStyle;
 use tangul_core::{AiAccess, ConnId, DriverKind, ResultSet, ValueAccess};
@@ -38,6 +40,10 @@ pub struct Exposed {
     pub values: ValueAccess,
     /// The user's bookmarks for this database (`list_bookmarks`, `run_readonly`).
     pub bookmarks: Vec<SharedBookmark>,
+    /// The database's id (its settings file).
+    pub database: String,
+    /// What AI tools see of its rows (its settings file, read for each call).
+    pub columns: AiColumns,
 }
 
 impl Exposed {
@@ -203,9 +209,23 @@ pub(crate) struct Conn {
     pub user: String,
     pub access: AiAccess,
     pub values: ValueAccess,
+    /// What AI tools see of its rows.
+    pub rules: Rules,
+    pub driver: DriverKind,
 }
 
 impl Conn {
+    /// What AI tools may see of `sql`'s result here, or why it can't run for them.
+    pub fn plan(&self, sql: &str) -> Result<Plan, ToolError> {
+        let lexing = tangul_assist::dialect::dialect_for(self.driver).lexing();
+        ai_view::plan(sql, &self.schema, &self.rules, lexing).map_err(ToolError::NotAllowed)
+    }
+
+    /// What AI tools see of `table.column` (by the schema's names).
+    pub fn mode(&self, schema: &str, table: &str, column: &str) -> Mode {
+        self.rules.mode(schema, table, column)
+    }
+
     /// The AI connection rows are read on; refused for a schema-only database.
     pub fn session(&self) -> Result<ConnId, ToolError> {
         self.conn.ok_or_else(|| {
@@ -374,11 +394,16 @@ impl Ctx {
             .knowledge
             .user(&exposed.user)
             .ok_or_else(|| ToolError::Failed(format!("{} is not connected yet", exposed.name)))?;
-        let known_values = if exposed.values.values() {
+        let rules = Rules::new(&exposed.columns);
+        let mut known_values = if exposed.values.values() {
             self.knowledge.known_values(&exposed.user)
         } else {
             KnownValues::new()
         };
+        // Values of redacted or hidden columns never reach the model.
+        known_values.retain(|(schema, table, column), _| {
+            rules.mode(schema, table, column) == Mode::Visible
+        });
         Ok(Conn {
             name: exposed.name.clone(),
             conn: exposed.conn,
@@ -386,6 +411,8 @@ impl Ctx {
             user: exposed.user.clone(),
             access: exposed.access,
             values: exposed.values,
+            rules,
+            driver: exposed.driver,
             usage: self.knowledge.usage(&known.database).unwrap_or_default(),
             schema: known.schema,
         })
@@ -404,6 +431,8 @@ mod tests {
 
     fn exposed(name: &str, access: AiAccess) -> Exposed {
         Exposed {
+            database: String::new(),
+            columns: Default::default(),
             name: name.into(),
             user: name.into(),
             conn: Some(ConnId(1)),

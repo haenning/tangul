@@ -219,21 +219,10 @@ impl Plan {
         if modes.iter().all(|m| *m == Mode::Visible) {
             return (result.clone(), None);
         }
-        let kept: Vec<usize> = (0..modes.len())
-            .filter(|&c| modes[c] != Mode::Hidden)
-            .collect();
-        let columns: Vec<ColumnInfo> = kept.iter().map(|&c| result.columns()[c].clone()).collect();
-        let mut out = ResultSet::new(columns);
-        let mut batch = RowBatch::with_capacity(result.row_count() * kept.len());
+        let mut out = ResultSet::new(columns(&modes, result.columns()));
+        let mut batch = RowBatch::with_capacity(result.row_count() * modes.len());
         for row in 0..result.row_count() {
-            for &c in &kept {
-                let value = result.cell(row, c);
-                batch.push_cell(match modes[c] {
-                    Mode::Redacted => value.map(|_| REDACTED),
-                    _ => value,
-                });
-            }
-            batch.finish_row();
+            push_row(&modes, &mut batch, |c| result.cell(row, c));
         }
         out.append(batch);
         let named = |mode: Mode| -> Vec<&str> {
@@ -483,6 +472,36 @@ pub fn plan(
         }
     }
     Ok(Plan { columns, all })
+}
+
+/// The columns of a result whose columns are in `modes`, as AI tools see them.
+pub fn columns(modes: &[Mode], columns: &[ColumnInfo]) -> Vec<ColumnInfo> {
+    columns
+        .iter()
+        .zip(modes)
+        .filter(|(_, m)| **m != Mode::Hidden)
+        .map(|(c, _)| c.clone())
+        .collect()
+}
+
+/// A batch of a result whose columns are in `modes`, as AI tools see it.
+pub fn batch(modes: &[Mode], rows: &RowBatch) -> RowBatch {
+    let mut out = RowBatch::with_capacity(rows.rows() * modes.len());
+    for row in 0..rows.rows() {
+        push_row(modes, &mut out, |c| rows.cell(modes.len(), row, c));
+    }
+    out
+}
+
+fn push_row<'a>(modes: &[Mode], out: &mut RowBatch, cell: impl Fn(usize) -> Option<&'a str>) {
+    for (c, mode) in modes.iter().enumerate() {
+        match mode {
+            Mode::Hidden => {}
+            Mode::Redacted => out.push_cell(cell(c).map(|_| REDACTED)),
+            Mode::Visible => out.push_cell(cell(c)),
+        }
+    }
+    out.finish_row();
 }
 
 fn within_item(i: usize, items: &[(usize, usize)]) -> bool {

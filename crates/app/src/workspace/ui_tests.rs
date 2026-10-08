@@ -1227,6 +1227,96 @@ fn the_empty_state_offers_a_new_board_once_connected(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_query_marked_ai_view_shows_what_ai_tools_see(cx: &mut TestAppContext) {
+    use crate::query_router::RunningQuery;
+    use tangul_assist::ai_view::{self, Rules};
+    use tangul_assist::lexer::Lexing;
+    use tangul_assist::schema::SchemaIndex;
+    use tangul_core::{ColumnMeta, SchemaInfo, TableInfo, TableKind};
+    use tangul_engine::Event;
+    let (handle, workspace) = open(cx);
+    let sql = ai_view::mark("select id, email, ssn from users");
+    // Not marked, or no database to ask: nothing to show differently.
+    cx.update(|cx| {
+        let ws = workspace.read(cx);
+        assert!(ws.ai_view_plan("app", "select 1").is_none());
+        assert!(ws.ai_view_plan("nobody", &sql).is_none());
+    });
+    let col = |name: &str| ColumnMeta {
+        schema: "public".into(),
+        table: "users".into(),
+        name: name.into(),
+        data_type: "text".into(),
+        nullable: true,
+        ..Default::default()
+    };
+    let schema = SchemaIndex::new(
+        SchemaInfo {
+            tables: vec![TableInfo {
+                schema: "public".into(),
+                name: "users".into(),
+                kind: TableKind::Table,
+                comment: None,
+                row_estimate: None,
+                size_bytes: None,
+            }],
+            columns: vec![col("id"), col("email"), col("ssn")],
+            ..Default::default()
+        },
+        tangul_assist::dialect::dialect_for(tangul_core::DriverKind::Postgres),
+        Some("public".into()),
+    );
+    let rules = Rules::new(
+        &serde_json::from_str(r#"{"redact_columns": ["email"], "hide_columns": ["ssn"]}"#).unwrap(),
+    );
+    let plan = ai_view::plan(&sql, &schema, &rules, Lexing::default()).unwrap();
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            let tab = ws.add_tab(&sql, window, cx);
+            let query = QueryId(ws.next_id());
+            ws.router.view_as_ai(query, plan);
+            ws.router.started(
+                query,
+                RunningQuery {
+                    tab: tab.downgrade(),
+                    sql: sql.clone(),
+                    user_id: "app".into(),
+                    started_at: 0,
+                    derived: true,
+                },
+            );
+            tab.update(cx, |t, cx| t.started(query, &sql, cx));
+            let names = ["id", "email", "ssn"].map(|n| ColumnInfo { name: n.into() });
+            let mut rows = RowBatch::default();
+            for cell in [Some("1"), Some("ann@x.io"), Some("123")] {
+                rows.push_cell(cell);
+            }
+            rows.finish_row();
+            for event in [
+                QueryEvent::Exec(ExecEvent::ResultStart(names.to_vec())),
+                QueryEvent::Exec(ExecEvent::Rows(rows)),
+                QueryEvent::Finished {
+                    elapsed: Duration::ZERO,
+                    error: None,
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+            ] {
+                ws.on_engine_event(Event::Query { query, event }, window, cx);
+            }
+            tab
+        })
+    });
+    cx.update(|cx| {
+        let results = tab.read(cx).results().read(cx);
+        assert_eq!(results.columns(cx), ["id", "email"]);
+        assert_eq!(results.cell(0, 0, cx).as_deref(), Some("1"));
+        assert_eq!(results.cell(0, 1, cx).as_deref(), Some(ai_view::REDACTED));
+    });
+}
+
+#[gpui_kit::test]
 fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let sql =
@@ -1504,7 +1594,7 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
     assert_eq!(
         shown(cx),
         [
-            (Source::Mcp, "SELECT count(*) FROM orders".to_string()),
+            (Source::Mcp, AI_QUERY.to_string()),
             (Source::App, "SELECT 1".into())
         ]
     );
@@ -1513,10 +1603,7 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
         assert!(window.find(("history-source-icon", 1usize)).visible());
         window.click(("history-source", Source::Mcp as usize), cx);
     });
-    assert_eq!(
-        shown(cx),
-        [(Source::Mcp, "SELECT count(*) FROM orders".to_string())]
-    );
+    assert_eq!(shown(cx), [(Source::Mcp, AI_QUERY.to_string())]);
     step(handle, cx, |window, cx| {
         // Filtered, the row still says who ran it.
         assert!(window.find(("history-source-icon", 0usize)).visible());
@@ -2152,6 +2239,10 @@ fn schema_only_opens_no_ai_connection(cx: &mut TestAppContext) {
         });
     });
 }
+
+/// What history keeps of an AI's `SELECT count(*) FROM orders`.
+const AI_QUERY: &str =
+    "-- ai view\n-- remove the line above to see the full result\nSELECT count(*) FROM orders";
 
 /// A board of `shop` with tiles `t1`…: `sqls` in order, `t1` and `t3` alike when
 /// asked for; opened in its tab.

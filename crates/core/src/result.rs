@@ -47,6 +47,20 @@ impl RowBatch {
         self.rows
     }
 
+    /// The cell at `row`, `col` of a batch with `columns` columns; `None` for NULL.
+    pub fn cell(&self, columns: usize, row: usize, col: usize) -> Option<&str> {
+        let ix = row * columns + col;
+        if self.nulls[ix] {
+            return None;
+        }
+        let start = if ix == 0 {
+            0
+        } else {
+            self.ends[ix - 1] as usize
+        };
+        Some(&self.text[start..self.ends[ix] as usize])
+    }
+
     pub fn is_empty(&self) -> bool {
         self.rows == 0
     }

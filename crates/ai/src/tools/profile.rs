@@ -16,6 +16,7 @@ use super::query::read;
 use super::resolve_table;
 use crate::ctx::Ctx;
 use crate::tool::{Tool, ToolError, ToolOutput, input, schema_of};
+use tangul_assist::ai_view::Mode;
 
 pub(crate) struct ColumnProfileTool;
 
@@ -110,6 +111,14 @@ impl Tool for ColumnProfileTool {
         if is_secret(&meta.name) {
             return Err(ToolError::NotAllowed(format!(
                 "{name} looks like a secret; its values are never read"
+            )));
+        }
+        let mode = conn.mode(&meta.schema, &meta.table, &meta.name);
+        if mode != Mode::Visible {
+            return Err(ToolError::NotAllowed(format!(
+                "{name} is {} for AI tools (the database's settings); its values are never \
+                 profiled",
+                mode.word()
             )));
         }
         let key = (meta.schema.clone(), meta.table.clone(), meta.name.clone());

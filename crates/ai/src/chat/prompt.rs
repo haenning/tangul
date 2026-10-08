@@ -68,6 +68,8 @@ mod tests {
         let none = Ctx::new(Knowledge::default(), None, Vec::new());
         assert!(system_prompt(&none, None).contains("No database is available"));
         let shop = Exposed {
+            database: String::new(),
+            columns: Default::default(),
             name: "shop".into(),
             user: "u".into(),
             conn: Some(ConnId(1)),
@@ -87,6 +89,8 @@ mod tests {
     #[test]
     fn marks_schema_only_databases() {
         let shop = Exposed {
+            database: String::new(),
+            columns: Default::default(),
             name: "shop".into(),
             user: "u".into(),
             conn: Some(ConnId(1)),

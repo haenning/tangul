@@ -257,13 +257,23 @@ impl Tool for RunReadonly {
             return Err(ToolError::BadInput("column needs a chart".into()));
         }
         let conn = ctx.conn(connection.as_deref())?;
+        // What of its result the model may see, before anything runs.
+        let plan = conn.plan(&sql)?;
         let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
         // What the user is shown isn't cut to what the model reads.
         let kept_rows = if show.is_some() { ROW_LIMIT } else { limit };
         let statement = sql.trim().to_string();
         let out = read(ctx, conn.session()?, sql, kept_rows).await?;
         let set = out.results.into_iter().last();
-        let rows = match &set {
+        // The model reads it as AI tools see it; the user is shown all of it.
+        let (seen, note) = match &set {
+            Some(set) => {
+                let (seen, note) = plan.apply(set);
+                (Some(seen), note)
+            }
+            None => (None, None),
+        };
+        let rows = match &seen {
             Some(set) => Rows {
                 columns: set.columns().iter().map(|c| c.name.clone()).collect(),
                 rows: (0..set.row_count().min(limit))
@@ -286,6 +296,9 @@ impl Tool for RunReadonly {
                 .keep(&conn.name, rows.columns.clone(), rows.rows.clone())
         });
         let mut text = text(&rows, kept.as_deref());
+        if let Some(note) = note {
+            text.push_str(&format!("\n{note}"));
+        }
         if let (Some(show), Some(sink)) = (show, ctx.shows()) {
             let chart = show.chart.map(|c| ChartRequest {
                 style: c.style(),

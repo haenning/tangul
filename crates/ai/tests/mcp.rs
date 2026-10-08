@@ -73,6 +73,8 @@ async fn server_on(
     let schema = SchemaIndex::new(info, dialect, dialect.default_schema(""));
     knowledge.set_schema("u1", "db1", conn, Arc::new(schema));
     let exposed = vec![Exposed {
+        database: String::new(),
+        columns: Default::default(),
         name: "shop".into(),
         user: "u1".into(),
         conn: Some(conn),
