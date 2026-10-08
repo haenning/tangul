@@ -11,16 +11,19 @@ tangul keeps its settings as JSON next to each other in the config folder (macOS
 Saved changes apply right away. A file that doesn't parse is kept as you wrote it
 but not applied; the tab says why.
 
-**Upgrades.** On start, tangul brings every file to its current layout: older
-layouts are moved over, missing keys added at their default, your values and keys
-it doesn't know are kept. The old text stays next to it as `<name>.bak`. In a file's
-tab, **Upgrade** does the same and **Revert to default** puts every key at its
-default; both only fill the editor, so you look before you save.
+**Upgrades.** Each file starts with `"version"`, its layout; leave it as it is.
+On start, tangul brings every file from an older release to its current layout:
+keys that moved are carried over, missing keys added at their default, your values
+and keys it doesn't know are kept. The old text stays next to it as `<name>.bak`.
+A file written by a newer tangul is left alone. In a file's tab, **Upgrade** does
+the same and **Revert to default** puts every key at its default; both only fill
+the editor, so you look before you save.
 
 ## `settings.json`
 
 ```json
 {
+  "version": 1,
   "editor": { "font_size": null, "font_family": null },
   "table": { "font_size": null, "font_family": null },
   "chart": { "primary_color": null, "font_size": null, "font_family": null },
@@ -76,6 +79,7 @@ means unset (the app's own value) or no limit.
 
 ```json
 {
+  "version": 1,
   "ai": {
     "content_blocking": {
       "redact": [],
@@ -87,5 +91,5 @@ means unset (the app's own value) or no limit.
 ```
 
 What AI tools see of this database's rows; see [What the AI sees of your
-rows](ai-view.md). Keys under `ai` it doesn't know make the file fail, and then AI
-tools see no rows, so a typo never leaves data open.
+rows](ai-view.md). Keys under `ai` it doesn't know, or a newer `"version"`, make
+the file fail, and then AI tools see no rows, so a typo never leaves data open.

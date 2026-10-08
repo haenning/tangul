@@ -34,11 +34,7 @@ impl FileKind {
         match self {
             FileKind::Settings => settings::problem(text),
             FileKind::Theme => tangul_data::themes::Theme::parse(text).err(),
-            FileKind::Database => {
-                serde_json::from_str::<tangul_core::ai_view::DatabaseSettings>(text)
-                    .err()
-                    .map(|e| e.to_string())
-            }
+            FileKind::Database => tangul_data::database_settings::parse(text).err(),
         }
     }
 

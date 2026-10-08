@@ -3210,7 +3210,7 @@ fn a_settings_file_is_upgraded_or_reverted_in_the_editor_unsaved(cx: &mut TestAp
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("db1.json");
-    let old = r#"{"ai": {"type": "blacklist", "redact": ["*.company_id"], "show": []}}"#;
+    let old = r#"{"ai": {"content_blocking": {"redact": ["*.company_id"]}}}"#;
     std::fs::write(&path, old).unwrap();
     step(handle, cx, |window, cx| {
         workspace.update(cx, |ws, cx| {

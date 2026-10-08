@@ -8,6 +8,7 @@ pub mod config;
 pub mod database_settings;
 pub mod local;
 pub mod metrics;
+pub mod migrations;
 pub mod profiles;
 pub mod settings;
 pub mod themes;

@@ -467,6 +467,7 @@ pub fn path() -> Option<PathBuf> {
 /// Every key the file can have, at its default (`null`: unset, the app's own).
 pub fn defaults() -> serde_json::Value {
     serde_json::json!({
+        "version": crate::migrations::current(crate::migrations::SETTINGS),
         "editor": {
             "font_size": null,
             "font_family": null,
@@ -516,14 +517,7 @@ pub fn defaults() -> serde_json::Value {
 /// `text` with every key of this version: the user's values kept, missing ones at
 /// their default, unknown ones kept.
 pub fn upgrade(text: &str) -> Result<String, String> {
-    let user = crate::upgrade::parse(text)?;
-    if !user.is_object() {
-        return Err("settings.json must contain a JSON object".into());
-    }
-    Ok(crate::upgrade::pretty(&crate::upgrade::merge(
-        &defaults(),
-        &user,
-    )))
+    crate::upgrade::upgrade(text, &defaults(), crate::migrations::SETTINGS)
 }
 
 /// Writes the file with the defaults if it doesn't exist yet, so there is something
@@ -939,5 +933,7 @@ mod tests {
         );
         assert_eq!(upgrade("").unwrap(), text);
         assert!(upgrade("[]").is_err() && upgrade("{ nope").is_err());
+        let newer = upgrade(r#"{"version": 99}"#).unwrap_err();
+        assert!(newer.contains("newer tangul"), "{newer}");
     }
 }

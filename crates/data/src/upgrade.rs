@@ -1,12 +1,57 @@
-//! Bringing a settings file up to date: every key the current version knows, with
-//! the user's values kept, and keys this version doesn't know kept too (so nothing
-//! the user wrote is lost; the file tab says what doesn't apply). The app does this
-//! once at start for `settings.json` and each database's file; the file tab offers
-//! it, and the defaults, as buttons.
+//! Bringing a settings file up to date: the migration steps from its `"version"` to
+//! the current one ([`crate::migrations`]), then every key the current layout knows,
+//! with the user's values kept, and keys it doesn't know kept too (so nothing the
+//! user wrote is lost; the file tab says what doesn't apply). The app does this once
+//! at start for `settings.json` and each database's file; the file tab offers it,
+//! and the defaults, as buttons.
 
 use std::path::Path;
 
 use serde_json::Value;
+
+use crate::migrations::{Step, current};
+
+/// The key holding a file's layout version.
+pub const VERSION: &str = "version";
+
+/// `text` (a JSON object) migrated by `steps` from its version to the current one,
+/// then merged onto `defaults`. A file written by a newer tangul is refused.
+pub fn upgrade(text: &str, defaults: &Value, steps: &[Step]) -> Result<String, String> {
+    let mut user = parse(text)?;
+    if !user.is_object() {
+        return Err("the file must contain a JSON object".into());
+    }
+    let version = version(&user)?;
+    if let Some(newer) = newer(version, steps) {
+        return Err(newer);
+    }
+    for step in &steps[(version - 1) as usize..] {
+        step(&mut user);
+    }
+    let mut out = merge(defaults, &user);
+    out[VERSION] = current(steps).into();
+    Ok(pretty(&out))
+}
+
+/// The layout version of `file`: 1 without one (before versions were written).
+pub fn version(file: &Value) -> Result<u64, String> {
+    match file.get(VERSION) {
+        None => Ok(1),
+        Some(v) => v
+            .as_u64()
+            .filter(|v| *v >= 1)
+            .ok_or_else(|| format!("\"{VERSION}\" must be a whole number from 1")),
+    }
+}
+
+/// Why a file of layout `version` can't be read here, if it was written by a newer
+/// tangul.
+pub fn newer(version: u64, steps: &[Step]) -> Option<String> {
+    let current = current(steps);
+    (version > current).then(|| {
+        format!("written by a newer tangul (layout {version}; this version knows up to {current})")
+    })
+}
 
 /// A file's upgrade: its text in the current layout.
 pub type Upgrade = fn(&str) -> Result<String, String>;
@@ -114,7 +159,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("databases")).unwrap();
         let db = dir.join("databases").join("db1.json");
-        let old = r#"{"ai": {"type": "blacklist", "redact": ["*.company_id"]}}"#;
+        let old = r#"{"ai": {"content_blocking": {"redact": ["*.company_id"]}}}"#;
         std::fs::write(&db, old).unwrap();
         std::fs::write(dir.join("databases").join("broken.json"), "{ nope").unwrap();
 
@@ -122,10 +167,12 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("broken.json"), "{problems:?}");
         let new: Value = serde_json::from_str(&std::fs::read_to_string(&db).unwrap()).unwrap();
+        assert_eq!(new["version"], json!(1));
         assert_eq!(
             new["ai"]["content_blocking"]["redact"],
             json!(["*.company_id"])
         );
+        assert_eq!(new["ai"]["content_blocking"]["hide"], json!([]));
         assert_eq!(
             std::fs::read_to_string(dir.join("databases").join("db1.json.bak")).unwrap(),
             old
