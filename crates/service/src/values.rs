@@ -1,17 +1,18 @@
 //! The editor's quick look at a column: its most frequent values among the first
 //! few hundred rows ([`tangul_assist::profile::quick_values_sql`]), so they can be
 //! offered while a condition is typed. Cheap on any table size: the server reads at
-//! most [`QUICK_ROWS`](tangul_assist::profile::QUICK_ROWS) rows. Runs through the
-//! gate as `Caller::Editor` (reads only, rolled back).
+//! most [`QUICK_ROWS`](tangul_assist::profile::QUICK_ROWS) rows. Never on views: one
+//! that sorts, groups or deduplicates is computed in full before any limit applies.
+//! Runs through the gate as `Caller::Editor` (reads only, rolled back).
 
 use tangul_assist::profile::{QUICK_VALUES, VALUE_CHARS, quick_values_sql};
 use tangul_assist::schema::SchemaIndex;
-use tangul_core::{ColumnMeta, ConnId, QueryId};
+use tangul_core::{ColumnMeta, ConnId, QueryId, TableKind};
 use tangul_engine::{Caller, EngineHandle, QueryOptions};
 
 /// The most frequent values of `column` on `conn`, most frequent first; values
-/// longer than [`VALUE_CHARS`] are left out (a cut one would never match). The
-/// error is the server's message.
+/// longer than [`VALUE_CHARS`] are left out (a cut one would never match). None
+/// for a view (not looked at). The error is the server's message.
 pub async fn quick_values(
     engine: &EngineHandle,
     query: QueryId,
@@ -22,6 +23,9 @@ pub async fn quick_values(
     let table = schema
         .resolve(Some(&column.schema), &column.table)
         .ok_or_else(|| format!("no table {}", column.table))?;
+    if schema.table(table).kind == TableKind::View {
+        return Ok(Vec::new());
+    }
     let sql = quick_values_sql(schema.dialect(), &schema.sql_name(table), &column.name);
     let options = QueryOptions {
         row_limit: QUICK_VALUES,
@@ -47,7 +51,7 @@ pub async fn quick_values(
 #[cfg(test)]
 mod tests {
     use tangul_assist::dialect::dialect_for;
-    use tangul_core::{DriverKind, SchemaInfo, TableInfo, TableKind};
+    use tangul_core::{DriverKind, SchemaInfo, TableInfo};
     use tangul_data::local::{HistoryEntry, Local, NewHistory, Source};
 
     use super::*;
@@ -58,7 +62,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tangul-values-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let local = Local::open(Some(&dir));
-        for (sql, n) in [("select 1", 3), ("select 2", 1), ("select 3", 2)] {
+        let long = format!("select '{}'", "x".repeat(64));
+        for (sql, n) in [
+            ("select 1", 3),
+            ("select 2", 1),
+            ("select 3", 2),
+            (long.as_str(), 5),
+        ] {
             for _ in 0..n {
                 let entry = NewHistory {
                     database_id: "db",
@@ -91,12 +101,20 @@ mod tests {
         };
         let schema = SchemaIndex::new(
             SchemaInfo {
-                tables: vec![TableInfo {
-                    schema: "main".into(),
-                    name: "history".into(),
-                    kind: TableKind::Table,
-                    ..Default::default()
-                }],
+                tables: vec![
+                    TableInfo {
+                        schema: "main".into(),
+                        name: "history".into(),
+                        kind: TableKind::Table,
+                        ..Default::default()
+                    },
+                    TableInfo {
+                        schema: "main".into(),
+                        name: "history_view".into(),
+                        kind: TableKind::View,
+                        ..Default::default()
+                    },
+                ],
                 columns: vec![column.clone()],
                 ..Default::default()
             },
@@ -107,6 +125,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(values, ["select 1", "select 3", "select 2"]);
+
+        // A view isn't looked at: this one doesn't even exist on the server.
+        let view = ColumnMeta {
+            table: "history_view".into(),
+            ..column.clone()
+        };
+        assert!(
+            quick_values(&engine, QueryId(3), conn, &schema, &view)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let gone = ColumnMeta {
             table: "nope".into(),

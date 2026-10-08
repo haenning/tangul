@@ -55,6 +55,11 @@ pub trait Dialect: Sync {
         }
     }
 
+    /// The number of characters of `expr`.
+    fn char_length(&self, expr: &str) -> String {
+        format!("char_length({expr})")
+    }
+
     /// `column` as text, and the operator matching it case-insensitively with `LIKE`
     /// patterns.
     fn text_match(&self, column: &str) -> (String, &'static str);

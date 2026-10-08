@@ -31,6 +31,10 @@ impl Dialect for Sqlite {
     }
 
     /// `LIKE` ignores ASCII case already.
+    fn char_length(&self, expr: &str) -> String {
+        format!("length({expr})")
+    }
+
     fn text_match(&self, column: &str) -> (String, &'static str) {
         (format!("CAST({column} AS TEXT)"), "LIKE")
     }

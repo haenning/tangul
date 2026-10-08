@@ -523,7 +523,9 @@ fn comparing_different_columns_warns(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_palette_opens_only_once(cx: &mut TestAppContext) {
     let (handle, _) = open(cx);
-    step(handle, cx, |window, cx| window.press("secondary-shift-p", cx));
+    step(handle, cx, |window, cx| {
+        window.press("secondary-shift-p", cx)
+    });
     step(handle, cx, |window, cx| {
         assert!(window.find("palette").visible());
         window.press("secondary-shift-p", cx);
