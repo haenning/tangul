@@ -317,7 +317,9 @@ impl Plot for ResultChart {
     ) -> Option<AnyElement> {
         let l = self.layout(bounds);
         let row = state.index;
-        let mut cross = CrossLine::new(point(px(l.x(row)), px(l.top))).height(l.bottom - l.top);
+        // `span` sets where the line starts; `height` alone would start it at the plot's top edge.
+        let mut cross =
+            CrossLine::new(point(px(l.x(row)), px(l.top))).span(l.top, l.bottom - l.top);
         if self.style.is_bars() {
             cross = cross.band(px(l.step));
         }
