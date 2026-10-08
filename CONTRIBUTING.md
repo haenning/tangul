@@ -92,12 +92,23 @@ verifies all of that and publishes it as a GitHub release with generated notes. 
 checks that the tag matches the `Cargo.toml` version.
 
 Signing needs these secrets in the `release` environment (Settings → Environments →
-`release`, deployments only from tags `v*`): `MACOS_CERTIFICATE_P12` (the exported
-`.p12`, base64), `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`
-(`Developer ID Application: Name (TEAMID)`), `NOTARY_API_KEY_P8` (the App Store
-Connect API key's `.p8`), `NOTARY_KEY_ID` and `NOTARY_ISSUER_ID`. Without them the job
-fails before building, unless the repository variable `UNSIGNED_RELEASE` is `true`
-(ad-hoc signed, as before). `scripts/release-keychain.sh` puts the certificate into a
+`release`, deployments only from tags `v*`): `MACOS_CERTIFICATE_P12` (the `.p12`,
+base64), `MACOS_CERTIFICATE_PASSWORD` and `MACOS_SIGN_IDENTITY` (the certificate's
+name). Two kinds of certificate:
+
+- **Self-signed** (until there is an Apple Developer ID):
+  `scripts/release-signing-cert.sh tangul-release.p12` creates it and prints the
+  three secrets. Every release then has the same signature, so the Keychain's "Always
+  Allow" survives updates; Gatekeeper still asks on each downloaded update. Keep the
+  `.p12`: a new certificate makes every user answer the Keychain again.
+- **Developer ID** (`Developer ID Application: Name (TEAMID)`): also needs
+  `NOTARY_API_KEY_P8` (the App Store Connect API key's `.p8`), `NOTARY_KEY_ID` and
+  `NOTARY_ISSUER_ID`; the release is notarized and stapled and opens without the
+  Gatekeeper step. Switching to it asks every user once more (the certificate
+  changes), then never again.
+
+Without the secrets the job fails before building, unless the repository variable
+`UNSIGNED_RELEASE` is `true` (ad-hoc signed, as before). `scripts/release-keychain.sh` puts the certificate into a
 temporary keychain and removes it at the end; `scripts/notarize-macos.sh` notarizes.
 The bundle id `io.github.haenning.tangul` must never change: macOS ties Keychain
 access to it and the Team ID. The internal crates depend on each other by path only, so the workspace

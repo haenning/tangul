@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# The Developer ID certificate and the notary key for a release build (GitHub
-# Actions, environment `release`), in a temporary keychain that is removed again.
+# The signing certificate (and for a Developer ID the notary key) for a release build
+# (GitHub Actions, environment `release`), in a temporary keychain removed again.
 #
-#   scripts/release-keychain.sh setup     # needs the six secrets below
+#   scripts/release-keychain.sh setup
 #   scripts/release-keychain.sh cleanup   # always, at the end of the job
 #
-# Secrets: MACOS_CERTIFICATE_P12 (base64 .p12), MACOS_CERTIFICATE_PASSWORD,
-# MACOS_SIGN_IDENTITY ("Developer ID Application: Name (TEAMID)"),
-# NOTARY_API_KEY_P8 (the .p8's contents), NOTARY_KEY_ID, NOTARY_ISSUER_ID.
-# Sets TANGUL_SIGN_IDENTITY and NOTARY_KEY_PATH for the later steps ($GITHUB_ENV).
-# Never prints a secret.
+# Secrets: MACOS_CERTIFICATE_P12 (base64 .p12), MACOS_CERTIFICATE_PASSWORD and
+# MACOS_SIGN_IDENTITY (the certificate's name). Either a Developer ID
+# ("Developer ID Application: Name (TEAMID)"), which also needs NOTARY_API_KEY_P8 (the
+# .p8's contents), NOTARY_KEY_ID and NOTARY_ISSUER_ID and gets notarized; or the
+# self-signed one from scripts/release-signing-cert.sh: a stable signature, so the
+# Keychain's "Always Allow" survives updates, but Gatekeeper still asks.
+# Sets TANGUL_SIGN_IDENTITY, NOTARIZE and NOTARY_KEY_PATH for the later steps
+# ($GITHUB_ENV). Never prints a secret.
 set -euo pipefail
 
 dir="${RUNNER_TEMP:?runs in GitHub Actions}/release-signing"
@@ -17,18 +20,19 @@ keychain="$dir/build.keychain-db"
 
 case "${1:-}" in
 setup)
+  needed=(MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD MACOS_SIGN_IDENTITY)
+  notarize=false
+  if [[ "${MACOS_SIGN_IDENTITY:-}" == "Developer ID Application: "* ]]; then
+    notarize=true
+    needed+=(NOTARY_API_KEY_P8 NOTARY_KEY_ID NOTARY_ISSUER_ID)
+  fi
   missing=()
-  for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD MACOS_SIGN_IDENTITY \
-      NOTARY_API_KEY_P8 NOTARY_KEY_ID NOTARY_ISSUER_ID; do
+  for name in "${needed[@]}"; do
     [[ -n "${!name:-}" ]] || missing+=("$name")
   done
   if ((${#missing[@]})); then
     echo "::error::release secrets missing in the 'release' environment: ${missing[*]}" \
       "(or set the repository variable UNSIGNED_RELEASE=true for an ad-hoc signed release)"
-    exit 1
-  fi
-  if [[ "$MACOS_SIGN_IDENTITY" != "Developer ID Application: "* ]]; then
-    echo "::error::MACOS_SIGN_IDENTITY must be a 'Developer ID Application: …' identity"
     exit 1
   fi
   mkdir -p "$dir" && chmod 700 "$dir"
@@ -44,17 +48,23 @@ setup)
   # Search this keychain first, then the existing ones.
   security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
   rm -f "$dir/cert.p12"
-  if ! security find-identity -v -p codesigning "$keychain" | grep -qF "\"$MACOS_SIGN_IDENTITY\""; then
+  # Without -v: a self-signed certificate isn't trusted here, and needn't be.
+  if ! security find-identity -p codesigning "$keychain" | grep -qF "\"$MACOS_SIGN_IDENTITY\""; then
     echo "::error::the certificate doesn't hold the identity in MACOS_SIGN_IDENTITY"
     exit 1
   fi
-  printf '%s\n' "$NOTARY_API_KEY_P8" > "$dir/AuthKey.p8"
-  chmod 600 "$dir/AuthKey.p8"
   {
     echo "TANGUL_SIGN_IDENTITY=$MACOS_SIGN_IDENTITY"
-    echo "NOTARY_KEY_PATH=$dir/AuthKey.p8"
+    echo "NOTARIZE=$notarize"
   } >> "$GITHUB_ENV"
-  echo "signing identity ready"
+  if $notarize; then
+    printf '%s\n' "$NOTARY_API_KEY_P8" > "$dir/AuthKey.p8"
+    chmod 600 "$dir/AuthKey.p8"
+    echo "NOTARY_KEY_PATH=$dir/AuthKey.p8" >> "$GITHUB_ENV"
+    echo "signing identity ready (Developer ID: notarized)"
+  else
+    echo "signing identity ready (self-signed: not notarized)"
+  fi
   ;;
 cleanup)
   security delete-keychain "$keychain" 2>/dev/null || true
