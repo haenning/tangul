@@ -1508,6 +1508,59 @@ fn the_summary_of_a_table_column_starts_with_schema_tags(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn a_search_hit_opens_its_table_and_keeps_the_search(cx: &mut TestAppContext) {
+    use tangul_core::{ColumnMeta, ConnId, SchemaInfo, TableInfo, TableKind};
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            let info = SchemaInfo {
+                tables: vec![TableInfo {
+                    schema: "public".into(),
+                    name: "orders".into(),
+                    kind: TableKind::Table,
+                    comment: None,
+                    row_estimate: None,
+                    size_bytes: None,
+                }],
+                columns: vec![ColumnMeta {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    name: "status".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.set_schema("app", ConnId(1), info);
+        })
+    });
+    // A table hit and a column hit: each the second row, under its heading.
+    for search in ["ord", "status"] {
+        step(handle, cx, |window, cx| {
+            workspace.update(cx, |ws, cx| {
+                let input = ws.panels.schema.search.clone();
+                input.update(cx, |i, cx| i.set_value(search, window, cx));
+                cx.notify();
+            })
+        });
+        step(handle, cx, |window, cx| {
+            window.click(("sidebar-row", 1usize), cx)
+        });
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            let tab = ws.tabs.active_query().expect("opened").read(cx);
+            assert_eq!(tab.title.as_ref(), "orders");
+            assert!(tab.sql(cx).contains("orders"), "{}", tab.sql(cx));
+            assert_eq!(ws.panels.schema.search.read(cx).value(), search);
+        });
+    }
+}
+
+#[gpui_kit::test]
 fn the_summary_comes_back_after_the_filter_closes(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     tab_with_rows(
