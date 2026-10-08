@@ -420,7 +420,7 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
         let d = tangul_assist::dialect::dialect_for(driver);
         let index = tangul_assist::schema::SchemaIndex::new(info.clone(), d, None);
         let rules = Rules::new(&tangul_core::ai_view::AiColumns {
-            redact_columns: vec!["child.amount".into(), "child.id".into()],
+            redact: vec!["child.amount".into(), "child.id".into()],
             ..Default::default()
         });
         let seen = |sql: &str| plan(sql, &index, &rules, d.lexing()).unwrap().modes(1);

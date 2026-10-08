@@ -1266,9 +1266,8 @@ fn a_query_marked_ai_view_shows_what_ai_tools_see(cx: &mut TestAppContext) {
         tangul_assist::dialect::dialect_for(tangul_core::DriverKind::Postgres),
         Some("public".into()),
     );
-    let rules = Rules::new(
-        &serde_json::from_str(r#"{"redact_columns": ["email"], "hide_columns": ["ssn"]}"#).unwrap(),
-    );
+    let rules =
+        Rules::new(&serde_json::from_str(r#"{"redact": ["*.email"], "hide": ["*.ssn"]}"#).unwrap());
     let plan = ai_view::plan(&sql, &schema, &rules, Lexing::default()).unwrap();
     let tab = step(handle, cx, |window, cx| {
         workspace.update(cx, |ws, cx| {

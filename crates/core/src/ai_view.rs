@@ -6,20 +6,17 @@
 //! {
 //!   "ai": {
 //!     "type": "blacklist",
-//!     "redact_columns": ["name", "orders.adr*"],
-//!     "redact_tables": ["billing_*"],
-//!     "hide_columns": ["ssn"],
-//!     "hide_tables": ["audit_*"],
-//!     "show_columns": [],
-//!     "show_tables": [],
+//!     "redact": ["*.name", "orders.adr*", "billing_*"],
+//!     "hide": ["*.ssn", "audit_*"],
+//!     "show": [],
 //!     "block_queries": "none"
 //!   }
 //! }
 //! ```
 //!
-//! Patterns ignore case and know one wildcard, `*`. A column pattern is `column`
-//! (in every table), `table.column` or `schema.table.column`; a table pattern is
-//! `table` or `schema.table`.
+//! Patterns ignore case and know one wildcard, `*`. With a dot they name columns:
+//! `table.column` (`*.email`: in every table) or `schema.table.column`; without one,
+//! tables (all their columns). A table in a schema: `schema.table.*`.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,32 +30,20 @@ pub struct DatabaseSettings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiColumns {
-    /// Blacklist: the redact and hide lists apply, the rest is visible. Whitelist:
-    /// only the show lists are visible (the redact lists still apply to them), the
-    /// rest is hidden.
+    /// Blacklist: `redact` and `hide` apply, the rest is visible. Whitelist: only
+    /// `show` is visible (`redact` still applies to it), the rest is hidden.
     #[serde(rename = "type")]
     pub kind: ListKind,
-    pub redact_columns: Vec<String>,
-    pub redact_tables: Vec<String>,
-    pub hide_columns: Vec<String>,
-    pub hide_tables: Vec<String>,
-    pub show_columns: Vec<String>,
-    pub show_tables: Vec<String>,
+    pub redact: Vec<String>,
+    pub hide: Vec<String>,
+    pub show: Vec<String>,
     pub block_queries: BlockQueries,
 }
 
 impl AiColumns {
     /// Whether every column is visible as it is.
     pub fn is_open(&self) -> bool {
-        self.kind == ListKind::Blacklist
-            && [
-                &self.redact_columns,
-                &self.redact_tables,
-                &self.hide_columns,
-                &self.hide_tables,
-            ]
-            .iter()
-            .all(|l| l.is_empty())
+        self.kind == ListKind::Blacklist && self.redact.is_empty() && self.hide.is_empty()
     }
 }
 
@@ -88,14 +73,14 @@ mod tests {
     #[test]
     fn reads_the_file_and_defaults_what_is_missing() {
         let s: DatabaseSettings = serde_json::from_str(
-            r#"{"ai": {"type": "whitelist", "show_tables": ["orders"],
+            r#"{"ai": {"type": "whitelist", "show": ["orders"],
                 "block_queries": "redacted_and_hidden"}}"#,
         )
         .unwrap();
         assert_eq!(s.ai.kind, ListKind::Whitelist);
-        assert_eq!(s.ai.show_tables, ["orders"]);
+        assert_eq!(s.ai.show, ["orders"]);
         assert_eq!(s.ai.block_queries, BlockQueries::RedactedAndHidden);
-        assert!(s.ai.redact_columns.is_empty());
+        assert!(s.ai.redact.is_empty());
         assert!(!s.ai.is_open());
         let empty: DatabaseSettings = serde_json::from_str("{}").unwrap();
         assert!(empty.ai.is_open());

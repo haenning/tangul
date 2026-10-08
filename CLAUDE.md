@@ -197,16 +197,17 @@ explicit OK, and keep them covered by tests.
   as anyone else instead.
 - **What AI tools see of rows.** Per database, in its own settings file
   (`core::ai_view`, `databases/<id>.json`; no UI yet): `type` blacklist or whitelist,
-  `redact_*`, `hide_*` and `show_*` lists of column and table patterns (`*` only, case
-  ignored), `block_queries`. `assist::ai_view::plan` checks every AI read before it
+  `redact`, `hide` and `show` lists of patterns (with a dot a column: `*.email`,
+  `orders.adr*`, `schema.table.column`; without one a table; `*` only, case ignored),
+  `block_queries`. `assist::ai_view::plan` checks every AI read before it
   runs and traces each result column to the table columns it comes from (renames,
   expressions, `*`, CTEs, subqueries, `UNION`, generated columns, views); what it
   can't tell gets the strictest mode the statement uses. While rules apply, only the
   database's own tables (no catalogs, no functions in `FROM`). `Ctx` hands the model
   redacted values as `⟦redacted⟧` and leaves hidden columns out; `show` still opens
   the full result for the user. Value profiles and known values skip these columns.
-  AI queries go to history under `-- ai view`; a query with that line shows its
-  result as AI tools see it. A settings file that can't be read hides everything.
+  AI queries go to history under `-- ai view`; a query whose first line is that
+  (case and spaces aside) shows its result as AI tools see it. A settings file that can't be read hides everything.
 - **Schema only.** A database's `ai_access` (`"data"` or `"schema"`), under the
   callers' ceilings `ai.access` (assistant) and `mcp.access` (MCP) in `settings.json`;
   the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no

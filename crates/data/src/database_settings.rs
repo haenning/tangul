@@ -77,17 +77,17 @@ mod tests {
         let file = create_if_missing(&d, "db1").unwrap();
         assert_eq!(file, d.join("databases").join("db1.json"));
         let text = std::fs::read_to_string(&file).unwrap();
-        assert!(text.contains("\"redact_columns\": []"), "{text}");
+        assert!(text.contains("\"redact\": []"), "{text}");
         assert_eq!(load(Some(&d), "db1"), (DatabaseSettings::default(), None));
 
-        std::fs::write(&file, r#"{"ai": {"hide_columns": ["ssn"]}}"#).unwrap();
+        std::fs::write(&file, r#"{"ai": {"hide": ["*.ssn"]}}"#).unwrap();
         create_if_missing(&d, "db1").unwrap();
-        assert_eq!(load(Some(&d), "db1").0.ai.hide_columns, ["ssn"], "kept");
+        assert_eq!(load(Some(&d), "db1").0.ai.hide, ["*.ssn"], "kept");
 
         std::fs::write(&file, "{ broken").unwrap();
         let (settings, problem) = load(Some(&d), "db1");
         assert_eq!(settings.ai.kind, ListKind::Whitelist);
-        assert!(settings.ai.show_tables.is_empty());
+        assert!(settings.ai.show.is_empty());
         assert!(problem.unwrap().contains("db1.json"));
         let _ = std::fs::remove_dir_all(&d);
     }

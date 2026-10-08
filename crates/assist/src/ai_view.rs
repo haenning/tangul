@@ -49,56 +49,41 @@ impl Mode {
     }
 }
 
-/// `schema.table.column`, `table.column` or `column`.
+/// With a dot a column (`table.column`, `schema.table.column`), else a table.
 #[derive(Debug, Clone)]
-struct ColumnPattern {
+struct Pattern {
     schema: Option<String>,
-    table: Option<String>,
-    column: String,
+    table: String,
+    /// `None`: all of the table's columns.
+    column: Option<String>,
 }
 
-impl ColumnPattern {
+impl Pattern {
     fn new(text: &str) -> Self {
-        let parts: Vec<&str> = text.trim().split('.').map(str::trim).collect();
-        let n = parts.len();
-        let part = |back: usize| (n > back).then(|| parts[n - 1 - back].to_lowercase());
-        Self {
-            schema: part(2),
-            table: part(1),
-            column: part(0).unwrap_or_default(),
+        let parts: Vec<String> = text.split('.').map(|p| p.trim().to_lowercase()).collect();
+        match parts.as_slice() {
+            [table, column] => Self {
+                schema: None,
+                table: table.clone(),
+                column: Some(column.clone()),
+            },
+            [.., schema, table, column] => Self {
+                schema: Some(schema.clone()),
+                table: table.clone(),
+                column: Some(column.clone()),
+            },
+            _ => Self {
+                schema: None,
+                table: parts.concat(),
+                column: None,
+            },
         }
     }
 
     fn matches(&self, schema: &str, table: &str, column: &str) -> bool {
-        glob(&self.column, column)
-            && self.table.as_deref().is_none_or(|p| glob(p, table))
+        glob(&self.table, table)
+            && self.column.as_deref().is_none_or(|p| glob(p, column))
             && self.schema.as_deref().is_none_or(|p| glob(p, schema))
-    }
-}
-
-/// `schema.table` or `table`.
-#[derive(Debug, Clone)]
-struct TablePattern {
-    schema: Option<String>,
-    table: String,
-}
-
-impl TablePattern {
-    fn new(text: &str) -> Self {
-        match text.trim().rsplit_once('.') {
-            Some((schema, table)) => Self {
-                schema: Some(schema.trim().to_lowercase()),
-                table: table.trim().to_lowercase(),
-            },
-            None => Self {
-                schema: None,
-                table: text.trim().to_lowercase(),
-            },
-        }
-    }
-
-    fn matches(&self, schema: &str, table: &str) -> bool {
-        glob(&self.table, table) && self.schema.as_deref().is_none_or(|p| glob(p, schema))
     }
 }
 
@@ -125,28 +110,21 @@ fn glob(pattern: &str, text: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct Rules {
     kind: ListKind,
-    redact_columns: Vec<ColumnPattern>,
-    redact_tables: Vec<TablePattern>,
-    hide_columns: Vec<ColumnPattern>,
-    hide_tables: Vec<TablePattern>,
-    show_columns: Vec<ColumnPattern>,
-    show_tables: Vec<TablePattern>,
+    redact: Vec<Pattern>,
+    hide: Vec<Pattern>,
+    show: Vec<Pattern>,
     block: BlockQueries,
     open: bool,
 }
 
 impl Rules {
     pub fn new(settings: &AiColumns) -> Self {
-        let columns = |l: &[String]| l.iter().map(|p| ColumnPattern::new(p)).collect();
-        let tables = |l: &[String]| l.iter().map(|p| TablePattern::new(p)).collect();
+        let patterns = |l: &[String]| l.iter().map(|p| Pattern::new(p)).collect();
         Self {
             kind: settings.kind,
-            redact_columns: columns(&settings.redact_columns),
-            redact_tables: tables(&settings.redact_tables),
-            hide_columns: columns(&settings.hide_columns),
-            hide_tables: tables(&settings.hide_tables),
-            show_columns: columns(&settings.show_columns),
-            show_tables: tables(&settings.show_tables),
+            redact: patterns(&settings.redact),
+            hide: patterns(&settings.hide),
+            show: patterns(&settings.show),
             block: settings.block_queries,
             open: settings.is_open(),
         }
@@ -159,18 +137,11 @@ impl Rules {
 
     /// What AI tools see of `schema.table.column`.
     pub fn mode(&self, schema: &str, table: &str, column: &str) -> Mode {
-        let column_hit = |l: &[ColumnPattern]| l.iter().any(|p| p.matches(schema, table, column));
-        let table_hit = |l: &[TablePattern]| l.iter().any(|p| p.matches(schema, table));
-        if column_hit(&self.hide_columns) || table_hit(&self.hide_tables) {
+        let hit = |l: &[Pattern]| l.iter().any(|p| p.matches(schema, table, column));
+        if hit(&self.hide) || (self.kind == ListKind::Whitelist && !hit(&self.show)) {
             return Mode::Hidden;
         }
-        if self.kind == ListKind::Whitelist
-            && !column_hit(&self.show_columns)
-            && !table_hit(&self.show_tables)
-        {
-            return Mode::Hidden;
-        }
-        if column_hit(&self.redact_columns) || table_hit(&self.redact_tables) {
+        if hit(&self.redact) {
             return Mode::Redacted;
         }
         Mode::Visible
@@ -893,18 +864,12 @@ impl<'a> Scan<'a> {
     }
 }
 
-/// Whether `sql` asks to be shown as AI tools see it: a `-- ai view` comment line
-/// (any case, any spacing).
+/// Whether `sql` asks to be shown as AI tools see it: its first line is the
+/// `-- ai view` comment, case and spaces aside (`--  AiV iE W` counts).
 pub fn is_marked(sql: &str) -> bool {
-    tokenize(sql).iter().any(|t| {
-        t.kind == TokenKind::Comment && {
-            let text = t.text(sql).trim_start_matches('-').trim_start_matches('#');
-            let words: Vec<&str> = text.split_whitespace().collect();
-            words.len() == 2
-                && words[0].eq_ignore_ascii_case("ai")
-                && words[1].eq_ignore_ascii_case("view")
-        }
-    })
+    let first = sql.trim_start().lines().next().unwrap_or_default();
+    let squeezed: String = first.chars().filter(|c| !c.is_whitespace()).collect();
+    squeezed.eq_ignore_ascii_case("--aiview")
 }
 
 /// `sql` under the comment that shows it as AI tools see it, and the note below.
@@ -967,10 +932,7 @@ mod tests {
 
     /// The usual rules: email and the address redacted, ssn and the audit log hidden.
     fn usual() -> Rules {
-        rules(
-            r#"{"redact_columns": ["email", "orders.adr*"], "hide_columns": ["ssn"],
-                "hide_tables": ["audit_*"]}"#,
-        )
+        rules(r#"{"redact": ["*.email", "orders.adr*"], "hide": ["*.ssn", "audit_*"]}"#)
     }
 
     fn modes(sql: &str, rules: &Rules, count: usize) -> Vec<Mode> {
@@ -996,23 +958,28 @@ mod tests {
         assert_eq!(r.mode("public", "users", "ssn"), H);
         assert_eq!(r.mode("public", "audit_log", "id"), H);
         assert_eq!(r.mode("public", "users", "id"), V);
-        let r = rules(r#"{"redact_columns": ["public.users.name", "other.*.id"]}"#);
+        let r = rules(r#"{"redact": ["public.users.name", "other.*.id", "public.orders.*"]}"#);
         assert_eq!(r.mode("public", "users", "name"), R);
-        assert_eq!(r.mode("public", "orders", "id"), V);
+        assert_eq!(r.mode("public", "users", "id"), V);
+        assert_eq!(r.mode("public", "orders", "total"), R);
+        // Without a dot, a table: all its columns, nothing elsewhere named like it.
+        let r = rules(r#"{"redact": ["users"]}"#);
+        assert_eq!(r.mode("public", "users", "id"), R);
+        assert_eq!(r.mode("public", "orders", "users"), V);
     }
 
     #[test]
     fn a_whitelist_hides_what_it_doesnt_show_and_hidden_beats_redacted() {
         let r = rules(
-            r#"{"type": "whitelist", "show_tables": ["orders"], "show_columns": ["users.id"],
-                "redact_columns": ["adr*", "id"], "hide_columns": ["orders.total"]}"#,
+            r#"{"type": "whitelist", "show": ["orders", "users.id"],
+                "redact": ["*.adr*", "*.id"], "hide": ["orders.total"]}"#,
         );
         assert_eq!(r.mode("public", "orders", "user_id"), V);
         assert_eq!(r.mode("public", "orders", "adr_city"), R);
         assert_eq!(r.mode("public", "orders", "total"), H);
         assert_eq!(r.mode("public", "users", "id"), R);
         assert_eq!(r.mode("public", "users", "name"), H);
-        let both = rules(r#"{"redact_columns": ["ssn"], "hide_columns": ["ssn"]}"#);
+        let both = rules(r#"{"redact": ["*.ssn"], "hide": ["*.ssn"]}"#);
         assert_eq!(both.mode("public", "users", "ssn"), H);
     }
 
@@ -1187,7 +1154,7 @@ mod tests {
             dialect_for(DriverKind::Postgres),
             Some("public".into()),
         );
-        let r = rules(r#"{"redact_columns": ["email"]}"#);
+        let r = rules(r#"{"redact": ["*.email"]}"#);
         let modes =
             |sql: &str, n: usize| plan(sql, &schema, &r, Lexing::default()).unwrap().modes(n);
         assert_eq!(modes("select id, domain from users", 2), [V, R]);
@@ -1221,7 +1188,7 @@ mod tests {
     fn block_queries_keeps_redacted_columns_out_of_conditions() {
         let block = |level: &str| {
             rules(&format!(
-                r#"{{"redact_columns": ["email"], "hide_columns": ["ssn"], "block_queries": "{level}"}}"#
+                r#"{{"redact": ["*.email"], "hide": ["*.ssn"], "block_queries": "{level}"}}"#
             ))
         };
         let run = |sql: &str, r: &Rules| plan(sql, &shop(), r, Lexing::default()).map(|_| ());
@@ -1297,15 +1264,18 @@ mod tests {
         for marked in [
             "-- AI View\nselect 1",
             "--ai   view\nselect 1",
-            "select 1 -- Ai VIEW",
+            "--     AiV iE W\nselect 1",
+            "\n  -- ai view\nselect 1",
         ] {
             assert!(is_marked(marked), "{marked}");
         }
         for not in [
             "select 1",
+            "select 1 -- ai view",
+            "-- first\n-- ai view\nselect 1",
             "-- ai views\nselect 1",
             "select '-- ai view'",
-            "-- the ai view of it",
+            "— ai view\nselect 1",
         ] {
             assert!(!is_marked(not), "{not}");
         }
