@@ -825,6 +825,36 @@ async fn postgres() {
     board_checks(&mut h, "SELECT tangul_ai_sneak()").await;
     editor_checks(&mut h, DriverKind::Postgres, "SELECT tangul_ai_sneak()").await;
     h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak()").await;
+    lock_wait_checks(&mut h).await;
+}
+
+/// A read that runs for others (here a board's) waits only so long for a lock: a
+/// migration's `ALTER TABLE` holding one doesn't keep it waiting until the time limit.
+async fn lock_wait_checks(h: &mut Harness) {
+    let tab = TabId(13);
+    h.set(false, None);
+    h.run(tab, "DROP TABLE IF EXISTS tangul_lock_test").await;
+    h.run(tab, "CREATE TABLE tangul_lock_test (id INT)").await;
+    h.run(tab, "BEGIN").await;
+    h.run(tab, "LOCK TABLE tangul_lock_test IN ACCESS EXCLUSIVE MODE")
+        .await;
+    h.next_query += 1;
+    let started = std::time::Instant::now();
+    let out = h
+        .engine
+        .query_batch(
+            QueryId(h.next_query),
+            h.conn,
+            vec!["SELECT count(*) FROM tangul_lock_test".into()],
+            QueryOptions::new(Caller::Board),
+        )
+        .await
+        .unwrap();
+    let error = out[0].as_ref().unwrap_err();
+    assert!(error.message.contains("lock timeout"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(15));
+    h.run(tab, "ROLLBACK").await;
+    h.run(tab, "DROP TABLE tangul_lock_test").await;
 }
 
 #[tokio::test]

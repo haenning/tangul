@@ -109,6 +109,18 @@ impl Session for PgSession {
         self.in_transaction
     }
 
+    /// Read-only whatever the session says, and besides: a read gives up waiting for
+    /// a lock (behind a migration's `ALTER TABLE`, say) after [`READ_LOCK_WAIT`], and
+    /// the server ends the transaction if it is left idle. Both end with it.
+    async fn begin_read_only(&mut self) -> Result<()> {
+        let sql = format!(
+            "START TRANSACTION READ ONLY; \
+             SET LOCAL lock_timeout = '{READ_LOCK_WAIT}'; \
+             SET LOCAL idle_in_transaction_session_timeout = '{READ_IDLE}'"
+        );
+        self.execute(&sql, 0, &mut |_| {}).await
+    }
+
     async fn set_read_only(&mut self, on: bool) -> Result<()> {
         let mode = if on { "READ ONLY" } else { "READ WRITE" };
         self.client
@@ -267,6 +279,11 @@ impl Session for PgSession {
 }
 
 /// Schemas of the user's objects: not the system's, TOAST or temporary ones.
+/// How long a read in a read-only transaction waits for a lock.
+const READ_LOCK_WAIT: &str = "5s";
+/// How long a read-only transaction may sit idle before the server ends it.
+const READ_IDLE: &str = "60s";
+
 const USER_SCHEMAS: &str = "n.nspname NOT IN ('pg_catalog','information_schema') \
      AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'";
 
