@@ -24,6 +24,7 @@ tangul-service = { path = "../service" }
 [dev-dependencies]
 async-channel.workspace = true
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+tangul-data = { path = "../data" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

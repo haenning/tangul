@@ -8,9 +8,10 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Mutex, PoisonError, RwLock};
 
 use tangul_ai::{
-    AuditSink, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink, ShownResult, SqlProposal,
-    ToolCall,
+    AuditSink, BoardCall, BoardSink, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink,
+    ShownResult, SqlProposal, ToolCall,
 };
+use tangul_core::board::AiCaller;
 use tangul_data::local::{AuditEntry, Source};
 use tangul_service::connections::assistant_user;
 
@@ -25,6 +26,8 @@ pub(super) enum AiEvent {
     Proposed(SqlProposal),
     /// A read's result to open in a tab (`run_readonly` with `show`).
     Shown(ShownResult),
+    /// A board tool's call, answered by the window (`answer_board_call`).
+    Board(AiCaller, BoardCall),
 }
 
 /// The most each caller may see of any database (`ai.access`, `mcp.access`).
@@ -239,8 +242,19 @@ impl Workspace {
                 let _ = events.try_send(AiEvent::Proposed(proposal));
             }
         });
-        let shows: ShowSink = Arc::new(move |shown| {
-            let _ = events.try_send(AiEvent::Shown(shown));
+        let shows: ShowSink = Arc::new({
+            let events = events.clone();
+            move |shown| {
+                let _ = events.try_send(AiEvent::Shown(shown));
+            }
+        });
+        let by = match caller {
+            "mcp" => AiCaller::Mcp,
+            _ => AiCaller::Assistant,
+        };
+        // Unanswered (the window is gone), the call fails.
+        let boards: BoardSink = Arc::new(move |call| {
+            let _ = events.try_send(AiEvent::Board(by, call));
         });
         Arc::new(move || {
             let exposed = exposed
@@ -257,6 +271,7 @@ impl Workspace {
                 .with_audit(caller, sink.clone())
                 .with_proposals(proposals.clone())
                 .with_shows(shows.clone())
+                .with_boards(boards.clone())
         })
     }
 
@@ -277,6 +292,9 @@ impl Workspace {
                                 AiEvent::Ran(call) => ws.record_tool_call(call, cx),
                                 AiEvent::Proposed(p) => ws.open_proposal(p, window, cx),
                                 AiEvent::Shown(s) => ws.open_shown(s, window, cx),
+                                AiEvent::Board(by, call) => {
+                                    ws.answer_board_call(by, call, window, cx)
+                                }
                             })
                             .ok()
                         })

@@ -26,6 +26,9 @@ shows the grid.
 - Bookmarks: the user can save a query under a name, and schedule it to run now and \
 then; tangul then tracks its duration and row count over time. list_bookmarks lists \
 them; run_readonly with \"bookmark\" runs one (with \"show\", for the user too).
+- Boards: several queries of one database at a glance, each a tile shown as a \
+table or a chart. list_boards and get_board read them; create_board and edit_board \
+set them up when the user asks. The user's board runs the tiles, not you.
 - Changes: statements that change data or schema are never run by you; propose_sql \
 opens them in a tab for the user to review and run as themselves. It is only for \
 changes, except on a schema-only database.

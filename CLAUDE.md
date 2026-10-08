@@ -20,8 +20,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
-  `boards` (the one API that changes boards, for the UI and later the AI tools, and
-  when a board refreshes), `values` (the editor's quick look at a column's values)
+  `boards` (the one API that changes boards, for the UI and the AI tools, and when a
+  board refreshes; every change a new revision), `values` (the editor's quick look at a column's values)
   and `knowledge`: the one pool of what is known about the databases (schema per
   user, usage and most run queries per database, value profiles and the editor's
   quick looks per user). The editor, schema tree, results and the assistant all
@@ -35,6 +35,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   for every caller: only exposed connections and their opt-ins; SQL only through the
   gate as `Caller::Assistant`. Tests call tools through the registry and compare
   exact output (hand-built schemas, and SQLite files with the real engine).
+  Board tools (`tools/boards.rs`) ask the app (`Ctx::with_boards`, a `BoardCall`),
+  which answers in `workspace/boards.rs`.
   `mcp.rs`: the MCP server (rmcp, Streamable HTTP on `127.0.0.1`, bearer token,
   requests with an `Origin` refused); it builds a `Ctx` per call from a `CtxSource`
   and records each call through an `AuditSink`.
@@ -154,6 +156,14 @@ explicit OK, and keep them covered by tests.
   is one `Command::QueryBatch` (readers only, never `Caller::User`): each statement
   passes the gate on its own, then all run on one spare session in a read-only
   transaction that is rolled back.
+- **Boards by AI.** The board tools change tangul's boards, not the database: only
+  through `service::boards::{create_by_ai, apply_by_ai}`, on databases offered to AI
+  tools, all edits or none and only at the revision the AI read. Tile queries must
+  be one statement that reads (the gate's checks) and run as the user's board
+  (`Caller::Board`), never for the AI: no result goes back. Links, refresh, removing
+  tiles and deleting or archiving boards stay the user's. Tiles an AI changed are
+  marked (red) until the user runs them in the tile's tab. On a schema-only database
+  the AI sees tile queries only as fingerprints.
 - **Editor values.** While a condition on a text column is typed, the editor may
   look at its values (`assist::profile::quick_values_sql`: at most a few hundred
   rows) as `Caller::Editor`, with the schedules' rules; only where the database's

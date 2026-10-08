@@ -1174,6 +1174,67 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn an_ai_sets_up_a_board_and_its_changes_show_in_the_open_tab(cx: &mut TestAppContext) {
+    use tangul_ai::{BoardCall, BoardReply, BoardRequest};
+    use tangul_core::board::AiCaller;
+    use tangul_service::boards::{self, Edit};
+    let (handle, workspace) = open(cx);
+    let events = step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.ai.assistant_used = true;
+            ws.expose_to_ai();
+            ws.test_events(cx)
+        })
+    });
+    // As a board tool does (from the MCP server's thread or the assistant's
+    // runtime): the window answers.
+    let ask = |request: BoardRequest, cx: &mut TestAppContext| {
+        let (call, mut answer) = BoardCall::new(request);
+        events
+            .try_send(super::ai::AiEvent::Board(AiCaller::Mcp, call))
+            .unwrap();
+        cx.run_until_parked();
+        answer.try_recv().expect("answered")
+    };
+    let created = ask(
+        BoardRequest::Create {
+            user: "app".into(),
+            name: "Revenue".into(),
+            description: String::new(),
+            tiles: vec![boards::tile("Per month", "select 1", None)],
+        },
+        cx,
+    );
+    let Ok(BoardReply::Board(board)) = created else {
+        panic!("{created:?}");
+    };
+    assert_eq!(board.database_id, "db");
+    let not_offered = ask(
+        BoardRequest::List {
+            user: "nobody".into(),
+        },
+        cx,
+    );
+    assert_eq!(
+        not_offered,
+        Err("that database isn't offered to AI tools".into())
+    );
+
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.open_board(&board.id, window, cx))
+    });
+    let edit = BoardRequest::Edit {
+        user: "app".into(),
+        board: board.id.clone(),
+        revision: board.revision.clone(),
+        edits: vec![Edit::Rename("Money".into())],
+    };
+    assert!(ask(edit, cx).is_ok());
+    cx.update(|cx| assert_eq!(board_tab(&workspace, cx).read(cx).board().name, "Money"));
+}
+
+#[gpui_kit::test]
 fn a_shown_result_opens_with_its_chart_and_isnt_run_again(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let sink = step(handle, cx, |_, cx| {

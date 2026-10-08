@@ -234,7 +234,11 @@ async fn every_tool_has_a_schema_and_a_description() {
             "run_readonly",
             "get_cell",
             "list_bookmarks",
-            "propose_sql"
+            "propose_sql",
+            "list_boards",
+            "get_board",
+            "create_board",
+            "edit_board"
         ]
     );
     for s in &specs {

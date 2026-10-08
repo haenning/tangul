@@ -7,10 +7,13 @@ use tangul_assist::lexer::fingerprint;
 use tangul_assist::schema::SchemaIndex;
 use tangul_assist::slice::KnownValues;
 use tangul_assist::usage::Usage;
+use tangul_core::board::{Board, Tile};
 use tangul_core::chart::ChartStyle;
 use tangul_core::{AiAccess, ConnId, DriverKind, ResultSet, ValueAccess};
 use tangul_engine::EngineHandle;
+use tangul_service::boards::Edit;
 use tangul_service::knowledge::Knowledge;
+use tokio::sync::oneshot;
 
 use crate::audit::AuditSink;
 use crate::results::Results;
@@ -80,6 +83,8 @@ pub struct Ctx {
     proposals: Option<ProposalSink>,
     /// Where `run_readonly` sends results to show the user; none: it can't.
     shows: Option<ShowSink>,
+    /// Where the board tools ask for boards; none: there are none.
+    boards: Option<BoardSink>,
     /// Results whose cells the text cut, for `get_cell`.
     results: Results,
 }
@@ -135,6 +140,54 @@ pub struct ChartRequest {
 /// Where results to show go.
 pub type ShowSink = Arc<dyn Fn(ShownResult) + Send + Sync>;
 
+/// What a board tool asks of the app, which keeps the boards and changes them
+/// through `service::boards` (the AI's changes with `apply_by_ai`: only at the
+/// revision read, marked as the caller's). `user` names the database as
+/// [`Exposed::user`] does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoardRequest {
+    /// The database's boards (not the archived ones).
+    List { user: String },
+    Create {
+        user: String,
+        name: String,
+        description: String,
+        tiles: Vec<Tile>,
+    },
+    Edit {
+        user: String,
+        board: String,
+        revision: String,
+        edits: Vec<Edit>,
+    },
+}
+
+/// The app's answer to a [`BoardRequest`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoardReply {
+    Boards(Vec<Board>),
+    /// The board as it is now.
+    Board(Board),
+}
+
+/// A [`BoardRequest`] and where its answer goes (a refusal as text).
+#[derive(Debug)]
+pub struct BoardCall {
+    pub request: BoardRequest,
+    pub reply: oneshot::Sender<Result<BoardReply, String>>,
+}
+
+impl BoardCall {
+    /// A call for `request` and where its answer arrives.
+    pub fn new(request: BoardRequest) -> (Self, oneshot::Receiver<Result<BoardReply, String>>) {
+        let (reply, answer) = oneshot::channel();
+        (Self { request, reply }, answer)
+    }
+}
+
+/// Where board calls go.
+pub type BoardSink = Arc<dyn Fn(BoardCall) + Send + Sync>;
+
 /// A connection resolved for a call.
 pub(crate) struct Conn {
     /// How the client names it.
@@ -172,6 +225,7 @@ impl Ctx {
             audit: None,
             proposals: None,
             shows: None,
+            boards: None,
             results: Results::default(),
         }
         .with_ceiling_over(exposed, AiAccess::Data)
@@ -243,6 +297,26 @@ impl Ctx {
 
     pub(crate) fn shows(&self) -> Option<&ShowSink> {
         self.shows.as_ref()
+    }
+
+    /// Hands the board tools' calls to `sink`.
+    pub fn with_boards(mut self, sink: BoardSink) -> Self {
+        self.boards = Some(sink);
+        self
+    }
+
+    /// Asks the app about boards.
+    pub(crate) async fn boards(&self, request: BoardRequest) -> Result<BoardReply, ToolError> {
+        let sink = self
+            .boards
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("boards aren't available here".into()))?;
+        let (call, answer) = BoardCall::new(request);
+        sink(call);
+        answer
+            .await
+            .map_err(|_| ToolError::Failed("tangul didn't answer".into()))?
+            .map_err(ToolError::Failed)
     }
 
     /// Keeps results in `results` (shared by the calls of one client).

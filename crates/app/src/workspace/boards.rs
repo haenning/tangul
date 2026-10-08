@@ -3,8 +3,9 @@
 //! tile's own query tab (opened from the tile or for a new one; saving there writes
 //! the tile), and the sidebar panel.
 
+use tangul_ai::{BoardCall, BoardReply, BoardRequest};
 use tangul_assist::guard;
-use tangul_core::board::{Board, Link, LinkTo, Tile};
+use tangul_core::board::{AiCaller, Board, Link, LinkTo, Tile};
 use tangul_service::boards::{self, Edit};
 
 use super::*;
@@ -393,6 +394,79 @@ impl Workspace {
             ),
         }
         cx.notify();
+    }
+
+    /// Answers an AI's board call (assistant or MCP, `by`): only on a database
+    /// offered to AI tools, changed through `service::boards` as the AI's.
+    pub(super) fn answer_board_call(
+        &mut self,
+        by: AiCaller,
+        call: BoardCall,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let reply = self.board_reply(by, call.request, window, cx);
+        let _ = call.reply.send(reply);
+    }
+
+    fn board_reply(
+        &mut self,
+        by: AiCaller,
+        request: BoardRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<BoardReply, String> {
+        let user = match &request {
+            BoardRequest::List { user }
+            | BoardRequest::Create { user, .. }
+            | BoardRequest::Edit { user, .. } => user.clone(),
+        };
+        if !self.ai_exposed().iter().any(|e| e.user == user) {
+            return Err("that database isn't offered to AI tools".into());
+        }
+        let (db_id, lexing) = self
+            .find_user(&user)
+            .map(|(db, _)| (db.id.clone(), dialect_for(db.driver).lexing()))
+            .ok_or("no such database")?;
+        match request {
+            BoardRequest::List { .. } => Ok(BoardReply::Boards(
+                self.data
+                    .boards
+                    .for_database(&db_id)
+                    .into_iter()
+                    .filter(|b| !b.archived)
+                    .cloned()
+                    .collect(),
+            )),
+            BoardRequest::Create {
+                name,
+                description,
+                tiles,
+                ..
+            } => {
+                let boards = &mut self.data.boards;
+                let board =
+                    boards::create_by_ai(boards, &db_id, &name, &description, tiles, by, lexing)?;
+                cx.notify();
+                Ok(BoardReply::Board(board))
+            }
+            BoardRequest::Edit {
+                board,
+                revision,
+                edits,
+                ..
+            } => {
+                let ours = self.data.boards.get(&board);
+                if ours.is_none_or(|b| b.database_id != db_id) {
+                    return Err("no such board".into());
+                }
+                let boards = &mut self.data.boards;
+                let board = boards::apply_by_ai(boards, &board, &revision, edits, by, lexing)?;
+                self.show_board(board.clone(), window, cx);
+                cx.notify();
+                Ok(BoardReply::Board(board))
+            }
+        }
     }
 
     /// A tile's query ran in its tab: what an AI changed there is seen now.
