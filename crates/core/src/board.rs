@@ -16,8 +16,10 @@
 //!   ],
 //!   "database_id": "p18e…",
 //!   "refresh": { "every": 60 },
+//!   "revision": "kqzmwa",
 //!   "tiles": [
-//!     { "id": "t1", "title": "Per day", "sql": "select …", "view": "bars", "width": "half" }
+//!     { "id": "t1", "title": "Per day", "sql": "select …", "view": "bars", "width": "half" },
+//!     { "id": "t2", "title": "By plan", "sql": "select …", "ai": { "by": "mcp", "unseen": true } }
 //!   ]
 //! }
 //! ```
@@ -45,6 +47,10 @@ pub struct Board {
     /// Kept, but out of the way: no longer needed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// New with every change (six random letters): an AI changes the board only
+    /// at the revision it read, never at a stale one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub revision: String,
     #[serde(default)]
     pub tiles: Vec<Tile>,
 }
@@ -200,6 +206,28 @@ pub struct Tile {
     pub view: Option<ChartView>,
     #[serde(default)]
     pub width: Width,
+    /// Set up or changed by an AI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiMark>,
+}
+
+/// That an AI set up or changed a tile, and whether the user has run it since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiMark {
+    pub by: AiCaller,
+    /// Changed by the AI and not yet run by the user in a tab of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unseen: bool,
+}
+
+/// Which AI changed a tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiCaller {
+    /// The in-app assistant.
+    Assistant,
+    /// An MCP client.
+    Mcp,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +448,7 @@ mod tests {
             database_id: "db".into(),
             refresh: Refresh::Every(30),
             archived: true,
+            revision: "kqzmwa".into(),
             tiles: vec![
                 Tile {
                     view: Some(ChartView {
@@ -430,10 +459,22 @@ mod tests {
                     ..tile("t", Width::Half)
                 },
                 tile("u", Width::Full),
+                Tile {
+                    ai: Some(AiMark {
+                        by: AiCaller::Mcp,
+                        unseen: true,
+                    }),
+                    ..tile("v", Width::Full)
+                },
             ],
         };
         let json = serde_json::to_string(&board).unwrap();
         assert!(json.contains(r#""refresh":{"every":30}"#), "{json}");
+        assert!(json.contains(r#""revision":"kqzmwa""#), "{json}");
+        assert!(
+            json.contains(r#""ai":{"by":"mcp","unseen":true}"#),
+            "{json}"
+        );
         assert!(json.contains(r#""view":"stacked_bars:1""#), "{json}");
         assert!(json.contains(r#""width":"half""#), "{json}");
         assert_eq!(serde_json::from_str::<Board>(&json).unwrap(), board);

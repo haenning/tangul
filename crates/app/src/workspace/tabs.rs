@@ -345,6 +345,9 @@ impl Workspace {
                 let Some(conn) = tab.read(cx).conn_id(cx) else {
                     return;
                 };
+                if let Some(link) = tab.read(cx).board_tile.clone() {
+                    self.tile_run(&link, window, cx);
+                }
                 match self.decide_for_tab(conn, sql, cx) {
                     Decision::Run(_) => self.execute(tab, sql, Approval::None, cx),
                     Decision::Confirm { guard, .. } => {

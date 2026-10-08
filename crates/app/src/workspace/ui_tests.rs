@@ -2255,6 +2255,60 @@ fn add_to_board_makes_a_new_board_and_a_tile_opens_in_a_tab(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn a_tile_an_ai_changed_is_marked_until_its_query_runs_in_a_tab(cx: &mut TestAppContext) {
+    use tangul_assist::lexer::Lexing;
+    use tangul_core::board::AiCaller;
+    use tangul_service::boards::{self, Edit};
+    let (handle, workspace) = open(cx);
+    cx.update(|cx| shop_with_ai_user(&workspace, None, cx));
+    let id = workspace.update(cx, |ws, cx| {
+        ws.connect("app", cx);
+        let mut tile = boards::tile("Per day", "select 1", None);
+        tile.description = "Signups per day.".into();
+        let board = boards::create(&mut ws.data.boards, "db", "Signups").unwrap();
+        let board = boards::apply(&mut ws.data.boards, &board.id, Edit::AddTile(tile)).unwrap();
+        let edit = Edit::SetQuery {
+            tile: "t1".into(),
+            sql: "select 2".into(),
+            view: None,
+        };
+        let by = AiCaller::Mcp;
+        let lexing = Lexing::default();
+        boards::apply_by_ai(
+            &mut ws.data.boards,
+            &board.id,
+            &board.revision,
+            vec![edit],
+            by,
+            lexing,
+        )
+        .unwrap()
+        .id
+    });
+    let unseen = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            ws.data.boards.get(&id).unwrap().tiles[0].ai.unwrap().unseen
+        })
+    };
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.open_board(&id, window, cx))
+    });
+    assert!(unseen(cx));
+    // The description is behind an (i) after the title.
+    step(handle, cx, |window, _| {
+        assert!(window.try_find(("tile-info", 0usize)).is_some())
+    });
+    // The mark opens the tile's query in a tab, where it runs: seen.
+    step(handle, cx, |window, cx| {
+        window.click(("tile-ai", 0usize), cx)
+    });
+    let query = cx.update(|cx| workspace.read(cx).tabs.active_query().cloned().unwrap());
+    cx.update(|cx| assert!(query.read(cx).board_tile.is_some()));
+    assert!(!unseen(cx));
+}
+
+#[gpui_kit::test]
 fn a_tiles_tab_saves_to_the_tile_and_a_new_one_adds_a_tile(cx: &mut TestAppContext) {
     use crate::board::BoardEvent;
     use crate::query_tab::TabEvent;

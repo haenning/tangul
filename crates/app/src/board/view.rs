@@ -17,7 +17,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_assist::suggest::one_line;
-use tangul_core::board::{LinkTo, Refresh, Row, Tile, Width, is_web, rows};
+use tangul_core::board::{AiCaller, AiMark, LinkTo, Refresh, Row, Tile, Width, is_web, rows};
 use tangul_service::boards::{self, Edit};
 
 use tangul_core::chart::{ChartStyle, ChartView};
@@ -26,7 +26,7 @@ use super::form::{AskForm, QueryForm, TileForm, view_label};
 use super::{BoardEvent, BoardTab, link_action, link_icon};
 use crate::assets::{Lucide, style_icon};
 use crate::result_view::{SetView, chart_menu};
-use crate::ui::{dialog_form, enter_saves};
+use crate::ui::{dialog_form, enter_saves, info, wrapped_tooltip};
 
 /// A tile's height; tables scroll inside it.
 const TILE_HEIGHT: f32 = 300.;
@@ -309,7 +309,49 @@ impl BoardTab {
             .into_any_element()
     }
 
+    /// Left of a tile's title: that an AI set it up (the assistant's or MCP's icon),
+    /// red while what it changed hasn't been run in a tab yet.
+    fn render_ai_mark(
+        &self,
+        ix: usize,
+        tile: &str,
+        mark: AiMark,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let (icon, who) = match mark.by {
+            AiCaller::Assistant => (Lucide::Bot, "the assistant"),
+            AiCaller::Mcp => (Lucide::Plug, "an MCP client"),
+        };
+        let (color, tooltip) = if mark.unseen {
+            (
+                theme.danger,
+                format!(
+                    "Changed by {who}. Open the query in a new tab to see the changes it \
+                     proposes."
+                ),
+            )
+        } else {
+            (theme.muted_foreground, format!("Set up by {who}"))
+        };
+        let open_id = tile.to_string();
+        div()
+            .id(("tile-ai", ix))
+            .test_support()
+            .flex_none()
+            .child(Icon::new(icon).xsmall().text_color(color))
+            .tooltip(wrapped_tooltip(tooltip))
+            .when(mark.unseen, |this| {
+                this.cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_tile(&open_id, cx)))
+            })
+            .into_any_element()
+    }
+
     fn render_tile(&self, ix: usize, tile: &Tile, cx: &mut Context<Self>) -> impl IntoElement {
+        let ai_mark = tile
+            .ai
+            .map(|mark| self.render_ai_mark(ix, &tile.id, mark, cx));
         let theme = cx.theme();
         let view = self.tiles.get(&tile.id);
         let title: SharedString = if tile.title.is_empty() {
@@ -460,12 +502,16 @@ impl BoardTab {
                 )
             })
             .child(
-                v_flex()
+                h_flex()
                     .flex_1()
                     .min_w_0()
+                    .gap_1()
+                    .items_center()
+                    .children(ai_mark)
                     .child(
                         div()
                             .id(("tile-title", ix))
+                            .min_w_0()
                             .truncate()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
@@ -478,13 +524,7 @@ impl BoardTab {
                             .child(title),
                     )
                     .when(!tile.description.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(tile.description.clone()),
-                        )
+                        this.child(info(("tile-info", ix), tile.description.clone(), cx))
                     }),
             )
             .when_some(unfit, |this, reason| {

@@ -395,6 +395,28 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A tile's query ran in its tab: what an AI changed there is seen now.
+    pub(super) fn tile_run(
+        &mut self,
+        link: &BoardTile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tile) = link.tile.as_deref() else {
+            return;
+        };
+        let unseen = self
+            .data
+            .boards
+            .get(&link.board)
+            .and_then(|b| b.tile(tile))
+            .and_then(|t| t.ai)
+            .is_some_and(|mark| mark.unseen);
+        if unseen {
+            self.edit_board(&link.board, Edit::Seen(tile.into()), window, cx);
+        }
+    }
+
     /// Hands the open tab of `board` (if any) the board as it is now, and its
     /// tiles' tabs their titles.
     fn show_board(&mut self, board: Board, window: &mut Window, cx: &mut Context<Self>) {

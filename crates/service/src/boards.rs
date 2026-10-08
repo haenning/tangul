@@ -1,14 +1,24 @@
-//! Boards: the one way to change them, for the UI now and the assistant and MCP
-//! tools later ([`create`], [`apply`] an [`Edit`], [`copy_to`], [`delete`]), over the
-//! stored boards (`tangul_data::boards`); and what a refresh sends ([`Batch`]) and
-//! when ([`due`]).
+//! Boards: the one way to change them, for the UI ([`create`], [`apply`] an
+//! [`Edit`], [`copy_to`], [`delete`]) and for an AI ([`create_by_ai`],
+//! [`apply_by_ai`]), over the stored boards (`tangul_data::boards`); and what a
+//! refresh sends ([`Batch`]) and when ([`due`]). Every change gives the board a new
+//! revision.
 
 use std::time::{Duration, Instant};
 
-use tangul_core::board::{Board, Link, LinkTo, Refresh, Tile, Width, web_address};
+use tangul_assist::guard;
+use tangul_assist::lexer::Lexing;
+use tangul_core::board::{
+    AiCaller, AiMark, Board, Link, LinkTo, Refresh, Tile, Width, web_address,
+};
 use tangul_core::chart::ChartView;
 use tangul_data::boards::Boards;
-use tangul_data::profiles::new_id;
+use tangul_data::profiles::{new_id, new_revision};
+
+/// The most tiles an AI may leave on a board.
+pub const AI_MAX_TILES: usize = 24;
+/// The longest tile query an AI may write (characters).
+pub const AI_MAX_SQL: usize = 10_000;
 
 /// A change to a board.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +59,8 @@ pub enum Edit {
         to: usize,
     },
     RemoveTile(String),
+    /// The user ran the tile's query in a tab: what an AI changed is seen.
+    Seen(String),
 }
 
 /// A new, empty board for `database_id`.
@@ -59,14 +71,134 @@ pub fn create(boards: &mut Boards, database_id: &str, name: &str) -> Result<Boar
         database_id: database_id.into(),
         ..Board::default()
     };
-    boards.save(board.clone())?;
-    Ok(board)
+    save(boards, board)
 }
 
-/// Applies `edit` to board `id` and saves it; the board as it is now.
+/// Applies `edit` to board `id` and saves it; the board as it is now. A query the
+/// user sets counts as seen.
 pub fn apply(boards: &mut Boards, id: &str, edit: Edit) -> Result<Board, String> {
     let mut board = boards.get(id).cloned().ok_or("no such board")?;
+    let seen = match &edit {
+        Edit::SetQuery { tile, .. } => Some(tile.clone()),
+        _ => None,
+    };
     edit_board(&mut board, edit)?;
+    if let Some(tile) = seen {
+        edit_board(&mut board, Edit::Seen(tile))?;
+    }
+    save(boards, board)
+}
+
+/// A new board by an AI for `database_id`, with `tiles` (see [`apply_by_ai`]).
+pub fn create_by_ai(
+    boards: &mut Boards,
+    database_id: &str,
+    name: &str,
+    description: &str,
+    tiles: Vec<Tile>,
+    by: AiCaller,
+    lexing: Lexing,
+) -> Result<Board, String> {
+    let mut board = Board {
+        id: new_id(),
+        name: name_of(name)?,
+        description: description.trim().into(),
+        database_id: database_id.into(),
+        ..Board::default()
+    };
+    let edits = tiles.into_iter().map(Edit::AddTile).collect();
+    edit_by_ai(&mut board, edits, by, lexing)?;
+    save(boards, board)
+}
+
+/// Applies an AI's `edits` to board `id`, all or none, and only at `revision`: the
+/// one it read. A board that changed since is left as it is. Only names, texts,
+/// queries, views, widths and order: links, refresh, removing tiles or the board stay
+/// the user's. A tile's query must be one statement that reads (by the database's
+/// `lexing`). The tiles it adds or changes are marked as changed by `by`, unseen.
+pub fn apply_by_ai(
+    boards: &mut Boards,
+    id: &str,
+    revision: &str,
+    edits: Vec<Edit>,
+    by: AiCaller,
+    lexing: Lexing,
+) -> Result<Board, String> {
+    let mut board = boards.get(id).cloned().ok_or("no such board")?;
+    if board.revision != revision {
+        return Err(format!(
+            "the board changed since revision {revision} (now {}): nothing was changed; \
+             read it again and redo the changes on what it is now",
+            board.revision
+        ));
+    }
+    edit_by_ai(&mut board, edits, by, lexing)?;
+    save(boards, board)
+}
+
+fn edit_by_ai(
+    board: &mut Board,
+    edits: Vec<Edit>,
+    by: AiCaller,
+    lexing: Lexing,
+) -> Result<(), String> {
+    for edit in edits {
+        let marked = match &edit {
+            Edit::AddTile(tile) => {
+                check_read(&tile.sql, lexing)?;
+                None
+            }
+            Edit::SetQuery { tile, sql, .. } => {
+                check_read(sql, lexing)?;
+                Some(tile.clone())
+            }
+            Edit::LabelTile { tile, .. } | Edit::SetView { tile, .. } => Some(tile.clone()),
+            Edit::Rename(_) | Edit::Describe(_) | Edit::SetWidth { .. } | Edit::MoveTile { .. } => {
+                None
+            }
+            Edit::SetLinks(_)
+            | Edit::AddLink(_)
+            | Edit::SetRefresh(_)
+            | Edit::Archive(_)
+            | Edit::RemoveTile(_)
+            | Edit::Seen(_) => return Err("only the user may do that".into()),
+        };
+        let added = matches!(edit, Edit::AddTile(_));
+        edit_board(board, edit)?;
+        let tile = match (added, marked) {
+            (true, _) => board.tiles.last_mut(),
+            (false, Some(id)) => board.tile_mut(&id),
+            (false, None) => None,
+        };
+        if let Some(tile) = tile {
+            tile.ai = Some(AiMark { by, unseen: true });
+        }
+    }
+    if board.tiles.len() > AI_MAX_TILES {
+        return Err(format!("at most {AI_MAX_TILES} tiles on a board"));
+    }
+    Ok(())
+}
+
+/// That `sql` is one statement that reads, as the gate will check it on a board.
+fn check_read(sql: &str, lexing: Lexing) -> Result<(), String> {
+    if sql.chars().count() > AI_MAX_SQL {
+        return Err(format!(
+            "a tile's query has at most {AI_MAX_SQL} characters"
+        ));
+    }
+    if let Some((keyword, _)) = guard::not_reads_with(sql, lexing).into_iter().next() {
+        return Err(format!("a tile only reads; this query is {keyword}"));
+    }
+    match guard::not_one_read(&guard::read_text(sql, lexing)) {
+        Some(reason) => Err(reason.into()),
+        None => Ok(()),
+    }
+}
+
+/// Saves `board` with a new revision.
+fn save(boards: &mut Boards, mut board: Board) -> Result<Board, String> {
+    board.revision = new_revision();
     boards.save(board.clone())?;
     Ok(board)
 }
@@ -86,8 +218,7 @@ pub fn copy_to(
         archived: false,
         ..boards.get(id).cloned().ok_or("no such board")?
     };
-    boards.save(board.clone())?;
-    Ok(board)
+    save(boards, board)
 }
 
 pub fn delete(boards: &mut Boards, id: &str) -> Result<(), String> {
@@ -153,6 +284,11 @@ fn edit_board(board: &mut Board, edit: Edit) -> Result<(), String> {
         Edit::RemoveTile(tile) => {
             let at = position(board, &tile)?;
             board.tiles.remove(at);
+        }
+        Edit::Seen(tile) => {
+            if let Some(mark) = &mut tile_mut(board, &tile)?.ai {
+                mark.unseen = false;
+            }
         }
     }
     Ok(())
@@ -527,5 +663,180 @@ mod tests {
         );
         assert_eq!(next_in(Refresh::Every(30), None, now), None);
         assert_eq!(next_in(Refresh::OnOpen, Some(ago(10)), now), None);
+    }
+
+    #[test]
+    fn every_change_gives_a_new_revision() {
+        let mut boards = Boards::open(None);
+        let board = create(&mut boards, "db", "Signups").unwrap();
+        assert_eq!(board.revision.len(), 6);
+        assert!(board.revision.chars().all(|c| c.is_ascii_lowercase()));
+        let renamed = apply(&mut boards, &board.id, Edit::Rename("Growth".into())).unwrap();
+        assert_ne!(renamed.revision, board.revision);
+        assert_eq!(boards.get(&board.id).unwrap().revision, renamed.revision);
+        let copy = copy_to(&mut boards, &board.id, "db2", "Copy").unwrap();
+        assert_eq!(copy.revision.len(), 6);
+    }
+
+    #[test]
+    fn an_ai_changes_a_board_only_at_the_revision_it_read() {
+        let mut boards = Boards::open(None);
+        let board = with_tiles(&mut boards, 1);
+        let ai = |boards: &mut Boards, revision: &str, edits: Vec<Edit>| {
+            apply_by_ai(
+                boards,
+                &board.id,
+                revision,
+                edits,
+                AiCaller::Mcp,
+                Lexing::default(),
+            )
+        };
+        let stale = ai(&mut boards, "aaaaaa", vec![Edit::Rename("X".into())]).unwrap_err();
+        assert!(
+            stale.starts_with("the board changed since revision aaaaaa"),
+            "{stale}"
+        );
+        assert_eq!(boards.get(&board.id).unwrap().name, "Signups");
+
+        // All or none: the second edit fails, so the rename doesn't happen either.
+        let err = ai(
+            &mut boards,
+            &board.revision,
+            vec![
+                Edit::Rename("Growth".into()),
+                Edit::AddTile(tile("Gone", "delete from t", None)),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(err, "a tile only reads; this query is DELETE");
+        assert_eq!(boards.get(&board.id).unwrap().revision, board.revision);
+
+        let b = ai(
+            &mut boards,
+            &board.revision,
+            vec![
+                Edit::Rename("Growth".into()),
+                Edit::AddTile(tile("New", "select 2", None)),
+                Edit::SetView {
+                    tile: "t1".into(),
+                    view: ChartView::from_key("bars"),
+                },
+                Edit::SetWidth {
+                    tile: "t2".into(),
+                    width: Width::Half,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(b.name, "Growth");
+        let mark = Some(AiMark {
+            by: AiCaller::Mcp,
+            unseen: true,
+        });
+        assert_eq!(b.tiles[0].ai, mark);
+        assert_eq!(b.tiles[1].ai, mark);
+        assert_ne!(b.revision, board.revision);
+    }
+
+    #[test]
+    fn an_ai_writes_tiles_that_read_and_leaves_the_rest_to_the_user() {
+        let mut boards = Boards::open(None);
+        let board = with_tiles(&mut boards, 1);
+        let ai = |boards: &mut Boards, edit: Edit| {
+            let revision = boards.get(&board.id).unwrap().revision.clone();
+            apply_by_ai(
+                boards,
+                &board.id,
+                &revision,
+                vec![edit],
+                AiCaller::Assistant,
+                Lexing::default(),
+            )
+        };
+        let query = |sql: &str| Edit::SetQuery {
+            tile: "t1".into(),
+            sql: sql.into(),
+            view: None,
+        };
+        assert_eq!(
+            ai(&mut boards, query("select 1; select 2")).unwrap_err(),
+            guard::not_one_read("select 1; select 2").unwrap()
+        );
+        assert!(ai(&mut boards, query(&"x".repeat(AI_MAX_SQL + 1))).is_err());
+        for edit in [
+            Edit::RemoveTile("t1".into()),
+            Edit::Archive(true),
+            Edit::SetRefresh(Refresh::Every(5)),
+            Edit::AddLink(Link {
+                label: "x".into(),
+                to: LinkTo::Url("https://x.io".into()),
+            }),
+            Edit::Seen("t1".into()),
+        ] {
+            assert_eq!(
+                ai(&mut boards, edit).unwrap_err(),
+                "only the user may do that"
+            );
+        }
+        let tiles = (0..=AI_MAX_TILES).map(|i| tile("T", &format!("select {i}"), None));
+        assert!(
+            create_by_ai(
+                &mut boards,
+                "db",
+                "Many",
+                "",
+                tiles.collect(),
+                AiCaller::Mcp,
+                Lexing::default()
+            )
+            .is_err()
+        );
+
+        let b = ai(&mut boards, query("select 3")).unwrap();
+        assert!(b.tiles[0].ai.unwrap().unseen);
+        // Run in a tab, or saved there by the user: seen.
+        let b = apply(&mut boards, &board.id, Edit::Seen("t1".into())).unwrap();
+        assert_eq!(
+            b.tiles[0].ai,
+            Some(AiMark {
+                by: AiCaller::Assistant,
+                unseen: false
+            })
+        );
+        ai(&mut boards, query("select 4")).unwrap();
+        let b = apply(
+            &mut boards,
+            &board.id,
+            Edit::SetQuery {
+                tile: "t1".into(),
+                sql: "select 5".into(),
+                view: None,
+            },
+        )
+        .unwrap();
+        assert!(!b.tiles[0].ai.unwrap().unseen);
+    }
+
+    #[test]
+    fn an_ai_creates_a_board_with_its_tiles() {
+        let mut boards = Boards::open(None);
+        let b = create_by_ai(
+            &mut boards,
+            "db",
+            " Revenue ",
+            " Per month. ",
+            vec![tile("Per month", "select 1", ChartView::from_key("bars"))],
+            AiCaller::Assistant,
+            Lexing::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (b.name.as_str(), b.description.as_str()),
+            ("Revenue", "Per month.")
+        );
+        assert_eq!(ids(&b), ["t1"]);
+        assert_eq!(b.tiles[0].ai.unwrap().by, AiCaller::Assistant);
+        assert_eq!(boards.get(&b.id), Some(&b));
     }
 }
