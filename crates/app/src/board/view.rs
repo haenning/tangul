@@ -615,21 +615,19 @@ impl BoardTab {
                 .w(px(560.))
                 .child(form.clone())
                 .footer(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        Button::new("tile-in-tab")
-                            .label("Open in a tab")
-                            .icon(Icon::new(Lucide::ExternalLink))
-                            .ghost()
-                            .tooltip(
-                                "Write the query in a query tab, with completion and its result",
-                            )
-                            .on_click(in_tab),
-                    )
-                    .child(footer(save)),
-            )
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            Button::new("tile-in-tab")
+                                .label("Open in a tab")
+                                .icon(Icon::new(Lucide::ExternalLink))
+                                .ghost()
+                                .tooltip("Edit the tile's query in a query tab")
+                                .on_click(in_tab),
+                        )
+                        .child(footer(save)),
+                )
         });
     }
 

@@ -225,7 +225,7 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .tooltip(if on {
-                            "Read-only mode is on: writes ask first. Click to turn off"
+                            "Read-only mode is on: statements that change data are not run. Click to turn off"
                         } else {
                             "Read-only mode is off. Click to turn on"
                         })

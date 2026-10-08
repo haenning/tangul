@@ -277,10 +277,8 @@ impl AiSettingsTab {
         section(
             "Databases",
             Some(
-                "What AI tools may use, for the assistant and MCP clients alike. The same \
-                 settings are in the title bar's AI menu and each connection's settings. A \
-                 database user that may only read on the server is the safer choice; schema \
-                 only keeps every row from the AI.",
+                "What AI tools (the assistant, MCP clients) may use of each database. The \
+                 same settings are in the title bar's AI menu and each connection's settings.",
             ),
             rows,
             cx,
