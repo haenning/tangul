@@ -1195,6 +1195,38 @@ fn a_failed_connection_is_connected_again_once_a_query_works(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn the_empty_state_offers_a_new_board_once_connected(cx: &mut TestAppContext) {
+    use crate::connection::ConnStatus;
+    use gpui_kit::component::WindowExt as _;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+        })
+    });
+    step(handle, cx, |window, _| {
+        assert!(
+            window.try_find("empty-new-board").is_none(),
+            "not connected yet"
+        )
+    });
+    step(handle, cx, |_, cx| {
+        let conn = workspace.read(cx).tab_conn("app").unwrap();
+        conn.update(cx, |c, cx| {
+            c.status = ConnStatus::Connected;
+            cx.notify();
+        });
+        workspace.update(cx, |_, cx| cx.notify());
+    });
+    step(handle, cx, |window, cx| window.click("empty-new-board", cx));
+    step(handle, cx, |window, cx| {
+        assert!(window.has_active_dialog(cx))
+    });
+}
+
+#[gpui_kit::test]
 fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let sql =
