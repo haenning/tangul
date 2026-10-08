@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use tangul_core::ai_view::{AiColumns, BlockQueries, ListKind};
+use tangul_core::ai_view::{AiColumns, BlockQueries};
 use tangul_core::{ColumnInfo, ResultSet, RowBatch};
 
 use crate::analyze::{TableRef, analyze, is_reserved, significant_with};
@@ -49,9 +49,11 @@ impl Mode {
     }
 }
 
-/// With a dot a column (`table.column`, `schema.table.column`), else a table.
+/// With a dot a column (`table.column`, `schema.table.column`), else a table. A
+/// leading `!` makes it an exception to the patterns before it in its list.
 #[derive(Debug, Clone)]
 struct Pattern {
+    except: bool,
     schema: Option<String>,
     table: String,
     /// `None`: all of the table's columns.
@@ -60,24 +62,33 @@ struct Pattern {
 
 impl Pattern {
     fn new(text: &str) -> Self {
+        let text = text.trim();
+        let (except, text) = match text.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, text),
+        };
         let parts: Vec<String> = text.split('.').map(|p| p.trim().to_lowercase()).collect();
-        match parts.as_slice() {
+        let pattern = match parts.as_slice() {
             [table, column] => Self {
+                except,
                 schema: None,
                 table: table.clone(),
                 column: Some(column.clone()),
             },
             [.., schema, table, column] => Self {
+                except,
                 schema: Some(schema.clone()),
                 table: table.clone(),
                 column: Some(column.clone()),
             },
             _ => Self {
+                except,
                 schema: None,
                 table: parts.concat(),
                 column: None,
             },
-        }
+        };
+        Self { except, ..pattern }
     }
 
     fn matches(&self, schema: &str, table: &str, column: &str) -> bool {
@@ -109,10 +120,8 @@ fn glob(pattern: &str, text: &str) -> bool {
 /// A database's rules, ready to match.
 #[derive(Debug, Clone)]
 pub struct Rules {
-    kind: ListKind,
     redact: Vec<Pattern>,
     hide: Vec<Pattern>,
-    show: Vec<Pattern>,
     block: BlockQueries,
     open: bool,
 }
@@ -121,10 +130,8 @@ impl Rules {
     pub fn new(settings: &AiColumns) -> Self {
         let patterns = |l: &[String]| l.iter().map(|p| Pattern::new(p)).collect();
         Self {
-            kind: settings.kind,
             redact: patterns(&settings.redact),
             hide: patterns(&settings.hide),
-            show: patterns(&settings.show),
             block: settings.block_queries,
             open: settings.is_open(),
         }
@@ -137,8 +144,14 @@ impl Rules {
 
     /// What AI tools see of `schema.table.column`.
     pub fn mode(&self, schema: &str, table: &str, column: &str) -> Mode {
-        let hit = |l: &[Pattern]| l.iter().any(|p| p.matches(schema, table, column));
-        if hit(&self.hide) || (self.kind == ListKind::Whitelist && !hit(&self.show)) {
+        // The last pattern that matches decides; an exception lifts the ones before.
+        let hit = |l: &[Pattern]| {
+            l.iter()
+                .rev()
+                .find(|p| p.matches(schema, table, column))
+                .is_some_and(|p| !p.except)
+        };
+        if hit(&self.hide) {
             return Mode::Hidden;
         }
         if hit(&self.redact) {
@@ -969,16 +982,25 @@ mod tests {
     }
 
     #[test]
-    fn a_whitelist_hides_what_it_doesnt_show_and_hidden_beats_redacted() {
+    fn the_last_matching_pattern_decides_and_hidden_beats_redacted() {
         let r = rules(
-            r#"{"type": "whitelist", "show": ["orders", "users.id"],
-                "redact": ["*.adr*", "*.id"], "hide": ["orders.total"]}"#,
+            r#"{"hide": ["*", "!orders", "!users.id", "orders.total"],
+                "redact": ["*.adr*", "*.id"]}"#,
         );
         assert_eq!(r.mode("public", "orders", "user_id"), V);
         assert_eq!(r.mode("public", "orders", "adr_city"), R);
-        assert_eq!(r.mode("public", "orders", "total"), H);
+        assert_eq!(r.mode("public", "orders", "total"), H, "hidden again");
         assert_eq!(r.mode("public", "users", "id"), R);
         assert_eq!(r.mode("public", "users", "name"), H);
+        // An exception only lifts patterns before it.
+        let r = rules(r#"{"hide": ["!orders", "*"]}"#);
+        assert_eq!(r.mode("public", "orders", "id"), H);
+        // A schema as the exception; only exceptions hide nothing.
+        let r = rules(r#"{"hide": ["*", "!sales.*.*"]}"#);
+        assert_eq!(r.mode("sales", "orders", "id"), V);
+        assert_eq!(r.mode("public", "orders", "id"), H);
+        assert!(!r.is_open());
+        assert!(rules(r#"{"hide": ["!orders"]}"#).is_open());
         let both = rules(r#"{"redact": ["*.ssn"], "hide": ["*.ssn"]}"#);
         assert_eq!(both.mode("public", "users", "ssn"), H);
     }

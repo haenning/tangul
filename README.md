@@ -80,8 +80,8 @@ out of your way.
   change tangul's `settings.json` and switch off read-only mode for your own users;
   only the database's grants hold against that.
 - **Redact or hide columns.** Per database, say which columns the AI gets only as
-  `⟦redacted⟧` or not at all (`*.email`, `orders.adr*`, whole tables), as a blacklist
-  or a whitelist. Renamed and computed columns count as the ones they come from.
+  `⟦redacted⟧` or not at all (`*.email`, `orders.adr*`, whole tables), with
+  exceptions (`"hide": ["*", "!sales.*.*"]`). Renamed and computed columns count as the ones they come from.
   [How it works](docs/ai-view.md).
 - **You can see what it ran.** Every AI query is logged locally, under `-- ai view`:
   run it again and you see exactly what the AI saw.

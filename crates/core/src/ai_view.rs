@@ -6,10 +6,8 @@
 //! {
 //!   "ai": {
 //!     "content_blocking": {
-//!       "type": "blacklist",
 //!       "redact": ["*.name", "orders.adr*", "billing_*"],
 //!       "hide": ["*.ssn", "audit_*"],
-//!       "show": [],
 //!       "block_queries": "none"
 //!     }
 //!   }
@@ -18,7 +16,10 @@
 //!
 //! Patterns ignore case and know one wildcard, `*`. With a dot they name columns:
 //! `table.column` (`*.email`: in every table) or `schema.table.column`; without one,
-//! tables (all their columns). A table in a schema: `schema.table.*`.
+//! tables (all their columns). A table in a schema: `schema.table.*`. A leading `!`
+//! makes an exception, and within a list the last pattern that matches decides:
+//! `"hide": ["*", "!orders.*.*", "orders.payments.card_no"]` hides everything but
+//! the schema `orders`, and in it `payments.card_no`.
 
 use serde::{Deserialize, Serialize};
 
@@ -36,32 +37,30 @@ pub struct DatabaseAi {
     pub content_blocking: AiColumns,
 }
 
+/// Unknown keys are an error: a misspelt list must not leave columns open.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AiColumns {
-    /// Blacklist: `redact` and `hide` apply, the rest is visible. Whitelist: only
-    /// `show` is visible (`redact` still applies to it), the rest is hidden.
-    #[serde(rename = "type")]
-    pub kind: ListKind,
+    /// What matches is redacted, unless hidden too (the stricter wins).
     pub redact: Vec<String>,
     pub hide: Vec<String>,
-    pub show: Vec<String>,
     pub block_queries: BlockQueries,
 }
 
 impl AiColumns {
-    /// Whether every column is visible as it is.
-    pub fn is_open(&self) -> bool {
-        self.kind == ListKind::Blacklist && self.redact.is_empty() && self.hide.is_empty()
+    /// Every column hidden.
+    pub fn closed() -> Self {
+        Self {
+            hide: vec!["*".into()],
+            ..Self::default()
+        }
     }
-}
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ListKind {
-    #[default]
-    Blacklist,
-    Whitelist,
+    /// Whether every column is visible as it is: no pattern but exceptions.
+    pub fn is_open(&self) -> bool {
+        let none = |l: &[String]| l.iter().all(|p| p.trim().starts_with('!'));
+        none(&self.redact) && none(&self.hide)
+    }
 }
 
 /// Which columns queries may only read (select), never filter, join, sort or
@@ -82,22 +81,41 @@ mod tests {
     #[test]
     fn reads_the_file_and_defaults_what_is_missing() {
         let s: DatabaseSettings = serde_json::from_str(
-            r#"{"ai": {"content_blocking": {"type": "whitelist", "show": ["orders"],
+            r#"{"ai": {"content_blocking": {"hide": ["*", "!orders.*.*"],
                 "block_queries": "redacted_and_hidden"}}}"#,
         )
         .unwrap();
-        assert_eq!(s.ai.content_blocking.kind, ListKind::Whitelist);
-        assert_eq!(s.ai.content_blocking.show, ["orders"]);
-        assert_eq!(
-            s.ai.content_blocking.block_queries,
-            BlockQueries::RedactedAndHidden
-        );
-        assert!(s.ai.content_blocking.redact.is_empty());
-        assert!(!s.ai.content_blocking.is_open());
+        let c = &s.ai.content_blocking;
+        assert_eq!(c.hide, ["*", "!orders.*.*"]);
+        assert_eq!(c.block_queries, BlockQueries::RedactedAndHidden);
+        assert!(c.redact.is_empty());
+        assert!(!c.is_open());
         let empty: DatabaseSettings = serde_json::from_str("{}").unwrap();
         assert!(empty.ai.content_blocking.is_open());
         let json = serde_json::to_string(&empty).unwrap();
-        assert!(json.contains(r#""type":"blacklist""#), "{json}");
+        assert!(json.contains(r#""hide":[]"#), "{json}");
         assert!(json.contains(r#""block_queries":"none""#), "{json}");
+    }
+
+    #[test]
+    fn only_exceptions_hide_nothing() {
+        let c = AiColumns {
+            hide: vec![" !orders".into()],
+            ..AiColumns::default()
+        };
+        assert!(c.is_open());
+        assert!(!AiColumns::closed().is_open());
+    }
+
+    #[test]
+    fn only_exceptions_hide_nothing_and_unknown_keys_fail() {
+        let c = AiColumns {
+            hide: vec![" !orders".into()],
+            ..AiColumns::default()
+        };
+        assert!(c.is_open());
+        assert!(!AiColumns::closed().is_open());
+        let typo = r#"{"ai": {"content_blocking": {"hdie": ["*"]}}}"#;
+        assert!(serde_json::from_str::<DatabaseSettings>(typo).is_err());
     }
 }

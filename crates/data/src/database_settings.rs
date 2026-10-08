@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tangul_core::ai_view::{AiColumns, DatabaseAi, DatabaseSettings, ListKind};
+use tangul_core::ai_view::{AiColumns, DatabaseAi, DatabaseSettings};
 
 const DIR: &str = "databases";
 
@@ -37,10 +37,7 @@ pub fn load(config_dir: Option<&Path>, id: &str) -> (DatabaseSettings, Option<St
 fn closed() -> DatabaseSettings {
     DatabaseSettings {
         ai: DatabaseAi {
-            content_blocking: AiColumns {
-                kind: ListKind::Whitelist,
-                ..AiColumns::default()
-            },
+            content_blocking: AiColumns::closed(),
         },
     }
 }
@@ -96,8 +93,7 @@ mod tests {
 
         std::fs::write(&file, "{ broken").unwrap();
         let (settings, problem) = load(Some(&d), "db1");
-        assert_eq!(settings.ai.content_blocking.kind, ListKind::Whitelist);
-        assert!(settings.ai.content_blocking.show.is_empty());
+        assert_eq!(settings.ai.content_blocking, AiColumns::closed());
         assert!(problem.unwrap().contains("db1.json"));
         let _ = std::fs::remove_dir_all(&d);
     }

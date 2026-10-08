@@ -196,10 +196,10 @@ explicit OK, and keep them covered by tests.
   can't connect is shown to the user, and the AI has no connection: it never connects
   as anyone else instead.
 - **What AI tools see of rows.** Per database, in its own settings file
-  (`core::ai_view`, `databases/<id>.json` under `ai.content_blocking`; no UI yet): `type` blacklist or whitelist,
-  `redact`, `hide` and `show` lists of patterns (with a dot a column: `*.email`,
-  `orders.adr*`, `schema.table.column`; without one a table; `*` only, case ignored),
-  `block_queries`. `assist::ai_view::plan` checks every AI read before it
+  (`core::ai_view`, `databases/<id>.json` under `ai.content_blocking`; no UI yet):
+  `redact` and `hide` lists of patterns (with a dot a column: `*.email`,
+  `orders.adr*`, `schema.table.column`; without one a table; `*` only, case ignored;
+  `!` an exception, the last match in a list wins), `block_queries`. `assist::ai_view::plan` checks every AI read before it
   runs and traces each result column to the table columns it comes from (renames,
   expressions, `*`, CTEs, subqueries, `UNION`, generated columns, views); what it
   can't tell gets the strictest mode the statement uses. While rules apply, only the

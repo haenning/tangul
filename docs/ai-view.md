@@ -1,31 +1,22 @@
 # What the AI sees of your rows
 
-The AI sees the same database you see: every schema, table and column. What you can
-limit is what it reads from the rows. Per database, a column can be
+The AI sees the same schemas, tables and columns as you. Per database you decide
+what it reads from the rows: a column is **visible**, **redacted** (every value
+becomes `⟦redacted⟧`, `NULL` stays `NULL`) or **hidden** (left out). You always see
+everything, including results the AI opens for you.
 
-- **visible**: as it is,
-- **redacted**: the column stays in the result, every value becomes `⟦redacted⟧`
-  (`NULL` stays `NULL`),
-- **hidden**: the column is left out of the result.
+## Where
 
-You see everything as always, including results the AI opens for you in a tab.
-
-## Where to set it
-
-Each database has its own settings file, `databases/<id>.json` next to
-`settings.json` (on macOS in `~/Library/Application Support/tangul/`). Open it from
-the database menu in the title bar: **Database settings file**. It is created with
-the defaults the first time. Changes apply to the AI's next query as soon as you
-save; there is nothing to restart.
+Database menu in the title bar → **Database settings file**. It opens
+`databases/<id>.json` next to `settings.json` (created on first open). Changes
+apply to the AI's next query once saved.
 
 ```json
 {
   "ai": {
     "content_blocking": {
-      "type": "blacklist",
-      "redact": ["*.email", "*.phone", "orders.adr*", "billing_*"],
+      "redact": ["*.email", "*.phone", "orders.adr*"],
       "hide": ["*.ssn", "audit_*"],
-      "show": [],
       "block_queries": "none"
     }
   }
@@ -34,74 +25,55 @@ save; there is nothing to restart.
 
 ## Patterns
 
-One wildcard, `*`. Case doesn't matter.
+`*` is the only wildcard; case doesn't matter. With a dot a column, without one a
+table.
 
 | Pattern | Means |
 |---|---|
-| `users` | the table `users`: all its columns |
+| `users` | the table `users` |
 | `billing_*` | every table starting with `billing_` |
-| `users.email` | the column `email` of `users` |
 | `*.email` | the column `email` in every table |
 | `orders.adr*` | `adr_street`, `adr_city`, … of `orders` |
 | `public.users.email` | with the schema (MySQL: the database) |
 | `public.users.*` | the table `users` in the schema `public` |
+| `sales.*.*` | the whole schema `sales` |
 
-With a dot it is a column, without one a table. So `public.users` means the column
-`users` of a table `public`; write `public.users.*` for the table.
-
-## Blacklist or whitelist
-
-- **`"type": "blacklist"`** (the default): what `redact` and `hide` match is redacted
-  or hidden, everything else is visible. `show` is not used.
-- **`"type": "whitelist"`**: only what `show` matches is visible, everything else is
-  hidden. `redact` still applies to what is shown.
-
-When a column matches more than one list, the strictest wins: hidden, then redacted,
-then visible.
+**`!` makes an exception, and the last matching pattern of a list wins**, as in
+`.gitignore`:
 
 ```json
-{ "ai": { "content_blocking": { "type": "whitelist", "show": ["orders", "products", "users.id"], "redact": ["orders.adr*"] } } }
+"hide": ["*", "!sales.*.*", "sales.payments.card_no"]
 ```
+
+hides everything except the schema `sales`, and in it `payments.card_no`. Careful:
+a typo in a `!` pattern opens data, a typo elsewhere only fails to hide.
+
+Across lists the stricter wins: hidden over redacted.
 
 ## Renamed and computed columns
 
-The AI writes the SQL, so `SELECT email AS e` or `upper(email)` must not get around a
-rule. tangul traces every column of a result back to the table columns it comes from
-and gives it the strictest mode among them:
+A result column counts as every table column it comes from: renames
+(`email AS e`), expressions (`upper(email)`, `count(email)`), `*`, CTEs,
+subqueries, `UNION`, generated columns and views. Where that can't be told, the
+whole result gets the strictest mode the query uses. While any rule is set, the AI
+reads only the database's own tables: no catalogs (`pg_stats` lists common
+values), no functions in `FROM`.
 
-- renames and expressions: `email AS e`, `upper(email)`, `count(email)`,
-  `email || ''`, `CASE WHEN email …`
-- `*` and `t.*`
-- CTEs and subqueries in `FROM`
-- `UNION` branches
-- generated columns (`domain` computed from `email`)
-- views (a view column counts as what its definition reads)
+## `block_queries`
 
-Where it can't tell which column a value comes from, every column of that result gets
-the strictest mode the query uses anywhere. A visible column named like a redacted
-one counts as redacted too: strict rather than leaky.
+Filtering on a redacted column (`WHERE email LIKE 'a%'`) reveals it bit by bit.
 
-While any rule is set, the AI reads only the database's own tables. Catalogs such as
-`pg_stats` (which lists the most common values of columns) and functions in `FROM`
-(`generate_series(…)`) are refused.
-
-## Filters: `block_queries`
-
-A redacted column can still be used to filter: `WHERE email LIKE 'a%'` returns only
-ids, but asked often enough it reveals the value bit by bit. `block_queries` decides
-whether that is allowed:
-
-| `block_queries` | Redacted columns | Hidden columns |
-|---|---|---|
-| `none` (default) | may be used anywhere | may be used anywhere |
-| `redacted` | only selected, never filtered, joined, sorted or grouped by | anywhere |
-| `redacted_and_hidden` | only selected | only selected (and left out) |
+| Value | Redacted and hidden columns may be |
+|---|---|
+| `none` (default) | used anywhere |
+| `redacted` | redacted ones only selected; hidden ones anywhere |
+| `redacted_and_hidden` | only selected |
 
 A refused query tells the AI which column and why.
 
 ## See what the AI saw
 
-Every query the AI runs goes to your history under two lines:
+The AI's queries go to your history as
 
 ```sql
 -- ai view
@@ -109,24 +81,17 @@ Every query the AI runs goes to your history under two lines:
 SELECT id, email FROM users
 ```
 
-Run it from there and the result shows exactly what the AI got: redacted values as
-`⟦redacted⟧`, hidden columns left out. Delete the first line to see everything.
-
-You can put `-- ai view` on top of your own queries to check your rules before the AI
-ever runs them. It only counts as the first line; case and spaces don't matter
-(`-- AI View` works). If the AI would be refused, tangul says why instead of running
-the query.
+Run it and you get exactly the AI's result. Put `-- ai view` as the first line of
+your own query to test your rules (case and spaces don't matter).
 
 ## Good to know
 
-- **Your database grants are still the real boundary.** These rules are applied by
-  tangul to what reaches the AI. Give the AI its own read-only database user too (the
-  database form sets one up).
-- **A settings file tangul can't read hides every column** from the AI until it is
-  fixed. The file tab shows what is wrong when you save.
-- **Value profiles skip redacted and hidden columns**, and the AI's table descriptions
-  mark them, so it doesn't keep trying.
-- Not yet: showing part of a value (`Max⟦…⟧ann`,
-  [#196](https://github.com/haenning/tangul/issues/196)), blocking user-defined
-  functions ([#194](https://github.com/haenning/tangul/issues/194)), a settings screen
-  for these rules.
+- **Database grants remain the real boundary.** Give the AI its own read-only user
+  too (the database form sets one up).
+- A settings file that can't be read hides everything until fixed; the file tab
+  says what's wrong.
+- Value profiles skip redacted and hidden columns; the AI's table descriptions mark
+  them.
+- Not yet: partial masking ([#196](https://github.com/haenning/tangul/issues/196)),
+  blocking user-defined functions
+  ([#194](https://github.com/haenning/tangul/issues/194)), a settings screen.
