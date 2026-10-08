@@ -1210,6 +1210,19 @@ fn an_ai_sets_up_a_board_and_its_changes_show_in_the_open_tab(cx: &mut TestAppCo
         panic!("{created:?}");
     };
     assert_eq!(board.database_id, "db");
+    assert_eq!(board.tiles[0].sql, "-- Set up by MCP\nselect 1");
+    // No database here: no plan, so it waits for the user.
+    assert!(board.tiles[0].held().unwrap().starts_with("its plan"));
+    let write = ask(
+        BoardRequest::Create {
+            user: "app".into(),
+            name: "X".into(),
+            description: String::new(),
+            tiles: vec![boards::tile("Gone", "delete from orders", None)],
+        },
+        cx,
+    );
+    assert_eq!(write, Err("a tile only reads; this query is DELETE".into()));
     let not_offered = ask(
         BoardRequest::List {
             user: "nobody".into(),
@@ -2316,13 +2329,15 @@ fn add_to_board_makes_a_new_board_and_a_tile_opens_in_a_tab(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
-fn a_tile_an_ai_changed_is_marked_until_its_query_runs_in_a_tab(cx: &mut TestAppContext) {
+fn a_held_tile_waits_until_its_query_runs_in_a_tab(cx: &mut TestAppContext) {
+    use crate::query_tab::TabEvent;
+    use std::collections::HashMap;
     use tangul_assist::lexer::Lexing;
     use tangul_core::board::AiCaller;
-    use tangul_service::boards::{self, Edit};
+    use tangul_service::boards::{self, ByAi, Edit};
     let (handle, workspace) = open(cx);
     cx.update(|cx| shop_with_ai_user(&workspace, None, cx));
-    let id = workspace.update(cx, |ws, cx| {
+    let (id, revision) = workspace.update(cx, |ws, cx| {
         ws.connect("app", cx);
         let mut tile = boards::tile("Per day", "select 1", None);
         tile.description = "Signups per day.".into();
@@ -2330,43 +2345,57 @@ fn a_tile_an_ai_changed_is_marked_until_its_query_runs_in_a_tab(cx: &mut TestApp
         let board = boards::apply(&mut ws.data.boards, &board.id, Edit::AddTile(tile)).unwrap();
         let edit = Edit::SetQuery {
             tile: "t1".into(),
-            sql: "select 2".into(),
+            sql: "select * from big".into(),
             view: None,
         };
-        let by = AiCaller::Mcp;
-        let lexing = Lexing::default();
-        boards::apply_by_ai(
+        let held = HashMap::from([("select * from big".into(), "heavy".into())]);
+        let ai = ByAi {
+            by: AiCaller::Mcp,
+            lexing: Lexing::default(),
+            held: &held,
+        };
+        let board = boards::apply_by_ai(
             &mut ws.data.boards,
             &board.id,
             &board.revision,
             vec![edit],
-            by,
-            lexing,
+            &ai,
         )
-        .unwrap()
-        .id
+        .unwrap();
+        (board.id, board.revision)
     });
-    let unseen = |cx: &mut TestAppContext| {
+    let held = |cx: &mut TestAppContext| {
         cx.update(|cx| {
             let ws = workspace.read(cx);
-            ws.data.boards.get(&id).unwrap().tiles[0].ai.unwrap().unseen
+            let board = ws.data.boards.get(&id).unwrap();
+            (board.tiles[0].held().is_some(), board.revision.clone())
         })
     };
     step(handle, cx, |window, cx| {
         workspace.update(cx, |ws, cx| ws.open_board(&id, window, cx))
     });
-    assert!(unseen(cx));
-    // The description is behind an (i) after the title.
-    step(handle, cx, |window, _| {
-        assert!(window.try_find(("tile-info", 0usize)).is_some())
+    assert_eq!(held(cx), (true, revision.clone()));
+    // Shown: its open button pulses; the description is behind an (i).
+    step(handle, cx, |window, cx| {
+        assert!(board_tab(&workspace, cx).read(cx).shown > 0);
+        assert!(window.try_find(("tile-info", 0usize)).is_some());
     });
-    // The mark opens the tile's query in a tab, where it runs: seen.
+    // The mark opens the query in a tab, not run; running it there releases the
+    // tile, without a new revision.
     step(handle, cx, |window, cx| {
         window.click(("tile-ai", 0usize), cx)
     });
     let query = cx.update(|cx| workspace.read(cx).tabs.active_query().cloned().unwrap());
-    cx.update(|cx| assert!(query.read(cx).board_tile.is_some()));
-    assert!(!unseen(cx));
+    cx.update(|cx| {
+        assert!(query.read(cx).board_tile.is_some());
+        assert!(!query.read(cx).is_running(cx));
+    });
+    step(handle, cx, |_, cx| {
+        query.update(cx, |_, cx| {
+            cx.emit(TabEvent::Run("select * from big".into()))
+        })
+    });
+    assert_eq!(held(cx), (false, revision));
 }
 
 #[gpui_kit::test]

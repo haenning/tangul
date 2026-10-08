@@ -19,7 +19,8 @@
 //!   "revision": "kqzmwa",
 //!   "tiles": [
 //!     { "id": "t1", "title": "Per day", "sql": "select …", "view": "bars", "width": "half" },
-//!     { "id": "t2", "title": "By plan", "sql": "select …", "ai": { "by": "mcp", "unseen": true } }
+//!     { "id": "t2", "title": "By plan", "sql": "select …", "ai": { "by": "mcp" } },
+//!     { "id": "t3", "title": "All", "sql": "select …", "ai": { "by": "mcp", "held": "…" } }
 //!   ]
 //! }
 //! ```
@@ -65,10 +66,10 @@ impl Board {
     }
 
     /// The tiles' different statements, in order: what one refresh sends (tiles
-    /// with the same SQL share a result).
+    /// with the same SQL share a result; held ones wait for the user).
     pub fn statements(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
-        for tile in &self.tiles {
+        for tile in self.tiles.iter().filter(|t| t.held().is_none()) {
             if !out.contains(&tile.sql.as_str()) {
                 out.push(&tile.sql);
             }
@@ -211,13 +212,21 @@ pub struct Tile {
     pub ai: Option<AiMark>,
 }
 
-/// That an AI set up or changed a tile, and whether the user has run it since.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl Tile {
+    /// Why its query waits for the user, if it does (see [`AiMark::held`]).
+    pub fn held(&self) -> Option<&str> {
+        self.ai.as_ref()?.held.as_deref()
+    }
+}
+
+/// That an AI set up or changed a tile, and whether its query waits for the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiMark {
     pub by: AiCaller,
-    /// Changed by the AI and not yet run by the user in a tab of its own.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub unseen: bool,
+    /// Why the query waits for the user (its plan said it is heavy, or there was
+    /// none): the board doesn't run it until the user ran it in a tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
 }
 
 /// Which AI changed a tile.
@@ -344,6 +353,13 @@ mod tests {
         };
         board.tiles[2].id = "c".into();
         assert_eq!(board.statements(), ["select 'a'", "select 'b'"]);
+        board.tiles[1].ai = Some(AiMark {
+            by: AiCaller::Assistant,
+            held: Some("heavy".into()),
+        });
+        assert_eq!(board.tiles[1].held(), Some("heavy"));
+        assert_eq!(board.statements(), ["select 'a'"]);
+        board.tiles[1].ai = None;
         assert_eq!(board.tile("c").map(|t| t.width), Some(Width::Half));
         board.tile_mut("b").unwrap().title = "B".into();
         assert_eq!(board.tile("b").unwrap().title, "B");
@@ -462,7 +478,7 @@ mod tests {
                 Tile {
                     ai: Some(AiMark {
                         by: AiCaller::Mcp,
-                        unseen: true,
+                        held: Some("heavy".into()),
                     }),
                     ..tile("v", Width::Full)
                 },
@@ -472,7 +488,7 @@ mod tests {
         assert!(json.contains(r#""refresh":{"every":30}"#), "{json}");
         assert!(json.contains(r#""revision":"kqzmwa""#), "{json}");
         assert!(
-            json.contains(r#""ai":{"by":"mcp","unseen":true}"#),
+            json.contains(r#""ai":{"by":"mcp","held":"heavy"}"#),
             "{json}"
         );
         assert!(json.contains(r#""view":"stacked_bars:1""#), "{json}");

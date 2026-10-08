@@ -823,9 +823,38 @@ async fn postgres() {
     )
     .await;
     board_checks(&mut h, "SELECT tangul_ai_sneak()").await;
+    plan_checks(&mut h, DriverKind::Postgres).await;
     editor_checks(&mut h, DriverKind::Postgres, "SELECT tangul_ai_sneak()").await;
     h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak()").await;
     lock_wait_checks(&mut h).await;
+}
+
+/// A query's plan, asked for as a board's read (what an AI's tile queries get
+/// before they are saved): a cost both dialects read; a missing table fails.
+async fn plan_checks(h: &mut Harness, driver: DriverKind) {
+    let d = tangul_assist::dialect::dialect_for(driver);
+    let ask = async |h: &mut Harness, sql: &str| {
+        h.next_query += 1;
+        let explain = d.explain_sql(sql).unwrap();
+        let options = QueryOptions::new(Caller::Board);
+        h.engine
+            .query(QueryId(h.next_query), h.conn, explain, options)
+            .await
+    };
+    let tab = TabId(14);
+    h.set(false, None);
+    h.run(tab, "DROP TABLE IF EXISTS tangul_plan_test").await;
+    h.run(tab, "CREATE TABLE tangul_plan_test (id INT)").await;
+    let out = ask(h, "SELECT count(*) FROM tangul_plan_test")
+        .await
+        .unwrap();
+    let plan = out.results[0].cell(0, 0).unwrap().to_string();
+    let cost = d
+        .plan_cost(&plan)
+        .unwrap_or_else(|| panic!("no cost in {plan}"));
+    assert!(cost < tangul_assist::dialect::HEAVY_COST, "{cost}");
+    assert!(ask(h, "SELECT * FROM tangul_no_such_table").await.is_err());
+    h.run(tab, "DROP TABLE tangul_plan_test").await;
 }
 
 /// A read that runs for others (here a board's) waits only so long for a lock: a
@@ -897,6 +926,7 @@ async fn mysql() {
     )
     .await;
     board_checks(&mut h, "SELECT tangul_ai_sneak()").await;
+    plan_checks(&mut h, DriverKind::Mysql).await;
     editor_checks(&mut h, DriverKind::Mysql, "SELECT tangul_ai_sneak()").await;
     h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak").await;
 }

@@ -1,6 +1,7 @@
 //! The board tools, called through the registry as a model would, over boards kept
 //! in memory and changed through `service::boards` the way the app does.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -24,13 +25,28 @@ fn exposed(access: AiAccess) -> Exposed {
     }
 }
 
-/// What the app does with a board call: database `db1` is user `u1`'s.
+/// What the app does with a board call: database `db1` is user `u1`'s; queries
+/// over `big` have a heavy plan.
 fn answer(boards: &mut Boards, request: BoardRequest) -> Result<BoardReply, String> {
     let db = |user: &str| match user {
         "u1" => Ok("db1"),
         _ => Err("no such database".to_string()),
     };
-    let (by, lexing) = (AiCaller::Mcp, Lexing::default());
+    let queries = match &request {
+        BoardRequest::Create { tiles, .. } => tiles.iter().map(|t| t.sql.clone()).collect(),
+        BoardRequest::Edit { edits, .. } => boards::ai_queries(edits),
+        BoardRequest::List { .. } => Vec::new(),
+    };
+    let held: HashMap<String, String> = queries
+        .into_iter()
+        .filter(|q| q.contains("big"))
+        .map(|q| (q, "its plan estimates a cost of 2000000".to_string()))
+        .collect();
+    let ai = boards::ByAi {
+        by: AiCaller::Mcp,
+        lexing: Lexing::default(),
+        held: &held,
+    };
     match request {
         BoardRequest::List { user } => Ok(BoardReply::Boards(
             boards
@@ -45,7 +61,7 @@ fn answer(boards: &mut Boards, request: BoardRequest) -> Result<BoardReply, Stri
             name,
             description,
             tiles,
-        } => boards::create_by_ai(boards, db(&user)?, &name, &description, tiles, by, lexing)
+        } => boards::create_by_ai(boards, db(&user)?, &name, &description, tiles, &ai)
             .map(BoardReply::Board),
         BoardRequest::Edit {
             user,
@@ -57,7 +73,7 @@ fn answer(boards: &mut Boards, request: BoardRequest) -> Result<BoardReply, Stri
             if boards.get(&board).is_none_or(|b| b.database_id != db) {
                 return Err("no such board".into());
             }
-            boards::apply_by_ai(boards, &board, &revision, edits, by, lexing).map(BoardReply::Board)
+            boards::apply_by_ai(boards, &board, &revision, edits, &ai).map(BoardReply::Board)
         }
     }
 }
@@ -99,8 +115,8 @@ async fn an_ai_creates_reads_and_changes_a_board() {
             "tiles": [
                 {"title": "Per month", "sql": "select month, sum(total) from orders group by 1",
                  "view": "bars", "width": "half"},
-                {"title": "Open", "description": "Orders not paid yet.",
-                 "sql": "select count(*) from orders where status = 'open'"}
+                {"title": "All", "description": "Every order ever.",
+                 "sql": "select * from big"}
             ]
         }),
     )
@@ -112,10 +128,11 @@ async fn an_ai_creates_reads_and_changes_a_board() {
         created,
         format!(
             "Created. Board \"Revenue\" on shop (id {id}, revision {revision}):\nMoney in.\n\n\
-             Tile t1 \"Per month\" (bars, half width), by mcp, not yet run by the user\n\
-             select month, sum(total) from orders group by 1\n\n\
-             Tile t2 \"Open\" (table, full width), by mcp, not yet run by the user: Orders \
-             not paid yet.\nselect count(*) from orders where status = 'open'"
+             Tile t1 \"Per month\" (bars, half width), by mcp\n\
+             -- Set up by MCP\nselect month, sum(total) from orders group by 1\n\n\
+             Tile t2 \"All\" (table, full width), by mcp, waits for the user to run it (its \
+             plan estimates a cost of 2000000): Every order ever.\n\
+             -- Set up by MCP\nselect * from big"
         )
     );
     assert_eq!(
@@ -143,7 +160,11 @@ async fn an_ai_creates_reads_and_changes_a_board() {
         now.revision
     )));
     assert_eq!(now.tiles[0].id, "t2");
-    assert_eq!(now.tiles[0].sql, "select count(*) from orders");
+    assert_eq!(
+        now.tiles[0].sql,
+        "-- Changed by MCP\nselect count(*) from orders"
+    );
+    assert_eq!(now.tiles[0].held(), None, "a new query, a new plan");
     let stale = call(&ctx, "edit_board", edit(&revision)).await.unwrap_err();
     assert_eq!(
         stale.to_string(),
@@ -221,7 +242,7 @@ async fn schema_only_shows_tile_queries_as_fingerprints() {
     // Stored as written: the user's board runs it.
     assert_eq!(
         only(&store).tiles[0].sql,
-        "select * from users where name = 'Ann' -- vip"
+        "-- Set up by MCP\nselect * from users where name = 'Ann' -- vip"
     );
 }
 

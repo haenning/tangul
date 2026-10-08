@@ -245,6 +245,16 @@ impl Dialect for Postgres {
         true
     }
 
+    fn explain_sql(&self, sql: &str) -> Option<String> {
+        Some(format!("EXPLAIN (FORMAT JSON) {sql}"))
+    }
+
+    /// `[{"Plan": {"Total Cost": 1234.5, …}}]`
+    fn plan_cost(&self, plan: &str) -> Option<f64> {
+        let plan: serde_json::Value = serde_json::from_str(plan).ok()?;
+        plan.get(0)?.get("Plan")?.get("Total Cost")?.as_f64()
+    }
+
     fn side_effect_functions(&self) -> &'static [&'static str] {
         &[
             "pg_terminate_backend",

@@ -158,12 +158,15 @@ explicit OK, and keep them covered by tests.
   transaction that is rolled back.
 - **Boards by AI.** The board tools change tangul's boards, not the database: only
   through `service::boards::{create_by_ai, apply_by_ai}`, on databases offered to AI
-  tools, all edits or none and only at the revision the AI read. Tile queries must
-  be one statement that reads (the gate's checks) and run as the user's board
-  (`Caller::Board`), never for the AI: no result goes back. Links, refresh, removing
-  tiles and deleting or archiving boards stay the user's. Tiles an AI changed are
-  marked (red) until the user runs them in the tile's tab. On a schema-only database
-  the AI sees tile queries only as fingerprints.
+  tools, all edits or none and only at the revision the AI read (only changes to
+  what a board shows give a new revision). Tile queries must be one statement that
+  reads (the gate's checks), are saved under a comment naming the AI, and run as the
+  user's board (`Caller::Board`), never for the AI: no result goes back. Before they
+  are saved they are planned (`EXPLAIN` as a board read, `Dialect::plan_cost`): a
+  cost over `HEAVY_COST` or no plan holds the tile (red, not run by the board) until
+  the user ran it in the tile's tab. Links, refresh, removing tiles and deleting or
+  archiving boards stay the user's. On a schema-only database the AI sees tile
+  queries only as fingerprints.
 - **Editor values.** While a condition on a text column is typed, the editor may
   look at its values (`assist::profile::quick_values_sql`: at most a few hundred
   rows) as `Caller::Editor`, with the schedules' rules; only where the database's

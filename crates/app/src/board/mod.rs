@@ -96,6 +96,8 @@ pub struct BoardTab {
     /// When the last refresh finished, and why it failed as a whole.
     updated: Option<Instant>,
     failed: Option<SharedString>,
+    /// How often the tab was shown: each time, the open buttons of held tiles pulse.
+    pub(crate) shown: u64,
     _refresh: Task<()>,
     /// Asks for a redraw when the interval is up, and now and then for "updated
     /// … ago".
@@ -146,6 +148,7 @@ impl BoardTab {
             running: None,
             updated: None,
             failed: None,
+            shown: 0,
             _refresh: Task::ready(()),
             _timer: Task::ready(()),
             _tick: tick,
@@ -201,6 +204,12 @@ impl BoardTab {
 
     pub fn focus(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
         window.focus(&this.read(cx).focus_handle.clone(), cx);
+    }
+
+    /// The tab is shown again (it became the active one).
+    pub fn shown(&mut self, cx: &mut Context<Self>) {
+        self.shown += 1;
+        cx.notify();
     }
 
     /// Stops a refresh that is running (the tab closes).
@@ -317,25 +326,18 @@ impl BoardTab {
         if self.running.is_some() {
             return;
         }
-        let batch = Batch::of(&self.board);
-        let tiles: Vec<(String, usize)> = self
-            .board
-            .tiles
-            .iter()
-            .map(|t| t.id.clone())
-            .zip(batch.tiles.iter().copied())
-            .collect();
+        let Batch { statements, tiles } = Batch::of(&self.board);
         self.last = Some(Instant::now());
         self.failed = None;
         self.arm_timer(cx);
-        if batch.statements.is_empty() {
+        if statements.is_empty() {
             self.updated = self.last;
             cx.notify();
             return;
         }
         let query = QueryId(crate::next_id());
         self.running = Some(query);
-        let (engine, statements) = (self.engine.clone(), batch.statements);
+        let engine = self.engine.clone();
         self._refresh = cx.spawn(async move |this, cx| {
             let options = QueryOptions::new(Caller::Board);
             let output = engine
@@ -405,17 +407,10 @@ impl BoardTab {
         results: Vec<Result<QueryOutput, QueryError>>,
         cx: &mut Context<Self>,
     ) {
-        let batch = Batch::of(&self.board);
-        let tiles: Vec<(String, usize)> = self
-            .board
-            .tiles
-            .iter()
-            .map(|t| t.id.clone())
-            .zip(batch.tiles.iter().copied())
-            .collect();
+        let Batch { statements, tiles } = Batch::of(&self.board);
         let query = QueryId(crate::next_id());
         self.running = Some(query);
-        self.finished(query, &batch.statements, &tiles, Ok(results), cx);
+        self.finished(query, &statements, &tiles, Ok(results), cx);
     }
 
     /// The result view of tile `id` (tests).

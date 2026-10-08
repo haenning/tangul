@@ -2,10 +2,10 @@
 //! tangul's own data, not the database's: the tools ask the app (`Ctx::boards`),
 //! which changes them through `service::boards` as the AI's changes: all or none,
 //! only at the revision the AI read, tile queries that read, and nothing the user
-//! keeps for themselves (links, refresh, removing). Tiles the AI changed are marked
-//! for the user until they run them. Tile queries run as the user's board, never for
-//! the AI: no result comes back. On a schema-only database tile queries are shown as
-//! fingerprints, like bookmarks.
+//! keeps for themselves (links, refresh, removing). Tiles the AI changed are marked,
+//! and held until the user ran them where their plan looks heavy. Tile queries run
+//! as the user's board, never for the AI: no result comes back. On a schema-only
+//! database tile queries are shown as fingerprints, like bookmarks.
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -162,8 +162,8 @@ struct ShownTile {
     width: &'static str,
     /// Who of the AIs set it up, if one did.
     by_ai: Option<&'static str>,
-    /// Changed by an AI and not yet run by the user.
-    unseen: bool,
+    /// Why the board doesn't run it until the user did (its plan).
+    held: Option<String>,
 }
 
 #[async_trait]
@@ -261,7 +261,7 @@ impl Tool for CreateBoard {
         "Create a board for the user: a name, a description and tiles, each one query \
          that reads, shown as a table or a chart. Only when the user asked for a \
          board. The board runs the tiles as the user, read-only; you never see their \
-         results. Tiles you set up are marked for the user until they run them."
+         results. A query whose plan looks heavy waits until the user ran it."
     }
 
     fn input_schema(&self) -> Value {
@@ -299,8 +299,8 @@ impl Tool for EditBoard {
          change a tile's title, query, view, width or position. All edits or none, and \
          only at the revision you read (get_board): if the board changed since, \
          nothing changes; read it again. Tile ids are from get_board. Removing tiles, \
-         links, refresh and deleting boards stay with the user. Tiles you change are \
-         marked for the user until they run them."
+         links, refresh and deleting boards stay with the user. A query whose plan \
+         looks heavy waits until the user ran it."
     }
 
     fn input_schema(&self) -> Value {
@@ -373,11 +373,11 @@ fn shown(exposed: &Exposed, board: &Board, done: Option<&str>) -> ToolOutput {
                     Width::Full => "full",
                     Width::Half => "half",
                 },
-                by_ai: t.ai.map(|mark| match mark.by {
+                by_ai: t.ai.as_ref().map(|mark| match mark.by {
                     AiCaller::Assistant => "assistant",
                     AiCaller::Mcp => "mcp",
                 }),
-                unseen: t.ai.is_some_and(|mark| mark.unseen),
+                held: t.held().map(String::from),
             })
             .collect(),
     };
@@ -401,12 +401,10 @@ fn shown(exposed: &Exposed, board: &Board, done: Option<&str>) -> ToolOutput {
             t.id, t.title, t.view, t.width
         ));
         if let Some(by) = t.by_ai {
-            let seen = if t.unseen {
-                "not yet run by the user"
-            } else {
-                "run by the user"
-            };
-            text.push_str(&format!(", by {by}, {seen}"));
+            text.push_str(&format!(", by {by}"));
+        }
+        if let Some(held) = &t.held {
+            text.push_str(&format!(", waits for the user to run it ({held})"));
         }
         if let Some(line) = one_line(Some(t.description.clone())) {
             text.push_str(&format!(": {line}"));
