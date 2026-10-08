@@ -323,7 +323,7 @@ impl Workspace {
             )
     }
 
-    /// A favorite's star, always shown at the row's right end; while the row is
+    /// A favorite's star, always shown (left of the row count); while the row is
     /// hovered the same star among the hover actions takes its place.
     fn fixed_star(
         &self,
@@ -471,6 +471,8 @@ impl Workspace {
                             r.child(div().flex_1().min_w_0().truncate().child(name))
                         }
                     })
+                    // Left of the row count.
+                    .children(fixed_star)
                     .when_some(estimate, |r, estimate| {
                         r.child(
                             div()
@@ -483,8 +485,6 @@ impl Workspace {
                     // The kind, estimate and comment: wrapped, long comments behind
                     // "Show all".
                     .when_some(info, |r, info| r.hoverable_tooltip(TextCard::builder(info)))
-                    // Rightmost, so a favorite's star lines up at the edge.
-                    .children(fixed_star)
                     .child(
                         hover_actions(group, theme.sidebar_accent)
                             .child(
