@@ -10,7 +10,6 @@ use gpui_kit::component::{
     button::Button,
     h_flex,
     input::{Input, InputState},
-    switch::Switch,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -20,7 +19,8 @@ use tangul_core::{
 };
 
 use crate::ui::{
-    FORM_LABEL_WIDTH, Severity, alert_card, form_note, form_row, form_section, segmented,
+    FORM_LABEL_WIDTH, Severity, alert_card, form_note, form_row, form_section, segmented, switch,
+    wrapped_tooltip,
 };
 use tangul_assist::dialect::dialect_for;
 use tangul_data::profiles::{new_id, new_password};
@@ -427,7 +427,7 @@ impl ConnectionForm {
     }
 
     fn render_ssh(&self, cx: &mut Context<Self>) -> Div {
-        let toggle = Switch::new("use-ssh")
+        let toggle = switch("use-ssh", cx)
             .checked(self.ssh)
             .small()
             .on_click(cx.listener(|this, checked: &bool, _, cx| {
@@ -487,7 +487,7 @@ impl ConnectionForm {
     }
 
     fn render_ai(&self, cx: &mut Context<Self>) -> Div {
-        let toggle = Switch::new("ai-tools")
+        let toggle = switch("ai-tools", cx)
             .checked(self.ai_tools)
             .small()
             .on_click(cx.listener(|this, checked: &bool, _, cx| {
@@ -576,12 +576,20 @@ impl ConnectionForm {
                 .when(can_set_up, |this| {
                     this.child(
                         h_flex().pl(px(FORM_LABEL_WIDTH + 12.)).child(
-                            Button::new("set-up-ai-account")
-                                .label("Set up a read-only AI user…")
-                                .xsmall()
-                                .outline()
-                                .tooltip(SET_UP_INFO)
-                                .on_click(cx.listener(|this, _, _, cx| this.set_up_ai_account(cx))),
+                            div()
+                                .id("set-up-info")
+                                .tooltip(wrapped_tooltip(SET_UP_INFO))
+                                .child(
+                                    Button::new("set-up-ai-account")
+                                        .label("Set up a read-only AI user…")
+                                        .xsmall()
+                                        .outline()
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.set_up_ai_account(cx)
+                                            }),
+                                        ),
+                                ),
                         ),
                     )
                 })
@@ -616,7 +624,7 @@ impl ConnectionForm {
                         .child("Suggest values while typing conditions"),
                 )
                 .child(
-                    Switch::new("editor-values")
+                    switch("editor-values", cx)
                         .checked(self.editor_values)
                         .small()
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {

@@ -7,6 +7,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::PopupMenuItem,
+    switch::Switch,
     tooltip::Tooltip,
     v_flex,
 };
@@ -246,6 +247,11 @@ pub const USER_INFO: &str = "The database user the AI's queries run as. A user t
 /// The (i) of the column values: what they don't limit.
 pub const VALUES_INFO: &str = "Profiles the AI may take of a column's values. They don't limit the AI's own \
      queries; the rights of its database user do.";
+
+/// An on/off switch, on in the muted color: being on needs no accent.
+pub fn switch(id: impl Into<ElementId>, cx: &App) -> Switch {
+    Switch::new(id).color(cx.theme().muted_foreground)
+}
 
 /// Width of a form's labels, so that its controls line up.
 pub const FORM_LABEL_WIDTH: f32 = 112.;

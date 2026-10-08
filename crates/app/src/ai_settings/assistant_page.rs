@@ -7,7 +7,6 @@ use gpui_kit::component::{
     h_flex,
     input::Input,
     menu::{DropdownMenu as _, PopupMenuItem},
-    switch::Switch,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -17,6 +16,7 @@ use tangul_core::llm::ProviderKind;
 use super::layout::{note, row, section};
 use super::{AiSettingsEvent, AiSettingsTab, Models};
 use crate::settings;
+use crate::ui::switch;
 
 impl AiSettingsTab {
     pub(super) fn render_assistant(
@@ -81,7 +81,7 @@ impl AiSettingsTab {
                          the database."
                             .into(),
                     ),
-                    Switch::new("ai-questions-in-editor")
+                    switch("ai-questions-in-editor", cx)
                         .checked(ai.questions_in_editor)
                         .on_click(cx.listener(|this, on: &bool, window, cx| {
                             let result = settings::set_value(

@@ -6,7 +6,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::DropdownMenu as _,
-    switch::Switch,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -16,7 +15,7 @@ use tangul_core::{AiAccess, ValueAccess};
 use super::{AiSettingsEvent, AiSettingsTab, CALLS_COLLAPSED, CALLS_PAGE, CallsView};
 use crate::settings;
 use crate::ui::{
-    Severity, USER_INFO, VALUES_INFO, YOUR_USER, alert_card, menu_choice, menu_section,
+    Severity, USER_INFO, VALUES_INFO, YOUR_USER, alert_card, menu_choice, menu_section, switch,
 };
 
 /// A titled group of rows.
@@ -223,7 +222,7 @@ impl AiSettingsTab {
                                 .items_center()
                                 .child(div().flex_1().text_sm().child(db.name.clone()))
                                 .child(
-                                    Switch::new(("ai-tools", ix))
+                                    switch(("ai-tools", ix), cx)
                                         .small()
                                         .checked(db.ai_tools)
                                         .label("AI tools")
@@ -302,7 +301,7 @@ impl AiSettingsTab {
                  run."
                     .into(),
             ),
-            Switch::new(id)
+            switch(id, cx)
                 .checked(!current.is_data())
                 .on_click(cx.listener(move |this, on: &bool, window, cx| {
                     let access = if *on {
