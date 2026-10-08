@@ -42,6 +42,27 @@ impl Workspace {
         self.open_file(path, FileKind::Settings, window, cx);
     }
 
+    /// Opens database `id`'s own settings file (written with the defaults first).
+    pub(super) fn open_database_settings(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let file = self
+            .data
+            .profiles
+            .dir()
+            .map(|dir| tangul_data::database_settings::create_if_missing(dir, id));
+        match file {
+            Some(Ok(path)) => self.open_file(path, FileKind::Database, window, cx),
+            _ => window.push_notification(
+                Notification::error("Could not create the database's settings file"),
+                cx,
+            ),
+        }
+    }
+
     /// Opens `path` in a file tab (or shows the one it is open in).
     pub(super) fn open_file(
         &mut self,
