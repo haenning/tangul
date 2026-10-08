@@ -63,7 +63,7 @@ pub fn create_if_missing(config_dir: &Path, id: &str) -> std::io::Result<PathBuf
 pub fn defaults() -> Value {
     let settings = serde_json::to_value(DatabaseSettings::default()).unwrap_or_default();
     let version =
-        json!({ crate::upgrade::VERSION: crate::migrations::current(crate::migrations::DATABASE) });
+        json!({ crate::upgrade::VERSION: crate::migrations::DATABASE.current().to_string() });
     crate::upgrade::merge(&version, &settings)
 }
 
@@ -79,7 +79,7 @@ pub fn upgrade(text: &str) -> Result<String, String> {
 pub fn parse(text: &str) -> Result<DatabaseSettings, String> {
     let value = crate::upgrade::parse(text)?;
     let version = crate::upgrade::version(&value)?;
-    if let Some(newer) = crate::upgrade::newer(version, crate::migrations::DATABASE) {
+    if let Some(newer) = crate::upgrade::newer(version.as_ref(), crate::migrations::DATABASE) {
         return Err(newer);
     }
     serde_json::from_value(value).map_err(|e| e.to_string())
@@ -134,14 +134,15 @@ mod tests {
             parse(&upgrade("").unwrap()),
             Ok(DatabaseSettings::default())
         );
-        assert!(upgrade("").unwrap().starts_with("{\n  \"version\": 1,"));
+        let first = format!("{{\n  \"version\": \"{}\",", env!("CARGO_PKG_VERSION"));
+        assert!(upgrade("").unwrap().starts_with(&first));
         // What it doesn't know stays, and the file then doesn't apply.
         let kept = upgrade(r#"{"ai": {"content_blocking": {"hdie": ["*"]}}}"#).unwrap();
         assert!(kept.contains("hdie"), "{kept}");
         assert!(parse(&kept).is_err());
         // A dev build's layout isn't migrated: it fails, so AI tools see no rows.
         assert!(parse(r#"{"ai": {"type": "blacklist", "redact": ["*.x"]}}"#).is_err());
-        let newer = r#"{"version": 2, "ai": {}}"#;
+        let newer = r#"{"version": "99.0.0", "ai": {}}"#;
         assert!(parse(newer).unwrap_err().contains("newer tangul"));
         assert!(upgrade(newer).is_err());
     }

@@ -9,48 +9,50 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::migrations::{Step, current};
+use semver::Version;
 
-/// The key holding a file's layout version.
+use crate::migrations::Steps;
+
+/// The key holding a file's layout: the tangul version it was written for.
 pub const VERSION: &str = "version";
 
 /// `text` (a JSON object) migrated by `steps` from its version to the current one,
 /// then merged onto `defaults`. A file written by a newer tangul is refused.
-pub fn upgrade(text: &str, defaults: &Value, steps: &[Step]) -> Result<String, String> {
+pub fn upgrade(text: &str, defaults: &Value, steps: Steps) -> Result<String, String> {
     let mut user = parse(text)?;
     if !user.is_object() {
         return Err("the file must contain a JSON object".into());
     }
     let version = version(&user)?;
-    if let Some(newer) = newer(version, steps) {
+    if let Some(newer) = newer(version.as_ref(), steps) {
         return Err(newer);
     }
-    for step in &steps[(version - 1) as usize..] {
-        step(&mut user);
-    }
+    steps.apply(&mut user, version.as_ref())?;
     let mut out = merge(defaults, &user);
-    out[VERSION] = current(steps).into();
+    out[VERSION] = steps.current().to_string().into();
     Ok(pretty(&out))
 }
 
-/// The layout version of `file`: 1 without one (before versions were written).
-pub fn version(file: &Value) -> Result<u64, String> {
+/// The layout of `file`; `None` before versions were written (or a dev build's
+/// whole number, before they were tangul versions).
+pub fn version(file: &Value) -> Result<Option<Version>, String> {
     match file.get(VERSION) {
-        None => Ok(1),
-        Some(v) => v
-            .as_u64()
-            .filter(|v| *v >= 1)
-            .ok_or_else(|| format!("\"{VERSION}\" must be a whole number from 1")),
+        None | Some(Value::Number(_)) => Ok(None),
+        Some(Value::String(v)) => Version::parse(v)
+            .map(Some)
+            .map_err(|e| format!("\"{VERSION}\" {v:?}: {e}")),
+        Some(_) => Err(format!(
+            "\"{VERSION}\" must be a tangul version, e.g. \"0.1.3\""
+        )),
     }
 }
 
-/// Why a file of layout `version` can't be read here, if it was written by a newer
-/// tangul.
-pub fn newer(version: u64, steps: &[Step]) -> Option<String> {
-    let current = current(steps);
-    (version > current).then(|| {
-        format!("written by a newer tangul (layout {version}; this version knows up to {current})")
-    })
+/// Why a file of layout `version` can't be read here, if a newer tangul wrote it.
+pub fn newer(version: Option<&Version>, steps: Steps) -> Option<String> {
+    let current = steps.current();
+    version
+        .filter(|v| **v > current)
+        .map(|v| format!("written by a newer tangul ({v}; this one is {current})"))
 }
 
 /// A file's upgrade: its text in the current layout.
@@ -167,7 +169,7 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("broken.json"), "{problems:?}");
         let new: Value = serde_json::from_str(&std::fs::read_to_string(&db).unwrap()).unwrap();
-        assert_eq!(new["version"], json!(1));
+        assert_eq!(new["version"], json!(env!("CARGO_PKG_VERSION")));
         assert_eq!(
             new["ai"]["content_blocking"]["redact"],
             json!(["*.company_id"])

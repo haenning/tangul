@@ -508,7 +508,7 @@ pub fn defaults() -> serde_json::Value {
         settings.ai.providers.entry(kind).or_default();
     }
     let version = serde_json::json!({
-        crate::upgrade::VERSION: crate::migrations::current(crate::migrations::SETTINGS)
+        crate::upgrade::VERSION: crate::migrations::SETTINGS.current().to_string()
     });
     crate::upgrade::merge(
         &version,
@@ -995,7 +995,7 @@ mod tests {
         );
         assert_eq!(upgrade("").unwrap(), text);
         assert!(upgrade("[]").is_err() && upgrade("{ nope").is_err());
-        let newer = upgrade(r#"{"version": 99}"#).unwrap_err();
+        let newer = upgrade(r#"{"version": "99.0.0"}"#).unwrap_err();
         assert!(newer.contains("newer tangul"), "{newer}");
     }
 }

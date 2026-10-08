@@ -11,7 +11,8 @@ tangul keeps its settings as JSON next to each other in the config folder (macOS
 Saved changes apply right away. A file that doesn't parse is kept as you wrote it
 but not applied; the tab says why.
 
-**Upgrades.** Each file starts with `"version"`, its layout; leave it as it is.
+**Upgrades.** Each file starts with `"version"`: the tangul version whose layout
+it has; leave it as it is.
 On start, tangul brings every file from an older release to its current layout:
 keys that moved are carried over, missing keys added at their default, your values
 and keys it doesn't know are kept. The old text stays next to it as `<name>.bak`.
@@ -23,7 +24,7 @@ the editor, so you look before you save.
 
 ```json
 {
-  "version": 1,
+  "version": "0.1.2",
   "editor": { "font_size": null, "font_family": null },
   "table": { "font_size": null, "font_family": null },
   "chart": { "primary_color": null, "font_size": null, "font_family": null },
@@ -84,7 +85,7 @@ means unset (the app's own value) or no limit.
 
 ```json
 {
-  "version": 1,
+  "version": "0.1.2",
   "ai": {
     "content_blocking": {
       "redact": [],

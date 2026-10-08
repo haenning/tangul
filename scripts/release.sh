@@ -60,7 +60,11 @@ release() {
     [[ "$(cargo_version)" == "$version" ]] || die "Cargo.toml didn't take the new version"
     # Updates the workspace crates' versions in Cargo.lock.
     cargo metadata --format-version 1 >/dev/null
-    git commit --quiet -m "Release $tag" -- Cargo.toml Cargo.lock
+    # The settings files' dev migration steps become this release's one step, and
+    # its layouts fixtures (crates/data/migrations/CLAUDE.md).
+    scripts/release-migrations.py "$version"
+    git add crates/data/migrations
+    git commit --quiet -m "Release $tag" -- Cargo.toml Cargo.lock crates/data/migrations
     git tag -a "$tag" -m "tangul $tag"
     # Both or neither: the tag's build needs the commit.
     git push --quiet --atomic origin main "$tag"

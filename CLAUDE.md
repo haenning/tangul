@@ -20,9 +20,10 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there;
   each database's own settings: `database_settings.rs`, `databases/<id>.json` there;
   `upgrade.rs`: every settings file brought to the current layout at start (its
-  `"version"`, the steps in `migrations/`, only from release to release: see
-  `migrations/CLAUDE.md`), the user's values kept, the old text as `.bak`; a new key
-  goes into the file's `defaults()` and into `docs/settings.md`)
+  `"version"`, a tangul version; `migrations.rs` runs the steps, JSON files in
+  `crates/data/migrations/`: see `CLAUDE.md` there; `make release` joins a
+  version's dev steps), the user's values kept, the old text as `.bak`; a new key
+  goes into the settings' struct and `docs/settings.md`)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
   `boards` (the one API that changes boards, for the UI and the AI tools, and when a
