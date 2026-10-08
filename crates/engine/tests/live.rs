@@ -937,7 +937,15 @@ async fn mysql() {
     assert_eq!(out.result.unwrap().cell(0, 0), Some("0xdeadbeef"));
 
     read_only_checks(&mut h, "SET SESSION TRANSACTION READ WRITE").await;
-    time_limit_checks(&mut h, "SELECT SLEEP(30)", "SELECT SLEEP(2)").await;
+    // `max_execution_time` ends a SLEEP() early without an error (it returns 1), so
+    // the statement over the limit is a long read instead.
+    time_limit_checks(
+        &mut h,
+        "SELECT count(*) FROM information_schema.columns a, information_schema.columns b, \
+         information_schema.columns c",
+        "SELECT SLEEP(2)",
+    )
+    .await;
     h.run(TabId(1), "DROP FUNCTION IF EXISTS tangul_ai_sneak")
         .await;
     // DETERMINISTIC: with binary logging on (MySQL 8 default) it can't be created
