@@ -104,9 +104,9 @@ fn cmd_b_toggles_the_left_sidebar_and_keeps_its_panel(cx: &mut TestAppContext) {
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         window.click(button(Panel::Bookmarks), cx);
-        window.press("cmd-b", cx);
+        window.press("secondary-b", cx);
         assert!(window.try_find(LEFT).is_none());
-        window.press("cmd-b", cx);
+        window.press("secondary-b", cx);
         assert!(window.find(LEFT).visible());
         assert!(shows(&workspace, Panel::Bookmarks, cx));
     })
@@ -218,7 +218,7 @@ fn the_right_sidebar_opens_on_an_empty_value_viewer(cx: &mut TestAppContext) {
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find(RIGHT).is_none());
-        window.press("alt-cmd-b", cx);
+        window.press("alt-secondary-b", cx);
         assert!(window.find(RIGHT).visible());
         assert!(window.find("value-empty").visible());
         assert!(shows(&workspace, Panel::Value, cx));
@@ -523,10 +523,10 @@ fn comparing_different_columns_warns(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_palette_opens_only_once(cx: &mut TestAppContext) {
     let (handle, _) = open(cx);
-    step(handle, cx, |window, cx| window.press("cmd-shift-p", cx));
+    step(handle, cx, |window, cx| window.press("secondary-shift-p", cx));
     step(handle, cx, |window, cx| {
         assert!(window.find("palette").visible());
-        window.press("cmd-shift-p", cx);
+        window.press("secondary-shift-p", cx);
     });
     // `find` fails on two elements with the same id.
     step(handle, cx, |window, _| {
