@@ -1,11 +1,16 @@
 //! Form for creating/editing a database and its users. Rendered inside a dialog.
+//!
+//! One layout throughout (`ui::form_section`, `form_row`, `form_note`): sections
+//! with a muted heading, a label column, and choices as segmented controls. The
+//! databases offered come from [`OFFERED`]; nothing below names one, so adding a
+//! database adds no code here.
 
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
+    Sizable as _,
+    button::Button,
     h_flex,
     input::{Input, InputState},
+    switch::Switch,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -14,9 +19,40 @@ use tangul_core::{
     AiAccess, Database, DbUser, DriverKind, SshAuth, SshConfig, TlsMode, ValueAccess,
 };
 
-use crate::ui::{Severity, alert_card};
+use crate::ui::{
+    FORM_LABEL_WIDTH, Severity, alert_card, form_note, form_row, form_section, segmented,
+};
 use tangul_assist::dialect::dialect_for;
 use tangul_data::profiles::{new_id, new_password};
+
+/// The databases a connection can be set up for (SQLite only holds the app's own
+/// data).
+pub(crate) const OFFERED: [DriverKind; 2] = [DriverKind::Postgres, DriverKind::Mysql];
+
+const TLS: [(TlsMode, &str); 3] = [
+    (TlsMode::Disable, "Off"),
+    (TlsMode::Prefer, "Prefer"),
+    (TlsMode::Require, "Require"),
+];
+
+const TLS_INFO: &str = "Prefer encrypts when the server offers TLS, Require always. \
+     Neither checks the server's certificate.";
+
+const SSH_AUTH: [(SshAuth, &str); 3] = [
+    (SshAuth::Agent, "SSH agent"),
+    (SshAuth::Key, "Key file"),
+    (SshAuth::Password, "Password"),
+];
+
+const ACCESS_INFO: &str = "With schema only, queries the AI writes open in a tab for \
+     you to run. Model provider and MCP server: in the AI settings.";
+
+const VALUES_INFO: &str = "From a sample of up to 10,000 rows per column. Columns that \
+     look like passwords, tokens or keys are never read.";
+
+const SET_UP_INFO: &str = "Adds a user that may only read, with a new password \
+     (Keychain), as the AI's. Saving opens the statements that create it; run them \
+     as an admin.";
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum FormMode {
@@ -316,312 +352,303 @@ impl ConnectionForm {
     }
 }
 
-fn field(label: &'static str, input: impl IntoElement) -> Div {
-    v_flex()
-        .gap_1()
-        .child(div().text_xs().child(label))
-        .child(input)
-}
+impl ConnectionForm {
+    fn render_connection(&self, cx: &mut Context<Self>) -> Div {
+        form_section("Connection", None, cx)
+            .child(form_row(
+                "Database",
+                None,
+                segmented(
+                    "driver",
+                    OFFERED.map(|d| (d, d.label().into())),
+                    self.driver,
+                    cx.listener(|this, driver: &DriverKind, window, cx| {
+                        this.set_driver(*driver, window, cx)
+                    }),
+                    cx,
+                ),
+                cx,
+            ))
+            .child(form_row("Name", None, Input::new(&self.name), cx))
+            .child(form_row(
+                "Host",
+                None,
+                h_flex()
+                    .flex_1()
+                    .gap_2()
+                    .child(Input::new(&self.host).flex_1())
+                    .child(Input::new(&self.port).w(px(72.))),
+                cx,
+            ))
+            .when(self.ssh, |this| {
+                this.child(form_note("As seen from the SSH server.", cx))
+            })
+            .child(form_row(
+                "Database name",
+                None,
+                Input::new(&self.database),
+                cx,
+            ))
+            .child(form_row(
+                "TLS",
+                Some(TLS_INFO),
+                segmented(
+                    "tls",
+                    TLS.map(|(mode, label)| (mode, label.into())),
+                    self.tls,
+                    cx.listener(|this, mode: &TlsMode, _, cx| {
+                        this.tls = *mode;
+                        cx.notify();
+                    }),
+                    cx,
+                ),
+                cx,
+            ))
+    }
 
-impl Render for ConnectionForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let driver_button = |kind: DriverKind, current: DriverKind, cx: &mut Context<Self>| {
-            let b = Button::new(kind.label()).label(kind.label()).small();
-            let b = if kind == current {
-                b.primary()
-            } else {
-                b.ghost()
-            };
-            b.on_click(cx.listener(move |this, _, window, cx| this.set_driver(kind, window, cx)))
-        };
-        let tls_button =
-            |mode: TlsMode, label: &'static str, current: TlsMode, cx: &mut Context<Self>| {
-                let b = Button::new(label).label(label).xsmall();
-                let b = if mode == current {
-                    b.primary()
-                } else {
-                    b.ghost()
-                };
-                b.on_click(cx.listener(move |this, _, _, cx| {
-                    this.tls = mode;
-                    cx.notify();
-                }))
-            };
-
-        let db_fields = v_flex()
-            .gap_3()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(driver_button(DriverKind::Postgres, self.driver, cx))
-                    .child(driver_button(DriverKind::Mysql, self.driver, cx)),
-            )
-            .child(field("Name", Input::new(&self.name)))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(field("Host", Input::new(&self.host)).flex_1())
-                    .child(field("Port", Input::new(&self.port)).w(px(90.))),
-            )
-            .child(field("Database", Input::new(&self.database)))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().text_xs().child("TLS"))
-                    .child(tls_button(TlsMode::Disable, "off", self.tls, cx))
-                    .child(tls_button(TlsMode::Prefer, "prefer", self.tls, cx))
-                    .child(tls_button(TlsMode::Require, "require", self.tls, cx)),
-            );
-        let auth_button = |auth: SshAuth, label: &'static str, cx: &mut Context<Self>| {
-            let b = Button::new(label).label(label).xsmall();
-            let b = if auth == self.ssh_auth {
-                b.primary()
-            } else {
-                b.ghost()
-            };
-            b.on_click(cx.listener(move |this, _, _, cx| {
-                this.ssh_auth = auth;
-                cx.notify();
-            }))
-        };
-        let ssh_fields = v_flex()
-            .gap_3()
-            .child(
+    fn render_user(&self, cx: &mut Context<Self>) -> Div {
+        form_section("Sign in", None, cx)
+            .child(form_row(
+                "User",
+                None,
                 div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Host and port above are as seen from the SSH server."),
-            )
-            .child(
+                    .id("form-user")
+                    .test_support()
+                    .flex_1()
+                    .child(Input::new(&self.user)),
+                cx,
+            ))
+            .child(form_row(
+                "Password",
+                None,
+                Input::new(&self.password).mask_toggle(),
+                cx,
+            ))
+    }
+
+    fn render_ssh(&self, cx: &mut Context<Self>) -> Div {
+        let toggle = Switch::new("use-ssh")
+            .checked(self.ssh)
+            .small()
+            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                this.ssh = *checked;
+                cx.notify();
+            }));
+        form_section("SSH tunnel", Some(toggle.into_any_element()), cx).when(self.ssh, |this| {
+            this.child(form_row(
+                "SSH host",
+                None,
                 h_flex()
+                    .flex_1()
                     .gap_2()
-                    .child(field("SSH host", Input::new(&self.ssh_host)).flex_1())
-                    .child(field("Port", Input::new(&self.ssh_port)).w(px(90.))),
-            )
-            .child(field("SSH user", Input::new(&self.ssh_user)))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().text_xs().child("Auth"))
-                    .child(auth_button(SshAuth::Agent, "ssh-agent", cx))
-                    .child(auth_button(SshAuth::Key, "key file", cx))
-                    .child(auth_button(SshAuth::Password, "password", cx)),
-            )
+                    .child(Input::new(&self.ssh_host).flex_1())
+                    .child(Input::new(&self.ssh_port).w(px(72.))),
+                cx,
+            ))
+            .child(form_row("SSH user", None, Input::new(&self.ssh_user), cx))
+            .child(form_row(
+                "Sign in with",
+                None,
+                segmented(
+                    "ssh-auth",
+                    SSH_AUTH.map(|(auth, label)| (auth, label.into())),
+                    self.ssh_auth,
+                    cx.listener(|this, auth: &SshAuth, _, cx| {
+                        this.ssh_auth = *auth;
+                        cx.notify();
+                    }),
+                    cx,
+                ),
+                cx,
+            ))
             .when(self.ssh_auth == SshAuth::Key, |this| {
-                this.child(
-                    h_flex()
-                        .gap_2()
-                        .child(field("Key file", Input::new(&self.ssh_key_path)).flex_1())
-                        .child(
-                            field("Passphrase", Input::new(&self.ssh_secret).mask_toggle())
-                                .w(px(150.)),
-                        ),
-                )
+                this.child(form_row(
+                    "Key file",
+                    None,
+                    Input::new(&self.ssh_key_path),
+                    cx,
+                ))
+                .child(form_row(
+                    "Passphrase",
+                    None,
+                    Input::new(&self.ssh_secret).mask_toggle(),
+                    cx,
+                ))
             })
             .when(self.ssh_auth == SshAuth::Password, |this| {
-                this.child(field(
+                this.child(form_row(
                     "SSH password",
+                    None,
                     Input::new(&self.ssh_secret).mask_toggle(),
+                    cx,
                 ))
-            });
-        let db_fields = db_fields
-            .child(
-                Checkbox::new("use-ssh")
-                    .label("Connect through an SSH tunnel")
-                    .checked(self.ssh)
-                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        this.ssh = *checked;
+            })
+        })
+    }
+
+    fn render_ai(&self, cx: &mut Context<Self>) -> Div {
+        let toggle = Switch::new("ai-tools")
+            .checked(self.ai_tools)
+            .small()
+            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                this.ai_tools = *checked;
+                cx.notify();
+            }));
+        let section = form_section("AI tools", Some(toggle.into_any_element()), cx);
+        if !self.ai_tools {
+            return section.child(form_note_flush(
+                "Not offered to the assistant or MCP clients.",
+                cx,
+            ));
+        }
+        let section = section
+            .child(form_row(
+                "Access",
+                Some(ACCESS_INFO),
+                segmented(
+                    "ai-access",
+                    AiAccess::ALL.map(|a| (a, a.title().into())),
+                    self.ai_access,
+                    cx.listener(|this, access: &AiAccess, _, cx| {
+                        this.ai_access = *access;
                         cx.notify();
-                    })),
-            )
-            .when(self.ssh, |this| this.child(ssh_fields));
-        // Which user the AI assistant connects as; only once the database has users.
+                    }),
+                    cx,
+                ),
+                cx,
+            ))
+            .child(form_note(self.ai_access.description(), cx));
+        // Its user and value profiles only matter where the AI reads data, and the
+        // user only once the database has users.
+        if !self.ai_access.is_data() {
+            return section;
+        }
         let users = self
             .base
             .as_ref()
             .map(|b| b.users.clone())
             .unwrap_or_default();
-        let assistant_button = |id: Option<String>,
-                                label: String,
-                                current: &Option<String>,
-                                cx: &mut Context<Self>| {
-            let key = format!("assistant-{}", id.as_deref().unwrap_or("-"));
-            let b = Button::new(SharedString::from(key)).label(label).xsmall();
-            let b = if &id == current {
-                b.primary()
-            } else {
-                b.ghost()
-            };
-            b.on_click(cx.listener(move |this, _, _, cx| {
-                this.assistant_user = id.clone();
-                cx.notify();
-            }))
-        };
-        // Also when setting up a new connection, before it has users.
-        let db_fields = db_fields
-            .child(
-                Checkbox::new("editor-values")
-                    .label("Suggest values from the data while typing conditions")
-                    .checked(self.editor_values)
-                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        this.editor_values = *checked;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Checkbox::new("ai-tools")
-                    .label("Available to AI tools (MCP clients, the assistant)")
-                    .checked(self.ai_tools)
-                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        this.ai_tools = *checked;
-                        cx.notify();
-                    })),
-            )
-            .when(self.ai_tools, |this| {
-                this.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .flex_wrap()
-                        .child(div().text_xs().child("AI access"))
-                        .children(AiAccess::ALL.map(|access| {
-                            let b =
-                                Button::new(SharedString::from(format!("ai-access-{access:?}")))
-                                    .label(access.title())
-                                    .tooltip(access.description())
-                                    .xsmall();
-                            let b = if self.ai_access == access {
-                                b.primary()
-                            } else {
-                                b.ghost()
-                            };
-                            b.on_click(cx.listener(move |this, _, _, cx| {
-                                this.ai_access = access;
-                                cx.notify();
-                            }))
-                        })),
-                )
-            })
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(if self.ai_access.is_data() {
-                        "Model provider and MCP server: in the AI settings."
-                    } else {
-                        "Table contents stay hidden from the AI; queries it writes open in \
-                         a tab for you to run."
-                    }),
-            );
         let can_set_up = self.mode == FormMode::EditDatabase
             && self.ai_account.is_none()
             && dialect_for(self.driver)
                 .readonly_account_sql("", "", "", &[])
                 .is_some();
-        // Its AI user and value profiles only matter where the AI reads data.
-        let db_fields = db_fields.when(!users.is_empty() && self.ai_access.is_data(), |this| {
-            let current = self.assistant_user.clone();
-            this.child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .flex_wrap()
-                            .child(div().text_xs().child("AI connects as"))
-                            .child(assistant_button(None, "Your user".into(), &current, cx))
-                            .children(users.iter().map(|u| {
-                                assistant_button(Some(u.id.clone()), u.user.clone(), &current, cx)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if current.is_none() {
-                                "Reads what you can read. A user that can only read on the \
-                                 server is safer."
-                            } else {
-                                "The AI connects only as this user, never as yours."
-                            }),
-                    )
-                    .when(can_set_up, |this| {
-                        this.child(
-                            h_flex().child(
-                                Button::new("set-up-ai-account")
-                                    .label("Set up a read-only AI user…")
-                                    .xsmall()
-                                    .outline()
-                                    .tooltip(
-                                        "Adds a user that may only read, with a new password \
-                                         (Keychain), as the AI's. Saving opens the statements \
-                                         that create it; run them as an admin.",
-                                    )
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.set_up_ai_account(cx)),
-                                    ),
-                            ),
-                        )
-                    })
-                    .when_some(self.ai_account.as_ref(), |this, (user, _)| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().success)
-                                .child(format!(
-                                    "{} will be added as the AI's user. Save, then run the \
-                                 statements in the new tab as an admin.",
-                                    user.user
-                                )),
-                        )
-                    })
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .flex_wrap()
-                            .child(div().text_xs().child("Column values"))
-                            .children(ValueAccess::ALL.map(|access| {
-                                let b = Button::new(SharedString::from(format!(
-                                    "ai-values-{access:?}"
-                                )))
-                                .label(access.title())
-                                .tooltip(access.description())
-                                .xsmall();
-                                let b = if self.ai_values == access {
-                                    b.primary()
-                                } else {
-                                    b.ghost()
-                                };
-                                b.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.ai_values = access;
-                                    cx.notify();
-                                }))
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                "From a sample of up to 10,000 rows per column. Columns that \
-                                 look like passwords, tokens or keys are never read.",
-                            ),
+        section
+            .when(!users.is_empty(), |this| {
+                let options = std::iter::once((None, "Your user".into())).chain(
+                    users
+                        .iter()
+                        .map(|u| (Some(u.id.clone()), SharedString::from(u.user.clone()))),
+                );
+                // Ids for the segmented control must be `Copy`: index into the list.
+                let ids: Vec<Option<String>> = options.clone().map(|(id, _)| id).collect();
+                let chosen = ids
+                    .iter()
+                    .position(|id| *id == self.assistant_user)
+                    .unwrap_or(0);
+                this.child(form_row(
+                    "Connects as",
+                    Some(crate::ui::USER_INFO),
+                    segmented(
+                        "assistant",
+                        options.enumerate().map(|(ix, (_, label))| (ix, label)),
+                        chosen,
+                        cx.listener(move |this, ix: &usize, _, cx| {
+                            this.assistant_user = ids[*ix].clone();
+                            cx.notify();
+                        }),
+                        cx,
                     ),
-            )
-        });
-        let user_fields = h_flex()
-            .gap_2()
-            .child(field("User", Input::new(&self.user)).flex_1())
-            .child(field("Password", Input::new(&self.password).mask_toggle()).flex_1());
+                    cx,
+                ))
+                .child(match (&self.ai_account, &self.assistant_user) {
+                    (Some((user, _)), _) => form_note(
+                        format!(
+                            "{} is added as the AI's user. Save, then run the statements \
+                             in the new tab as an admin.",
+                            user.user
+                        ),
+                        cx,
+                    ),
+                    (None, None) => form_note(crate::ui::YOUR_USER, cx),
+                    (None, Some(_)) => form_note("Never connects as your user.", cx),
+                })
+                .when(can_set_up, |this| {
+                    this.child(
+                        h_flex().pl(px(FORM_LABEL_WIDTH + 12.)).child(
+                            Button::new("set-up-ai-account")
+                                .label("Set up a read-only AI user…")
+                                .xsmall()
+                                .outline()
+                                .tooltip(SET_UP_INFO)
+                                .on_click(cx.listener(|this, _, _, cx| this.set_up_ai_account(cx))),
+                        ),
+                    )
+                })
+            })
+            .child(form_row(
+                "Column values",
+                Some(VALUES_INFO),
+                segmented(
+                    "ai-values",
+                    ValueAccess::ALL.map(|a| (a, a.title().into())),
+                    self.ai_values,
+                    cx.listener(|this, access: &ValueAccess, _, cx| {
+                        this.ai_values = *access;
+                        cx.notify();
+                    }),
+                    cx,
+                ),
+                cx,
+            ))
+            .child(form_note(self.ai_values.description(), cx))
+    }
 
+    fn render_editor(&self, cx: &mut Context<Self>) -> Div {
+        form_section("Editor", None, cx).child(
+            h_flex()
+                .gap_3()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_sm()
+                        .child("Suggest values while typing conditions"),
+                )
+                .child(
+                    Switch::new("editor-values")
+                        .checked(self.editor_values)
+                        .small()
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.editor_values = *checked;
+                            cx.notify();
+                        })),
+                ),
+        )
+    }
+}
+
+/// A note under a section heading, not under a control.
+fn form_note_flush(text: &'static str, cx: &App) -> Div {
+    form_note(text, cx).pl_0()
+}
+
+impl Render for ConnectionForm {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let db = self.mode.has_db_fields();
         v_flex()
-            .gap_3()
-            .when(self.mode.has_db_fields(), |this| this.child(db_fields))
-            .when(self.mode.has_user_fields(), |this| this.child(user_fields))
+            .id("connection-form")
+            .test_support()
+            .gap_5()
+            .when(db, |this| this.child(self.render_connection(cx)))
+            .when(self.mode.has_user_fields(), |this| {
+                this.child(self.render_user(cx))
+            })
+            .when(db, |this| {
+                this.child(self.render_ssh(cx))
+                    .child(self.render_ai(cx))
+                    .child(self.render_editor(cx))
+            })
             .children(
                 self.error
                     .clone()

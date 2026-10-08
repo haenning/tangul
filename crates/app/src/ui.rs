@@ -247,6 +247,116 @@ pub const USER_INFO: &str = "The database user the AI's queries run as. A user t
 pub const VALUES_INFO: &str = "Profiles the AI may take of a column's values. They don't limit the AI's own \
      queries; the rights of its database user do.";
 
+/// Width of a form's labels, so that its controls line up.
+pub const FORM_LABEL_WIDTH: f32 = 112.;
+
+/// One choice out of a few as a segmented control: a muted track, the chosen
+/// option raised on the background color. The accent stays for what needs it. The
+/// options get the ids `(id, index)`.
+pub fn segmented<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    options: impl IntoIterator<Item = (T, SharedString)>,
+    chosen: T,
+    on_select: impl Fn(&T, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    let (fg, muted, raised) = (theme.foreground, theme.muted_foreground, theme.background);
+    let on_select = std::rc::Rc::new(on_select);
+    h_flex()
+        .flex_wrap()
+        .gap_0p5()
+        .p_0p5()
+        .rounded(theme.radius)
+        .bg(theme.tab_bar_segmented)
+        .children(options.into_iter().enumerate().map(|(ix, (value, label))| {
+            let on_select = on_select.clone();
+            div()
+                .id((id, ix))
+                .test_support()
+                .px_2p5()
+                .py_0p5()
+                .rounded(theme.radius)
+                .text_xs()
+                .map(|d| {
+                    if value == chosen {
+                        d.bg(raised).text_color(fg).shadow_xs()
+                    } else {
+                        d.text_color(muted)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(fg))
+                    }
+                })
+                .child(label)
+                .on_click(move |_, window, cx| on_select(&value, window, cx))
+        }))
+}
+
+/// A form section: its heading in the muted color, with a control at the right if
+/// one turns the section on (a switch), then its rows. Sections of a form keep
+/// `gap_5` between them, rows `gap_2`.
+pub fn form_section(title: &'static str, toggle: Option<AnyElement>, cx: &App) -> Div {
+    v_flex().gap_2().child(
+        h_flex()
+            .h(px(20.))
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(title),
+            )
+            .children(toggle),
+    )
+}
+
+/// A form row: the label at the left (with an (i) if `info` explains it), the
+/// control after it.
+pub fn form_row(
+    label: &'static str,
+    info: Option<&'static str>,
+    control: impl IntoElement,
+    cx: &App,
+) -> Div {
+    let muted = cx.theme().muted_foreground;
+    h_flex()
+        .gap_3()
+        .items_center()
+        .child(
+            h_flex()
+                .w(px(FORM_LABEL_WIDTH))
+                .flex_none()
+                .gap_1()
+                .items_center()
+                .text_sm()
+                .child(label)
+                .when_some(info, |this, info| {
+                    this.child(
+                        div()
+                            .id(SharedString::from(format!("info-{label}")))
+                            .test_support()
+                            .child(Icon::new(IconName::Info).xsmall().text_color(muted))
+                            .tooltip(wrapped_tooltip(info)),
+                    )
+                }),
+        )
+        .child(h_flex().flex_1().min_w_0().gap_2().child(control))
+}
+
+/// A few words under a form row's control, in the muted color, lined up with it
+/// and closer to it than the next row.
+pub fn form_note(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .mt(px(-4.))
+        .pl(px(FORM_LABEL_WIDTH + 12.))
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .whitespace_normal()
+        .child(text.into())
+}
+
 /// A form dialog's Enter: does what its main button does. The dialog's default
 /// (`on_ok` unset) only closes it, dropping what was typed. `save` closes the
 /// dialog itself once it succeeds, so a form with an error stays open.

@@ -77,7 +77,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     it says enough and needs nothing more. Only where the title alone doesn't make the
     option clear, a few words below it in the muted color, e.g. "Schema only" /
     "Table contents stay hidden from the AI" (not "Your user" / "Uses your user").
-    Longer explanations go behind an (i) (`menu_section`), never as paragraphs
+    Longer explanations go behind an (i) (`menu_section`), never as paragraphs.
+    Forms: `form_section` / `form_row` / `form_note`, a choice of a few as `segmented`
+    (muted track, the chosen one raised); the accent only where it means something
   - `board/`: a board in a tab (header, tiles as `ResultView`s, edit mode with drag and
     drop); knows nothing about the workspace: asks for changes with events, refreshes
     in one batch (`Caller::Board`) only while it is drawn

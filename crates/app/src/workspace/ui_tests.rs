@@ -1023,6 +1023,59 @@ fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn the_database_form_offers_every_database_and_saves_the_choices(cx: &mut TestAppContext) {
+    use crate::connection_form::{FormMode, OFFERED};
+    use tangul_core::{AiAccess, DriverKind};
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_form(FormMode::NewDatabase, None, None, window, cx)
+        })
+    });
+    step(handle, cx, |window, _| {
+        for ix in 0..OFFERED.len() {
+            assert!(window.find(("driver", ix)).visible());
+        }
+        // Off until turned on.
+        assert!(window.try_find(("ssh-auth", 0usize)).is_none());
+    });
+    let mysql = OFFERED
+        .iter()
+        .position(|d| *d == DriverKind::Mysql)
+        .unwrap();
+    step(handle, cx, |window, cx| window.click(("driver", mysql), cx));
+    step(handle, cx, |window, cx| window.click("use-ssh", cx));
+    step(handle, cx, |window, _| {
+        assert!(window.find(("ssh-auth", 0usize)).visible())
+    });
+    step(handle, cx, |window, cx| window.click("use-ssh", cx));
+    let schema = AiAccess::ALL
+        .iter()
+        .position(|a| *a == AiAccess::Schema)
+        .unwrap();
+    step(handle, cx, |window, cx| {
+        window.click(("ai-access", schema), cx)
+    });
+    step(handle, cx, |window, _| {
+        // Column values only matter where the AI reads data.
+        assert!(window.try_find(("ai-values", 0usize)).is_none())
+    });
+    step(handle, cx, |window, cx| window.click("form-user", cx));
+    step(handle, cx, |window, cx| window.input("app", cx));
+    step(handle, cx, |window, cx| window.click("save", cx));
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let db = ws.data.profiles.databases.last().expect("saved");
+        assert_eq!(db.driver, DriverKind::Mysql);
+        // The port follows the database while it is the default.
+        assert_eq!(db.port, 3306);
+        assert_eq!(db.ai_access, AiAccess::Schema);
+        assert!(db.ssh.is_none());
+        assert_eq!(db.users[0].user, "app");
+    });
+}
+
+#[gpui_kit::test]
 fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
     use tangul_core::{Database, DbUser, DriverKind, TlsMode};
     let (handle, workspace) = open(cx);
