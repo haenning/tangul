@@ -12,7 +12,7 @@ use crate::board::{
     AddForm, Adding, BoardEvent, BoardTab, BookmarkChoice, Choices, DetailsForm, Target,
 };
 use crate::query_tab::BoardTile;
-use crate::ui::{enter_saves, hover_actions};
+use crate::ui::{dialog_form, enter_saves, hover_actions};
 
 /// What "Add to board" adds: a tile, or the same as a link (chosen in the dialog).
 #[derive(Clone)]
@@ -335,7 +335,7 @@ impl Workspace {
                 .on_ok(enter_saves(save.clone()))
                 .title("Board details")
                 .w(px(560.))
-                .child(form.clone())
+                .child(dialog_form(form.clone()))
                 .footer(
                     h_flex()
                         .w_full()
@@ -551,7 +551,7 @@ impl Workspace {
                 .on_ok(enter_saves(save.clone()))
                 .title(title)
                 .w(px(420.))
-                .child(form.clone())
+                .child(dialog_form(form.clone()))
                 .footer(
                     h_flex()
                         .w_full()

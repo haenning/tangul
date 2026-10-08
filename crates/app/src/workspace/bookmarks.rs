@@ -1,7 +1,7 @@
 //! Bookmarks: the dialog, saving, deleting, opening, and the sidebar panel.
 
 use super::*;
-use crate::ui::{enter_saves, hover_actions};
+use crate::ui::{dialog_form, enter_saves, hover_actions};
 
 impl Workspace {
     /// Asks for a name and saves `sql` as a bookmark (updating `existing` if set).
@@ -48,7 +48,7 @@ impl Workspace {
                 .on_ok(enter_saves(save.clone()))
                 .title(title)
                 .w(px(460.))
-                .child(form.clone())
+                .child(dialog_form(form.clone()))
                 .footer(
                     h_flex()
                         .w_full()

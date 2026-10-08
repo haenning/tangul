@@ -26,7 +26,7 @@ use super::form::{AskForm, QueryForm, TileForm, view_label};
 use super::{BoardEvent, BoardTab, link_action, link_icon};
 use crate::assets::{Lucide, style_icon};
 use crate::result_view::{SetView, chart_menu};
-use crate::ui::enter_saves;
+use crate::ui::{dialog_form, enter_saves};
 
 /// A tile's height; tables scroll inside it.
 const TILE_HEIGHT: f32 = 300.;
@@ -613,7 +613,7 @@ impl BoardTab {
                 .on_ok(enter_saves(save.clone()))
                 .title("New tile")
                 .w(px(560.))
-                .child(form.clone())
+                .child(dialog_form(form.clone()))
                 .footer(
                     h_flex()
                         .w_full()
@@ -651,7 +651,7 @@ impl BoardTab {
                 .on_ok(enter_saves(save.clone()))
                 .title("Ask AI for a tile")
                 .w(px(480.))
-                .child(form.clone())
+                .child(dialog_form(form.clone()))
                 .footer(footer(save))
         });
     }
@@ -681,7 +681,7 @@ impl BoardTab {
                 .on_ok(enter_saves(save.clone()))
                 .title("Tile")
                 .w(px(460.))
-                .child(form.clone())
+                .child(dialog_form(form.clone()))
                 .footer(footer(save))
         });
     }

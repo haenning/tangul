@@ -388,6 +388,13 @@ pub fn hover_actions(group: SharedString, bg: Hsla) -> Div {
         .group_hover(group, |s| s.visible())
 }
 
+/// A form as a dialog's body. The dialog clips its body at its edges, right under
+/// the title and above the footer, which cut off the focus ring of a first or last
+/// text field; a little room keeps it whole.
+pub fn dialog_form(form: impl IntoElement) -> Div {
+    div().py(px(6.)).child(form)
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_long;

@@ -1,7 +1,7 @@
 //! Connections: connecting, switching database and user, the database forms and engine events.
 
 use super::*;
-use crate::ui::enter_saves;
+use crate::ui::{dialog_form, enter_saves};
 
 impl Workspace {
     /// Changes what the database lets the AI do and saves the profiles.
@@ -353,7 +353,7 @@ impl Workspace {
                 .overlay_closable(false)
                 .keyboard(false)
                 .close_button(false)
-                .child(form.clone())
+                .child(dialog_form(form.clone()))
                 .footer(
                     h_flex()
                         .w_full()
