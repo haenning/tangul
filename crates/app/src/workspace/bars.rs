@@ -482,8 +482,8 @@ pub(super) fn database_menu(
     if !databases.is_empty() {
         menu = menu.separator();
     }
-    if let Some(id) = active {
-        let (ws, id) = (workspace.clone(), id.to_string());
+    if let Some(active) = active {
+        let (ws, id) = (workspace.clone(), active.to_string());
         menu = menu.item(
             PopupMenuItem::new("Edit database…")
                 .icon(IconName::Settings)
@@ -491,6 +491,14 @@ pub(super) fn database_menu(
                     let _ = ws.update(cx, |ws, cx| {
                         ws.open_form(FormMode::EditDatabase, Some(id.clone()), None, window, cx)
                     });
+                }),
+        );
+        let (ws, id) = (workspace.clone(), active.to_string());
+        menu = menu.item(
+            PopupMenuItem::new("Database settings file")
+                .icon(IconName::File)
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.open_database_settings(&id, window, cx));
                 }),
         );
     }

@@ -179,6 +179,8 @@ pub struct Workspace {
     /// The board the assistant was last asked for a tile from, and the question:
     /// "Add to board" on its answer goes there.
     board_asked: Option<(String, String)>,
+    /// The tab drawn last, to tell a board tab when it is shown again.
+    shown_tab: Option<EntityId>,
     /// The editor's quick looks at column values.
     quick_looks: quick_values::QuickLooks,
     /// The other databases' tabs, and saving the pinned ones.
@@ -308,6 +310,7 @@ impl Workspace {
             mcp: mcp::Mcp::default(),
             assistant: assistant::Assistant::default(),
             board_asked: None,
+            shown_tab: None,
             quick_looks: quick_values::QuickLooks::start(cx),
             db_tabs: database_tabs::DatabaseTabs::default(),
             focus_handle: cx.focus_handle(),
@@ -448,6 +451,13 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.tabs.active().map(TabItem::view);
+        let shown = active.as_ref().map(AnyView::entity_id);
+        if shown != self.shown_tab {
+            self.shown_tab = shown;
+            if let Some(board) = self.tabs.active().and_then(TabItem::board).cloned() {
+                cx.defer(move |cx| board.update(cx, |b, cx| b.shown(cx)));
+            }
+        }
         v_flex()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)

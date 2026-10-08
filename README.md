@@ -10,7 +10,11 @@ out of your way.
 
 ![tangul](docs/screenshot.png)
 
-**[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)**
+**[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)** · **[Testing](docs/TESTING.md)**
+
+[![tests](https://github.com/haenning/tangul/raw/badges/tests.svg)](docs/TESTING.md)
+[![coverage](https://github.com/haenning/tangul/raw/badges/coverage.svg)](https://github.com/haenning/tangul/blob/badges/summary.md)
+[![databases](https://github.com/haenning/tangul/raw/badges/databases.svg)](docs/TESTING.md#live-database-tests)
 
 ## See your data
 
@@ -46,12 +50,21 @@ out of your way.
   it took and how many rows it returned.
 - **Command palette** (⌘⇧P) for bookmarks, history and settings.
 
-## Investigate with AI (in development)
+## Investigate with AI
 
-Not built yet; follow along in [#37](https://github.com/haenning/tangul/issues/37).
-
-- **Ask in plain language.** The AI writes the SQL, runs it, follows your foreign keys
-  and explains what it finds.
+- **An assistant next to your data.** Ask in plain language in the chat on the right,
+  or type a question into the editor and run it. The AI writes the SQL, runs it,
+  follows your foreign keys and explains what it finds. Use your own key for
+  Anthropic, OpenAI or any OpenAI-compatible service, or Gemini, or a local model with
+  Ollama.
+- **Results and charts in a tab.** When the AI has an answer, it opens it for you as
+  the grid or a chart, without running the query again.
+- **Boards by AI.** Ask for a board and the AI sets one up: tiles with their queries,
+  shown as tables or charts. It can also change a board, but never removes tiles or
+  links. A query whose plan looks heavy waits until you have run it yourself.
+- **Your own AI tools too (MCP).** tangul runs an MCP server on your Mac (local only,
+  with a token), so Claude Code or any other MCP client that speaks HTTP can use the
+  same tools, with the same limits.
 - **It can only read.** Its queries run one statement at a time, exactly as tangul
   checked them, in a read-only transaction that is always rolled back, so nothing it
   runs can change your data.
@@ -66,7 +79,12 @@ Not built yet; follow along in [#37](https://github.com/haenning/tangul/issues/3
   that can run commands or edit files on your Mac (Claude Code, for one) could also
   change tangul's `settings.json` and switch off read-only mode for your own users;
   only the database's grants hold against that.
-- **You can see what it ran.** Every AI query is logged locally.
+- **Redact or hide columns.** Per database, say which columns the AI gets only as
+  `⟦redacted⟧` or not at all (`*.email`, `orders.adr*`, whole tables), with
+  exceptions (`"hide": ["*", "!sales.*.*"]`). Renamed and computed columns count as the ones they come from.
+  [How it works](docs/ai-view.md).
+- **You can see what it ran.** Every AI query is logged locally, under `-- ai view`:
+  run it again and you see exactly what the AI saw.
 
 ## Safe on production
 
@@ -132,7 +150,7 @@ to point at production.
 ## Status
 
 tangul is young and under active development. It runs on macOS (Apple Silicon and
-Intel) and supports PostgreSQL and MySQL. AI investigation is being built. Plans and
+Intel) and supports PostgreSQL and MySQL, with an AI assistant and an MCP server. Plans and
 ideas are in the [roadmap](ROADMAP.md); requests are welcome as
 [issues](https://github.com/haenning/tangul/issues).
 

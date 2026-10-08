@@ -356,6 +356,12 @@ impl ResultView {
         self.running
     }
 
+    /// The cell at `row`, `col` of the result shown (tests).
+    #[cfg(test)]
+    pub fn cell(&self, row: usize, col: usize, cx: &App) -> Option<String> {
+        self.table.read(cx).delegate().cell(row, col)
+    }
+
     pub fn columns(&self, cx: &App) -> Vec<String> {
         self.table.read(cx).delegate().column_names()
     }

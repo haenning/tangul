@@ -230,6 +230,21 @@ impl Dialect for Mysql {
         }
     }
 
+    fn explain_sql(&self, sql: &str) -> Option<String> {
+        Some(format!("EXPLAIN FORMAT=JSON {sql}"))
+    }
+
+    /// `{"query_block": {"cost_info": {"query_cost": "1234.50"}, …}}` (MySQL);
+    /// MariaDB's plan has no cost.
+    fn plan_cost(&self, plan: &str) -> Option<f64> {
+        let plan: serde_json::Value = serde_json::from_str(plan).ok()?;
+        let cost = plan
+            .get("query_block")?
+            .get("cost_info")?
+            .get("query_cost")?;
+        cost.as_f64().or_else(|| cost.as_str()?.parse().ok())
+    }
+
     fn side_effect_functions(&self) -> &'static [&'static str] {
         &[
             "load_file",

@@ -25,6 +25,7 @@ impl Workspace {
         let action = |id: &'static str, icon: Icon, label: &'static str, keys: &'static str| {
             h_flex()
                 .id(id)
+                .test_support()
                 .w(px(280.))
                 .px_3()
                 .py_1p5()
@@ -56,6 +57,17 @@ impl Workspace {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.add_tab("", window, cx);
                                 })),
+                        )
+                        .child(
+                            action(
+                                "empty-new-board",
+                                Icon::new(Lucide::LayoutDashboard),
+                                "New board",
+                                "",
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.new_board(window, cx)),
+                            ),
                         )
                     })
                     .child(

@@ -63,14 +63,16 @@ pub fn top_values_sql(d: &dyn Dialect, table: &str, column: &str) -> String {
     )
 }
 
-/// The editor's quick look: the most frequent non-NULL values among the first
-/// [`QUICK_ROWS`] rows the server returns (NULLs are dropped after the limit, so
-/// the scan stops after those rows however empty the column is).
+/// The editor's quick look: the most frequent non-NULL values of at most
+/// [`VALUE_CHARS`] characters among the first [`QUICK_ROWS`] rows the server
+/// returns (both dropped after the limit, so the scan stops after those rows
+/// however empty the column is; longer values leave their places to ones that fit).
 pub fn quick_values_sql(d: &dyn Dialect, table: &str, column: &str) -> String {
     format!(
         "SELECT v, count(*) FROM (SELECT {c} AS v FROM {table} {}) AS tangul_sample \
-         WHERE v IS NOT NULL GROUP BY v ORDER BY 2 DESC, 1 {}",
+         WHERE v IS NOT NULL AND {} <= {VALUE_CHARS} GROUP BY v ORDER BY 2 DESC, 1 {}",
         d.limit(QUICK_ROWS, 0),
+        d.char_length("v"),
         d.limit(QUICK_VALUES, 0),
         c = quote_ident(d, column)
     )
@@ -113,8 +115,11 @@ mod tests {
         assert_eq!(
             quick_values_sql(pg, "app.orders", "Status"),
             "SELECT v, count(*) FROM (SELECT \"Status\" AS v FROM app.orders LIMIT 500) AS \
-             tangul_sample WHERE v IS NOT NULL GROUP BY v ORDER BY 2 DESC, 1 LIMIT 20"
+             tangul_sample WHERE v IS NOT NULL AND char_length(v) <= 64 GROUP BY v \
+             ORDER BY 2 DESC, 1 LIMIT 20"
         );
+        let lite = dialect_for(DriverKind::Sqlite);
+        assert!(quick_values_sql(lite, "t", "c").contains("AND length(v) <= 64"));
     }
 
     #[test]

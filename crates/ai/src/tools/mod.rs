@@ -1,5 +1,6 @@
 //! The tools, one module each, and what they share.
 
+mod boards;
 mod bookmarks;
 mod catalog;
 mod cells;
@@ -33,6 +34,10 @@ pub(crate) fn all() -> Vec<Box<dyn Tool>> {
         Box::new(cells::GetCell),
         Box::new(bookmarks::ListBookmarks),
         Box::new(propose::ProposeSql),
+        Box::new(boards::ListBoards),
+        Box::new(boards::GetBoard),
+        Box::new(boards::CreateBoard),
+        Box::new(boards::EditBoard),
     ]
 }
 

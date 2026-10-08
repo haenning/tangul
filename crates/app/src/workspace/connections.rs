@@ -531,10 +531,13 @@ impl Workspace {
         };
         match event {
             Event::Query { query, event } => {
-                if let Some(done) = self.router.deliver(query, event, cx)
-                    && !done.run.derived
-                {
-                    self.record_run(done.run, done.error, done.elapsed_ms, cx);
+                if let Some(done) = self.router.deliver(query, event, cx) {
+                    if done.error.is_none() {
+                        self.connection_works(&done.run.user_id, cx);
+                    }
+                    if !done.run.derived {
+                        self.record_run(done.run, done.error, done.elapsed_ms, cx);
+                    }
                 }
             }
             Event::Connected { conn } => {
@@ -721,6 +724,20 @@ impl Workspace {
     }
 
     /// Changes the tab connection `conn` and redraws the tabs on it.
+    /// A query on `user_id`'s connection succeeded: it works again after a failure
+    /// (the pool reconnects on its own once the network is back).
+    fn connection_works(&self, user_id: &str, cx: &mut Context<Self>) {
+        if let Some(conn) = self.tab_conn(user_id)
+            && matches!(conn.read(cx).status, ConnStatus::Failed(_))
+        {
+            conn.update(cx, |c, cx| {
+                c.status = ConnStatus::Connected;
+                cx.notify();
+            });
+            cx.notify();
+        }
+    }
+
     pub(super) fn update_conn(
         &self,
         conn: ConnId,

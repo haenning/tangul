@@ -73,6 +73,8 @@ async fn server_on(
     let schema = SchemaIndex::new(info, dialect, dialect.default_schema(""));
     knowledge.set_schema("u1", "db1", conn, Arc::new(schema));
     let exposed = vec![Exposed {
+        database: String::new(),
+        columns: Default::default(),
         name: "shop".into(),
         user: "u1".into(),
         conn: Some(conn),
@@ -277,7 +279,11 @@ async fn a_client_lists_and_calls_the_tools() {
                 "run_readonly",
                 "get_cell",
                 "list_bookmarks",
-                "propose_sql"
+                "propose_sql",
+                "list_boards",
+                "get_board",
+                "create_board",
+                "edit_board"
             ]
         );
         let describe = tools
@@ -369,7 +375,7 @@ async fn the_latest_protocol_gets_a_cacheable_list() {
         let result = &reply.json()["result"];
         assert_eq!(result["ttlMs"], 0, "{result}");
         assert_eq!(result["cacheScope"], "private");
-        assert_eq!(result["tools"].as_array().unwrap().len(), 13);
+        assert_eq!(result["tools"].as_array().unwrap().len(), 17);
         let reply = post(
             addr,
             &[

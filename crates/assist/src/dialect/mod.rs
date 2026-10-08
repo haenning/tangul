@@ -55,6 +55,11 @@ pub trait Dialect: Sync {
         }
     }
 
+    /// The number of characters of `expr`.
+    fn char_length(&self, expr: &str) -> String {
+        format!("char_length({expr})")
+    }
+
     /// `column` as text, and the operator matching it case-insensitively with `LIKE`
     /// patterns.
     fn text_match(&self, column: &str) -> (String, &'static str);
@@ -137,7 +142,23 @@ pub trait Dialect: Sync {
     /// sequences, settings, other servers) or read files. Lower case; the guard
     /// matches them as substrings.
     fn side_effect_functions(&self) -> &'static [&'static str];
+
+    /// `EXPLAIN` that plans `sql` without running it and answers with the plan as
+    /// JSON in one cell, for [`Dialect::plan_cost`]. `None` where there is none.
+    fn explain_sql(&self, _sql: &str) -> Option<String> {
+        None
+    }
+
+    /// The planner's estimated cost in `plan` (the cell [`Dialect::explain_sql`]
+    /// answers with), in its own units.
+    fn plan_cost(&self, _plan: &str) -> Option<f64> {
+        None
+    }
 }
+
+/// Above this estimated cost a query an AI writes waits for the user: about a full
+/// scan of tens of millions of rows, in both Postgres' and MySQL's units.
+pub const HEAVY_COST: f64 = 1_000_000.;
 
 impl std::fmt::Debug for dyn Dialect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -357,6 +378,34 @@ mod tests {
             d(DriverKind::Sqlite).default_schema("").as_deref(),
             Some("main")
         );
+    }
+
+    #[test]
+    fn plans_and_their_costs() {
+        let (pg, my) = (
+            dialect_for(DriverKind::Postgres),
+            dialect_for(DriverKind::Mysql),
+        );
+        assert_eq!(
+            pg.explain_sql("select 1").as_deref(),
+            Some("EXPLAIN (FORMAT JSON) select 1")
+        );
+        assert_eq!(
+            my.explain_sql("select 1").as_deref(),
+            Some("EXPLAIN FORMAT=JSON select 1")
+        );
+        assert_eq!(
+            dialect_for(DriverKind::Sqlite).explain_sql("select 1"),
+            None
+        );
+        let plan = r#"[{"Plan": {"Node Type": "Seq Scan", "Total Cost": 1234.5, "Plan Rows": 9}}]"#;
+        assert_eq!(pg.plan_cost(plan), Some(1234.5));
+        assert_eq!(pg.plan_cost("nonsense"), None);
+        let plan = r#"{"query_block": {"select_id": 1, "cost_info": {"query_cost": "2500.75"}}}"#;
+        assert_eq!(my.plan_cost(plan), Some(2500.75));
+        // MariaDB: no cost.
+        assert_eq!(my.plan_cost(r#"{"query_block": {"select_id": 1}}"#), None);
+        assert_eq!(dialect_for(DriverKind::Sqlite).plan_cost(plan), None);
     }
 
     #[test]

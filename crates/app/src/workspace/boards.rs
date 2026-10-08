@@ -3,8 +3,12 @@
 //! tile's own query tab (opened from the tile or for a new one; saving there writes
 //! the tile), and the sidebar panel.
 
+use std::collections::HashMap;
+use tangul_ai::{BoardCall, BoardReply, BoardRequest};
+
+use tangul_assist::dialect::{Dialect, HEAVY_COST};
 use tangul_assist::guard;
-use tangul_core::board::{Board, Link, LinkTo, Tile};
+use tangul_core::board::{AiCaller, Board, Link, LinkTo, Tile};
 use tangul_service::boards::{self, Edit};
 
 use super::*;
@@ -145,13 +149,15 @@ impl Workspace {
                     cx.notify();
                     return;
                 }
+                // A held query runs when the user runs it.
+                let run = !self.tile_held(&board_id, &tile);
                 let link = BoardTile {
                     board: board_id,
                     board_name: tab.read(cx).board().name.clone(),
                     tile: Some(tile),
                     saved: Some((sql.clone(), view)),
                 };
-                let query = self.open_query_on(&db_id, &title, &sql, true, window, cx);
+                let query = self.open_query_on(&db_id, &title, &sql, run, window, cx);
                 query.update(cx, |t, cx| {
                     t.set_chart_view(view, cx);
                     t.set_board_tile(link, window, cx);
@@ -393,6 +399,144 @@ impl Workspace {
             ),
         }
         cx.notify();
+    }
+
+    /// Answers an AI's board call (assistant or MCP, `by`): only on a database
+    /// offered to AI tools, changed through `service::boards` as the AI's. Its new
+    /// queries are planned first (`EXPLAIN`, as the board's reads): one that looks
+    /// heavy, or has no plan, waits for the user.
+    pub(super) fn answer_board_call(
+        &mut self,
+        by: AiCaller,
+        call: BoardCall,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let BoardCall { request, reply } = call;
+        let (db_id, dialect) = match self.board_target(&request) {
+            Ok(target) => target,
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
+        let queries = match &request {
+            BoardRequest::List { .. } => {
+                let boards = self.data.boards.for_database(&db_id).into_iter();
+                let boards = boards.filter(|b| !b.archived).cloned().collect();
+                let _ = reply.send(Ok(BoardReply::Boards(boards)));
+                return;
+            }
+            BoardRequest::Create { tiles, .. } => {
+                tiles.iter().map(|t| t.sql.trim().to_string()).collect()
+            }
+            BoardRequest::Edit { edits, .. } => boards::ai_queries(edits),
+        };
+        // What doesn't only read never gets as far as its plan.
+        let lexing = dialect.lexing();
+        if let Some(e) = queries
+            .iter()
+            .find_map(|q| boards::check_read(q, lexing).err())
+        {
+            let _ = reply.send(Err(e));
+            return;
+        }
+        let (engine, conn) = (self.engine.clone(), self.board_conn(&db_id));
+        cx.spawn_in(window, async move |this, cx| {
+            let held = held_queries(&engine, conn, dialect, queries).await;
+            let answer = this.update_in(cx, |ws, window, cx| {
+                ws.apply_ai_board(by, request, &db_id, dialect, &held, window, cx)
+            });
+            let _ = reply.send(answer.unwrap_or_else(|_| Err("tangul closed".into())));
+        })
+        .detach();
+    }
+
+    /// The database a board call is about, if it is offered to AI tools.
+    fn board_target(
+        &self,
+        request: &BoardRequest,
+    ) -> Result<(String, &'static dyn Dialect), String> {
+        let user = match request {
+            BoardRequest::List { user }
+            | BoardRequest::Create { user, .. }
+            | BoardRequest::Edit { user, .. } => user,
+        };
+        if !self.ai_exposed().iter().any(|e| &e.user == user) {
+            return Err("that database isn't offered to AI tools".into());
+        }
+        self.find_user(user)
+            .map(|(db, _)| (db.id.clone(), dialect_for(db.driver)))
+            .ok_or_else(|| "no such database".into())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_ai_board(
+        &mut self,
+        by: AiCaller,
+        request: BoardRequest,
+        db_id: &str,
+        dialect: &'static dyn Dialect,
+        held: &HashMap<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<BoardReply, String> {
+        let ai = boards::ByAi {
+            by,
+            lexing: dialect.lexing(),
+            held,
+        };
+        let board = match request {
+            BoardRequest::List { .. } => return Err("not a change".into()),
+            BoardRequest::Create {
+                name,
+                description,
+                tiles,
+                ..
+            } => {
+                let boards = &mut self.data.boards;
+                boards::create_by_ai(boards, db_id, &name, &description, tiles, &ai)?
+            }
+            BoardRequest::Edit {
+                board,
+                revision,
+                edits,
+                ..
+            } => {
+                let ours = self.data.boards.get(&board);
+                if ours.is_none_or(|b| b.database_id != db_id) {
+                    return Err("no such board".into());
+                }
+                let boards = &mut self.data.boards;
+                let board = boards::apply_by_ai(boards, &board, &revision, edits, &ai)?;
+                self.show_board(board.clone(), window, cx);
+                board
+            }
+        };
+        cx.notify();
+        Ok(BoardReply::Board(board))
+    }
+
+    /// A tile's query ran in its tab: a held one runs on the board again.
+    pub(super) fn tile_run(
+        &mut self,
+        link: &BoardTile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tile) = link.tile.as_deref() else {
+            return;
+        };
+        if self.tile_held(&link.board, tile) {
+            self.edit_board(&link.board, Edit::Release(tile.into()), window, cx);
+        }
+    }
+
+    fn tile_held(&self, board: &str, tile: &str) -> bool {
+        let board = self.data.boards.get(board);
+        board
+            .and_then(|b| b.tile(tile))
+            .is_some_and(|t| t.held().is_some())
     }
 
     /// Hands the open tab of `board` (if any) the board as it is now, and its
@@ -906,4 +1050,42 @@ impl Workspace {
             .on_click(cx.listener(move |this, _, window, cx| this.open_board(&open_id, window, cx)))
             .into_any_element()
     }
+}
+
+/// Why each of `queries` waits for the user: its plan (as the board's reads, on
+/// `conn`) costs more than [`HEAVY_COST`], or there is none (it failed, or there is
+/// no connection to ask). A cost the database doesn't give (MariaDB) holds nothing.
+async fn held_queries(
+    engine: &EngineHandle,
+    conn: Result<ConnId, SharedString>,
+    dialect: &'static dyn Dialect,
+    queries: Vec<String>,
+) -> HashMap<String, String> {
+    let mut held = HashMap::new();
+    for sql in queries {
+        let Some(explain) = dialect.explain_sql(&sql) else {
+            continue;
+        };
+        let why = match &conn {
+            Err(e) => Some(format!("its plan couldn't be checked ({e})")),
+            Ok(conn) => {
+                let options = QueryOptions::new(Caller::Board);
+                let query = QueryId(crate::next_id());
+                match engine.query(query, *conn, explain, options).await {
+                    Err(e) => Some(format!("its plan failed ({})", e.message)),
+                    Ok(out) => out
+                        .results
+                        .first()
+                        .and_then(|r| r.cell(0, 0))
+                        .and_then(|plan| dialect.plan_cost(plan))
+                        .filter(|cost| *cost > HEAVY_COST)
+                        .map(|cost| format!("its plan estimates a cost of {cost:.0}")),
+                }
+            }
+        };
+        if let Some(why) = why {
+            held.insert(sql, why);
+        }
+    }
+    held
 }

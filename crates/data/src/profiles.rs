@@ -286,6 +286,13 @@ pub fn new_password() -> String {
         .collect()
 }
 
+/// Six random lowercase letters: a board's revision.
+pub fn new_revision() -> String {
+    let mut bytes = [0u8; 6];
+    getrandom::fill(&mut bytes).expect("system randomness");
+    bytes.iter().map(|b| char::from(b'a' + b % 26)).collect()
+}
+
 #[cfg(test)]
 mod tests {
 

@@ -474,6 +474,12 @@ impl QueryTab {
     }
 
     /// See [`ResultView::grid_focus`].
+    /// Its result view (tests).
+    #[cfg(test)]
+    pub fn results(&self) -> &Entity<ResultView> {
+        &self.results
+    }
+
     pub fn results_focus(&self, cx: &App) -> FocusHandle {
         self.results.read(cx).grid_focus(cx)
     }

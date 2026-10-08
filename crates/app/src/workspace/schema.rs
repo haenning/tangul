@@ -349,6 +349,7 @@ impl Workspace {
         let row = |depth: usize| {
             h_flex()
                 .id(("sidebar-row", ix))
+                .test_support()
                 .relative()
                 .w_full()
                 .h(px(ROW_HEIGHT))
@@ -549,9 +550,10 @@ impl Workspace {
                     )
                     .children(fixed_star)
                     .child(hover_actions(group, theme.sidebar_accent).child(star))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.reveal(table.schema.clone().into(), Some(&table), window, cx)
-                    }))
+                    // Opens the table; the search stays.
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.open_table(&table, window, cx)),
+                    )
                     .into_any_element()
             }
             SidebarRow::ColumnHit {
@@ -574,9 +576,9 @@ impl Workspace {
                         .text_color(theme.muted_foreground)
                         .child(format!("{}.{} · {data_type}", table.schema, table.name)),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.reveal(table.schema.clone().into(), Some(&table), window, cx)
-                }))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.open_table(&table, window, cx)),
+                )
                 .into_any_element(),
         }
     }

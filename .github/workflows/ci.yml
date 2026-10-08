@@ -1,85 +1,122 @@
 name: CI
 
-# Paused while the app is in heavy development: runs only when started by hand
-# (Actions → CI → Run workflow). To re-enable on PRs into main, add back:
-#   pull_request:
-#     branches: [main]
+# Every crate's tests in one run, coverage measured in that same run, on Linux (the
+# app's UI tests run headless there too). Two jobs side by side:
+# - checks: format, clippy, dependencies, and that docs/TESTING.md names real tests
+# - tests: all tests with cargo-nextest under cargo-llvm-cov, the live ones against
+#   Postgres, MySQL and the SSH bastion (docker-compose.yml); the report goes to the
+#   run page and, on dev, to the `badges` branch (badges, tests.json, summary.md)
+# Releases call this workflow before they build (release.yml).
 on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # No debug info: coverage doesn't need it, and it makes linking and the cache
+  # much bigger.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  # What GPUI links against on Linux.
+  LINUX_LIBS: >-
+    libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev
+    libfontconfig-dev libfreetype-dev libvulkan-dev
 
 jobs:
-  # Backend crates + live tests against real Postgres and MySQL (service containers only
-  # exist on Linux runners). The GPUI app is built on macOS below.
-  backend:
+  checks:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports: ["55432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 2s --health-retries 30
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
-          MYSQL_DATABASE: app
-        ports: ["53306:3306"]
-        options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent"
-          --health-interval 2s --health-retries 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: System libraries
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq $LINUX_LIBS
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy -p tangul-core -p tangul-drivers -p tangul-engine -p tangul-assist -p tangul-tunnel -p tangul-data -p tangul-service --all-targets -- -D warnings
-      - name: Tests (incl. live DB tests)
-        env:
-          TANGUL_TEST_PG: postgres:@127.0.0.1:55432/postgres
-          TANGUL_TEST_MYSQL: root:@127.0.0.1:53306/app
-        run: cargo test -p tangul-core -p tangul-drivers -p tangul-engine -p tangul-assist -p tangul-tunnel -p tangul-data -p tangul-service
-
-  # Dependency checks: advisories, licenses, sources (deny.toml) and unused deps.
-  deps:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+        with:
+          shared-key: checks
+          cache-on-failure: true
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny,cargo-machete
-      - name: cargo-deny
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Dependencies (advisories, licenses, sources)
         run: cargo deny check
       - name: Unused dependencies
         run: cargo machete
+      - name: docs/TESTING.md names tests that exist
+        run: python3 scripts/check-testing-doc.py docs/TESTING.md
 
-  app:
-    runs-on: macos-15
+  tests:
+    runs-on: ubuntu-latest
+    # A build without cache (the first run, a changed Cargo.lock) takes most of it.
+    timeout-minutes: 50
+    permissions:
+      contents: write # the badges branch, on dev
     steps:
       - uses: actions/checkout@v4
-      - name: Metal toolchain (GPUI compiles its shaders at build time)
-        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
+      - name: Databases and SSH bastion
+        run: docker compose up -d --wait
+      - name: System libraries
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq $LINUX_LIBS
       - name: Install toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Build
-        run: cargo build -p tangul
-      - name: Unit tests
-        run: cargo test -p tangul-core -p tangul-drivers
+        with:
+          shared-key: tests
+          # Keep the build even when a test fails, so the next run starts warm.
+          cache-on-failure: true
+      - name: Tests with coverage (incl. live and UI tests)
+        env:
+          TANGUL_TEST_PG: postgres:@127.0.0.1:55432/postgres
+          TANGUL_TEST_MYSQL: root:@127.0.0.1:53306/app
+          TANGUL_TEST_SSH: tangul:tangul@127.0.0.1:52222
+        run: cargo llvm-cov nextest --workspace --profile ci --no-report
+      - name: Report
+        if: always()
+        run: |
+          cargo llvm-cov report --json --summary-only --output-path coverage.json || true
+          cargo llvm-cov report --html --output-dir coverage-html || true
+          junit=$(find target -path '*nextest/ci/junit.xml' | head -1)
+          python3 scripts/test-report.py coverage.json "${junit:-none}" docker-compose.yml report
+          cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report
+          path: |
+            report
+            coverage-html/html
+      - name: Publish report (dev only)
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        run: |
+          cd report
+          git init -q -b badges
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -qm "Test report for ${GITHUB_SHA::7}"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" badges
+      - name: Stop databases
+        if: always()
+        run: docker compose down -v

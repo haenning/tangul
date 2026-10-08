@@ -320,15 +320,14 @@ pub fn form_section(title: &'static str, toggle: Option<AnyElement>, cx: &App) -
     )
 }
 
-/// A form row: the label at the left (with an (i) if `info` explains it), the
-/// control after it.
+/// A form row: the label at the left (with an (i) if `explained`), the control
+/// after it.
 pub fn form_row(
     label: &'static str,
-    info: Option<&'static str>,
+    explained: Option<&'static str>,
     control: impl IntoElement,
     cx: &App,
 ) -> Div {
-    let muted = cx.theme().muted_foreground;
     h_flex()
         .gap_3()
         .items_center()
@@ -340,17 +339,26 @@ pub fn form_row(
                 .items_center()
                 .text_sm()
                 .child(label)
-                .when_some(info, |this, info| {
-                    this.child(
-                        div()
-                            .id(SharedString::from(format!("info-{label}")))
-                            .test_support()
-                            .child(Icon::new(IconName::Info).xsmall().text_color(muted))
-                            .tooltip(wrapped_tooltip(info)),
-                    )
+                .when_some(explained, |this, text| {
+                    this.child(info(SharedString::from(format!("info-{label}")), text, cx))
                 }),
         )
         .child(h_flex().flex_1().min_w_0().gap_2().child(control))
+}
+
+/// An (i) that explains `text` on hover: longer explanations, never paragraphs.
+pub fn info(id: impl Into<ElementId>, text: impl Into<SharedString>, cx: &App) -> AnyElement {
+    div()
+        .id(id)
+        .test_support()
+        .flex_none()
+        .child(
+            Icon::new(IconName::Info)
+                .xsmall()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .tooltip(wrapped_tooltip(text))
+        .into_any_element()
 }
 
 /// A few words under a form row's control, in the muted color, lined up with it

@@ -24,6 +24,8 @@ pub enum FileKind {
     Settings,
     /// A color theme (applied when the folder is read again, within a second).
     Theme,
+    /// A database's own settings (read whenever needed).
+    Database,
 }
 
 impl FileKind {
@@ -32,6 +34,11 @@ impl FileKind {
         match self {
             FileKind::Settings => settings::problem(text),
             FileKind::Theme => tangul_data::themes::Theme::parse(text).err(),
+            FileKind::Database => {
+                serde_json::from_str::<tangul_core::ai_view::DatabaseSettings>(text)
+                    .err()
+                    .map(|e| e.to_string())
+            }
         }
     }
 }

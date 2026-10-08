@@ -104,9 +104,9 @@ fn cmd_b_toggles_the_left_sidebar_and_keeps_its_panel(cx: &mut TestAppContext) {
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         window.click(button(Panel::Bookmarks), cx);
-        window.press("cmd-b", cx);
+        window.press("secondary-b", cx);
         assert!(window.try_find(LEFT).is_none());
-        window.press("cmd-b", cx);
+        window.press("secondary-b", cx);
         assert!(window.find(LEFT).visible());
         assert!(shows(&workspace, Panel::Bookmarks, cx));
     })
@@ -218,7 +218,7 @@ fn the_right_sidebar_opens_on_an_empty_value_viewer(cx: &mut TestAppContext) {
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find(RIGHT).is_none());
-        window.press("alt-cmd-b", cx);
+        window.press("alt-secondary-b", cx);
         assert!(window.find(RIGHT).visible());
         assert!(window.find("value-empty").visible());
         assert!(shows(&workspace, Panel::Value, cx));
@@ -523,10 +523,12 @@ fn comparing_different_columns_warns(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_palette_opens_only_once(cx: &mut TestAppContext) {
     let (handle, _) = open(cx);
-    step(handle, cx, |window, cx| window.press("cmd-shift-p", cx));
+    step(handle, cx, |window, cx| {
+        window.press("secondary-shift-p", cx)
+    });
     step(handle, cx, |window, cx| {
         assert!(window.find("palette").visible());
-        window.press("cmd-shift-p", cx);
+        window.press("secondary-shift-p", cx);
     });
     // `find` fails on two elements with the same id.
     step(handle, cx, |window, _| {
@@ -1142,6 +1144,180 @@ fn shop_for_the_assistant(ws: &mut Workspace, cx: &mut gpui_kit::Context<Workspa
 }
 
 #[gpui_kit::test]
+fn a_failed_connection_is_connected_again_once_a_query_works(cx: &mut TestAppContext) {
+    use crate::connection::ConnStatus;
+    use crate::query_router::RunningQuery;
+    use tangul_engine::Event;
+    let (handle, workspace) = open(cx);
+    let failed = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let conn = workspace.read(cx).tab_conn("app").unwrap();
+            matches!(conn.read(cx).status, ConnStatus::Failed(_))
+        })
+    };
+    let finish = |error: Option<&str>, cx: &mut TestAppContext| {
+        step(handle, cx, |window, cx| {
+            workspace.update(cx, |ws, cx| {
+                let tab = ws.tabs.active_query().unwrap().downgrade();
+                let query = QueryId(ws.next_id());
+                ws.router.started(
+                    query,
+                    RunningQuery {
+                        tab,
+                        sql: "select 1".into(),
+                        user_id: "app".into(),
+                        started_at: 0,
+                        derived: true,
+                    },
+                );
+                let event = QueryEvent::Finished {
+                    elapsed: Duration::ZERO,
+                    error: error.map(String::from),
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                };
+                ws.on_engine_event(Event::Query { query, event }, window, cx);
+            })
+        })
+    };
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.open_sql("Q", "select 1", window, cx);
+            let conn = ws.tab_conn("app").unwrap();
+            conn.update(cx, |c, _| c.status = ConnStatus::Failed("offline".into()));
+        })
+    });
+    // Still offline: a failing query changes nothing.
+    finish(Some("could not connect"), cx);
+    assert!(failed(cx));
+    finish(None, cx);
+    assert!(!failed(cx));
+}
+
+#[gpui_kit::test]
+fn the_empty_state_offers_a_new_board_once_connected(cx: &mut TestAppContext) {
+    use crate::connection::ConnStatus;
+    use gpui_kit::component::WindowExt as _;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+        })
+    });
+    step(handle, cx, |window, _| {
+        assert!(
+            window.try_find("empty-new-board").is_none(),
+            "not connected yet"
+        )
+    });
+    step(handle, cx, |_, cx| {
+        let conn = workspace.read(cx).tab_conn("app").unwrap();
+        conn.update(cx, |c, cx| {
+            c.status = ConnStatus::Connected;
+            cx.notify();
+        });
+        workspace.update(cx, |_, cx| cx.notify());
+    });
+    step(handle, cx, |window, cx| window.click("empty-new-board", cx));
+    step(handle, cx, |window, cx| {
+        assert!(window.has_active_dialog(cx))
+    });
+}
+
+#[gpui_kit::test]
+fn a_query_marked_ai_view_shows_what_ai_tools_see(cx: &mut TestAppContext) {
+    use crate::query_router::RunningQuery;
+    use tangul_assist::ai_view::{self, Rules};
+    use tangul_assist::lexer::Lexing;
+    use tangul_assist::schema::SchemaIndex;
+    use tangul_core::{ColumnMeta, SchemaInfo, TableInfo, TableKind};
+    use tangul_engine::Event;
+    let (handle, workspace) = open(cx);
+    let sql = ai_view::mark("select id, email, ssn from users");
+    // Not marked, or no database to ask: nothing to show differently.
+    cx.update(|cx| {
+        let ws = workspace.read(cx);
+        assert!(ws.ai_view_plan("app", "select 1").is_none());
+        assert!(ws.ai_view_plan("nobody", &sql).is_none());
+    });
+    let col = |name: &str| ColumnMeta {
+        schema: "public".into(),
+        table: "users".into(),
+        name: name.into(),
+        data_type: "text".into(),
+        nullable: true,
+        ..Default::default()
+    };
+    let schema = SchemaIndex::new(
+        SchemaInfo {
+            tables: vec![TableInfo {
+                schema: "public".into(),
+                name: "users".into(),
+                kind: TableKind::Table,
+                comment: None,
+                row_estimate: None,
+                size_bytes: None,
+            }],
+            columns: vec![col("id"), col("email"), col("ssn")],
+            ..Default::default()
+        },
+        tangul_assist::dialect::dialect_for(tangul_core::DriverKind::Postgres),
+        Some("public".into()),
+    );
+    let rules =
+        Rules::new(&serde_json::from_str(r#"{"redact": ["*.email"], "hide": ["*.ssn"]}"#).unwrap());
+    let plan = ai_view::plan(&sql, &schema, &rules, Lexing::default()).unwrap();
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            let tab = ws.add_tab(&sql, window, cx);
+            let query = QueryId(ws.next_id());
+            ws.router.view_as_ai(query, plan);
+            ws.router.started(
+                query,
+                RunningQuery {
+                    tab: tab.downgrade(),
+                    sql: sql.clone(),
+                    user_id: "app".into(),
+                    started_at: 0,
+                    derived: true,
+                },
+            );
+            tab.update(cx, |t, cx| t.started(query, &sql, cx));
+            let names = ["id", "email", "ssn"].map(|n| ColumnInfo { name: n.into() });
+            let mut rows = RowBatch::default();
+            for cell in [Some("1"), Some("ann@x.io"), Some("123")] {
+                rows.push_cell(cell);
+            }
+            rows.finish_row();
+            for event in [
+                QueryEvent::Exec(ExecEvent::ResultStart(names.to_vec())),
+                QueryEvent::Exec(ExecEvent::Rows(rows)),
+                QueryEvent::Finished {
+                    elapsed: Duration::ZERO,
+                    error: None,
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+            ] {
+                ws.on_engine_event(Event::Query { query, event }, window, cx);
+            }
+            tab
+        })
+    });
+    cx.update(|cx| {
+        let results = tab.read(cx).results().read(cx);
+        assert_eq!(results.columns(cx), ["id", "email"]);
+        assert_eq!(results.cell(0, 0, cx).as_deref(), Some("1"));
+        assert_eq!(results.cell(0, 1, cx).as_deref(), Some(ai_view::REDACTED));
+    });
+}
+
+#[gpui_kit::test]
 fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let sql =
@@ -1171,6 +1347,80 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         let conn = tab.conn.as_ref().expect("on a connection");
         assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
     });
+}
+
+#[gpui_kit::test]
+fn an_ai_sets_up_a_board_and_its_changes_show_in_the_open_tab(cx: &mut TestAppContext) {
+    use tangul_ai::{BoardCall, BoardReply, BoardRequest};
+    use tangul_core::board::AiCaller;
+    use tangul_service::boards::{self, Edit};
+    let (handle, workspace) = open(cx);
+    let events = step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.ai.assistant_used = true;
+            ws.expose_to_ai();
+            ws.test_events(cx)
+        })
+    });
+    // As a board tool does (from the MCP server's thread or the assistant's
+    // runtime): the window answers.
+    let ask = |request: BoardRequest, cx: &mut TestAppContext| {
+        let (call, mut answer) = BoardCall::new(request);
+        events
+            .try_send(super::ai::AiEvent::Board(AiCaller::Mcp, call))
+            .unwrap();
+        cx.run_until_parked();
+        answer.try_recv().expect("answered")
+    };
+    let created = ask(
+        BoardRequest::Create {
+            user: "app".into(),
+            name: "Revenue".into(),
+            description: String::new(),
+            tiles: vec![boards::tile("Per month", "select 1", None)],
+        },
+        cx,
+    );
+    let Ok(BoardReply::Board(board)) = created else {
+        panic!("{created:?}");
+    };
+    assert_eq!(board.database_id, "db");
+    assert_eq!(board.tiles[0].sql, "-- Set up by MCP\nselect 1");
+    // No database here: no plan, so it waits for the user.
+    assert!(board.tiles[0].held().unwrap().starts_with("its plan"));
+    let write = ask(
+        BoardRequest::Create {
+            user: "app".into(),
+            name: "X".into(),
+            description: String::new(),
+            tiles: vec![boards::tile("Gone", "delete from orders", None)],
+        },
+        cx,
+    );
+    assert_eq!(write, Err("a tile only reads; this query is DELETE".into()));
+    let not_offered = ask(
+        BoardRequest::List {
+            user: "nobody".into(),
+        },
+        cx,
+    );
+    assert_eq!(
+        not_offered,
+        Err("that database isn't offered to AI tools".into())
+    );
+
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.open_board(&board.id, window, cx))
+    });
+    let edit = BoardRequest::Edit {
+        user: "app".into(),
+        board: board.id.clone(),
+        revision: board.revision.clone(),
+        edits: vec![Edit::Rename("Money".into())],
+    };
+    assert!(ask(edit, cx).is_ok());
+    cx.update(|cx| assert_eq!(board_tab(&workspace, cx).read(cx).board().name, "Money"));
 }
 
 #[gpui_kit::test]
@@ -1345,7 +1595,7 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
     assert_eq!(
         shown(cx),
         [
-            (Source::Mcp, "SELECT count(*) FROM orders".to_string()),
+            (Source::Mcp, AI_QUERY.to_string()),
             (Source::App, "SELECT 1".into())
         ]
     );
@@ -1354,10 +1604,7 @@ fn history_shows_everyone_s_queries_with_who_ran_them(cx: &mut TestAppContext) {
         assert!(window.find(("history-source-icon", 1usize)).visible());
         window.click(("history-source", Source::Mcp as usize), cx);
     });
-    assert_eq!(
-        shown(cx),
-        [(Source::Mcp, "SELECT count(*) FROM orders".to_string())]
-    );
+    assert_eq!(shown(cx), [(Source::Mcp, AI_QUERY.to_string())]);
     step(handle, cx, |window, cx| {
         // Filtered, the row still says who ran it.
         assert!(window.find(("history-source-icon", 0usize)).visible());
@@ -1431,6 +1678,59 @@ fn the_summary_of_a_table_column_starts_with_schema_tags(cx: &mut TestAppContext
         assert!(window.find("column-stats").visible());
         assert!(window.find("column-tags").visible());
     });
+}
+
+#[gpui_kit::test]
+fn a_search_hit_opens_its_table_and_keeps_the_search(cx: &mut TestAppContext) {
+    use tangul_core::{ColumnMeta, ConnId, SchemaInfo, TableInfo, TableKind};
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            let info = SchemaInfo {
+                tables: vec![TableInfo {
+                    schema: "public".into(),
+                    name: "orders".into(),
+                    kind: TableKind::Table,
+                    comment: None,
+                    row_estimate: None,
+                    size_bytes: None,
+                }],
+                columns: vec![ColumnMeta {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    name: "status".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.set_schema("app", ConnId(1), info);
+        })
+    });
+    // A table hit and a column hit: each the second row, under its heading.
+    for search in ["ord", "status"] {
+        step(handle, cx, |window, cx| {
+            workspace.update(cx, |ws, cx| {
+                let input = ws.panels.schema.search.clone();
+                input.update(cx, |i, cx| i.set_value(search, window, cx));
+                cx.notify();
+            })
+        });
+        step(handle, cx, |window, cx| {
+            window.click(("sidebar-row", 1usize), cx)
+        });
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            let tab = ws.tabs.active_query().expect("opened").read(cx);
+            assert_eq!(tab.title.as_ref(), "orders");
+            assert!(tab.sql(cx).contains("orders"), "{}", tab.sql(cx));
+            assert_eq!(ws.panels.schema.search.read(cx).value(), search);
+        });
+    }
 }
 
 #[gpui_kit::test]
@@ -1941,6 +2241,10 @@ fn schema_only_opens_no_ai_connection(cx: &mut TestAppContext) {
     });
 }
 
+/// What history keeps of an AI's `SELECT count(*) FROM orders`.
+const AI_QUERY: &str =
+    "-- ai view\n-- remove the line above to see the full result\nSELECT count(*) FROM orders";
+
 /// A board of `shop` with tiles `t1`…: `sqls` in order, `t1` and `t3` alike when
 /// asked for; opened in its tab.
 fn board_with_tiles(
@@ -2252,6 +2556,76 @@ fn add_to_board_makes_a_new_board_and_a_tile_opens_in_a_tab(cx: &mut TestAppCont
         let link = query.read(cx).board_tile.clone().unwrap();
         assert_eq!((link.board, link.tile), (board.id, Some("t1".to_string())));
     });
+}
+
+#[gpui_kit::test]
+fn a_held_tile_waits_until_its_query_runs_in_a_tab(cx: &mut TestAppContext) {
+    use crate::query_tab::TabEvent;
+    use std::collections::HashMap;
+    use tangul_assist::lexer::Lexing;
+    use tangul_core::board::AiCaller;
+    use tangul_service::boards::{self, ByAi, Edit};
+    let (handle, workspace) = open(cx);
+    cx.update(|cx| shop_with_ai_user(&workspace, None, cx));
+    let (id, revision) = workspace.update(cx, |ws, cx| {
+        ws.connect("app", cx);
+        let mut tile = boards::tile("Per day", "select 1", None);
+        tile.description = "Signups per day.".into();
+        let board = boards::create(&mut ws.data.boards, "db", "Signups").unwrap();
+        let board = boards::apply(&mut ws.data.boards, &board.id, Edit::AddTile(tile)).unwrap();
+        let edit = Edit::SetQuery {
+            tile: "t1".into(),
+            sql: "select * from big".into(),
+            view: None,
+        };
+        let held = HashMap::from([("select * from big".into(), "heavy".into())]);
+        let ai = ByAi {
+            by: AiCaller::Mcp,
+            lexing: Lexing::default(),
+            held: &held,
+        };
+        let board = boards::apply_by_ai(
+            &mut ws.data.boards,
+            &board.id,
+            &board.revision,
+            vec![edit],
+            &ai,
+        )
+        .unwrap();
+        (board.id, board.revision)
+    });
+    let held = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            let board = ws.data.boards.get(&id).unwrap();
+            (board.tiles[0].held().is_some(), board.revision.clone())
+        })
+    };
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.open_board(&id, window, cx))
+    });
+    assert_eq!(held(cx), (true, revision.clone()));
+    // Shown: its open button pulses; the description is behind an (i).
+    step(handle, cx, |window, cx| {
+        assert!(board_tab(&workspace, cx).read(cx).shown > 0);
+        assert!(window.try_find(("tile-info", 0usize)).is_some());
+    });
+    // The mark opens the query in a tab, not run; running it there releases the
+    // tile, without a new revision.
+    step(handle, cx, |window, cx| {
+        window.click(("tile-ai", 0usize), cx)
+    });
+    let query = cx.update(|cx| workspace.read(cx).tabs.active_query().cloned().unwrap());
+    cx.update(|cx| {
+        assert!(query.read(cx).board_tile.is_some());
+        assert!(!query.read(cx).is_running(cx));
+    });
+    step(handle, cx, |_, cx| {
+        query.update(cx, |_, cx| {
+            cx.emit(TabEvent::Run("select * from big".into()))
+        })
+    });
+    assert_eq!(held(cx), (false, revision));
 }
 
 #[gpui_kit::test]

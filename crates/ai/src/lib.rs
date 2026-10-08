@@ -30,7 +30,8 @@ pub use tangul_llm as llm;
 
 pub use audit::{AuditSink, ToolCall};
 pub use ctx::{
-    ChartRequest, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink, ShownResult, SqlProposal,
+    BoardCall, BoardReply, BoardRequest, BoardSink, ChartRequest, Ctx, Exposed, ProposalSink,
+    SharedBookmark, ShowSink, ShownResult, SqlProposal,
 };
 pub use results::Results;
 pub use tool::{Registry, Tool, ToolError, ToolOutput, ToolSpec};

@@ -17,7 +17,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_assist::suggest::one_line;
-use tangul_core::board::{LinkTo, Refresh, Row, Tile, Width, is_web, rows};
+use tangul_core::board::{AiCaller, AiMark, LinkTo, Refresh, Row, Tile, Width, is_web, rows};
 use tangul_service::boards::{self, Edit};
 
 use tangul_core::chart::{ChartStyle, ChartView};
@@ -26,7 +26,15 @@ use super::form::{AskForm, QueryForm, TileForm, view_label};
 use super::{BoardEvent, BoardTab, link_action, link_icon};
 use crate::assets::{Lucide, style_icon};
 use crate::result_view::{SetView, chart_menu};
-use crate::ui::{dialog_form, enter_saves};
+use crate::ui::{dialog_form, enter_saves, info, wrapped_tooltip};
+
+/// Three pulses of a held tile's open button.
+const PULSE: Duration = Duration::from_millis(1800);
+
+/// What a held tile says, `why` it waits (its plan).
+fn held_note(why: &str) -> String {
+    format!("Waits for you: {why}. Open it in a tab and run it there; then the board runs it too.")
+}
 
 /// A tile's height; tables scroll inside it.
 const TILE_HEIGHT: f32 = 300.;
@@ -309,7 +317,44 @@ impl BoardTab {
             .into_any_element()
     }
 
+    /// Left of a tile's title: that an AI set it up (the assistant's or MCP's icon);
+    /// red while its query waits for the user.
+    fn render_ai_mark(
+        &self,
+        ix: usize,
+        tile: &str,
+        mark: &AiMark,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let (icon, who) = match mark.by {
+            AiCaller::Assistant => (Lucide::Bot, "the assistant"),
+            AiCaller::Mcp => (Lucide::Plug, "MCP"),
+        };
+        let held = mark.held.is_some();
+        let (color, tooltip) = match &mark.held {
+            Some(why) => (theme.danger, format!("Set up by {who}. {}", held_note(why))),
+            None => (theme.muted_foreground, format!("Set up by {who}")),
+        };
+        let open_id = tile.to_string();
+        div()
+            .id(("tile-ai", ix))
+            .test_support()
+            .flex_none()
+            .child(Icon::new(icon).xsmall().text_color(color))
+            .tooltip(wrapped_tooltip(tooltip))
+            .when(held, |this| {
+                this.cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_tile(&open_id, cx)))
+            })
+            .into_any_element()
+    }
+
     fn render_tile(&self, ix: usize, tile: &Tile, cx: &mut Context<Self>) -> impl IntoElement {
+        let ai_mark = tile
+            .ai
+            .as_ref()
+            .map(|mark| self.render_ai_mark(ix, &tile.id, mark, cx));
         let theme = cx.theme();
         let view = self.tiles.get(&tile.id);
         let title: SharedString = if tile.title.is_empty() {
@@ -319,6 +364,16 @@ impl BoardTab {
         };
         let id = tile.id.clone();
         let body: AnyElement = match view {
+            _ if tile.held().is_some() => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(held_note(tile.held().unwrap_or_default()))
+                .into_any_element(),
             Some(view) if view.loaded => view.result.clone().into_any_element(),
             _ if self.running.is_some() => div()
                 .size_full()
@@ -343,12 +398,25 @@ impl BoardTab {
         let open_id = id.clone();
         // In both modes: a tile's query in a tab of its own, to try other charts or
         // see the table behind one.
+        let held = tile.held().is_some();
         let open = Button::new(("tile-open", ix))
-            .icon(Icon::new(Lucide::ExternalLink))
+            .icon(Icon::new(Lucide::ExternalLink).when(held, |i| i.text_color(theme.danger)))
             .ghost()
             .xsmall()
             .tooltip("Open in a tab")
             .on_click(cx.listener(move |this, _, _, cx| this.open_tile(&open_id, cx)));
+        // A held tile's button pulses three times each time the board is shown.
+        let open = if held {
+            let id = SharedString::from(format!("tile-open-pulse-{ix}-{}", self.shown));
+            div()
+                .child(open)
+                .with_animation(id, Animation::new(PULSE), |this, delta| {
+                    this.opacity(0.3 + 0.7 * (delta * 3. * std::f32::consts::PI).cos().abs())
+                })
+                .into_any_element()
+        } else {
+            open.into_any_element()
+        };
         // A chart the result doesn't fit is shown as the table; this says why.
         let unfit = view
             .filter(|v| v.loaded && tile.view.is_some())
@@ -460,12 +528,16 @@ impl BoardTab {
                 )
             })
             .child(
-                v_flex()
+                h_flex()
                     .flex_1()
                     .min_w_0()
+                    .gap_1()
+                    .items_center()
+                    .children(ai_mark)
                     .child(
                         div()
                             .id(("tile-title", ix))
+                            .min_w_0()
                             .truncate()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
@@ -478,13 +550,7 @@ impl BoardTab {
                             .child(title),
                     )
                     .when(!tile.description.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(tile.description.clone()),
-                        )
+                        this.child(info(("tile-info", ix), tile.description.clone(), cx))
                     }),
             )
             .when_some(unfit, |this, reason| {

@@ -5,10 +5,12 @@ tangul runs on macOS (Apple Silicon and Intel).
 ## From a release
 
 1. Download `tangul-<version>-universal.dmg` from the
-   [GitHub releases](https://github.com/haenning/rusdb/releases).
+   [GitHub releases](https://github.com/haenning/tangul/releases).
 2. Open it and drag tangul onto Applications.
 3. The first start needs one extra step, because tangul isn't signed with an Apple
-   Developer ID yet and macOS blocks apps it can't verify. Either:
+   Developer ID yet and macOS blocks apps it can't verify (again after each update you
+   download). Your passwords' "Always Allow" in the Keychain stays across updates:
+   every release is signed with the same certificate. Either:
    - open tangul once, then go to **System Settings → Privacy & Security**, scroll down
      and click **Open Anyway**, or
    - run this once in Terminal:

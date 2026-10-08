@@ -190,6 +190,12 @@ impl ResultsDelegate {
         self.reset(Vec::new());
     }
 
+    /// The cell at `row`, `col` (tests).
+    #[cfg(test)]
+    pub fn cell(&self, row: usize, col: usize) -> Option<String> {
+        self.result.cell(row, col).map(str::to_string)
+    }
+
     pub fn column_names(&self) -> Vec<String> {
         self.result
             .columns()

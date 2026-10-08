@@ -8267,6 +8267,7 @@ dependencies = [
  "serde_json",
  "tangul-assist",
  "tangul-core",
+ "tangul-data",
  "tangul-engine",
  "tangul-llm",
  "tangul-service",

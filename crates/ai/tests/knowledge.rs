@@ -159,6 +159,8 @@ fn shop() -> SchemaInfo {
 
 fn exposed(name: &str, user: &str) -> Exposed {
     Exposed {
+        database: String::new(),
+        columns: Default::default(),
         name: name.into(),
         user: user.into(),
         conn: Some(ConnId(1)),
@@ -234,7 +236,11 @@ async fn every_tool_has_a_schema_and_a_description() {
             "run_readonly",
             "get_cell",
             "list_bookmarks",
-            "propose_sql"
+            "propose_sql",
+            "list_boards",
+            "get_board",
+            "create_board",
+            "edit_board"
         ]
     );
     for s in &specs {

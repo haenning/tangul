@@ -8,9 +8,14 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Mutex, PoisonError, RwLock};
 
 use tangul_ai::{
-    AuditSink, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink, ShownResult, SqlProposal,
-    ToolCall,
+    AuditSink, BoardCall, BoardSink, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink,
+    ShownResult, SqlProposal, ToolCall,
 };
+use tangul_assist::ai_view::{self, Plan, Rules};
+use tangul_assist::schema::SchemaIndex;
+use tangul_core::SchemaInfo;
+use tangul_core::board::AiCaller;
+use tangul_data::database_settings;
 use tangul_data::local::{AuditEntry, Source};
 use tangul_service::connections::assistant_user;
 
@@ -25,6 +30,8 @@ pub(super) enum AiEvent {
     Proposed(SqlProposal),
     /// A read's result to open in a tab (`run_readonly` with `show`).
     Shown(ShownResult),
+    /// A board tool's call, answered by the window (`answer_board_call`).
+    Board(AiCaller, BoardCall),
 }
 
 /// The most each caller may see of any database (`ai.access`, `mcp.access`).
@@ -169,6 +176,8 @@ impl Workspace {
                 .find(|name| names.insert(name.clone()))
                 .unwrap_or(base);
             exposed.push(Exposed {
+                database: db.id.clone(),
+                columns: Default::default(),
                 name,
                 user: user_id,
                 conn,
@@ -221,6 +230,30 @@ impl Workspace {
         }
     }
 
+    /// For a query marked `-- ai view`: what AI tools would see of its result on
+    /// `user_id`'s database, or why they would be refused. `None`: not marked.
+    pub(super) fn ai_view_plan(&self, user_id: &str, sql: &str) -> Option<Result<Plan, String>> {
+        if !ai_view::is_marked(sql) {
+            return None;
+        }
+        let (db, _) = self.find_user(user_id)?;
+        let dialect = dialect_for(db.driver);
+        let columns = database_settings::load(self.data.profiles.dir(), &db.id)
+            .0
+            .ai
+            .content_blocking;
+        let schema = self
+            .knowledge
+            .schema(user_id)
+            .unwrap_or_else(|| Arc::new(SchemaIndex::new(SchemaInfo::default(), dialect, None)));
+        Some(ai_view::plan(
+            sql,
+            &schema,
+            &Rules::new(&columns),
+            dialect.lexing(),
+        ))
+    }
+
     /// A tool context for `caller` (`mcp`, `assistant`) over the databases offered
     /// at the time of the call, whose calls are audited and hand their statements,
     /// proposals and shown results to `events`.
@@ -232,6 +265,7 @@ impl Workspace {
     ) -> Arc<dyn Fn() -> Ctx + Send + Sync> {
         let (knowledge, engine) = (self.knowledge.clone(), self.engine.clone());
         let (exposed, ceilings) = (self.ai.exposed.clone(), self.ai.ceilings.clone());
+        let dir = self.data.profiles.dir().map(std::path::Path::to_path_buf);
         let sink = self.ai_audit(events.clone(), calls);
         let proposals: ProposalSink = Arc::new({
             let events = events.clone();
@@ -239,14 +273,32 @@ impl Workspace {
                 let _ = events.try_send(AiEvent::Proposed(proposal));
             }
         });
-        let shows: ShowSink = Arc::new(move |shown| {
-            let _ = events.try_send(AiEvent::Shown(shown));
+        let shows: ShowSink = Arc::new({
+            let events = events.clone();
+            move |shown| {
+                let _ = events.try_send(AiEvent::Shown(shown));
+            }
+        });
+        let by = match caller {
+            "mcp" => AiCaller::Mcp,
+            _ => AiCaller::Assistant,
+        };
+        // Unanswered (the window is gone), the call fails.
+        let boards: BoardSink = Arc::new(move |call| {
+            let _ = events.try_send(AiEvent::Board(by, call));
         });
         Arc::new(move || {
-            let exposed = exposed
+            let mut exposed = exposed
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
+            // Each database's settings as they are now: a saved change applies at once.
+            for e in &mut exposed {
+                e.columns = database_settings::load(dir.as_deref(), &e.database)
+                    .0
+                    .ai
+                    .content_blocking;
+            }
             let ceiling = ceilings
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -257,6 +309,7 @@ impl Workspace {
                 .with_audit(caller, sink.clone())
                 .with_proposals(proposals.clone())
                 .with_shows(shows.clone())
+                .with_boards(boards.clone())
         })
     }
 
@@ -277,6 +330,9 @@ impl Workspace {
                                 AiEvent::Ran(call) => ws.record_tool_call(call, cx),
                                 AiEvent::Proposed(p) => ws.open_proposal(p, window, cx),
                                 AiEvent::Shown(s) => ws.open_shown(s, window, cx),
+                                AiEvent::Board(by, call) => {
+                                    ws.answer_board_call(by, call, window, cx)
+                                }
                             })
                             .ok()
                         })
@@ -345,8 +401,9 @@ impl Workspace {
         let Some(db_id) = self.find_user(&user).map(|(db, _)| db.id.clone()) else {
             return;
         };
-        // Passwords (`CREATE ROLE … PASSWORD '…'`) are never kept.
-        let sql = tangul_assist::redact::redact(sql);
+        // Passwords (`CREATE ROLE … PASSWORD '…'`) are never kept. Run again from
+        // history, it shows what the AI saw.
+        let sql = ai_view::mark(&tangul_assist::redact::redact(sql));
         let fp = fingerprint(&sql);
         let entry = NewHistory {
             database_id: &db_id,

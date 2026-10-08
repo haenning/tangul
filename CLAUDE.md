@@ -17,11 +17,12 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
   incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
   the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
-  `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there)
+  `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there;
+  each database's own settings: `database_settings.rs`, `databases/<id>.json` there)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
-  `boards` (the one API that changes boards, for the UI and later the AI tools, and
-  when a board refreshes), `values` (the editor's quick look at a column's values)
+  `boards` (the one API that changes boards, for the UI and the AI tools, and when a
+  board refreshes; every change a new revision), `values` (the editor's quick look at a column's values)
   and `knowledge`: the one pool of what is known about the databases (schema per
   user, usage and most run queries per database, value profiles and the editor's
   quick looks per user). The editor, schema tree, results and the assistant all
@@ -35,6 +36,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   for every caller: only exposed connections and their opt-ins; SQL only through the
   gate as `Caller::Assistant`. Tests call tools through the registry and compare
   exact output (hand-built schemas, and SQLite files with the real engine).
+  Board tools (`tools/boards.rs`) ask the app (`Ctx::with_boards`, a `BoardCall`),
+  which answers in `workspace/boards.rs`.
   `mcp.rs`: the MCP server (rmcp, Streamable HTTP on `127.0.0.1`, bearer token,
   requests with an `Origin` refused); it builds a `Ctx` per call from a `CtxSource`
   and records each call through an `AuditSink`.
@@ -154,6 +157,17 @@ explicit OK, and keep them covered by tests.
   is one `Command::QueryBatch` (readers only, never `Caller::User`): each statement
   passes the gate on its own, then all run on one spare session in a read-only
   transaction that is rolled back.
+- **Boards by AI.** The board tools change tangul's boards, not the database: only
+  through `service::boards::{create_by_ai, apply_by_ai}`, on databases offered to AI
+  tools, all edits or none and only at the revision the AI read (only changes to
+  what a board shows give a new revision). Tile queries must be one statement that
+  reads (the gate's checks), are saved under a comment naming the AI, and run as the
+  user's board (`Caller::Board`), never for the AI: no result goes back. Before they
+  are saved they are planned (`EXPLAIN` as a board read, `Dialect::plan_cost`): a
+  cost over `HEAVY_COST` or no plan holds the tile (red, not run by the board) until
+  the user ran it in the tile's tab. Links, refresh, removing tiles and deleting or
+  archiving boards stay the user's. On a schema-only database the AI sees tile
+  queries only as fingerprints.
 - **Editor values.** While a condition on a text column is typed, the editor may
   look at its values (`assist::profile::quick_values_sql`: at most a few hundred
   rows) as `Caller::Editor`, with the schedules' rules; only where the database's
@@ -181,6 +195,19 @@ explicit OK, and keep them covered by tests.
   user (allowed; the title bar says what that means). A chosen user that is gone or
   can't connect is shown to the user, and the AI has no connection: it never connects
   as anyone else instead.
+- **What AI tools see of rows.** Per database, in its own settings file
+  (`core::ai_view`, `databases/<id>.json` under `ai.content_blocking`; no UI yet):
+  `redact` and `hide` lists of patterns (with a dot a column: `*.email`,
+  `orders.adr*`, `schema.table.column`; without one a table; `*` only, case ignored;
+  `!` an exception, the last match in a list wins), `block_queries`. `assist::ai_view::plan` checks every AI read before it
+  runs and traces each result column to the table columns it comes from (renames,
+  expressions, `*`, CTEs, subqueries, `UNION`, generated columns, views); what it
+  can't tell gets the strictest mode the statement uses. While rules apply, only the
+  database's own tables (no catalogs, no functions in `FROM`). `Ctx` hands the model
+  redacted values as `⟦redacted⟧` and leaves hidden columns out; `show` still opens
+  the full result for the user. Value profiles and known values skip these columns.
+  AI queries go to history under `-- ai view`; a query whose first line is that
+  (case and spaces aside) shows its result as AI tools see it. A settings file that can't be read hides everything.
 - **Schema only.** A database's `ai_access` (`"data"` or `"schema"`), under the
   callers' ceilings `ai.access` (assistant) and `mcp.access` (MCP) in `settings.json`;
   the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no
@@ -204,7 +231,8 @@ explicit OK, and keep them covered by tests.
 - **Tests.** Changes to the gate, guard, pool or drivers come with tests, including
   live ones (`crates/engine/tests/live.rs`, e.g. `assistant_checks`: a write hidden in
   a read must fail). Aim for ≥ 95% line coverage in core, drivers, engine, assist,
-  tunnel, data, service, llm and ai (`.github/workflows/coverage.yml`).
+  tunnel, data, service, llm and ai (`.github/workflows/ci.yml` measures it; see
+  `docs/TESTING.md`, which names the tests behind each README promise: keep it true).
 
 ## Commands
 
@@ -230,4 +258,7 @@ explicit OK, and keep them covered by tests.
   stack pull requests on each other.
 - Issues close when their commit reaches `main`, so put `Closes #N` in the commit
   message. In a pull request into `dev` it has no effect.
-- CI runs only when started by hand (Actions → CI → Run workflow).
+- Commit messages in lower case (the subject and the text; names as they are spelled).
+- CI (`.github/workflows/ci.yml`) runs on pushes to `dev` and `main` and on pull
+  requests: every crate's tests once, on Linux, with coverage; releases run it first.
+  UI tests press `secondary-…` keys (cmd on macOS, ctrl elsewhere), never `cmd-…`.
