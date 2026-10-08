@@ -248,9 +248,11 @@ pub const USER_INFO: &str = "The database user the AI's queries run as. A user t
 pub const VALUES_INFO: &str = "Profiles the AI may take of a column's values. They don't limit the AI's own \
      queries; the rights of its database user do.";
 
-/// An on/off switch, on in the muted color: being on needs no accent.
+/// An on/off switch, on as its off color tinted with a fifth of the accent: calm,
+/// yet clearly on.
 pub fn switch(id: impl Into<ElementId>, cx: &App) -> Switch {
-    Switch::new(id).color(cx.theme().muted_foreground)
+    let theme = cx.theme();
+    Switch::new(id).color(theme.switch.blend(theme.primary.opacity(0.2)))
 }
 
 /// Width of a form's labels, so that its controls line up.

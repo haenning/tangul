@@ -80,7 +80,7 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     Longer explanations go behind an (i) (`menu_section`), never as paragraphs.
     Forms: `form_section` / `form_row` / `form_note`, a choice of a few as `segmented`
     (muted track, the chosen one raised); the accent only where it means something,
-    switches via `ui::switch` (muted when on)
+    switches via `ui::switch` (on: the off color tinted with the accent)
   - `board/`: a board in a tab (header, tiles as `ResultView`s, edit mode with drag and
     drop); knows nothing about the workspace: asks for changes with events, refreshes
     in one batch (`Caller::Board`) only while it is drawn
