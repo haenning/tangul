@@ -79,11 +79,14 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     "Table contents stay hidden from the AI" (not "Your user" / "Uses your user").
     Longer explanations go behind an (i) (`menu_section`), never as paragraphs.
     Forms: `form_section` / `form_row` / `form_note`, a choice of a few as `segmented`
-    (muted track, the chosen one raised); the accent only where it means something
+    (muted track, the chosen one raised); the accent only where it means something,
+    switches via `ui::switch` (muted when on)
   - `board/`: a board in a tab (header, tiles as `ResultView`s, edit mode with drag and
     drop); knows nothing about the workspace: asks for changes with events, refreshes
     in one batch (`Caller::Board`) only while it is drawn
-  - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`
+  - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`; an empty editor shows
+    feature hints (`query_tab/hints.rs`). A larger feature or a usability win that
+    isn't obvious: propose a hint for it
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
     nothing about tabs, so boards and the assistant can reuse it
   - `query_router.rs`: engine answers to the tab waiting for them;
