@@ -10,7 +10,11 @@ out of your way.
 
 ![tangul](docs/screenshot.png)
 
-**[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)**
+**[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)** · **[Testing](docs/TESTING.md)**
+
+[![tests](https://github.com/haenning/tangul/raw/badges/tests.svg)](docs/TESTING.md)
+[![coverage](https://github.com/haenning/tangul/raw/badges/coverage.svg)](https://github.com/haenning/tangul/blob/badges/summary.md)
+[![databases](https://github.com/haenning/tangul/raw/badges/databases.svg)](docs/TESTING.md#live-database-tests)
 
 ## See your data
 

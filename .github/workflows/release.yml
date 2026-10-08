@@ -13,7 +13,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Every test first (the same run as on dev); nothing is built if one fails.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   dmg:
+    needs: ci
     # macOS 26 image: Xcode 26's actool compiles the Icon Composer icon (light/dark).
     # bundle-macos.sh falls back to the PNG icon if it isn't available.
     runs-on: macos-26

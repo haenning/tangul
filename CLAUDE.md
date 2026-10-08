@@ -231,7 +231,8 @@ explicit OK, and keep them covered by tests.
 - **Tests.** Changes to the gate, guard, pool or drivers come with tests, including
   live ones (`crates/engine/tests/live.rs`, e.g. `assistant_checks`: a write hidden in
   a read must fail). Aim for ≥ 95% line coverage in core, drivers, engine, assist,
-  tunnel, data, service, llm and ai (`.github/workflows/coverage.yml`).
+  tunnel, data, service, llm and ai (`.github/workflows/ci.yml` measures it; see
+  `docs/TESTING.md`, which names the tests behind each README promise: keep it true).
 
 ## Commands
 
@@ -258,4 +259,6 @@ explicit OK, and keep them covered by tests.
 - Issues close when their commit reaches `main`, so put `Closes #N` in the commit
   message. In a pull request into `dev` it has no effect.
 - Commit messages in lower case (the subject and the text; names as they are spelled).
-- CI runs only when started by hand (Actions → CI → Run workflow).
+- CI (`.github/workflows/ci.yml`) runs on pushes to `dev` and `main` and on pull
+  requests: every crate's tests once, on Linux, with coverage; releases run it first.
+  UI tests press `secondary-…` keys (cmd on macOS, ctrl elsewhere), never `cmd-…`.

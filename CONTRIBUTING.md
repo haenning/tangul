@@ -69,10 +69,13 @@ local Postgres or MySQL.
 
 ## Branches and CI
 
-Work happens on `dev`; pull requests into `main` are opened by hand. CI (`.github/workflows/ci.yml`: lint, backend with live database
-tests on Linux, app build on macOS) is paused during heavy development and only runs
-when started by hand (Actions → CI → Run workflow). Pull requests into `main` and
-releases run `make license-check` (`.github/workflows/licenses.yml`).
+Work happens on `dev`; pull requests into `main` are opened by hand. CI
+(`.github/workflows/ci.yml`) runs on every push to `dev` and `main` and on pull
+requests, on Linux: format, clippy and dependency checks in one job; every crate's
+tests (live database and headless UI tests included) once, with coverage, in the
+other. On `dev` it publishes the report and badges to the `badges` branch; see
+[docs/TESTING.md](docs/TESTING.md). Releases run it before they build. Pull requests
+into `main` and releases run `make license-check` (`.github/workflows/licenses.yml`).
 
 ## Releases
 
