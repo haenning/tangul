@@ -29,6 +29,7 @@ impl Workspace {
             let weak = weak.clone();
             Button::new("db-switcher")
                 .label(db.map_or("No database".into(), |d| d.display_name()))
+                .icon(Icon::new(Lucide::Database).text_color(theme.muted_foreground))
                 .ghost()
                 .small()
                 .dropdown_menu(move |menu, _, _| {
