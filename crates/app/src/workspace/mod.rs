@@ -266,6 +266,9 @@ impl Workspace {
         let appearance_sub = cx.observe_window_appearance(window, |_, window, cx| {
             crate::theme::apply(Some(window), cx)
         });
+        // Entering or leaving fullscreen resizes the window: the title bar's inset for
+        // the traffic lights changes with it.
+        let bounds_sub = cx.observe_window_bounds(window, |_, _, cx| cx.notify());
         let assistant = cx.new(|cx| crate::assistant::ChatPanel::new(window, cx));
         let assistant_sub = cx.subscribe_in(&assistant, window, Self::on_chat_event);
         let mut this = Self {
@@ -315,6 +318,7 @@ impl Workspace {
                 value_sub,
                 settings_sub,
                 appearance_sub,
+                bounds_sub,
                 assistant_sub,
             ],
             _pump: pump,
@@ -464,7 +468,14 @@ impl Render for Workspace {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(TitleBar::new().child(self.render_title_bar(cx)))
+            .child(
+                TitleBar::new()
+                    // macOS hides the traffic lights in fullscreen: no inset for them.
+                    .when(cfg!(target_os = "macos") && window.is_fullscreen(), |bar| {
+                        bar.pl_0()
+                    })
+                    .child(self.render_title_bar(cx)),
+            )
             .child({
                 let content = v_flex()
                     .size_full()
