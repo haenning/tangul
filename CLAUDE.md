@@ -17,7 +17,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
   incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
   the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
-  `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there)
+  `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there;
+  each database's own settings: `database_settings.rs`, `databases/<id>.json` there)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
   `boards` (the one API that changes boards, for the UI and the AI tools, and when a
@@ -194,6 +195,18 @@ explicit OK, and keep them covered by tests.
   user (allowed; the title bar says what that means). A chosen user that is gone or
   can't connect is shown to the user, and the AI has no connection: it never connects
   as anyone else instead.
+- **What AI tools see of rows.** Per database, in its own settings file
+  (`core::ai_view`, `databases/<id>.json`; no UI yet): `type` blacklist or whitelist,
+  `redact_*`, `hide_*` and `show_*` lists of column and table patterns (`*` only, case
+  ignored), `block_queries`. `assist::ai_view::plan` checks every AI read before it
+  runs and traces each result column to the table columns it comes from (renames,
+  expressions, `*`, CTEs, subqueries, `UNION`, generated columns, views); what it
+  can't tell gets the strictest mode the statement uses. While rules apply, only the
+  database's own tables (no catalogs, no functions in `FROM`). `Ctx` hands the model
+  redacted values as `⟦redacted⟧` and leaves hidden columns out; `show` still opens
+  the full result for the user. Value profiles and known values skip these columns.
+  AI queries go to history under `-- ai view`; a query with that line shows its
+  result as AI tools see it. A settings file that can't be read hides everything.
 - **Schema only.** A database's `ai_access` (`"data"` or `"schema"`), under the
   callers' ceilings `ai.access` (assistant) and `mcp.access` (MCP) in `settings.json`;
   the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no
@@ -243,4 +256,5 @@ explicit OK, and keep them covered by tests.
   stack pull requests on each other.
 - Issues close when their commit reaches `main`, so put `Closes #N` in the commit
   message. In a pull request into `dev` it has no effect.
+- Commit messages in lower case (the subject and the text; names as they are spelled).
 - CI runs only when started by hand (Actions → CI → Run workflow).

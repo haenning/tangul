@@ -412,6 +412,32 @@ async fn schema_checks(driver: DriverKind, cfg: ConnectConfig) {
         ("tangul_fk_test", "parent", &["id".to_string()][..])
     );
 
+    // What AI tools see, traced through the catalog as the server reports it: a
+    // generated column counts as what it is computed from, a view's column as what
+    // its definition reads.
+    {
+        use tangul_assist::ai_view::{Mode, Rules, plan};
+        let d = tangul_assist::dialect::dialect_for(driver);
+        let index = tangul_assist::schema::SchemaIndex::new(info.clone(), d, None);
+        let rules = Rules::new(&tangul_core::ai_view::AiColumns {
+            redact_columns: vec!["child.amount".into(), "child.id".into()],
+            ..Default::default()
+        });
+        let seen = |sql: &str| plan(sql, &index, &rules, d.lexing()).unwrap().modes(1);
+        assert_eq!(
+            seen("SELECT doubled FROM tangul_fk_test.child"),
+            [Mode::Redacted]
+        );
+        assert_eq!(
+            seen("SELECT id FROM tangul_fk_test.happy"),
+            [Mode::Redacted]
+        );
+        assert_eq!(
+            seen("SELECT parent_id FROM tangul_fk_test.child"),
+            [Mode::Visible]
+        );
+    }
+
     // What the rich catalog (#112) adds.
     let table = |name: &str| {
         info.tables

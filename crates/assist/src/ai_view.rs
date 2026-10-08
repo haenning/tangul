@@ -258,6 +258,19 @@ pub fn plan(
     rules: &Rules,
     lexing: Lexing,
 ) -> Result<Plan, String> {
+    plan_at(sql, schema, rules, lexing, 0)
+}
+
+/// How deep views of views are followed; deeper ones hide all they have.
+const VIEW_DEPTH: usize = 8;
+
+fn plan_at(
+    sql: &str,
+    schema: &SchemaIndex,
+    rules: &Rules,
+    lexing: Lexing,
+    depth: usize,
+) -> Result<Plan, String> {
     if rules.is_open() {
         return Ok(Plan::open());
     }
@@ -292,16 +305,17 @@ pub fn plan(
         ));
     }
     let tables: Vec<usize> = handles.iter().filter_map(|(_, t)| *t).collect();
+    let stored: HashMap<usize, Vec<Mode>> = tables
+        .iter()
+        .map(|&ix| (ix, stored_modes(schema, rules, lexing, ix, depth)))
+        .collect();
+    let table_modes = |ix: usize| -> Vec<Mode> { stored[&ix].clone() };
     let column_mode = |ix: usize, column: &str| {
-        let t = schema.table(ix);
-        rules.mode(&t.schema, &t.name, column)
-    };
-    let table_modes = |ix: usize| -> Vec<Mode> {
         schema
             .columns(ix)
             .iter()
-            .map(|c| column_mode(ix, &c.name))
-            .collect()
+            .position(|c| c.name.eq_ignore_ascii_case(column))
+            .map_or(Mode::Visible, |k| stored[&ix][k])
     };
     let strictest = |modes: &[Mode]| modes.iter().copied().max().unwrap_or(Mode::Visible);
     // By column name, the strictest of the tables read.
@@ -502,6 +516,56 @@ fn push_row<'a>(modes: &[Mode], out: &mut RowBatch, cell: impl Fn(usize) -> Opti
         }
     }
     out.finish_row();
+}
+
+/// What AI tools see of each column of table `ix` as it is stored: its rule; a
+/// generated column also what its expression uses; a view's column also what its
+/// definition reveals (a view that can't be told hides everything).
+fn stored_modes(
+    schema: &SchemaIndex,
+    rules: &Rules,
+    lexing: Lexing,
+    ix: usize,
+    depth: usize,
+) -> Vec<Mode> {
+    let t = schema.table(ix);
+    let columns = schema.columns(ix);
+    let own: Vec<Mode> = columns
+        .iter()
+        .map(|c| rules.mode(&t.schema, &t.name, &c.name))
+        .collect();
+    let mut out = own.clone();
+    for (k, c) in columns.iter().enumerate() {
+        let Some(expr) = &c.generated else { continue };
+        for token in tokenize(expr).iter().filter(|t| t.is_ident()) {
+            let name = unquote(token.text(expr));
+            if let Some(j) = columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(&name))
+            {
+                out[k] = out[k].max(own[j]);
+            }
+        }
+    }
+    let view = schema
+        .info()
+        .views
+        .iter()
+        .find(|v| v.schema == t.schema && v.name == t.name);
+    if let Some(view) = view {
+        let seen = (depth < VIEW_DEPTH)
+            .then(|| plan_at(&view.definition, schema, rules, lexing, depth + 1).ok())
+            .flatten();
+        match seen {
+            Some(plan) => {
+                for (k, mode) in plan.modes(columns.len()).into_iter().enumerate() {
+                    out[k] = out[k].max(mode);
+                }
+            }
+            None => out.fill(Mode::Hidden),
+        }
+    }
+    out
 }
 
 fn within_item(i: usize, items: &[(usize, usize)]) -> bool {
@@ -855,7 +919,7 @@ pub fn mark(sql: &str) -> String {
 mod tests {
     use super::*;
     use crate::dialect::dialect_for;
-    use tangul_core::{ColumnMeta, DriverKind, SchemaInfo, TableInfo, TableKind};
+    use tangul_core::{ColumnMeta, DriverKind, SchemaInfo, TableInfo, TableKind, ViewDef};
 
     fn shop() -> SchemaIndex {
         let table = |name: &str| TableInfo {
@@ -1070,6 +1134,67 @@ mod tests {
         assert_eq!(modes("select id from users where email = 'x'", &r, 1), [V]);
         // The hidden audit log: even its ids.
         assert_eq!(modes("select id from audit_log", &r, 1), [H]);
+    }
+
+    #[test]
+    fn generated_columns_and_views_carry_what_they_come_from() {
+        let col = |table: &str, name: &str, generated: Option<&str>| ColumnMeta {
+            schema: "public".into(),
+            table: table.into(),
+            name: name.into(),
+            data_type: "text".into(),
+            nullable: true,
+            generated: generated.map(String::from),
+            ..Default::default()
+        };
+        let table = |name: &str, kind: TableKind| TableInfo {
+            schema: "public".into(),
+            name: name.into(),
+            kind,
+            comment: None,
+            row_estimate: None,
+            size_bytes: None,
+        };
+        let schema = SchemaIndex::new(
+            SchemaInfo {
+                tables: vec![
+                    table("users", TableKind::Table),
+                    table("contacts", TableKind::View),
+                    table("loop_a", TableKind::View),
+                ],
+                columns: vec![
+                    col("users", "id", None),
+                    col("users", "email", None),
+                    col("users", "domain", Some("split_part(email, '@', 2)")),
+                    col("contacts", "id", None),
+                    col("contacts", "address", None),
+                    col("loop_a", "x", None),
+                ],
+                views: vec![
+                    ViewDef {
+                        schema: "public".into(),
+                        name: "contacts".into(),
+                        definition: "SELECT id, email AS address FROM users".into(),
+                    },
+                    ViewDef {
+                        schema: "public".into(),
+                        name: "loop_a".into(),
+                        definition: "SELECT x FROM loop_a".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+            dialect_for(DriverKind::Postgres),
+            Some("public".into()),
+        );
+        let r = rules(r#"{"redact_columns": ["email"]}"#);
+        let modes =
+            |sql: &str, n: usize| plan(sql, &schema, &r, Lexing::default()).unwrap().modes(n);
+        assert_eq!(modes("select id, domain from users", 2), [V, R]);
+        assert_eq!(modes("select * from contacts", 2), [V, R]);
+        assert_eq!(modes("select address from contacts", 1), [R]);
+        // A view that never ends: everything hidden.
+        assert_eq!(modes("select x from loop_a", 1), [H]);
     }
 
     #[test]
