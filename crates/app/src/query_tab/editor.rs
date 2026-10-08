@@ -20,6 +20,7 @@ use tangul_assist::lexer::{Lexing, TokenKind, tokenize, tokenize_with};
 use tangul_assist::statement::statement_at;
 use tangul_engine::Problem;
 
+use super::hints::Hint;
 use crate::completion::Snippets;
 
 /// Pause in typing after which the SQL is checked on the server.
@@ -79,6 +80,9 @@ pub struct SqlEditor {
     /// last edit (to tell an inserted item from typing).
     pub(super) snippets: Snippets,
     text_len: usize,
+    /// What an empty editor tells about the app; none under a board tile's own
+    /// placeholder.
+    hints: Vec<&'static Hint>,
     _changes: Subscription,
 }
 
@@ -117,6 +121,7 @@ impl SqlEditor {
             _validation: Task::ready(()),
             snippets: Snippets::default(),
             text_len: text.len(),
+            hints: super::hints::for_new_tab(),
             _changes: changes,
         };
         editor.color_comments(cx);
@@ -127,8 +132,18 @@ impl SqlEditor {
     /// and its SQL formatted differently.
     /// What the empty editor shows.
     pub fn set_placeholder(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.hints.clear();
         self.state
             .update(cx, |s, cx| s.set_placeholder(text, window, cx));
+    }
+
+    /// The hints to show now: only while the editor is empty.
+    pub fn hints(&self, cx: &App) -> &[&'static Hint] {
+        if self.state.read(cx).value().is_empty() {
+            &self.hints
+        } else {
+            &[]
+        }
     }
 
     pub fn set_dialect(&mut self, dialect: &dyn Dialect, cx: &mut Context<Self>) {

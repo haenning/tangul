@@ -3,6 +3,7 @@
 //! puts them together and passes what they ask for on to the workspace.
 
 mod editor;
+mod hints;
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -36,6 +37,10 @@ use editor::{EditorEvent, RunTake, SqlEditor};
 
 /// Editor height a new tab starts with.
 const EDITOR_HEIGHT: f32 = 240.;
+/// Where the hints of an empty editor start: two lines below the placeholder, at
+/// the text after the line numbers.
+const HINTS_TOP: f32 = 48.;
+const HINTS_LEFT: f32 = 53.;
 /// Dragging the editor below this height hides it completely.
 const EDITOR_SNAP_HIDE: f32 = 60.;
 
@@ -115,6 +120,8 @@ pub struct QueryTab {
     pub conn: Option<Entity<Connection>>,
     /// Re-renders the tab when its connection changes (status, name).
     _conn_changes: Option<Subscription>,
+    /// The empty editor's hints are shown (to redraw only when that changes).
+    hinting: bool,
     /// Bookmark this tab was opened from or saved as; bookmarking again updates it.
     pub bookmark_id: Option<String>,
     /// Times the last query was run successfully, when it is worth bookmarking.
@@ -154,8 +161,16 @@ impl QueryTab {
             editor.update(cx, |e, cx| e.set_dialect(dialect, cx));
         }
         let subscriptions = vec![
-            cx.subscribe(&editor, |_, _, event: &EditorEvent, cx| match event {
-                EditorEvent::Edited => cx.emit(TabEvent::Edited),
+            cx.subscribe(&editor, |this, _, event: &EditorEvent, cx| match event {
+                EditorEvent::Edited => {
+                    // Redrawn only when the hints come or go, not on every key.
+                    let hints = !this.editor.read(cx).hints(cx).is_empty();
+                    if hints != this.hinting {
+                        this.hinting = hints;
+                        cx.notify();
+                    }
+                    cx.emit(TabEvent::Edited)
+                }
                 EditorEvent::Validate {
                     generation,
                     statements,
@@ -170,6 +185,7 @@ impl QueryTab {
             id,
             title: format!("Query {}", id.0).into(),
             _conn_changes: conn.as_ref().map(|c| cx.observe(c, |_, _, cx| cx.notify())),
+            hinting: sql.is_empty(),
             conn,
             bookmark_id: None,
             board_tile: None,
@@ -503,6 +519,12 @@ impl QueryTab {
         });
     }
 
+    /// Whether the editor shows feature hints now (tests).
+    #[cfg(test)]
+    pub fn hints_shown(&self, cx: &App) -> bool {
+        !self.editor.read(cx).hints(cx).is_empty()
+    }
+
     /// The cursor's byte offset in the editor (tests).
     #[cfg(test)]
     pub fn cursor(&self, cx: &App) -> usize {
@@ -578,6 +600,34 @@ impl QueryTab {
     /// Timing and row count of the last run, shown in the workspace status bar.
     pub fn status_text(&self, cx: &App) -> SharedString {
         self.results.read(cx).status_text(cx)
+    }
+
+    /// Feature hints under the empty editor's placeholder, in the muted color;
+    /// they let clicks through to the editor.
+    fn render_hints(&self, cx: &App) -> Option<AnyElement> {
+        let hints = self.editor.read(cx).hints(cx);
+        if hints.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        Some(
+            v_flex()
+                .id("hints")
+                .test_support()
+                .absolute()
+                .top(px(HINTS_TOP))
+                .left(px(HINTS_LEFT))
+                .right(px(16.))
+                .gap_3()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .children(hints.iter().map(|hint| {
+                    v_flex()
+                        .child(div().font_weight(FontWeight::MEDIUM).child(hint.title))
+                        .child(div().whitespace_normal().child(hint.text))
+                }))
+                .into_any_element(),
+        )
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -728,9 +778,11 @@ impl Render for QueryTab {
                                 .child(
                                     div()
                                         .key_context("QueryEditor")
+                                        .relative()
                                         .size_full()
                                         .overflow_hidden()
-                                        .child(Editor::new(&editor).h_full().bordered(false)),
+                                        .child(Editor::new(&editor).h_full().bordered(false))
+                                        .children(self.render_hints(cx)),
                                 ),
                         )
                         .child(

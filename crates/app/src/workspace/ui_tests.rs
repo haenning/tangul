@@ -2752,3 +2752,20 @@ fn pinned_tabs_are_kept_per_database(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| show_db(&workspace, 2, window, cx));
     cx.update(|cx| assert_eq!(tab_titles(&workspace, cx), ["Orders", "*AI settings"]));
 }
+
+#[gpui_kit::test]
+fn an_empty_tab_shows_hints_until_something_is_typed(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = cx.update(|cx| {
+        handle
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |ws, cx| ws.add_tab("", window, cx))
+            })
+            .unwrap()
+    });
+    cx.update(|cx| assert!(tab.read(cx).hints_shown(cx)));
+    step(handle, cx, |window, cx| {
+        tab.update(cx, |t, cx| t.insert_sql("select 1", window, cx))
+    });
+    cx.update(|cx| assert!(!tab.read(cx).hints_shown(cx)));
+}
