@@ -20,11 +20,14 @@ gpui_kit::assets::icon_assets!(
         ChartColumn,
         ChartColumnStacked,
         ChartLine,
+        CircleDashed,
         Clock,
+        CornerDownRight,
         Database,
         Equal,
         EqualNot,
         ExternalLink,
+        FingerprintPattern,
         Funnel,
         GripVertical,
         Key,
@@ -32,6 +35,8 @@ gpui_kit::assets::icon_assets!(
         LayoutDashboard,
         Lightbulb,
         Link,
+        List,
+        ListOrdered,
         ListTree,
         Maximize2,
         Minimize2,
@@ -41,9 +46,12 @@ gpui_kit::assets::icon_assets!(
         Plug,
         RotateCcwClock,
         Rows3,
+        Sigma,
         Star,
         StarFill,
-        Table
+        Table,
+        Type,
+        Zap
     ]
 );
 

@@ -1393,6 +1393,47 @@ fn hovering_a_number_column_shows_its_summary(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_summary_of_a_table_column_starts_with_schema_tags(cx: &mut TestAppContext) {
+    use tangul_assist::columns::{ColumnFacts, Unique};
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(
+        handle,
+        &workspace,
+        &[[Some("1"), Some("a")], [Some("2"), None]],
+        cx,
+    );
+    let facts = ColumnFacts {
+        table: "t".into(),
+        column: "id".into(),
+        data_type: "integer".into(),
+        numeric: true,
+        nullable: true,
+        unique: Unique::Alone,
+        ..Default::default()
+    };
+    cx.update(|cx| {
+        tab.update(cx, |t, cx| {
+            t.set_row_actions(vec![], None, vec![Some(facts)], cx)
+        })
+    });
+    // An expression has no tags.
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats").visible());
+        assert!(window.try_find("column-tags").is_none());
+    });
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats").visible());
+        assert!(window.find("column-tags").visible());
+    });
+}
+
+#[gpui_kit::test]
 fn the_summary_comes_back_after_the_filter_closes(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     tab_with_rows(

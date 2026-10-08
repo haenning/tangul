@@ -30,7 +30,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_assist::columns::ColumnFacts;
+use tangul_assist::columns::{ColumnFacts, TagKind};
 use tangul_assist::refine::{ColumnKind, Refine};
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::{ColumnInfo, ResultSet};
@@ -443,7 +443,60 @@ impl KeyMarker {
     }
 }
 
-fn stats_card(scope: String, stats: &ColumnStats, cx: &App) -> impl IntoElement {
+fn tag_icon(kind: TagKind) -> Lucide {
+    match kind {
+        TagKind::Type => Lucide::Type,
+        TagKind::Nullable => Lucide::CircleDashed,
+        TagKind::Unique => Lucide::FingerprintPattern,
+        TagKind::Enum => Lucide::List,
+        TagKind::Default => Lucide::CornerDownRight,
+        TagKind::Computed => Lucide::Sigma,
+        TagKind::Auto => Lucide::ListOrdered,
+        TagKind::Index => Lucide::Zap,
+    }
+}
+
+/// What the schema says about a column: pills in the accent color, then its comment.
+fn schema_tags(facts: &ColumnFacts, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    v_flex()
+        .id("column-tags")
+        .test_support()
+        .gap_1()
+        .pb_1()
+        .child(
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .children(facts.tags().into_iter().map(|tag| {
+                    h_flex()
+                        .gap_1()
+                        .px_1p5()
+                        .py_0p5()
+                        .items_center()
+                        .rounded_full()
+                        .bg(theme.primary.opacity(0.12))
+                        .text_color(theme.primary)
+                        .child(Icon::new(tag_icon(tag.kind)).size_3())
+                        .child(div().child(tag.text))
+                })),
+        )
+        .when_some(facts.comment.clone(), |this, comment| {
+            this.child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .line_clamp(3)
+                    .child(comment),
+            )
+        })
+}
+
+fn stats_card(
+    scope: String,
+    stats: &ColumnStats,
+    facts: Option<&ColumnFacts>,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.theme();
     let row = |label: &'static str, value: SharedString| {
         h_flex()
@@ -471,6 +524,7 @@ fn stats_card(scope: String, stats: &ColumnStats, cx: &App) -> impl IntoElement 
         .text_color(theme.popover_foreground)
         .shadow_md()
         .child(div().pb_1().text_color(theme.muted_foreground).child(scope))
+        .children(facts.map(|f| schema_tags(f, cx)))
         .child(row("rows", stats.rows.to_string().into()))
         .when(stats.nulls > 0, |this| {
             this.child(row("non-null", stats.count.to_string().into()))
@@ -673,7 +727,7 @@ impl TableDelegate for ResultsDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let facts = self.facts.get(col_ix).cloned().flatten();
-        let key_icon = facts.and_then(|f| self.key_icon(col_ix, &f, cx));
+        let key_icon = facts.clone().and_then(|f| self.key_icon(col_ix, &f, cx));
         let theme = cx.theme();
         let name = self.columns[col_ix].name.clone();
         let hovered = self.hovered == Some(col_ix);
@@ -750,7 +804,7 @@ impl TableDelegate for ResultsDelegate {
                         .anchor(Anchor::TopCenter)
                         .offset(point(px(0.), px(8.)))
                         .snap_to_window_with_margin(px(8.))
-                        .child(stats_card(scope, &stats, cx)),
+                        .child(stats_card(scope, &stats, facts.as_ref(), cx)),
                 ))
             });
 
@@ -1302,6 +1356,7 @@ mod tests {
                 table: t.into(),
                 column: "id".into(),
             }),
+            ..Default::default()
         }
     }
 

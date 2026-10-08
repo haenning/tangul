@@ -14,7 +14,7 @@ use crate::related::numeric_type;
 use crate::schema::SchemaIndex;
 
 /// What the schema says about a result column that is a plain table column.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ColumnFacts {
     /// Short table name.
     pub table: String,
@@ -25,6 +25,105 @@ pub struct ColumnFacts {
     pub primary_key: bool,
     /// The column it points to, when it is part of a foreign key.
     pub references: Option<ForeignRef>,
+    pub nullable: bool,
+    /// A unique index or constraint (not the primary key) that includes it.
+    pub unique: Unique,
+    /// Name of its enum type and the number of values (never the values).
+    pub enum_type: Option<(String, usize)>,
+    pub default: Option<String>,
+    /// A generated (computed) column.
+    pub generated: bool,
+    /// Identity, serial or auto-increment.
+    pub identity: bool,
+    /// Names of the non-unique (or partial) indexes it is part of.
+    pub indexes: Vec<String>,
+    pub comment: Option<String>,
+}
+
+/// How a column takes part in unique indexes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Unique {
+    #[default]
+    No,
+    /// A unique index over this column alone.
+    Alone,
+    /// Only in a unique index over several columns: the other ones.
+    With(Vec<String>),
+}
+
+/// Longest text of a tag before it is cut off.
+const TAG_WIDTH: usize = 24;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagKind {
+    Type,
+    Nullable,
+    Unique,
+    Enum,
+    Default,
+    Computed,
+    Auto,
+    Index,
+}
+
+/// One pill of the column card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tag {
+    pub kind: TagKind,
+    pub text: String,
+}
+
+fn cut(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= TAG_WIDTH {
+        return text;
+    }
+    let head: String = text.chars().take(TAG_WIDTH - 1).collect();
+    format!("{}…", head.trim_end())
+}
+
+impl ColumnFacts {
+    /// What the schema says about the column, as short tags in a fixed order.
+    pub fn tags(&self) -> Vec<Tag> {
+        let tag = |kind, text: String| Tag { kind, text };
+        // An enum's tag names its type already, so it takes the type's place.
+        let mut tags = vec![match &self.enum_type {
+            Some((name, count)) => {
+                let name = name.rsplit('.').next().unwrap_or(name);
+                tag(TagKind::Enum, format!("{} ·{count}", cut(name)))
+            }
+            None => tag(TagKind::Type, cut(&self.data_type)),
+        }];
+        if self.nullable {
+            tags.push(tag(TagKind::Nullable, "null".into()));
+        }
+        match &self.unique {
+            Unique::No => {}
+            Unique::Alone => tags.push(tag(TagKind::Unique, "unique".into())),
+            Unique::With(others) => {
+                let text = match others.as_slice() {
+                    [one] => format!("unique +{}", cut(one)),
+                    more => format!("unique +{}", more.len()),
+                };
+                tags.push(tag(TagKind::Unique, text));
+            }
+        }
+        if let Some(default) = &self.default {
+            tags.push(tag(TagKind::Default, cut(default)));
+        }
+        if self.generated {
+            tags.push(tag(TagKind::Computed, "computed".into()));
+        }
+        if self.identity {
+            tags.push(tag(TagKind::Auto, "auto".into()));
+        }
+        match self.indexes.as_slice() {
+            [] => {}
+            [one] => tags.push(tag(TagKind::Index, cut(one))),
+            more => tags.push(tag(TagKind::Index, format!("{} indexes", more.len()))),
+        }
+        tags
+    }
 }
 
 /// The target of a foreign key column.
@@ -170,6 +269,39 @@ fn facts_for(schema: &SchemaIndex, table: usize, name: &str) -> Option<ColumnFac
             column: fk.ref_columns.get(i)?.clone(),
         })
     });
+    let (mut unique, mut indexes) = (Unique::No, Vec::new());
+    let mut composite: Option<Vec<String>> = None;
+    for ix in &schema.info().indexes {
+        if !(ix.schema.eq_ignore_ascii_case(&t.schema)
+            && ix.table.eq_ignore_ascii_case(&t.name)
+            && !ix.primary
+            && ix.columns.iter().any(|c| c.eq_ignore_ascii_case(&col.name)))
+        {
+            continue;
+        }
+        // A partial index doesn't make the column unique.
+        if ix.unique && ix.predicate.is_none() {
+            if ix.columns.len() == 1 {
+                unique = Unique::Alone;
+            } else if composite
+                .as_ref()
+                .is_none_or(|c| ix.columns.len() - 1 < c.len())
+            {
+                composite = Some(
+                    ix.columns
+                        .iter()
+                        .filter(|c| !c.eq_ignore_ascii_case(&col.name))
+                        .cloned()
+                        .collect(),
+                );
+            }
+        } else {
+            indexes.push(ix.name.clone());
+        }
+    }
+    if unique == Unique::No {
+        unique = composite.map_or(Unique::No, Unique::With);
+    }
     Some(ColumnFacts {
         table: t.name.clone(),
         column: col.name.clone(),
@@ -177,6 +309,16 @@ fn facts_for(schema: &SchemaIndex, table: usize, name: &str) -> Option<ColumnFac
         numeric: numeric_type(&col.data_type),
         primary_key: col.primary_key,
         references,
+        nullable: col.nullable,
+        unique,
+        enum_type: schema
+            .enum_of(col)
+            .map(|e| (e.name.clone(), e.values.len())),
+        default: col.default.clone().filter(|d| !d.trim().is_empty()),
+        generated: col.generated.is_some(),
+        identity: col.identity,
+        indexes,
+        comment: col.comment.clone().filter(|c| !c.trim().is_empty()),
     })
 }
 
@@ -357,6 +499,135 @@ mod tests {
         );
         assert_eq!(f[1].references.as_ref().unwrap().schema, "app");
         assert!(!f[2].primary_key && !f[2].numeric);
+    }
+
+    fn tags_of(schema: &SchemaIndex, table: &str, column: &str) -> Vec<(TagKind, String)> {
+        column_facts(
+            &format!("select {column} from {table}"),
+            &names(&[column]),
+            schema,
+        )
+        .remove(0)
+        .unwrap()
+        .tags()
+        .into_iter()
+        .map(|t| (t.kind, t.text))
+        .collect()
+    }
+
+    fn rich() -> SchemaIndex {
+        use tangul_core::{EnumInfo, IndexInfo};
+        let mut info = sample().info().clone();
+        let at = |info: &tangul_core::SchemaInfo, t: &str, n: &str| {
+            info.columns
+                .iter()
+                .position(|c| c.table == t && c.name == n)
+                .unwrap()
+        };
+        let email = at(&info, "users", "email");
+        let name = at(&info, "users", "name");
+        let total = at(&info, "orders", "total");
+        let uid = at(&info, "orders", "user_id");
+        info.columns[email].default = Some("''::text".into());
+        info.columns[name].enum_type = Some("app.status".into());
+        info.columns[total].generated = Some("a * b".into());
+        info.columns[total].comment = Some("with tax".into());
+        info.columns[uid].identity = true;
+        info.enums.push(EnumInfo {
+            schema: "app".into(),
+            name: "status".into(),
+            values: vec!["a".into(), "b".into(), "c".into()],
+            comment: None,
+        });
+        let index = |t: &str, name: &str, cols: &[&str], unique: bool| IndexInfo {
+            schema: "app".into(),
+            table: t.into(),
+            name: name.into(),
+            columns: cols.iter().map(|c| c.to_string()).collect(),
+            unique,
+            ..Default::default()
+        };
+        info.indexes = vec![
+            IndexInfo {
+                primary: true,
+                ..index("users", "users_pk", &["id"], true)
+            },
+            index("users", "users_email_key", &["email"], true),
+            index("orders", "orders_user_total", &["user_id", "total"], true),
+            index("orders", "orders_total_idx", &["total"], false),
+            index("orders", "orders_total_2", &["total", "id"], false),
+            IndexInfo {
+                predicate: Some("total > 0".into()),
+                ..index("orders", "orders_total_3", &["total"], true)
+            },
+            index("orders", "wide", &["id", "user_id", "total"], true),
+        ];
+        SchemaIndex::new(info, sample().dialect(), Some("public".into()))
+    }
+
+    #[test]
+    fn tags_follow_the_schema() {
+        use TagKind::*;
+        let s = rich();
+        // Primary keys are marked elsewhere, not tagged unique.
+        assert_eq!(tags_of(&s, "users", "id"), [(Type, "integer".into())]);
+        assert_eq!(
+            tags_of(&s, "users", "email"),
+            [
+                (Type, "text".into()),
+                (Nullable, "null".into()),
+                (Unique, "unique".into()),
+                (Default, "''::text".into())
+            ]
+        );
+        assert_eq!(
+            tags_of(&s, "users", "name"),
+            // In the type's place.
+            [(Enum, "status ·3".into()), (Nullable, "null".into())]
+        );
+        // Composite unique: the smallest one names its partner, a larger one counts.
+        assert_eq!(
+            tags_of(&s, "orders", "user_id"),
+            [
+                (Type, "integer".into()),
+                (Nullable, "null".into()),
+                (Unique, "unique +total".into()),
+                (Auto, "auto".into())
+            ]
+        );
+        assert_eq!(
+            tags_of(&s, "orders", "total"),
+            [
+                (Type, "text".into()),
+                (Nullable, "null".into()),
+                (Unique, "unique +user_id".into()),
+                (Computed, "computed".into()),
+                (Index, "3 indexes".into())
+            ]
+        );
+        let f = column_facts("select total from orders", &names(&["total"]), &s);
+        assert_eq!(f[0].as_ref().unwrap().comment.as_deref(), Some("with tax"));
+    }
+
+    #[test]
+    fn tags_count_and_cut() {
+        let mut f = column_facts("select id from orders", &names(&["id"]), &sample())
+            .remove(0)
+            .unwrap();
+        f.data_type = "character varying(255) with a very long tail".into();
+        f.default = Some("nextval('orders_id_seq'::regclass)".into());
+        f.unique = Unique::With(vec!["a".into(), "b".into()]);
+        f.indexes = vec!["only_one".into()];
+        let t: Vec<_> = f.tags().into_iter().map(|t| t.text).collect();
+        assert_eq!(
+            t,
+            [
+                "character varying(255)…",
+                "unique +2",
+                "nextval('orders_id_seq'…",
+                "only_one"
+            ]
+        );
     }
 
     #[test]
