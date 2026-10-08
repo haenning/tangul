@@ -1,7 +1,7 @@
 //! The schema sidebar: tree, search, favorites and actions on tables.
 
 use super::*;
-use crate::ui::{Severity, alert_card};
+use crate::ui::{Severity, alert_card, hover_actions};
 
 impl Workspace {
     /// `schema.table`, quoted only where needed.
@@ -323,7 +323,7 @@ impl Workspace {
             )
     }
 
-    /// A favorite's star, always shown at the row's right end; while the row is
+    /// A favorite's star, always shown (left of the row count); while the row is
     /// hovered the same star among the hover actions takes its place.
     fn fixed_star(
         &self,
@@ -471,6 +471,8 @@ impl Workspace {
                             r.child(div().flex_1().min_w_0().truncate().child(name))
                         }
                     })
+                    // Left of the row count.
+                    .children(fixed_star)
                     .when_some(estimate, |r, estimate| {
                         r.child(
                             div()
@@ -483,8 +485,6 @@ impl Workspace {
                     // The kind, estimate and comment: wrapped, long comments behind
                     // "Show all".
                     .when_some(info, |r, info| r.hoverable_tooltip(TextCard::builder(info)))
-                    // Rightmost, so a favorite's star lines up at the edge.
-                    .children(fixed_star)
                     .child(
                         hover_actions(group, theme.sidebar_accent)
                             .child(
@@ -815,24 +815,6 @@ pub(super) fn table_menu(
         .separator()
         .item(copy("Copy name", table.name.clone()))
         .item(copy("Copy qualified name", name))
-}
-
-/// Buttons over the right end of a row, shown while `group` is hovered: they take
-/// no room from the name the rest of the time. `bg` is the hovered row's
-/// background, so they cover the name's end cleanly.
-fn hover_actions(group: SharedString, bg: Hsla) -> Div {
-    h_flex()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        // The row's right padding (`pr_2`): a favorite's star stays in place.
-        .right(px(8.))
-        .pl_1()
-        .gap_0p5()
-        .items_center()
-        .bg(bg)
-        .invisible()
-        .group_hover(group, |s| s.visible())
 }
 
 fn kind_icon(kind: TableKind) -> Icon {

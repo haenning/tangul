@@ -29,6 +29,7 @@ impl Workspace {
             let weak = weak.clone();
             Button::new("db-switcher")
                 .label(db.map_or("No database".into(), |d| d.display_name()))
+                .icon(Icon::new(Lucide::Database).text_color(theme.muted_foreground))
                 .ghost()
                 .small()
                 .dropdown_menu(move |menu, _, _| {
@@ -224,7 +225,7 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .tooltip(if on {
-                            "Read-only mode is on: writes ask first. Click to turn off"
+                            "Read-only mode is on: statements that change data are not run. Click to turn off"
                         } else {
                             "Read-only mode is off. Click to turn on"
                         })

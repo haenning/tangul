@@ -1,14 +1,14 @@
 //! The MCP page: the server, how clients add it, its token, and what it offers.
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, button::Button, input::Input, switch::Switch,
-    v_flex,
+    ActiveTheme as _, Disableable as _, Sizable as _, button::Button, input::Input, v_flex,
 };
 use gpui_kit::*;
 
 use super::layout::{note, row, section};
 use super::{AiSettingsEvent, AiSettingsTab};
 use crate::settings;
+use crate::ui::switch;
 
 impl AiSettingsTab {
     pub(super) fn render_mcp(
@@ -43,7 +43,7 @@ impl AiSettingsTab {
                 row(
                     "MCP server",
                     Some(status),
-                    Switch::new("mcp-enabled")
+                    switch("mcp-enabled", cx)
                         .checked(enabled)
                         .on_click(cx.listener(|this, on: &bool, window, cx| {
                             let result = settings::set_mcp_enabled(*on, cx);

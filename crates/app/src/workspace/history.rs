@@ -1,6 +1,7 @@
 //! Query history: recording runs (and learning from them) and the sidebar panel.
 
 use super::*;
+use crate::ui::hover_actions;
 
 impl Workspace {
     pub(super) fn refresh_history(&mut self, cx: &mut Context<Self>) {
@@ -248,6 +249,7 @@ impl Workspace {
         h_flex()
             .id(("history-row", ix))
             .group(group.clone())
+            .relative()
             .w_full()
             .h(px(BOOKMARK_ROW_HEIGHT))
             .px_2()
@@ -300,7 +302,7 @@ impl Workspace {
                     ),
             )
             .child(
-                div().invisible().group_hover(group, |s| s.visible()).child(
+                hover_actions(group, theme.sidebar_accent).child(
                     Button::new(("history-bookmark", ix))
                         .icon(Icon::new(Lucide::Bookmark))
                         .ghost()

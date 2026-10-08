@@ -9,7 +9,7 @@ use gpui_kit::component::{
     plot::{
         AXIS_GAP, AxisLabelSide, AxisText, Grid, IntoPlot, Plot, PlotAxis, StrokeStyle,
         shape::{Area, Bar, Line},
-        tooltip::{CrossLine, Tooltip, TooltipState},
+        tooltip::{CrossLine, Dot, Tooltip, TooltipState},
     },
 };
 use gpui_kit::*;
@@ -129,6 +129,32 @@ impl Layout {
 impl ResultChart {
     fn color(&self, series: usize) -> Hsla {
         self.colors[series % self.colors.len().max(1)]
+    }
+
+    /// A dot in each series' color at the hovered row's data point (lines and areas
+    /// only; NULL values have none; stacked areas mark the top of their segment).
+    fn hover_dots(&self, l: &Layout, row: usize, cx: &App) -> Vec<Dot> {
+        let stacks = match self.style {
+            ChartStyle::Line | ChartStyle::Area => None,
+            ChartStyle::StackedArea => Some(self.data.stacks()),
+            ChartStyle::Bars | ChartStyle::StackedBars => return Vec::new(),
+        };
+        let background = cx.theme().background;
+        self.data
+            .series
+            .iter()
+            .enumerate()
+            .filter_map(|(s, series)| {
+                let value = series.values[row]?;
+                let value = stacks.as_ref().map_or(value, |stacks| stacks[s][row].1);
+                Some(
+                    Dot::new(point(px(l.x(row)), px(l.y(value))))
+                        .size(px(7.))
+                        .fill(self.color(s))
+                        .stroke(background),
+                )
+            })
+            .collect()
     }
 
     fn paint_axes(&self, l: &Layout, bounds: &Bounds<Pixels>, window: &mut Window, cx: &mut App) {
@@ -313,17 +339,20 @@ impl Plot for ResultChart {
         cursor: Point<Pixels>,
         bounds: Bounds<Pixels>,
         _: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> Option<AnyElement> {
         let l = self.layout(bounds);
         let row = state.index;
-        let mut cross = CrossLine::new(point(px(l.x(row)), px(l.top))).height(l.bottom - l.top);
+        // `span` sets where the line starts; `height` alone would start it at the plot's top edge.
+        let mut cross =
+            CrossLine::new(point(px(l.x(row)), px(l.top))).span(l.top, l.bottom - l.top);
         if self.style.is_bars() {
             cross = cross.band(px(l.step));
         }
         let mut tooltip = Tooltip::new(cursor, bounds.size)
             .gap(px(8.))
             .cross_line(cross)
+            .dots(self.hover_dots(&l, row, cx))
             .title(self.data.x.get(row)?.clone());
         for (s, series) in self.data.series.iter().enumerate().take(MAX_LISTED) {
             let value = series.values[row].map_or("NULL".into(), format_value);

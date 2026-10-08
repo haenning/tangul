@@ -1023,6 +1023,59 @@ fn a_read_only_ai_user_is_set_up_from_the_database_form(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn the_database_form_offers_every_database_and_saves_the_choices(cx: &mut TestAppContext) {
+    use crate::connection_form::{FormMode, OFFERED};
+    use tangul_core::{AiAccess, DriverKind};
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_form(FormMode::NewDatabase, None, None, window, cx)
+        })
+    });
+    step(handle, cx, |window, _| {
+        for ix in 0..OFFERED.len() {
+            assert!(window.find(("driver", ix)).visible());
+        }
+        // Off until turned on.
+        assert!(window.try_find(("ssh-auth", 0usize)).is_none());
+    });
+    let mysql = OFFERED
+        .iter()
+        .position(|d| *d == DriverKind::Mysql)
+        .unwrap();
+    step(handle, cx, |window, cx| window.click(("driver", mysql), cx));
+    step(handle, cx, |window, cx| window.click("use-ssh", cx));
+    step(handle, cx, |window, _| {
+        assert!(window.find(("ssh-auth", 0usize)).visible())
+    });
+    step(handle, cx, |window, cx| window.click("use-ssh", cx));
+    let schema = AiAccess::ALL
+        .iter()
+        .position(|a| *a == AiAccess::Schema)
+        .unwrap();
+    step(handle, cx, |window, cx| {
+        window.click(("ai-access", schema), cx)
+    });
+    step(handle, cx, |window, _| {
+        // Column values only matter where the AI reads data.
+        assert!(window.try_find(("ai-values", 0usize)).is_none())
+    });
+    step(handle, cx, |window, cx| window.click("form-user", cx));
+    step(handle, cx, |window, cx| window.input("app", cx));
+    step(handle, cx, |window, cx| window.click("save", cx));
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        let db = ws.data.profiles.databases.last().expect("saved");
+        assert_eq!(db.driver, DriverKind::Mysql);
+        // The port follows the database while it is the default.
+        assert_eq!(db.port, 3306);
+        assert_eq!(db.ai_access, AiAccess::Schema);
+        assert!(db.ssh.is_none());
+        assert_eq!(db.users[0].user, "app");
+    });
+}
+
+#[gpui_kit::test]
 fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
     use tangul_core::{Database, DbUser, DriverKind, TlsMode};
     let (handle, workspace) = open(cx);
@@ -1336,6 +1389,47 @@ fn hovering_a_number_column_shows_its_summary(cx: &mut TestAppContext) {
     });
     step(handle, cx, |window, _| {
         assert!(window.find("column-stats").visible())
+    });
+}
+
+#[gpui_kit::test]
+fn the_summary_of_a_table_column_starts_with_schema_tags(cx: &mut TestAppContext) {
+    use tangul_assist::columns::{ColumnFacts, Unique};
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(
+        handle,
+        &workspace,
+        &[[Some("1"), Some("a")], [Some("2"), None]],
+        cx,
+    );
+    let facts = ColumnFacts {
+        table: "t".into(),
+        column: "id".into(),
+        data_type: "integer".into(),
+        numeric: true,
+        nullable: true,
+        unique: Unique::Alone,
+        ..Default::default()
+    };
+    cx.update(|cx| {
+        tab.update(cx, |t, cx| {
+            t.set_row_actions(vec![], None, vec![Some(facts)], cx)
+        })
+    });
+    // An expression has no tags.
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats").visible());
+        assert!(window.try_find("column-tags").is_none());
+    });
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats").visible());
+        assert!(window.find("column-tags").visible());
     });
 }
 
@@ -1916,6 +2010,24 @@ fn the_boards_panel_lists_the_databases_boards_and_opens_them(cx: &mut TestAppCo
         window.click(("board-row", 0usize), cx)
     });
     cx.update(|cx| assert_eq!(workspace.read(cx).tabs.items().count(), open));
+}
+
+#[gpui_kit::test]
+fn a_row_uses_its_full_width_until_it_is_hovered(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    board_with_tiles(handle, &workspace, &["select 1"], cx);
+    step(handle, cx, |window, cx| {
+        window.click(button(Panel::Boards), cx)
+    });
+    step(handle, cx, |window, _| {
+        let row = window.find(("board-row", 0usize)).bounds();
+        let name = window.find(("board-name", 0usize)).bounds();
+        // Only the row's padding is left over: the hover buttons reserve no room.
+        assert!(
+            row.right() - name.right() <= px(12.),
+            "name {name:?} in row {row:?}"
+        );
+    });
 }
 
 #[gpui_kit::test]
@@ -2698,4 +2810,21 @@ fn pinned_tabs_are_kept_per_database(cx: &mut TestAppContext) {
     });
     step(handle, cx, |window, cx| show_db(&workspace, 2, window, cx));
     cx.update(|cx| assert_eq!(tab_titles(&workspace, cx), ["Orders", "*AI settings"]));
+}
+
+#[gpui_kit::test]
+fn an_empty_tab_shows_hints_until_something_is_typed(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = cx.update(|cx| {
+        handle
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |ws, cx| ws.add_tab("", window, cx))
+            })
+            .unwrap()
+    });
+    cx.update(|cx| assert!(tab.read(cx).hints_shown(cx)));
+    step(handle, cx, |window, cx| {
+        tab.update(cx, |t, cx| t.insert_sql("select 1", window, cx))
+    });
+    cx.update(|cx| assert!(!tab.read(cx).hints_shown(cx)));
 }
