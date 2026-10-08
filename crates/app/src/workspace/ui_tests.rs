@@ -1142,6 +1142,59 @@ fn shop_for_the_assistant(ws: &mut Workspace, cx: &mut gpui_kit::Context<Workspa
 }
 
 #[gpui_kit::test]
+fn a_failed_connection_is_connected_again_once_a_query_works(cx: &mut TestAppContext) {
+    use crate::connection::ConnStatus;
+    use crate::query_router::RunningQuery;
+    use tangul_engine::Event;
+    let (handle, workspace) = open(cx);
+    let failed = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let conn = workspace.read(cx).tab_conn("app").unwrap();
+            matches!(conn.read(cx).status, ConnStatus::Failed(_))
+        })
+    };
+    let finish = |error: Option<&str>, cx: &mut TestAppContext| {
+        step(handle, cx, |window, cx| {
+            workspace.update(cx, |ws, cx| {
+                let tab = ws.tabs.active_query().unwrap().downgrade();
+                let query = QueryId(ws.next_id());
+                ws.router.started(
+                    query,
+                    RunningQuery {
+                        tab,
+                        sql: "select 1".into(),
+                        user_id: "app".into(),
+                        started_at: 0,
+                        derived: true,
+                    },
+                );
+                let event = QueryEvent::Finished {
+                    elapsed: Duration::ZERO,
+                    error: error.map(String::from),
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                };
+                ws.on_engine_event(Event::Query { query, event }, window, cx);
+            })
+        })
+    };
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.open_sql("Q", "select 1", window, cx);
+            let conn = ws.tab_conn("app").unwrap();
+            conn.update(cx, |c, _| c.status = ConnStatus::Failed("offline".into()));
+        })
+    });
+    // Still offline: a failing query changes nothing.
+    finish(Some("could not connect"), cx);
+    assert!(failed(cx));
+    finish(None, cx);
+    assert!(!failed(cx));
+}
+
+#[gpui_kit::test]
 fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let sql =
