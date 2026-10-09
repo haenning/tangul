@@ -214,7 +214,8 @@ explicit OK, and keep them covered by tests.
   redacted values as `⟦redacted⟧` and leaves hidden columns out; `show` still opens
   the full result for the user. Value profiles and known values skip these columns.
   AI queries go to history under `-- ai view`; a query whose first line is that
-  (case and spaces aside) shows its result as AI tools see it. A settings file that can't be read hides everything.
+  (case and spaces aside) shows its result as AI tools see it (its sorted, filtered
+  and further pages too: `QueryRouter::tab_view`). A settings file that can't be read hides everything.
 - **Schema only.** A database's `ai_access` (`"data"` or `"schema"`), under the
   callers' ceilings `ai.access` (assistant) and `mcp.access` (MCP) in `settings.json`;
   the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no

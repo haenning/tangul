@@ -438,9 +438,11 @@ impl Workspace {
                 t.bookmark_id = Some(bookmark.id);
             });
         }
-        if let Some(Ok(plan)) = self.ai_view_plan(&user_id, sql) {
+        let plan = self.ai_view_plan(&user_id, sql).and_then(Result::ok);
+        if let Some(plan) = plan.clone() {
             self.router.view_as_ai(query, plan);
         }
+        self.router.tab_ran(tab.entity_id(), plan);
         self.router.started(
             query,
             RunningQuery {
@@ -483,6 +485,11 @@ impl Workspace {
             return;
         };
         let query = QueryId(self.next_id());
+        // A query around one shown as AI tools see it reads the same columns, so it
+        // is shown so too.
+        if let Some(plan) = self.router.tab_view(tab.entity_id()) {
+            self.router.view_as_ai(query, plan);
+        }
         self.router.started(
             query,
             RunningQuery {

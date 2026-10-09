@@ -73,6 +73,17 @@ impl FileKind {
                 if let Ok(root) = json::parse(text) {
                     let schema = database.and_then(DatabaseFile::schema);
                     problems.extend(ai_rules::problems(&root, schema.as_deref()));
+                    // One popup per place: what a marked pattern means goes below
+                    // the problem (hovering it shows only this).
+                    let namespace = database.map_or(Namespace::Schema, |d| d.namespace);
+                    for p in &mut problems {
+                        let explained =
+                            ai_rules::hover(&root, p.range.start, schema.as_deref(), namespace)
+                                .filter(|(range, _)| *range == p.range);
+                        if let Some((_, text)) = explained {
+                            p.message = format!("{}\n\n{text}", p.message);
+                        }
+                    }
                 }
                 problems
             }
@@ -470,10 +481,18 @@ impl HoverProvider for RulesEditing {
         _: &mut App,
     ) -> Task<Result<Option<Hover>>> {
         let text = rope.to_string();
+        // Where something is marked, its popup says it all (see `problems`).
+        let marked = FileKind::Database
+            .problems(&text, Some(&self.database))
+            .iter()
+            .any(|p| p.range.contains(&offset));
         let schema = self.database.schema();
-        let hover = json::parse(&text).ok().and_then(|root| {
-            ai_rules::hover(&root, offset, schema.as_deref(), self.database.namespace)
-        });
+        let hover = json::parse(&text)
+            .ok()
+            .filter(|_| !marked)
+            .and_then(|root| {
+                ai_rules::hover(&root, offset, schema.as_deref(), self.database.namespace)
+            });
         Task::ready(Ok(hover.map(|(range, value)| Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -601,6 +620,8 @@ mod tests {
         let texts: Vec<&str> = m.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(texts, ["\"users\"", "\"hdie\"", "\"!..\""], "{m:?}");
         assert!(m[0].1.contains("has no dot"), "{m:?}");
+        // A pattern that can be read: its explanation in the same popup.
+        assert!(m[2].1.contains("\n\n**Exception:**"), "{m:?}");
         assert!(m[1].1.contains("unknown field `hdie`"), "{m:?}");
 
         assert_eq!(marked(FileKind::Theme, "{").len(), 1);

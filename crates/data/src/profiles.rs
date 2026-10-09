@@ -118,6 +118,15 @@ impl Profiles {
         self.databases.iter().find(|d| d.id == id)
     }
 
+    /// Profiles that are never saved, with `dir` as their folder: the settings
+    /// files next to them are read there (tests).
+    pub fn in_memory_at(dir: &std::path::Path, databases: Vec<Database>) -> Self {
+        Self {
+            path: Some(dir.join("profiles.toml")),
+            ..Self::in_memory(databases)
+        }
+    }
+
     /// Profiles that are never saved (tests, tools).
     pub fn in_memory(databases: Vec<Database>) -> Self {
         Self {

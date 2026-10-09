@@ -36,6 +36,9 @@ pub struct QueryRouter {
     /// Runs shown as AI tools see them (`-- ai view`), and the modes of the
     /// columns of the result arriving.
     ai_views: HashMap<QueryId, (Plan, Vec<Mode>)>,
+    /// Per tab, the plan of its last run if that was shown as AI tools see it: its
+    /// sorted, filtered and further pages are shown so too.
+    tab_views: HashMap<EntityId, Plan>,
     /// Pending editor checks: request → (tab, edit generation).
     checks: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
 }
@@ -43,6 +46,12 @@ pub struct QueryRouter {
 impl QueryRouter {
     pub fn started(&mut self, query: QueryId, run: RunningQuery) {
         self.running.insert(query, run);
+    }
+
+    /// The queries running now.
+    #[cfg(test)]
+    pub fn running(&self) -> Vec<QueryId> {
+        self.running.keys().copied().collect()
     }
 
     /// Nothing is running.
@@ -54,6 +63,19 @@ impl QueryRouter {
     /// Shows `query`'s result as AI tools see it.
     pub fn view_as_ai(&mut self, query: QueryId, plan: Plan) {
         self.ai_views.insert(query, (plan, Vec::new()));
+    }
+
+    /// `tab` ran a statement: shown as AI tools see it with `plan`, or not.
+    pub fn tab_ran(&mut self, tab: EntityId, plan: Option<Plan>) {
+        match plan {
+            Some(plan) => self.tab_views.insert(tab, plan),
+            None => self.tab_views.remove(&tab),
+        };
+    }
+
+    /// How `tab`'s last run is shown as AI tools see it, if it is.
+    pub fn tab_view(&self, tab: EntityId) -> Option<Plan> {
+        self.tab_views.get(&tab).cloned()
     }
 
     pub fn deliver(&mut self, query: QueryId, event: QueryEvent, cx: &mut App) -> Option<Finished> {

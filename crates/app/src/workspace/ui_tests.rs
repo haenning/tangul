@@ -3337,3 +3337,132 @@ fn a_database_file_marks_explains_and_hints_its_patterns(cx: &mut TestAppContext
     assert!(tab.read_with(cx, |t, cx| t.text(cx)).contains(r#"["pub"]"#));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[gpui_kit::test]
+fn a_marked_query_on_mysql_is_redacted_by_the_saved_file_and_stays_so_when_paged(
+    cx: &mut TestAppContext,
+) {
+    use crate::query_tab::TabEvent;
+    use tangul_assist::ai_view;
+    use tangul_core::{ColumnMeta, Database, DbUser, DriverKind, SchemaInfo, TableInfo, TlsMode};
+    use tangul_engine::Event;
+    let (handle, workspace) = open(cx);
+    let dir = std::env::temp_dir().join(format!("tangul-ai-view-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("databases")).unwrap();
+    std::fs::write(
+        dir.join("databases").join("db.json"),
+        r#"{"ai": {"content_blocking": {"redact": ["..metadata"]}}}"#,
+    )
+    .unwrap();
+    let sql = "-- ai view\nselect * from items";
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles = tangul_data::profiles::Profiles::in_memory_at(
+                &dir,
+                vec![Database {
+                    id: "db".into(),
+                    name: "shop".into(),
+                    driver: DriverKind::Mysql,
+                    host: "localhost".into(),
+                    port: 3306,
+                    database: "shop".into(),
+                    tls: TlsMode::Disable,
+                    users: vec![DbUser {
+                        id: "app".into(),
+                        user: "app".into(),
+                    }],
+                    ssh: None,
+                    assistant_user: None,
+                    ai_values: Default::default(),
+                    ai_access: Default::default(),
+                    ai_tools: true,
+                    editor_values: true,
+                }],
+            );
+            ws.connect("app", cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            let conn = ws.tab_conn("app").unwrap().read(cx).id;
+            let col = |name: &str| ColumnMeta {
+                schema: "shop".into(),
+                table: "items".into(),
+                name: name.into(),
+                data_type: "json".into(),
+                ..Default::default()
+            };
+            let info = SchemaInfo {
+                tables: vec![TableInfo {
+                    schema: "shop".into(),
+                    name: "items".into(),
+                    ..Default::default()
+                }],
+                columns: vec![col("id"), col("metadata")],
+                ..Default::default()
+            };
+            ws.set_schema("app", conn, info);
+            ws.open_sql("Items", sql, window, cx);
+            ws.tabs.active_query().unwrap().clone()
+        })
+    });
+    // The result of a run (or of a page of it) as the engine sends it.
+    let answer = |query: QueryId, cx: &mut TestAppContext| {
+        step(handle, cx, |window, cx| {
+            workspace.update(cx, |ws, cx| {
+                let names = ["id", "metadata"].map(|n| ColumnInfo { name: n.into() });
+                let mut rows = RowBatch::default();
+                for cell in [Some("1"), Some("{\"secret\": 1}")] {
+                    rows.push_cell(cell);
+                }
+                rows.finish_row();
+                for event in [
+                    QueryEvent::Exec(ExecEvent::ResultStart(names.to_vec())),
+                    QueryEvent::Exec(ExecEvent::Rows(rows)),
+                    QueryEvent::Finished {
+                        elapsed: Duration::ZERO,
+                        error: None,
+                        error_position: None,
+                        in_transaction: false,
+                        cancelled: false,
+                    },
+                ] {
+                    ws.on_engine_event(Event::Query { query, event }, window, cx);
+                }
+            })
+        })
+    };
+    let run = |event: TabEvent, cx: &mut TestAppContext| -> QueryId {
+        step(handle, cx, |window, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.on_tab_event(&tab, &event, window, cx);
+                let running = ws.router.running();
+                assert_eq!(running.len(), 1, "one query ran");
+                running[0]
+            })
+        })
+    };
+    let shown = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let results = tab.read(cx).results().read(cx);
+            (results.cell(0, 0, cx), results.cell(0, 1, cx))
+        })
+    };
+    let query = run(TabEvent::Run(sql.into()), cx);
+    answer(query, cx);
+    let redacted = (Some("1".to_string()), Some(ai_view::REDACTED.to_string()));
+    assert_eq!(shown(cx), redacted);
+
+    // Sorted or paged: a query around it, as AI tools would see it too.
+    let refined = tangul_assist::refine::refinable(sql)
+        .map(|base| format!("SELECT * FROM (\n{base}\n) AS t ORDER BY t.id LIMIT 100"));
+    let query = run(
+        TabEvent::Refine {
+            sql: refined.unwrap(),
+            append: false,
+        },
+        cx,
+    );
+    answer(query, cx);
+    assert_eq!(shown(cx), redacted, "a sorted page");
+    let _ = std::fs::remove_dir_all(&dir);
+}

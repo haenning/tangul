@@ -95,7 +95,10 @@ SELECT id, email FROM users
 ```
 
 Run it and you get exactly the AI's result. Put `-- ai view` as the first line of
-your own query to test your rules (case and spaces don't matter).
+your own query to test your rules (case and spaces don't matter). Sorting,
+filtering and loading more rows of that result stay as the AI sees it. The
+comment must be directly above the statement you run: with a blank line between,
+⌘↵ runs the statement without it.
 
 ## Good to know
 
