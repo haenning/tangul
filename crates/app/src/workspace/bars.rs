@@ -1,7 +1,6 @@
 //! The title bar (database and user menus) and the status bar (connection details,
 //! panels, chart button).
 
-use super::ai::Ceilings;
 use super::*;
 use crate::result_view::{SetView, chart_menu};
 use crate::ui::{
@@ -61,7 +60,7 @@ impl Workspace {
             // nothing to warn about; the button says what the AI sees instead.
             let access = Access {
                 database: db.ai_access,
-                ceilings: self.ai_ceilings(),
+                ceiling: self.ai_ceiling(),
             };
             let schema_only = !self.ai_access(db).is_data();
             // How many tables the AI's user may change; `None` until checked.
@@ -514,32 +513,24 @@ pub(super) fn database_menu(
     )
 }
 
-/// What the AI may see of a database: its own level and the callers' ceilings.
+/// What the AI may see of a database: its own level and the ceiling of every AI
+/// tool.
 #[derive(Clone, Copy)]
 pub(super) struct Access {
     pub(super) database: AiAccess,
-    pub(super) ceilings: Ceilings,
+    pub(super) ceiling: AiAccess,
 }
 
 impl Access {
-    /// What the settings' ceilings leave of a database that allows data.
+    /// What the settings' ceiling leaves of a database that allows data.
     fn limit(self) -> Option<&'static str> {
-        if !self.database.is_data() {
-            return None;
-        }
-        match (self.ceilings.assistant, self.ceilings.mcp) {
-            (AiAccess::Data, AiAccess::Data) => None,
-            (AiAccess::Schema, AiAccess::Schema) => {
-                Some("Assistant and MCP clients: schema only (AI settings)")
-            }
-            (AiAccess::Schema, _) => Some("Assistant: schema only (AI settings)"),
-            (_, AiAccess::Schema) => Some("MCP clients: schema only (AI settings)"),
-        }
+        (self.database.is_data() && !self.ceiling.is_data())
+            .then_some("Schema only for every AI tool (AI settings)")
     }
 
-    /// Whether some caller may read data from it.
+    /// Whether AI tools may read data from it.
     fn data(self) -> bool {
-        self.database.min(self.ceilings.loosest()).is_data()
+        self.database.min(self.ceiling).is_data()
     }
 }
 

@@ -10,7 +10,8 @@
 //! [
 //!   { "move": "ai.redact", "to": "ai.content_blocking.redact" },
 //!   { "remove": "ai.show" },
-//!   { "map": "ai.block_queries", "values": { "none": [], "redacted": ["redacted"] } }
+//!   { "map": "ai.block_queries", "values": { "none": [], "redacted": ["redacted"] } },
+//!   { "merge": "mcp.access", "into": "ai.access", "strictest": ["data", "schema"] }
 //! ]
 //! ```
 
@@ -37,6 +38,7 @@ enum Op {
     Move(MoveOp),
     Remove(RemoveOp),
     Map(MapOp),
+    Merge(MergeOp),
 }
 
 /// The value at `move` goes to `to`, unless `to` is set already (then it is
@@ -61,6 +63,16 @@ struct RemoveOp {
 struct MapOp {
     map: String,
     values: Map<String, Value>,
+}
+
+/// The value at `merge` goes away; `into` keeps the stricter of the two, the later
+/// in `strictest` (a missing `into` counts as the first, the loosest).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergeOp {
+    merge: String,
+    into: String,
+    strictest: Vec<String>,
 }
 
 impl Steps {
@@ -115,6 +127,23 @@ impl Op {
             }
             Op::Remove(RemoveOp { remove }) => {
                 take(file, remove);
+            }
+            Op::Merge(MergeOp {
+                merge,
+                into,
+                strictest,
+            }) => {
+                let rank = |v: Option<&Value>| {
+                    let text = v.and_then(Value::as_str)?;
+                    strictest.iter().position(|s| s == text)
+                };
+                let Some(value) = take(file, merge) else {
+                    return;
+                };
+                let (from, to) = (rank(Some(&value)), rank(get(file, into)).or(Some(0)));
+                if from > to {
+                    set(file, into, value);
+                }
             }
             Op::Map(MapOp { map, values }) => {
                 let new = get(file, map)
@@ -205,6 +234,35 @@ mod tests {
                 json!({"a": 1, "b": 2})
             ),
             json!({"b": 2})
+        );
+    }
+
+    #[test]
+    fn a_merge_keeps_the_stricter_value() {
+        let op = json!([{ "merge": "mcp.access", "into": "ai.access",
+                          "strictest": ["data", "schema"] }]);
+        let merged = |file: Value| run(op.clone(), file);
+        assert_eq!(
+            merged(json!({"ai": {"access": "data"}, "mcp": {"access": "schema", "port": 1}})),
+            json!({"ai": {"access": "schema"}, "mcp": {"port": 1}})
+        );
+        assert_eq!(
+            merged(json!({"ai": {"access": "schema"}, "mcp": {"access": "data"}})),
+            json!({"ai": {"access": "schema"}, "mcp": {}})
+        );
+        assert_eq!(
+            merged(json!({"mcp": {"access": "schema"}})),
+            json!({"mcp": {}, "ai": {"access": "schema"}}),
+            "a missing ai.access is the loosest"
+        );
+        assert_eq!(
+            merged(json!({"ai": {"access": "data"}, "mcp": {"access": "weird"}})),
+            json!({"ai": {"access": "data"}, "mcp": {}})
+        );
+        // Twice is once.
+        assert_eq!(
+            merged(json!({"ai": {"access": "schema"}})),
+            json!({"ai": {"access": "schema"}})
         );
     }
 

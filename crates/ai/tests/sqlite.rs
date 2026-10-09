@@ -779,7 +779,7 @@ async fn schema_only_sees_structure_and_never_a_row() {
     let (dir, ctx) = shop_with("schema-only", ValueAccess::Values).await;
     let calls: Arc<Mutex<Vec<ToolCall>>> = Arc::default();
     let proposed: Arc<Mutex<Vec<SqlProposal>>> = Arc::default();
-    // The caller's ceiling (`mcp.access = "schema"`) wins over the database's data.
+    // The ceiling (`ai.access = "schema"`) wins over the database's data.
     let ctx = ctx
         .with_ceiling(AiAccess::Schema)
         .with_audit("mcp", {

@@ -21,7 +21,7 @@
 //!   },
 //!   "theme": { "appearance": "auto", "dark": "Tangul Dark Rainbow",
 //!              "light": "Tangul Light Rainbow" },
-//!   "mcp": { "enabled": false, "port": 7433, "access": "data" },
+//!   "mcp": { "enabled": false, "port": 7433 },
 //!   "ai": {
 //!     "provider": "anthropic",
 //!     "providers": { "anthropic": { "model": "claude-sonnet-5-5" },
@@ -130,8 +130,9 @@ pub struct AiSettings {
     /// database: only while the assistant is set up (provider, model, key), and only
     /// when it is surely not SQL (comments aside).
     pub questions_in_editor: bool,
-    /// The most the assistant may see of any database: `data`, or `schema` (only
-    /// the structure, whatever a database allows).
+    /// The most AI tools (the assistant, MCP clients, `-- ai view`) may see of any
+    /// database: `data`, or `schema` (only the structure, whatever a database
+    /// allows).
     pub access: AiAccess,
 }
 
@@ -183,9 +184,6 @@ pub struct McpSettings {
     pub enabled: bool,
     /// Listens on `127.0.0.1:<port>`.
     pub port: u16,
-    /// The most MCP clients may see of any database: `data`, or `schema` (only the
-    /// structure, whatever a database allows).
-    pub access: AiAccess,
 }
 
 impl Default for McpSettings {
@@ -193,7 +191,6 @@ impl Default for McpSettings {
         Self {
             enabled: false,
             port: 7433,
-            access: AiAccess::Data,
         }
     }
 }
@@ -719,17 +716,18 @@ mod tests {
     }
 
     #[test]
-    fn ai_access_ceilings_default_to_data() {
-        let s = Settings::default();
-        assert_eq!(
-            (s.ai.access, s.mcp.access),
-            (AiAccess::Data, AiAccess::Data)
-        );
-        let s = Settings::parse(r#"{"mcp": {"access": "schema"}}"#).unwrap();
-        assert_eq!(
-            (s.ai.access, s.mcp.access),
-            (AiAccess::Data, AiAccess::Schema)
-        );
+    fn ai_access_defaults_to_data_and_mcp_access_joins_it_on_upgrade() {
+        assert_eq!(Settings::default().ai.access, AiAccess::Data);
+        // One ceiling for every AI tool: MCP's own one, from before, makes it stricter.
+        let up = upgrade(r#"{"version": "0.1.2", "mcp": {"access": "schema"}}"#).unwrap();
+        let file: serde_json::Value = serde_json::from_str(&up).unwrap();
+        assert_eq!(file["mcp"].get("access"), None, "{up}");
+        assert_eq!(Settings::parse(&up).unwrap().ai.access, AiAccess::Schema);
+        let up = upgrade(
+            r#"{"version": "0.1.2", "ai": {"access": "schema"}, "mcp": {"access": "data"}}"#,
+        )
+        .unwrap();
+        assert_eq!(Settings::parse(&up).unwrap().ai.access, AiAccess::Schema);
     }
 
     #[test]

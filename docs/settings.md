@@ -44,7 +44,7 @@ the editor, so you look before you save.
     "max_mb": 50
   },
   "theme": { "appearance": "auto", "dark": "Tangul Dark Rainbow", "light": "Tangul Light Rainbow" },
-  "mcp": { "enabled": false, "port": 7433, "access": "data" },
+  "mcp": { "enabled": false, "port": 7433 },
   "ai": {
     "provider": null,
     "providers": {
@@ -77,7 +77,7 @@ means unset (the app's own value) or no limit.
 | `theme.appearance` | `"auto"` (as the system), `"dark"` or `"light"` |
 | `theme.dark`, `theme.light` | Theme names for each appearance |
 | `mcp.enabled`, `mcp.port` | The MCP server on `127.0.0.1:<port>` |
-| `mcp.access`, `ai.access` | The most MCP clients or the assistant see of any database: `"data"` or `"schema"` |
+| `ai.access` | The most AI tools (the assistant, MCP clients, `-- ai view`) see of any database: `"data"` or `"schema"` |
 | `ai.provider` | `"anthropic"`, `"openai"` (any OpenAI-compatible service), `"gemini"` or `"ollama"`; `null` until chosen |
 | `ai.providers` | Per provider: `model`, `base_url` (`null`: its own). Keys are in the Keychain, never here |
 | `ai.max_tool_rounds` | Most tool rounds per question (1–50) |

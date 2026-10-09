@@ -20,6 +20,8 @@ default. Steps are data, not code.
   - `{ "remove": "ai.show" }`
   - `{ "map": "ai.block_queries", "values": { "none": [], "redacted": ["redacted"] } }`:
     a text value that is a key of `values` becomes its value
+  - `{ "merge": "mcp.access", "into": "ai.access", "strictest": ["data", "schema"] }`:
+    `merge` goes away, `into` keeps the stricter of both (the later in `strictest`)
   Anything else needs a new operation in the migrator, with tests, not code per step.
 - **Never change or drop a released step.** Users skip releases.
 - **Fixtures**: `make release` keeps the layout each release writes, when it

@@ -1,0 +1,3 @@
+[
+  { "merge": "mcp.access", "into": "ai.access", "strictest": ["data", "schema"] }
+]

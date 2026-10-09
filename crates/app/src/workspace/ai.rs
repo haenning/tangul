@@ -37,39 +37,14 @@ pub(super) enum AiEvent {
 /// Most rows a query marked `-- ai view` shows: the most AI tools get of one.
 const AI_VIEW_ROWS: usize = 500;
 
-/// The most each caller may see of any database (`ai.access`, `mcp.access`).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Ceilings {
-    pub(super) assistant: AiAccess,
-    pub(super) mcp: AiAccess,
-}
-
-impl Ceilings {
-    fn of(self, caller: &str) -> AiAccess {
-        if caller == "mcp" {
-            self.mcp
-        } else {
-            self.assistant
-        }
-    }
-
-    /// The most any caller may see.
-    pub(super) fn loosest(self) -> AiAccess {
-        if self.assistant.is_data() || self.mcp.is_data() {
-            AiAccess::Data
-        } else {
-            AiAccess::Schema
-        }
-    }
-}
-
 /// The databases offered to AI tools.
 #[derive(Default)]
 pub(super) struct Ai {
     /// Offered now; every tool call reads it.
     pub(super) exposed: Arc<RwLock<Vec<Exposed>>>,
-    /// As the settings say; every tool call reads it.
-    pub(super) ceilings: Arc<RwLock<Ceilings>>,
+    /// The most every AI tool may see of any database (`ai.access`); every tool
+    /// call reads it.
+    pub(super) ceiling: Arc<RwLock<AiAccess>>,
     /// Whether the assistant was used in this window: then the databases are
     /// offered (and their AI connections opened) even while MCP is off.
     pub(super) assistant_used: bool,
@@ -81,37 +56,32 @@ impl Workspace {
         self.mcp.running() || self.ai.assistant_used
     }
 
-    /// The callers' ceilings now.
-    pub(super) fn ai_ceilings(&self) -> Ceilings {
+    /// The ceiling of every AI tool now.
+    pub(super) fn ai_ceiling(&self) -> AiAccess {
         *self
             .ai
-            .ceilings
+            .ceiling
             .read()
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The most any AI caller may see of `db`: its own level under the loosest
-    /// ceiling. Schema only: no AI connection is opened for it.
+    /// The most AI tools may see of `db`: its own level under the ceiling. Schema
+    /// only: no AI connection is opened for it.
     pub(super) fn ai_access(&self, db: &Database) -> AiAccess {
-        db.ai_access.min(self.ai_ceilings().loosest())
+        db.ai_access.min(self.ai_ceiling())
     }
 
-    /// Takes `ai.access` and `mcp.access` from the settings; a change applies to
-    /// the next tool call.
+    /// Takes `ai.access` from the settings; a change applies to the next tool call.
     pub(super) fn sync_ai_access(&mut self, cx: &mut Context<Self>) {
-        let s = settings::current(cx);
-        let ceilings = Ceilings {
-            assistant: s.ai.access,
-            mcp: s.mcp.access,
-        };
-        if ceilings == self.ai_ceilings() {
+        let ceiling = settings::current(cx).ai.access;
+        if ceiling == self.ai_ceiling() {
             return;
         }
         *self
             .ai
-            .ceilings
+            .ceiling
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = ceilings;
+            .unwrap_or_else(PoisonError::into_inner) = ceiling;
         self.expose_to_ai();
         self.check_ai_user(cx);
         self.push_ai_settings(cx);
@@ -234,7 +204,7 @@ impl Workspace {
     }
 
     /// Runs `sql`, marked `-- ai view`, the way AI tools do: `run_readonly` through
-    /// the registry, on the database's AI connection, under the assistant's ceiling
+    /// the registry, on the database's AI connection, under the AI tools' ceiling
     /// (audited as `ai view`). `tab` shows what they get, or why they are refused.
     pub(super) fn run_as_ai(
         &mut self,
@@ -284,16 +254,24 @@ impl Workspace {
             "limit": AI_VIEW_ROWS,
         });
         let started = std::time::Instant::now();
-        let work = tangul_ai::runtime::spawn(async move {
-            Registry::standard().call(&ctx, "run_readonly", input).await
-        });
+        let job = async move {
+            Registry::standard()
+                .call(&ctx, "run_readonly", input)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        // On the AI tools' runtime. Tests keep it on their own executor, which
+        // allows no wake-ups from other threads.
+        #[cfg(not(test))]
+        let work = {
+            let handle = tangul_ai::runtime::spawn(job);
+            async move { handle.await.map_err(|e| e.to_string()).flatten() }
+        };
+        #[cfg(test)]
+        let work = cx.background_spawn(job);
         let (tab, sql) = (tab.clone(), sql.to_string());
         cx.spawn_in(window, async move |this, cx| {
-            let output = match work.await {
-                Ok(Ok(output)) => Ok((output, started.elapsed())),
-                Ok(Err(e)) => Err(e.to_string()),
-                Err(e) => Err(e.to_string()),
-            };
+            let output = work.await.map(|output| (output, started.elapsed()));
             let _ = this.update_in(cx, |ws, window, cx| {
                 ws.show_ai_view(&tab, query, &sql, output, window, cx)
             });
@@ -353,7 +331,7 @@ impl Workspace {
         calls: Arc<AtomicU64>,
     ) -> Arc<dyn Fn() -> Ctx + Send + Sync> {
         let (knowledge, engine) = (self.knowledge.clone(), self.engine.clone());
-        let (exposed, ceilings) = (self.ai.exposed.clone(), self.ai.ceilings.clone());
+        let (exposed, ceiling) = (self.ai.exposed.clone(), self.ai.ceiling.clone());
         let dir = self.data.profiles.dir().map(std::path::Path::to_path_buf);
         let sink = self.ai_audit(events.clone(), calls);
         let proposals: ProposalSink = Arc::new({
@@ -388,10 +366,7 @@ impl Workspace {
                     .ai
                     .content_blocking;
             }
-            let ceiling = ceilings
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .of(caller);
+            let ceiling = *ceiling.read().unwrap_or_else(PoisonError::into_inner);
             // Without a connection that may read data, the context has no engine.
             Ctx::new(knowledge.clone(), Some(engine.clone()), exposed)
                 .with_ceiling(ceiling)

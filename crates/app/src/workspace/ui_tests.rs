@@ -2139,22 +2139,22 @@ fn schema_only_opens_no_ai_connection(cx: &mut TestAppContext) {
             ws.set_ai_access("db", AiAccess::Data, window, cx);
             assert_eq!(offered(ws), (AiAccess::Data, true));
         });
-        // MCP clients only ever get the schema; the assistant may read.
+        // Schema only in the settings: for every AI tool alike.
         let mut s = crate::settings::Settings::default();
-        s.mcp.access = AiAccess::Schema;
+        s.ai.access = AiAccess::Schema;
         crate::settings::set_for_test(s, cx);
     });
     step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| {
+            ws.sync_ai_access(cx);
             let events = ws.test_events(cx);
             let calls = Arc::default();
-            let mcp = ws.ai_ctx_source("mcp", events.clone(), Arc::clone(&calls))();
-            let assistant = ws.ai_ctx_source("assistant", events, calls)();
-            assert!(!mcp.reads_data());
-            assert_eq!(mcp.exposed()[0].conn, None);
-            assert!(assistant.reads_data());
-            // The assistant still reads, so its connection stays.
-            assert_eq!(offered(ws), (AiAccess::Data, true));
+            for caller in ["mcp", "assistant", "ai view"] {
+                let ctx = ws.ai_ctx_source(caller, events.clone(), Arc::clone(&calls))();
+                assert!(!ctx.reads_data(), "{caller}");
+                assert_eq!(ctx.exposed()[0].conn, None, "{caller}");
+            }
+            assert_eq!(offered(ws), (AiAccess::Schema, false));
         });
     });
 }
@@ -3327,13 +3327,7 @@ fn a_query_marked_ai_view_runs_as_ai_tools_run_it_never_as_you(cx: &mut TestAppC
             assert!(ws.router.is_idle(), "nothing ran as you");
         })
     });
-    for _ in 0..50 {
-        cx.run_until_parked();
-        if error(&tab, cx).is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    cx.run_until_parked();
     let e = error(&tab, cx).expect("an answer from the AI tools' path");
     assert!(e.starts_with("AI tools would get:"), "{e}");
     assert!(!e.contains("isn't offered"), "{e}");

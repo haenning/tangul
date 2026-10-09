@@ -284,15 +284,9 @@ impl AiSettingsTab {
         )
     }
 
-    /// The switch for a caller's ceiling (`ai.access`, `mcp.access`): on, it sees
+    /// The switch for the ceiling of every AI tool (`ai.access`): on, they see
     /// only the schema of every database.
-    pub(super) fn schema_only_row(
-        &self,
-        id: &'static str,
-        caller: &'static str,
-        current: AiAccess,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn schema_only_row(&self, current: AiAccess, cx: &mut Context<Self>) -> AnyElement {
         row(
             "Schema only",
             Some(
@@ -301,7 +295,7 @@ impl AiSettingsTab {
                  run."
                     .into(),
             ),
-            switch(id, cx)
+            switch("ai-schema-only", cx)
                 .checked(!current.is_data())
                 .on_click(cx.listener(move |this, on: &bool, window, cx| {
                     let access = if *on {
@@ -310,7 +304,7 @@ impl AiSettingsTab {
                         AiAccess::Data
                     };
                     let value = serde_json::to_value(access).unwrap_or_default();
-                    let result = settings::set_value(&[caller, "access"], value, cx);
+                    let result = settings::set_value(&["ai", "access"], value, cx);
                     this.report(result, window, cx);
                 })),
             cx,

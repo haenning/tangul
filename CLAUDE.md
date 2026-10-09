@@ -215,11 +215,11 @@ explicit OK, and keep them covered by tests.
   the full result for the user. Value profiles and known values skip these columns.
   AI queries go to history under `-- ai view`; a query whose first line is that
   (case and spaces aside) never runs as the user: the app calls `run_readonly`
-  through the registry with a `Ctx` (caller `ai view`, the assistant's ceiling)
+  through the registry with a `Ctx` (caller `ai view`)
   and shows what AI tools got, not refinable (`Workspace::run_as_ai`). A settings file that can't be read hides everything.
 - **Schema only.** A database's `ai_access` (`"data"` or `"schema"`), under the
-  callers' ceilings `ai.access` (assistant) and `mcp.access` (MCP) in `settings.json`;
-  the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no
+  ceiling `ai.access` in `settings.json`, one for every AI tool (the assistant, MCP
+  clients, `-- ai view`); the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no
   `conn`, `Ctx` no engine when nothing may read data), value profiles are off,
   bookmarks are shown only as fingerprints, and tools that read rows
   (`Tool::reads_rows`: `run_readonly`, `get_cell`, `column_profile`) aren't offered and

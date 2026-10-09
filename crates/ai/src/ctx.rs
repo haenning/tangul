@@ -251,8 +251,8 @@ impl Ctx {
         .with_ceiling_over(exposed, AiAccess::Data)
     }
 
-    /// Limits every connection to `ceiling` (the caller's: `ai.access`,
-    /// `mcp.access`); the stricter of it and the database's own level applies.
+    /// Limits every connection to `ceiling` (`ai.access`, the same for every AI
+    /// tool); the stricter of it and the database's own level applies.
     pub fn with_ceiling(self, ceiling: AiAccess) -> Self {
         let exposed = self.exposed.clone();
         self.with_ceiling_over(exposed, ceiling)

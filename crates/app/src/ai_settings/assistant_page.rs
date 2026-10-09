@@ -57,7 +57,12 @@ impl AiSettingsTab {
             Some(p) => rows.extend(self.provider_rows(p, cx)),
         }
         let access = settings::current(cx).ai.access;
-        let schema_only = self.schema_only_row("ai-schema-only", "ai", access, cx);
+        let every_tool = section(
+            "Every AI tool",
+            Some("The assistant, MCP clients and queries marked -- ai view alike."),
+            [self.schema_only_row(access, cx)],
+            cx,
+        );
         let provider = section(
             "Assistant",
             Some(
@@ -106,13 +111,13 @@ impl AiSettingsTab {
                     div(),
                     cx,
                 ),
-                schema_only,
             ],
             cx,
         );
         v_flex()
             .gap_6()
             .text_color(cx.theme().foreground)
+            .child(every_tool)
             .child(provider)
             .child(behavior)
             .child(self.render_databases(cx))
