@@ -11,10 +11,10 @@ use tangul_ai::{
     AuditSink, BoardCall, BoardSink, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink,
     ShownResult, SqlProposal, ToolCall,
 };
-use tangul_assist::ai_view::{self, Plan, Rules};
-use tangul_assist::schema::SchemaIndex;
-use tangul_core::SchemaInfo;
+use tangul_ai::{Registry, ToolOutput};
+use tangul_assist::ai_view;
 use tangul_core::board::AiCaller;
+use tangul_core::{ColumnInfo, ResultSet, RowBatch};
 use tangul_data::database_settings;
 use tangul_data::local::{AuditEntry, Source};
 use tangul_service::connections::assistant_user;
@@ -33,6 +33,9 @@ pub(super) enum AiEvent {
     /// A board tool's call, answered by the window (`answer_board_call`).
     Board(AiCaller, BoardCall),
 }
+
+/// Most rows a query marked `-- ai view` shows: the most AI tools get of one.
+const AI_VIEW_ROWS: usize = 500;
 
 /// The most each caller may see of any database (`ai.access`, `mcp.access`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -230,28 +233,114 @@ impl Workspace {
         }
     }
 
-    /// For a query marked `-- ai view`: what AI tools would see of its result on
-    /// `user_id`'s database, or why they would be refused. `None`: not marked.
-    pub(super) fn ai_view_plan(&self, user_id: &str, sql: &str) -> Option<Result<Plan, String>> {
-        if !ai_view::is_marked(sql) {
-            return None;
+    /// Runs `sql`, marked `-- ai view`, the way AI tools do: `run_readonly` through
+    /// the registry, on the database's AI connection, under the assistant's ceiling
+    /// (audited as `ai view`). `tab` shows what they get, or why they are refused.
+    pub(super) fn run_as_ai(
+        &mut self,
+        tab: &Entity<QueryTab>,
+        sql: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conn) = tab.read(cx).conn_id(cx) else {
+            return;
+        };
+        let user_id = self
+            .connections
+            .tab_user(conn)
+            .unwrap_or_default()
+            .to_string();
+        let Some(db_id) = self.find_user(&user_id).map(|(db, _)| db.id.clone()) else {
+            return;
+        };
+        // Offered from now on, as once the assistant is used.
+        self.ai.assistant_used = true;
+        self.expose_to_ai();
+        let name = self
+            .ai_exposed()
+            .into_iter()
+            .find(|e| e.database == db_id)
+            .map(|e| e.name);
+        let query = QueryId(self.next_id());
+        tab.update(cx, |t, cx| t.started(query, sql, cx));
+        let Some(name) = name else {
+            let why = self.ai_problems.get(&db_id).cloned().unwrap_or_else(|| {
+                "this database isn't offered to AI tools (database form: AI tools)".into()
+            });
+            self.show_ai_view(tab, query, sql, Err(why), window, cx);
+            return;
+        };
+        if self.assistant.events.is_none() {
+            self.assistant.events = Some(self.ai_events(cx));
         }
-        let (db, _) = self.find_user(user_id)?;
-        let dialect = dialect_for(db.driver);
-        let columns = database_settings::load(self.data.profiles.dir(), &db.id)
-            .0
-            .ai
-            .content_blocking;
-        let schema = self
-            .knowledge
-            .schema(user_id)
-            .unwrap_or_else(|| Arc::new(SchemaIndex::new(SchemaInfo::default(), dialect, None)));
-        Some(ai_view::plan(
-            sql,
-            &schema,
-            &Rules::new(&columns),
-            dialect.lexing(),
-        ))
+        let Some(events) = self.assistant.events.as_ref().map(|(_, tx)| tx.clone()) else {
+            return;
+        };
+        let ctx = self.ai_ctx_source("ai view", events, self.assistant.calls.clone())();
+        let input = serde_json::json!({
+            "sql": sql,
+            "connection": name,
+            "limit": AI_VIEW_ROWS,
+        });
+        let started = std::time::Instant::now();
+        let work = tangul_ai::runtime::spawn(async move {
+            Registry::standard().call(&ctx, "run_readonly", input).await
+        });
+        let (tab, sql) = (tab.clone(), sql.to_string());
+        cx.spawn_in(window, async move |this, cx| {
+            let output = match work.await {
+                Ok(Ok(output)) => Ok((output, started.elapsed())),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.show_ai_view(&tab, query, &sql, output, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Shows in `tab` what AI tools got for `sql`: the rows as handed to them, or
+    /// why they were refused. Only what they got: it can't be sorted, filtered or
+    /// paged (that would run as you).
+    pub(super) fn show_ai_view(
+        &mut self,
+        tab: &Entity<QueryTab>,
+        query: QueryId,
+        sql: &str,
+        output: Result<(ToolOutput, Duration), String>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let output = output.map(|(out, elapsed)| {
+            let data = &out.data;
+            let columns: Vec<ColumnInfo> = data["columns"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|c| ColumnInfo {
+                    name: c.as_str().unwrap_or_default().to_string(),
+                })
+                .collect();
+            let mut rows = RowBatch::default();
+            for row in data["rows"].as_array().into_iter().flatten() {
+                for cell in row.as_array().into_iter().flatten() {
+                    rows.push_cell(cell.as_str());
+                }
+                rows.finish_row();
+            }
+            let mut result = ResultSet::new(columns);
+            result.append(rows);
+            QueryOutput {
+                rows: Some(result.row_count() as u64),
+                results: vec![result],
+                truncated: data["truncated"].as_bool().unwrap_or(false),
+                elapsed,
+            }
+        });
+        let output = output.map_err(|e| format!("AI tools would get: {e}"));
+        tab.update(cx, |t, cx| t.show_output(query, sql, output, false, cx));
     }
 
     /// A tool context for `caller` (`mcp`, `assistant`) over the databases offered

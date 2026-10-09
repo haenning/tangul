@@ -95,10 +95,12 @@ SELECT id, email FROM users
 ```
 
 Run it and you get exactly the AI's result. Put `-- ai view` as the first line of
-your own query to test your rules (case and spaces don't matter). Sorting,
-filtering and loading more rows of that result stay as the AI sees it. The
-comment must be directly above the statement you run: with a blank line between,
-⌘↵ runs the statement without it.
+your own query to test your rules (case and spaces don't matter): it doesn't run
+as you but the way AI tools run it (`run_readonly` on the AI's connection, with
+its refusals), and shows what they get, at most 500 rows. That result can't be
+sorted, filtered or paged, since that would run as you. The comment must be
+directly above the statement you run: with a blank line between, ⌘↵ runs the
+statement without it, as you.
 
 ## Good to know
 

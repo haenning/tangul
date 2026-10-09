@@ -1229,95 +1229,6 @@ fn the_empty_state_offers_a_new_board_once_connected(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_query_marked_ai_view_shows_what_ai_tools_see(cx: &mut TestAppContext) {
-    use crate::query_router::RunningQuery;
-    use tangul_assist::ai_view::{self, Rules};
-    use tangul_assist::lexer::Lexing;
-    use tangul_assist::schema::SchemaIndex;
-    use tangul_core::{ColumnMeta, SchemaInfo, TableInfo, TableKind};
-    use tangul_engine::Event;
-    let (handle, workspace) = open(cx);
-    let sql = ai_view::mark("select id, email, ssn from users");
-    // Not marked, or no database to ask: nothing to show differently.
-    cx.update(|cx| {
-        let ws = workspace.read(cx);
-        assert!(ws.ai_view_plan("app", "select 1").is_none());
-        assert!(ws.ai_view_plan("nobody", &sql).is_none());
-    });
-    let col = |name: &str| ColumnMeta {
-        schema: "public".into(),
-        table: "users".into(),
-        name: name.into(),
-        data_type: "text".into(),
-        nullable: true,
-        ..Default::default()
-    };
-    let schema = SchemaIndex::new(
-        SchemaInfo {
-            tables: vec![TableInfo {
-                schema: "public".into(),
-                name: "users".into(),
-                kind: TableKind::Table,
-                comment: None,
-                row_estimate: None,
-                size_bytes: None,
-            }],
-            columns: vec![col("id"), col("email"), col("ssn")],
-            ..Default::default()
-        },
-        tangul_assist::dialect::dialect_for(tangul_core::DriverKind::Postgres),
-        Some("public".into()),
-    );
-    let rules =
-        Rules::new(&serde_json::from_str(r#"{"redact": ["..email"], "hide": ["..ssn"]}"#).unwrap());
-    let plan = ai_view::plan(&sql, &schema, &rules, Lexing::default()).unwrap();
-    let tab = step(handle, cx, |window, cx| {
-        workspace.update(cx, |ws, cx| {
-            let tab = ws.add_tab(&sql, window, cx);
-            let query = QueryId(ws.next_id());
-            ws.router.view_as_ai(query, plan);
-            ws.router.started(
-                query,
-                RunningQuery {
-                    tab: tab.downgrade(),
-                    sql: sql.clone(),
-                    user_id: "app".into(),
-                    started_at: 0,
-                    derived: true,
-                },
-            );
-            tab.update(cx, |t, cx| t.started(query, &sql, cx));
-            let names = ["id", "email", "ssn"].map(|n| ColumnInfo { name: n.into() });
-            let mut rows = RowBatch::default();
-            for cell in [Some("1"), Some("ann@x.io"), Some("123")] {
-                rows.push_cell(cell);
-            }
-            rows.finish_row();
-            for event in [
-                QueryEvent::Exec(ExecEvent::ResultStart(names.to_vec())),
-                QueryEvent::Exec(ExecEvent::Rows(rows)),
-                QueryEvent::Finished {
-                    elapsed: Duration::ZERO,
-                    error: None,
-                    error_position: None,
-                    in_transaction: false,
-                    cancelled: false,
-                },
-            ] {
-                ws.on_engine_event(Event::Query { query, event }, window, cx);
-            }
-            tab
-        })
-    });
-    cx.update(|cx| {
-        let results = tab.read(cx).results().read(cx);
-        assert_eq!(results.columns(cx), ["id", "email"]);
-        assert_eq!(results.cell(0, 0, cx).as_deref(), Some("1"));
-        assert_eq!(results.cell(0, 1, cx).as_deref(), Some(ai_view::REDACTED));
-    });
-}
-
-#[gpui_kit::test]
 fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let sql =
@@ -3338,28 +3249,21 @@ fn a_database_file_marks_explains_and_hints_its_patterns(cx: &mut TestAppContext
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[gpui_kit::test]
-fn a_marked_query_on_mysql_is_redacted_by_the_saved_file_and_stays_so_when_paged(
+/// MySQL database `db` (`shop`, user `app`) kept in `dir`, connected, its tab open
+/// on `sql`; `ai_tools`: offered to AI tools.
+fn mysql_shop_tab(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    dir: &std::path::Path,
+    ai_tools: bool,
+    sql: &str,
     cx: &mut TestAppContext,
-) {
-    use crate::query_tab::TabEvent;
-    use tangul_assist::ai_view;
-    use tangul_core::{ColumnMeta, Database, DbUser, DriverKind, SchemaInfo, TableInfo, TlsMode};
-    use tangul_engine::Event;
-    let (handle, workspace) = open(cx);
-    let dir = std::env::temp_dir().join(format!("tangul-ai-view-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("databases")).unwrap();
-    std::fs::write(
-        dir.join("databases").join("db.json"),
-        r#"{"ai": {"content_blocking": {"redact": ["..metadata"]}}}"#,
-    )
-    .unwrap();
-    let sql = "-- ai view\nselect * from items";
-    let tab = step(handle, cx, |window, cx| {
+) -> Entity<QueryTab> {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    step(handle, cx, |window, cx| {
         workspace.update(cx, |ws, cx| {
             ws.data.profiles = tangul_data::profiles::Profiles::in_memory_at(
-                &dir,
+                dir,
                 vec![Database {
                     id: "db".into(),
                     name: "shop".into(),
@@ -3376,93 +3280,95 @@ fn a_marked_query_on_mysql_is_redacted_by_the_saved_file_and_stays_so_when_paged
                     assistant_user: None,
                     ai_values: Default::default(),
                     ai_access: Default::default(),
-                    ai_tools: true,
+                    ai_tools,
                     editor_values: true,
                 }],
             );
             ws.connect("app", cx);
             ws.active_db = Some("db".into());
             ws.active_user = Some("app".into());
-            let conn = ws.tab_conn("app").unwrap().read(cx).id;
-            let col = |name: &str| ColumnMeta {
-                schema: "shop".into(),
-                table: "items".into(),
-                name: name.into(),
-                data_type: "json".into(),
-                ..Default::default()
-            };
-            let info = SchemaInfo {
-                tables: vec![TableInfo {
-                    schema: "shop".into(),
-                    name: "items".into(),
-                    ..Default::default()
-                }],
-                columns: vec![col("id"), col("metadata")],
-                ..Default::default()
-            };
-            ws.set_schema("app", conn, info);
             ws.open_sql("Items", sql, window, cx);
             ws.tabs.active_query().unwrap().clone()
         })
-    });
-    // The result of a run (or of a page of it) as the engine sends it.
-    let answer = |query: QueryId, cx: &mut TestAppContext| {
-        step(handle, cx, |window, cx| {
-            workspace.update(cx, |ws, cx| {
-                let names = ["id", "metadata"].map(|n| ColumnInfo { name: n.into() });
-                let mut rows = RowBatch::default();
-                for cell in [Some("1"), Some("{\"secret\": 1}")] {
-                    rows.push_cell(cell);
-                }
-                rows.finish_row();
-                for event in [
-                    QueryEvent::Exec(ExecEvent::ResultStart(names.to_vec())),
-                    QueryEvent::Exec(ExecEvent::Rows(rows)),
-                    QueryEvent::Finished {
-                        elapsed: Duration::ZERO,
-                        error: None,
-                        error_position: None,
-                        in_transaction: false,
-                        cancelled: false,
-                    },
-                ] {
-                    ws.on_engine_event(Event::Query { query, event }, window, cx);
-                }
-            })
-        })
-    };
-    let run = |event: TabEvent, cx: &mut TestAppContext| -> QueryId {
-        step(handle, cx, |window, cx| {
-            workspace.update(cx, |ws, cx| {
-                ws.on_tab_event(&tab, &event, window, cx);
-                let running = ws.router.running();
-                assert_eq!(running.len(), 1, "one query ran");
-                running[0]
-            })
-        })
-    };
-    let shown = |cx: &mut TestAppContext| {
-        cx.update(|cx| {
-            let results = tab.read(cx).results().read(cx);
-            (results.cell(0, 0, cx), results.cell(0, 1, cx))
-        })
-    };
-    let query = run(TabEvent::Run(sql.into()), cx);
-    answer(query, cx);
-    let redacted = (Some("1".to_string()), Some(ai_view::REDACTED.to_string()));
-    assert_eq!(shown(cx), redacted);
+    })
+}
 
-    // Sorted or paged: a query around it, as AI tools would see it too.
-    let refined = tangul_assist::refine::refinable(sql)
-        .map(|base| format!("SELECT * FROM (\n{base}\n) AS t ORDER BY t.id LIMIT 100"));
-    let query = run(
-        TabEvent::Refine {
-            sql: refined.unwrap(),
-            append: false,
-        },
-        cx,
-    );
-    answer(query, cx);
-    assert_eq!(shown(cx), redacted, "a sorted page");
+#[gpui_kit::test]
+fn a_query_marked_ai_view_runs_as_ai_tools_run_it_never_as_you(cx: &mut TestAppContext) {
+    use crate::query_tab::TabEvent;
+    let (handle, workspace) = open(cx);
+    let dir = std::env::temp_dir().join(format!("tangul-ai-view-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sql = "-- ai view\nselect * from items";
+    let error = |tab: &Entity<QueryTab>, cx: &mut TestAppContext| {
+        cx.update(|cx| tab.read(cx).results().read(cx).error())
+    };
+    // Not offered to AI tools: what they would get is that refusal.
+    let tab = mysql_shop_tab(handle, &workspace, &dir, false, sql, cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.on_tab_event(&tab, &TabEvent::Run(sql.into()), window, cx);
+            assert!(ws.router.is_idle(), "nothing ran as you");
+        })
+    });
+    let e = error(&tab, cx).unwrap();
+    assert!(
+        e.starts_with("AI tools would get:") && e.contains("isn't offered"),
+        "{e}"
+    );
+
+    // Offered: through the registry's run_readonly on the AI connection (the
+    // engine here answers nothing, so the read fails), never on your session.
+    let tab = mysql_shop_tab(handle, &workspace, &dir, true, sql, cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.on_tab_event(&tab, &TabEvent::Run(sql.into()), window, cx);
+            assert!(ws.router.is_idle(), "nothing ran as you");
+        })
+    });
+    for _ in 0..50 {
+        cx.run_until_parked();
+        if error(&tab, cx).is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let e = error(&tab, cx).expect("an answer from the AI tools' path");
+    assert!(e.starts_with("AI tools would get:"), "{e}");
+    assert!(!e.contains("isn't offered"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui_kit::test]
+fn what_ai_tools_got_is_shown_as_is_and_cant_be_refined(cx: &mut TestAppContext) {
+    use tangul_ai::ToolOutput;
+    use tangul_assist::ai_view::REDACTED;
+    let (handle, workspace) = open(cx);
+    let dir = std::env::temp_dir().join(format!("tangul-ai-got-{}", std::process::id()));
+    let sql = "-- ai view\nselect * from items";
+    let tab = mysql_shop_tab(handle, &workspace, &dir, true, sql, cx);
+    // As run_readonly hands it to AI tools: `secret` hidden, `metadata` redacted.
+    let output = ToolOutput {
+        data: serde_json::json!({
+            "columns": ["id", "metadata"],
+            "rows": [["1", REDACTED], ["2", null]],
+            "truncated": false,
+        }),
+        text: String::new(),
+        rows: Some(2),
+    };
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            let query = QueryId(ws.next_id());
+            ws.show_ai_view(&tab, query, sql, Ok((output, Duration::ZERO)), window, cx);
+        })
+    });
+    cx.update(|cx| {
+        let results = tab.read(cx).results().read(cx);
+        assert_eq!(results.columns(cx), ["id", "metadata"]);
+        assert_eq!(results.cell(0, 1, cx).as_deref(), Some(REDACTED));
+        assert_eq!(results.cell(1, 1, cx), None);
+        assert!(!results.is_refinable(), "sorting would run as you");
+    });
 }

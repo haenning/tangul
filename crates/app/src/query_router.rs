@@ -5,9 +5,8 @@
 use std::collections::HashMap;
 
 use gpui_kit::*;
-use tangul_assist::ai_view::{self, Mode, Plan};
 use tangul_core::QueryId;
-use tangul_engine::{ExecEvent, Problem, QueryEvent};
+use tangul_engine::{Problem, QueryEvent};
 
 use crate::query_tab::QueryTab;
 
@@ -33,12 +32,6 @@ pub struct Finished {
 #[derive(Default)]
 pub struct QueryRouter {
     running: HashMap<QueryId, RunningQuery>,
-    /// Runs shown as AI tools see them (`-- ai view`), and the modes of the
-    /// columns of the result arriving.
-    ai_views: HashMap<QueryId, (Plan, Vec<Mode>)>,
-    /// Per tab, the plan of its last run if that was shown as AI tools see it: its
-    /// sorted, filtered and further pages are shown so too.
-    tab_views: HashMap<EntityId, Plan>,
     /// Pending editor checks: request → (tab, edit generation).
     checks: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
 }
@@ -48,50 +41,13 @@ impl QueryRouter {
         self.running.insert(query, run);
     }
 
-    /// The queries running now.
-    #[cfg(test)]
-    pub fn running(&self) -> Vec<QueryId> {
-        self.running.keys().copied().collect()
-    }
-
     /// Nothing is running.
     pub fn is_idle(&self) -> bool {
         self.running.is_empty()
     }
 
     /// Hands the event to the query's tab; returns the run once it finished.
-    /// Shows `query`'s result as AI tools see it.
-    pub fn view_as_ai(&mut self, query: QueryId, plan: Plan) {
-        self.ai_views.insert(query, (plan, Vec::new()));
-    }
-
-    /// `tab` ran a statement: shown as AI tools see it with `plan`, or not.
-    pub fn tab_ran(&mut self, tab: EntityId, plan: Option<Plan>) {
-        match plan {
-            Some(plan) => self.tab_views.insert(tab, plan),
-            None => self.tab_views.remove(&tab),
-        };
-    }
-
-    /// How `tab`'s last run is shown as AI tools see it, if it is.
-    pub fn tab_view(&self, tab: EntityId) -> Option<Plan> {
-        self.tab_views.get(&tab).cloned()
-    }
-
     pub fn deliver(&mut self, query: QueryId, event: QueryEvent, cx: &mut App) -> Option<Finished> {
-        let event = match (self.ai_views.get_mut(&query), event) {
-            (Some((plan, modes)), QueryEvent::Exec(ExecEvent::ResultStart(columns))) => {
-                *modes = plan.modes(columns.len());
-                QueryEvent::Exec(ExecEvent::ResultStart(ai_view::columns(modes, &columns)))
-            }
-            (Some((_, modes)), QueryEvent::Exec(ExecEvent::Rows(rows))) => {
-                QueryEvent::Exec(ExecEvent::Rows(ai_view::batch(modes, &rows)))
-            }
-            (_, event) => event,
-        };
-        if matches!(event, QueryEvent::Finished { .. }) {
-            self.ai_views.remove(&query);
-        }
         let finished = match &event {
             QueryEvent::Finished { elapsed, error, .. } => {
                 Some((error.clone(), elapsed.as_millis() as i64))
