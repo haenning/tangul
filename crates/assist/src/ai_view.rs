@@ -439,7 +439,8 @@ fn push_row<'a>(modes: &[Mode], out: &mut RowBatch, cell: impl Fn(usize) -> Opti
     for (c, mode) in modes.iter().enumerate() {
         match mode {
             Mode::Hidden => {}
-            Mode::Redacted => out.push_cell(cell(c).map(|_| REDACTED)),
+            // NULL too: that a value is missing can say something.
+            Mode::Redacted => out.push_cell(Some(REDACTED)),
             Mode::Visible => out.push_cell(cell(c)),
         }
     }
@@ -1204,7 +1205,7 @@ mod tests {
         let names: Vec<&str> = seen.columns().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["id", "email"]);
         assert_eq!(seen.cell(0, 1), Some(REDACTED));
-        assert_eq!(seen.cell(1, 1), None, "NULL stays NULL");
+        assert_eq!(seen.cell(1, 1), Some(REDACTED), "NULL too");
         assert_eq!(seen.cell(1, 0), Some("2"));
         assert_eq!(
             note.unwrap(),

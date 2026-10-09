@@ -2,7 +2,7 @@
 
 The AI sees the same schemas, tables and columns as you. Per database you decide
 what it reads from the rows: a column is **visible**, **redacted** (every value
-becomes `⟦redacted⟧`, `NULL` stays `NULL`) or **hidden** (left out). You always see
+becomes `⟦redacted⟧`, `NULL` too, since a missing value can say something) or **hidden** (left out). You always see
 everything, including results the AI opens for you.
 
 ## Where
