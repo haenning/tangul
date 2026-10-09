@@ -43,7 +43,7 @@ the editor, so you look before you save.
     "max_age": "365d",
     "max_mb": 50
   },
-  "theme": { "appearance": "auto", "dark": "Tangul Dark", "light": "Tangul Light" },
+  "theme": { "appearance": "auto", "dark": "Tangul Dark Rainbow", "light": "Tangul Light Rainbow" },
   "mcp": { "enabled": false, "port": 7433, "access": "data" },
   "ai": {
     "provider": null,

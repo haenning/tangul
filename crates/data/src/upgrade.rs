@@ -55,6 +55,14 @@ pub fn newer(version: Option<&Version>, steps: Steps) -> Option<String> {
         .map(|v| format!("written by a newer tangul ({v}; this one is {current})"))
 }
 
+/// Whether `text` already has the current layout (or a newer one): nothing to
+/// upgrade.
+pub fn is_latest(text: &str, steps: Steps) -> bool {
+    parse(text)
+        .and_then(|v| version(&v))
+        .is_ok_and(|v| v.is_some_and(|v| v >= steps.current()))
+}
+
 /// A file's upgrade: its text in the current layout.
 pub type Upgrade = fn(&str) -> Result<String, String>;
 
@@ -188,5 +196,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&db).unwrap(), text);
         assert!(!dir.join("databases").join("db1.json.bak").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_in_the_current_layout_is_the_latest() {
+        let steps = crate::migrations::SETTINGS;
+        let current = steps.current().to_string();
+        assert!(is_latest(&format!(r#"{{"version": "{current}"}}"#), steps));
+        assert!(is_latest(r#"{"version": "99.0.0"}"#, steps));
+        assert!(!is_latest(r#"{"version": "0.0.1"}"#, steps));
+        assert!(!is_latest(r#"{"version": 1}"#, steps));
+        assert!(!is_latest("{", steps));
     }
 }

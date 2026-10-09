@@ -2129,11 +2129,18 @@ fn the_theme_follows_the_appearance_setting(cx: &mut TestAppContext) {
     let set = |appearance: Appearance, light: &str, cx: &mut TestAppContext| {
         let mut s = Settings::default();
         s.theme.appearance = appearance;
+        s.theme.dark = "Tangul Dark".into();
         s.theme.light = light.into();
         cx.update(|cx| crate::settings::set_for_test(s, cx));
     };
     let background = |cx: &mut TestAppContext| cx.update(|cx| Theme::global(cx).background);
-    let dark = default_for(ThemeMode::Dark);
+    let named = |name: &str| {
+        tangul_data::themes::built_in()
+            .into_iter()
+            .find(|t| t.name == name)
+            .unwrap()
+    };
+    let dark = named("Tangul Dark");
     let light = default_for(ThemeMode::Light);
     set(Appearance::Dark, "Tangul Light", cx);
     assert_eq!(background(cx), crate::theme::color(dark.colors.background));
@@ -3317,6 +3324,12 @@ fn a_database_file_marks_explains_and_hints_its_patterns(cx: &mut TestAppContext
         typed,
         "Tab inserts nothing"
     );
+    // Typing the closing quote steps over it, and the hint stays in the pattern.
+    step(handle, cx, |window, cx| window.input("\"", cx));
+    cx.run_until_parked();
+    assert_eq!(tab.read_with(cx, |t, cx| t.text(cx)), typed);
+    assert!(!tab.read_with(cx, |t, cx| t.hint_shown(cx)));
+    step(handle, cx, |window, cx| window.press("left", cx));
 
     // A letter: the database's names for the part.
     step(handle, cx, |window, cx| window.input("pub", cx));

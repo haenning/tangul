@@ -146,11 +146,19 @@ pub fn built_in() -> Vec<Theme> {
         .collect()
 }
 
-/// The default theme for `mode` (the first built-in one of it).
+/// The themes chosen until the user picks others.
+pub const DEFAULT_DARK: &str = "Tangul Dark Rainbow";
+pub const DEFAULT_LIGHT: &str = "Tangul Light Rainbow";
+
+/// The default theme for `mode`.
 pub fn default_for(mode: ThemeMode) -> Theme {
+    let name = match mode {
+        ThemeMode::Dark => DEFAULT_DARK,
+        ThemeMode::Light => DEFAULT_LIGHT,
+    };
     built_in()
         .into_iter()
-        .find(|t| t.mode == mode)
+        .find(|t| t.name == name && t.mode == mode)
         .expect("a built-in theme per mode")
 }
 
@@ -268,19 +276,20 @@ mod tests {
 
     #[test]
     fn dark_and_light_ship_monochrome_and_rainbow() {
-        assert_eq!(default_for(ThemeMode::Dark).name, "Tangul Dark");
-        assert_eq!(default_for(ThemeMode::Light).name, "Tangul Light");
+        assert_eq!(default_for(ThemeMode::Dark).name, "Tangul Dark Rainbow");
+        assert_eq!(default_for(ThemeMode::Light).name, "Tangul Light Rainbow");
         let themes = built_in();
-        for (name, mode) in [
-            ("Tangul Dark Rainbow", ThemeMode::Dark),
-            ("Tangul Light Rainbow", ThemeMode::Light),
+        let named = |name: &str| themes.iter().find(|t| t.name == name).unwrap();
+        for (name, mono, mode) in [
+            ("Tangul Dark Rainbow", "Tangul Dark", ThemeMode::Dark),
+            ("Tangul Light Rainbow", "Tangul Light", ThemeMode::Light),
         ] {
-            let rainbow = themes.iter().find(|t| t.name == name).unwrap();
+            let rainbow = named(name);
             assert_eq!(rainbow.mode, mode);
             assert_eq!(rainbow.charts.len(), 7);
             // The rest as the monochrome one of its mode.
-            assert_eq!(rainbow.colors, default_for(mode).colors);
-            assert_eq!(rainbow.syntax, default_for(mode).syntax);
+            assert_eq!(rainbow.colors, named(mono).colors);
+            assert_eq!(rainbow.syntax, named(mono).syntax);
         }
         assert!(themes.iter().filter(|t| t.charts.len() == 1).count() == 2);
     }
@@ -328,7 +337,7 @@ mod tests {
             ]
         );
         assert_eq!(themes[0], mine);
-        assert_eq!(themes[1].colors.accent.to_hex(), "#ff0000");
+        assert_eq!(themes[2].colors.accent.to_hex(), "#ff0000");
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("broken.json"));
         assert_eq!(stamp(&dir).len(), 4);
@@ -342,6 +351,6 @@ mod tests {
         let theme = default_for(ThemeMode::Light);
         assert_eq!(Theme::parse(&theme.to_json()).unwrap(), theme);
         assert!(theme.to_json().contains("\"selection\": \"#dc262633\""));
-        assert_eq!(theme.file_name(), "tangul-light.json");
+        assert_eq!(theme.file_name(), "tangul-light-rainbow.json");
     }
 }

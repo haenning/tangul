@@ -19,7 +19,8 @@
 //!     "max_age": "365d",
 //!     "max_mb": 50
 //!   },
-//!   "theme": { "appearance": "auto", "dark": "Tangul Dark", "light": "Tangul Light" },
+//!   "theme": { "appearance": "auto", "dark": "Tangul Dark Rainbow",
+//!              "light": "Tangul Light Rainbow" },
 //!   "mcp": { "enabled": false, "port": 7433, "access": "data" },
 //!   "ai": {
 //!     "provider": "anthropic",
@@ -84,8 +85,8 @@ impl Default for ThemeSettings {
     fn default() -> Self {
         Self {
             appearance: Appearance::Auto,
-            dark: "Tangul Dark".into(),
-            light: "Tangul Light".into(),
+            dark: crate::themes::DEFAULT_DARK.into(),
+            light: crate::themes::DEFAULT_LIGHT.into(),
         }
     }
 }
@@ -783,13 +784,13 @@ mod tests {
         assert_eq!(s.theme.appearance, Appearance::Auto);
         assert_eq!(
             (s.theme.dark.as_str(), s.theme.light.as_str()),
-            ("Tangul Dark", "Tangul Light")
+            ("Tangul Dark Rainbow", "Tangul Light Rainbow")
         );
         let s = Settings::parse(r#"{"theme": {"appearance": "light", "light": "Mine"}}"#).unwrap();
         assert_eq!(s.theme.appearance, Appearance::Light);
         assert_eq!(
             (s.theme.dark.as_str(), s.theme.light.as_str()),
-            ("Tangul Dark", "Mine")
+            ("Tangul Dark Rainbow", "Mine")
         );
         assert!(Settings::parse(r#"{"theme": {"appearance": "dim"}}"#).is_err());
         assert_eq!(

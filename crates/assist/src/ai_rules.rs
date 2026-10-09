@@ -250,7 +250,8 @@ pub struct Typing {
     /// The cursor's part as typed up to it, and where that starts.
     pub prefix: String,
     pub prefix_start: usize,
-    /// Whether nothing follows the cursor in the pattern.
+    /// Whether the cursor is right before the pattern's closing quote: the only
+    /// place parts are hinted.
     pub at_end: bool,
 }
 
@@ -278,7 +279,7 @@ pub fn typing(text: &str, offset: usize) -> Option<Typing> {
         parts,
         prefix_start: offset - prefix.len(),
         prefix,
-        at_end: at.after.is_empty(),
+        at_end: at.after.is_empty() && at.closed,
     })
 }
 
@@ -435,8 +436,9 @@ mod tests {
     #[test]
     fn typing_a_pattern_hints_the_parts_left_and_offers_names() {
         let typed = |pattern: &str| {
-            let text = format!(r#"{{"ai": {{"content_blocking": {{"hide": ["a.b", "{pattern}"#);
-            typing(&text, text.len())
+            let text =
+                format!(r#"{{"ai": {{"content_blocking": {{"hide": ["a.b", "{pattern}"]}}}}}}"#);
+            typing(&text, text.len() - r#""]}}}"#.len())
         };
         let hint = |pattern: &str| placeholder(&typed(pattern).unwrap(), Namespace::Schema);
         assert_eq!(hint("").as_deref(), Some("schema.table.column"));
@@ -462,6 +464,12 @@ mod tests {
         // Not in a pattern list.
         let other = r#"{"ai": {"content_blocking": {"block_queries": [""#;
         assert!(typing(other, other.len()).is_none());
+        // No closing quote yet: no hint.
+        let open = r#"{"ai": {"content_blocking": {"hide": ["pub"#;
+        assert_eq!(
+            placeholder(&typing(open, open.len()).unwrap(), Namespace::Schema),
+            None
+        );
         // Text after the cursor: no hint.
         let text = r#"{"ai": {"content_blocking": {"hide": ["pub"]}}}"#;
         let t = typing(text, text.find("ub").unwrap()).unwrap();

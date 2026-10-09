@@ -365,6 +365,8 @@ pub struct InString {
     pub start: usize,
     /// Its text after the cursor, up to its closing quote (or the line's end).
     pub after: String,
+    /// Whether it has its closing quote on the line.
+    pub closed: bool,
 }
 
 pub fn string_at(text: &str, offset: usize) -> Option<InString> {
@@ -445,6 +447,7 @@ pub fn string_at(text: &str, offset: usize) -> Option<InString> {
         path,
         start,
         after: rest[..end].to_string(),
+        closed: rest[end..].starts_with('"'),
     })
 }
 
@@ -569,10 +572,12 @@ mod tests {
         assert_eq!(at.path, ["ai", "list"]);
         assert_eq!(&text[at.start..], "tw");
         assert_eq!(at.after, "");
+        assert!(!at.closed);
         let text = r#"{"ai": {"list": ["o\"ne", "two"]}}"#;
         let cursor = text.find("wo").unwrap();
         let at = string_at(text, cursor).unwrap();
         assert_eq!(at.after, "wo");
+        assert!(at.closed);
         assert_eq!(at.path, ["ai", "list"]);
         assert!(string_at(text, text.find("ai").unwrap()).is_none(), "a key");
         assert!(string_at(r#"{"a": "b"#, 8).is_none(), "not in a list");

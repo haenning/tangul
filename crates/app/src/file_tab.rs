@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{
@@ -89,6 +89,16 @@ impl FileKind {
         Some(tangul_data::upgrade::pretty(&value))
     }
 
+    /// Whether `text` already has this version's layout: nothing to upgrade.
+    fn is_latest(self, text: &str) -> bool {
+        use tangul_data::{migrations, upgrade};
+        match self {
+            FileKind::Settings => upgrade::is_latest(text, migrations::SETTINGS),
+            FileKind::Database => upgrade::is_latest(text, migrations::DATABASE),
+            FileKind::Theme => true,
+        }
+    }
+
     /// `text` in this version's layout, keeping what the user set.
     fn upgrade(self, text: &str) -> Option<Result<String, String>> {
         match self {
@@ -123,7 +133,10 @@ pub struct FileTab {
     /// Where the hint of a pattern's parts shows: cursor and text length. Tab
     /// doesn't take it (it is no text to insert).
     hint_at: Rc<Cell<Option<(usize, usize)>>>,
+    /// Whether the text has this version's layout (Upgrade then has nothing to do).
+    latest: bool,
     _check: Task<()>,
+    _cursor: Subscription,
     pub id: TabId,
     pub title: SharedString,
     path: PathBuf,
@@ -169,11 +182,30 @@ impl FileTab {
                 cx.notify();
             }
         });
+        // Typing over a pattern's closing quote moves the cursor without changing the
+        // text, and the hint would follow it out of the pattern: cleared then.
+        let cursor = cx.observe(&editor, |this: &mut Self, editor, cx| {
+            let Some((at, len)) = this.hint_at.get() else {
+                return;
+            };
+            let (range, now) = {
+                let e = editor.read(cx);
+                (e.selected_range(), e.value().len())
+            };
+            if now == len && range != (at..at) {
+                this.hint_at.set(None);
+                if range.is_empty() {
+                    editor.update(cx, |e, cx| e.set_selected_range(range, cx));
+                }
+            }
+        });
         let mut tab = Self {
             kind,
             database,
             hint_at,
+            latest: false,
             _check: Task::ready(()),
+            _cursor: cursor,
             id,
             title: path
                 .file_name()
@@ -201,6 +233,7 @@ impl FileTab {
     fn check(&mut self, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value().to_string();
         let problems = self.kind.problems(&text, self.database.as_ref());
+        self.latest = self.kind.is_latest(&text);
         self.editor.update(cx, |editor, cx| {
             let rope = editor.text().clone();
             let Some(diagnostics) = editor.diagnostics_mut() else {
@@ -380,7 +413,12 @@ impl Render for FileTab {
                                 .label("Upgrade")
                                 .small()
                                 .ghost()
-                                .tooltip("This version's layout, keeping your values, unsaved")
+                                .disabled(self.latest)
+                                .tooltip(if self.latest {
+                                    "Already on the latest version"
+                                } else {
+                                    "This version's layout, keeping your values, unsaved"
+                                })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.upgrade(window, cx);
                                 })),
@@ -497,11 +535,17 @@ impl CompletionProvider for RulesEditing {
         _: &mut Window,
         _: &mut App,
     ) -> Task<Result<InlineCompletionResponse>> {
-        let hint = ai_rules::typing(&rope.to_string(), offset)
+        let text = rope.to_string();
+        let hint = ai_rules::typing(&text, offset)
             .and_then(|t| ai_rules::placeholder(&t, self.database.namespace));
         self.hint_at
             .set(hint.as_ref().map(|_| (offset, rope.len())));
+        // Ghost text covers what follows the cursor on its line, so that comes
+        // along (the closing quote stays in view).
+        let rest = &text[offset..];
+        let rest = &rest[..rest.find('\n').unwrap_or(rest.len())];
         let items = hint
+            .map(|hint| hint + rest)
             .map(|insert_text| InlineCompletionItem {
                 insert_text,
                 filter_text: None,
@@ -560,5 +604,13 @@ mod tests {
         assert!(m[1].1.contains("unknown field `hdie`"), "{m:?}");
 
         assert_eq!(marked(FileKind::Theme, "{").len(), 1);
+    }
+
+    #[test]
+    fn only_an_older_layout_can_be_upgraded() {
+        let current = settings::defaults().to_string();
+        assert!(FileKind::Settings.is_latest(&current));
+        assert!(!FileKind::Settings.is_latest(r#"{"editor": {}}"#));
+        assert!(!FileKind::Database.is_latest(r#"{"version": "0.0.1"}"#));
     }
 }
