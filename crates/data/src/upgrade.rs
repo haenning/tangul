@@ -161,7 +161,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("databases")).unwrap();
         let db = dir.join("databases").join("db1.json");
-        let old = r#"{"ai": {"content_blocking": {"redact": ["*.company_id"]}}}"#;
+        let old = r#"{"ai": {"content_blocking": {"redact": ["..company_id"]}}}"#;
         std::fs::write(&db, old).unwrap();
         std::fs::write(dir.join("databases").join("broken.json"), "{ nope").unwrap();
 
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(new["version"], json!(env!("CARGO_PKG_VERSION")));
         assert_eq!(
             new["ai"]["content_blocking"]["redact"],
-            json!(["*.company_id"])
+            json!(["..company_id"])
         );
         assert_eq!(new["ai"]["content_blocking"]["hide"], json!([]));
         assert_eq!(

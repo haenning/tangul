@@ -12,7 +12,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   (streamed into tabs) or `EngineHandle::query` (the whole result, for everything else).
   Its gate (`gate.rs`) is the only safety gate; see **Safety rules** below.
 - `crates/assist`: SQL logic without UI or I/O (lexer, dialects, analysis, completion,
-  filters); put testable logic here
+  filters; settings files read with positions and checked value by value: `json`;
+  editing content-blocking rules: `ai_rules`); put testable logic here
 - `crates/tunnel`: SSH tunnels
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
   incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
@@ -202,8 +203,9 @@ explicit OK, and keep them covered by tests.
   as anyone else instead.
 - **What AI tools see of rows.** Per database, in its own settings file
   (`core::ai_view`, `databases/<id>.json` under `ai.content_blocking`; no UI yet):
-  `redact` and `hide` lists of patterns (with a dot a column: `*.email`,
-  `orders.adr*`, `schema.table.column`; without one a table; `*` only, case ignored;
+  `redact` and `hide` lists of patterns by position (`schema.table`,
+  `schema.table.column`; an empty part any name: `..email`; no dot is an error;
+  `*` within a part, case ignored;
   `!` an exception, the last match in a list wins), `block_queries`. `assist::ai_view::plan` checks every AI read before it
   runs and traces each result column to the table columns it comes from (renames,
   expressions, `*`, CTEs, subqueries, `UNION`, generated columns, views); what it

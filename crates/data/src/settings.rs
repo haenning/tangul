@@ -462,6 +462,13 @@ fn color<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Rgb>, D::Error> {
         .transpose()
 }
 
+/// Why a file's `value` can't be applied as settings, if it can't.
+pub fn value_problem(value: &serde_json::Value) -> Option<String> {
+    serde_json::from_value::<Settings>(value.clone())
+        .err()
+        .map(|e| e.to_string())
+}
+
 /// Why `text` can't be applied as settings, if it can't.
 pub fn problem(text: &str) -> Option<String> {
     Settings::parse(text).err().map(|e| e.to_string())

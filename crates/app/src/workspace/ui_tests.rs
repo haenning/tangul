@@ -1269,7 +1269,7 @@ fn a_query_marked_ai_view_shows_what_ai_tools_see(cx: &mut TestAppContext) {
         Some("public".into()),
     );
     let rules =
-        Rules::new(&serde_json::from_str(r#"{"redact": ["*.email"], "hide": ["*.ssn"]}"#).unwrap());
+        Rules::new(&serde_json::from_str(r#"{"redact": ["..email"], "hide": ["..ssn"]}"#).unwrap());
     let plan = ai_view::plan(&sql, &schema, &rules, Lexing::default()).unwrap();
     let tab = step(handle, cx, |window, cx| {
         workspace.update(cx, |ws, cx| {
@@ -3210,13 +3210,14 @@ fn a_settings_file_is_upgraded_or_reverted_in_the_editor_unsaved(cx: &mut TestAp
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("db1.json");
-    let old = r#"{"ai": {"content_blocking": {"redact": ["*.company_id"]}}}"#;
+    let old = r#"{"ai": {"content_blocking": {"redact": ["..company_id"]}}}"#;
     std::fs::write(&path, old).unwrap();
     step(handle, cx, |window, cx| {
         workspace.update(cx, |ws, cx| {
             ws.open_file(
                 path.clone(),
                 crate::file_tab::FileKind::Database,
+                None,
                 window,
                 cx,
             )
@@ -3231,7 +3232,7 @@ fn a_settings_file_is_upgraded_or_reverted_in_the_editor_unsaved(cx: &mut TestAp
     };
 
     step(handle, cx, |window, cx| window.click("upgrade-file", cx));
-    assert_eq!(parsed(cx).ai.content_blocking.redact, ["*.company_id"]);
+    assert_eq!(parsed(cx).ai.content_blocking.redact, ["..company_id"]);
     assert!(tab.read_with(cx, |t, cx| t.has_unsaved_changes(cx)));
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -3241,5 +3242,85 @@ fn a_settings_file_is_upgraded_or_reverted_in_the_editor_unsaved(cx: &mut TestAp
 
     step(handle, cx, |window, cx| window.click("revert-file", cx));
     assert_eq!(parsed(cx), Default::default());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui_kit::test]
+fn a_database_file_marks_explains_and_hints_its_patterns(cx: &mut TestAppContext) {
+    use tangul_assist::dialect::{Namespace, dialect_for};
+    use tangul_assist::schema::SchemaIndex;
+    use tangul_core::{ColumnMeta, ConnId, DriverKind, SchemaInfo, TableInfo};
+
+    let (handle, workspace) = open(cx);
+    let dir = std::env::temp_dir().join(format!("tangul-rules-tab-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db1.json");
+    let text = r#"{"ai": {"content_blocking": {"redact": ["users", "..nope"], "hide": []}}}"#;
+    std::fs::write(&path, text).unwrap();
+    let info = SchemaInfo {
+        tables: vec![TableInfo {
+            schema: "public".into(),
+            name: "users".into(),
+            ..Default::default()
+        }],
+        columns: vec![ColumnMeta {
+            schema: "public".into(),
+            table: "users".into(),
+            name: "email".into(),
+            data_type: "text".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            let schema = SchemaIndex::new(info, dialect_for(DriverKind::Postgres), None);
+            ws.knowledge
+                .set_schema("u1", "db1", ConnId(1), Arc::new(schema));
+            let database = crate::file_tab::DatabaseFile {
+                id: "db1".into(),
+                knowledge: ws.knowledge.clone(),
+                namespace: Namespace::Schema,
+            };
+            ws.open_file(
+                path.clone(),
+                crate::file_tab::FileKind::Database,
+                Some(database),
+                window,
+                cx,
+            )
+        })
+    });
+    let tab = workspace.read_with(cx, |ws, _| {
+        ws.tabs.active().and_then(|t| t.file()).cloned().unwrap()
+    });
+    let marked = tab.read_with(cx, |t, cx| t.marked(cx));
+    assert_eq!(marked.len(), 2, "{marked:?}");
+    assert!(marked[0].1.contains("has no dot"), "{marked:?}");
+    assert!(marked[1].1.contains("matches no column"), "{marked:?}");
+
+    // A quote in the empty list gets its pair, and the parts show as a hint that
+    // Tab leaves alone.
+    let inside = text.find("[]").unwrap() + 1;
+    step(handle, cx, |window, cx| {
+        tab.update(cx, |t, cx| t.place_cursor(inside, window, cx))
+    });
+    step(handle, cx, |window, cx| window.input("\"", cx));
+    cx.run_until_parked();
+    let typed = tab.read_with(cx, |t, cx| t.text(cx));
+    assert!(typed.contains(r#""hide": [""]"#), "{typed}");
+    assert!(tab.read_with(cx, |t, cx| t.hint_shown(cx)));
+    step(handle, cx, |window, cx| window.press("tab", cx));
+    assert_eq!(
+        tab.read_with(cx, |t, cx| t.text(cx)),
+        typed,
+        "Tab inserts nothing"
+    );
+
+    // A letter: the database's names for the part.
+    step(handle, cx, |window, cx| window.input("pub", cx));
+    cx.run_until_parked();
+    assert!(tab.read_with(cx, |t, cx| t.text(cx)).contains(r#"["pub"]"#));
     let _ = std::fs::remove_dir_all(&dir);
 }

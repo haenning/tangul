@@ -77,7 +77,11 @@ pub fn upgrade(text: &str) -> Result<String, String> {
 /// The settings in `text`; an error for anything this version can't read exactly
 /// (unknown keys, a newer layout).
 pub fn parse(text: &str) -> Result<DatabaseSettings, String> {
-    let value = crate::upgrade::parse(text)?;
+    parse_value(crate::upgrade::parse(text)?)
+}
+
+/// The settings in a file's `value`, as [`parse`].
+pub fn parse_value(value: Value) -> Result<DatabaseSettings, String> {
     let version = crate::upgrade::version(&value)?;
     if let Some(newer) = crate::upgrade::newer(version.as_ref(), crate::migrations::DATABASE) {
         return Err(newer);
@@ -111,13 +115,13 @@ mod tests {
 
         std::fs::write(
             &file,
-            r#"{"ai": {"content_blocking": {"hide": ["*.ssn"]}}}"#,
+            r#"{"ai": {"content_blocking": {"hide": ["..ssn"]}}}"#,
         )
         .unwrap();
         create_if_missing(&d, "db1").unwrap();
         assert_eq!(
             load(Some(&d), "db1").0.ai.content_blocking.hide,
-            ["*.ssn"],
+            ["..ssn"],
             "kept"
         );
 

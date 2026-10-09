@@ -190,6 +190,17 @@ impl Knowledge {
         self.read(|p| p.users.get(user).map(|u| u.schema.clone()))
     }
 
+    /// The schema of `database` as its users last read it: the largest, if several.
+    pub fn database_schema(&self, database: &str) -> Option<Arc<SchemaIndex>> {
+        self.read(|p| {
+            p.users
+                .values()
+                .filter(|u| u.database == database)
+                .max_by_key(|u| u.schema.tables().len())
+                .map(|u| u.schema.clone())
+        })
+    }
+
     /// The schema and usage behind connection `conn`.
     pub fn for_conn(&self, conn: ConnId) -> Option<(Arc<SchemaIndex>, Arc<Usage>)> {
         self.read(|p| {
@@ -272,6 +283,27 @@ mod tests {
         k.set_schema("u1", "db1", ConnId(1), schema("orders"));
         assert_eq!(tables(&reader.schema("u1").unwrap()), ["orders"]);
         assert!(reader.schema("u2").is_none());
+    }
+
+    #[test]
+    fn a_database_schema_is_its_largest_users() {
+        let k = Knowledge::default();
+        assert!(k.database_schema("db1").is_none());
+        k.set_schema("u1", "db1", ConnId(1), schema("users"));
+        let mut two = (*schema("orders")).info().clone();
+        two.tables.push(two.tables[0].clone());
+        two.tables[1].name = "items".into();
+        let two = Arc::new(SchemaIndex::new(
+            two,
+            dialect_for(DriverKind::Postgres),
+            None,
+        ));
+        k.set_schema("u2", "db1", ConnId(2), two);
+        k.set_schema("u3", "db2", ConnId(3), schema("other"));
+        assert_eq!(
+            tables(&k.database_schema("db1").unwrap()),
+            ["orders", "items"]
+        );
     }
 
     #[test]

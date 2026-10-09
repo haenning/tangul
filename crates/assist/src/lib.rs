@@ -1,6 +1,7 @@
 //! SQL assistance without UI: tokenizing, statement analysis, fingerprints, editor
 //! completion, usage-based ranking, query suggestions and telling questions from SQL.
 
+pub mod ai_rules;
 pub mod ai_view;
 pub mod analyze;
 pub mod chart;
@@ -14,6 +15,7 @@ pub mod grammar;
 pub mod guard;
 pub mod hints;
 pub mod join_graph;
+pub mod json;
 pub mod lexer;
 pub mod nl;
 pub mod profile;

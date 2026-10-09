@@ -11,5 +11,8 @@ similar = "3"
 sqlformat = "0.5"
 tangul-core = { path = "../core" }
 
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+
 [lints]
 workspace = true

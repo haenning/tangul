@@ -39,7 +39,7 @@ impl Workspace {
             );
             return;
         };
-        self.open_file(path, FileKind::Settings, window, cx);
+        self.open_file(path, FileKind::Settings, None, window, cx);
     }
 
     /// Opens database `id`'s own settings file (written with the defaults first).
@@ -55,7 +55,19 @@ impl Workspace {
             .dir()
             .map(|dir| tangul_data::database_settings::create_if_missing(dir, id));
         match file {
-            Some(Ok(path)) => self.open_file(path, FileKind::Database, window, cx),
+            Some(Ok(path)) => {
+                let namespace = self
+                    .data
+                    .profiles
+                    .database(id)
+                    .map_or(Namespace::Schema, |db| dialect_for(db.driver).namespace());
+                let database = crate::file_tab::DatabaseFile {
+                    id: id.to_string(),
+                    knowledge: self.knowledge.clone(),
+                    namespace,
+                };
+                self.open_file(path, FileKind::Database, Some(database), window, cx)
+            }
             _ => window.push_notification(
                 Notification::error("Could not create the database's settings file"),
                 cx,
@@ -68,6 +80,7 @@ impl Workspace {
         &mut self,
         path: std::path::PathBuf,
         kind: FileKind,
+        database: Option<crate::file_tab::DatabaseFile>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -79,7 +92,7 @@ impl Workspace {
             Some(ix) => self.tabs.set_active(ix),
             None => {
                 let id = TabId(self.next_id());
-                let tab = cx.new(|cx| FileTab::new(id, path, kind, window, cx));
+                let tab = cx.new(|cx| FileTab::new(id, path, kind, database, window, cx));
                 self.tabs.push(TabItem::File(tab), None);
             }
         }

@@ -9,7 +9,9 @@ tangul keeps its settings as JSON next to each other in the config folder (macOS
 | `databases/<id>.json`, one per database | database menu → **Database settings file** |
 
 Saved changes apply right away. A file that doesn't parse is kept as you wrote it
-but not applied; the tab says why.
+but not applied; the tab says why. While you type, the tab underlines each value
+that can't be applied in red, with what it accepts on hover (`"dim"`: expected
+one of `auto`, `dark`, `light`), and keys it doesn't know in yellow.
 
 **Upgrades.** Each file starts with `"version"`: the tangul version whose layout
 it has; leave it as it is.

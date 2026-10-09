@@ -1,20 +1,40 @@
-//! A tab editing a file instead of SQL (`settings.json`, a theme): only the editor,
-//! `⌘S`
-//! saves.
+//! A tab editing a file instead of SQL (`settings.json`, a theme, a database's
+//! settings): only the editor, `⌘S` saves. Values that can't be applied are
+//! underlined with what would do. In a database's file, hovering its rules says
+//! what they hit, and typing a pattern hints its parts and offers the database's
+//! names.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
 
+use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::{
     ActiveTheme as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Editor, EditorState, InputEvent},
+    input::{
+        CompletionProvider, Editor, EditorState, HoverProvider, IndentInline, InputEvent, Rope,
+        RopeExt as _,
+    },
     notification::Notification,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use lsp_types::{
+    CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
+    Hover, HoverContents, InlineCompletionContext, InlineCompletionItem, InlineCompletionResponse,
+    MarkupContent, MarkupKind, TextEdit,
+};
+use tangul_assist::ai_rules;
+use tangul_assist::dialect::Namespace;
+use tangul_assist::json::{self, Problem, Severity};
+use tangul_assist::schema::SchemaIndex;
 use tangul_core::TabId;
+use tangul_service::knowledge::Knowledge;
 
 use crate::{SaveFile, settings};
 
@@ -38,6 +58,27 @@ impl FileKind {
         }
     }
 
+    /// What to underline in `text`.
+    fn problems(self, text: &str, database: Option<&DatabaseFile>) -> Vec<Problem> {
+        match self {
+            FileKind::Settings => json::check(text, &settings::defaults(), &|v| {
+                settings::value_problem(v).map_or(Ok(()), Err)
+            }),
+            FileKind::Theme => json::parse(text).err().into_iter().collect(),
+            FileKind::Database => {
+                use tangul_data::database_settings as db;
+                let mut problems = json::check(text, &db::defaults(), &|v| {
+                    db::parse_value(v.clone()).map(|_| ())
+                });
+                if let Ok(root) = json::parse(text) {
+                    let schema = database.and_then(DatabaseFile::schema);
+                    problems.extend(ai_rules::problems(&root, schema.as_deref()));
+                }
+                problems
+            }
+        }
+    }
+
     /// Every key at its default; `None` for files without defaults (themes).
     fn defaults(self) -> Option<String> {
         let value = match self {
@@ -58,8 +99,31 @@ impl FileKind {
     }
 }
 
+/// Pause in typing after which the text is checked again.
+const CHECK_AFTER: Duration = Duration::from_millis(300);
+
+/// What a database's settings file knows of its database: its schema as tangul
+/// last read it (from the one pool), and what the level above tables is called.
+#[derive(Clone)]
+pub struct DatabaseFile {
+    pub id: String,
+    pub knowledge: Knowledge,
+    pub namespace: Namespace,
+}
+
+impl DatabaseFile {
+    fn schema(&self) -> Option<Arc<SchemaIndex>> {
+        self.knowledge.database_schema(&self.id)
+    }
+}
+
 pub struct FileTab {
     kind: FileKind,
+    database: Option<DatabaseFile>,
+    /// Where the hint of a pattern's parts shows: cursor and text length. Tab
+    /// doesn't take it (it is no text to insert).
+    hint_at: Rc<Cell<Option<(usize, usize)>>>,
+    _check: Task<()>,
     pub id: TabId,
     pub title: SharedString,
     path: PathBuf,
@@ -76,6 +140,7 @@ impl FileTab {
         id: TabId,
         path: PathBuf,
         kind: FileKind,
+        database: Option<DatabaseFile>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -86,13 +151,29 @@ impl FileTab {
                 .line_number(true)
                 .default_value(text.clone())
         });
-        let changes = cx.subscribe(&editor, |_, _, ev: &InputEvent, cx| {
+        let hint_at = Rc::new(Cell::new(None));
+        if let Some(database) = database.clone().filter(|_| kind == FileKind::Database) {
+            let rules = Rc::new(RulesEditing {
+                database,
+                hint_at: hint_at.clone(),
+            });
+            editor.update(cx, |e, _| {
+                let lsp = e.lsp_mut();
+                lsp.completion_provider = Some(rules.clone());
+                lsp.hover_provider = Some(rules);
+            });
+        }
+        let changes = cx.subscribe(&editor, |this: &mut Self, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
+                this.check_soon(cx);
                 cx.notify();
             }
         });
-        Self {
+        let mut tab = Self {
             kind,
+            database,
+            hint_at,
+            _check: Task::ready(()),
             id,
             title: path
                 .file_name()
@@ -103,6 +184,79 @@ impl FileTab {
             saved: text,
             problem: None,
             _changes: changes,
+        };
+        tab.check(cx);
+        tab
+    }
+
+    fn check_soon(&mut self, cx: &mut Context<Self>) {
+        self._check = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CHECK_AFTER).await;
+            let _ = this.update(cx, |this, cx| this.check(cx));
+        });
+    }
+
+    /// Underlines what can't be applied (red) and what looks wrong (yellow), the
+    /// reason as hover text.
+    fn check(&mut self, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).value().to_string();
+        let problems = self.kind.problems(&text, self.database.as_ref());
+        self.editor.update(cx, |editor, cx| {
+            let rope = editor.text().clone();
+            let Some(diagnostics) = editor.diagnostics_mut() else {
+                return;
+            };
+            diagnostics.reset(&rope);
+            for p in problems {
+                if p.range.end > rope.len() {
+                    continue;
+                }
+                diagnostics.push(Diagnostic {
+                    range: rope.offset_to_position(p.range.start)
+                        ..rope.offset_to_position(p.range.end),
+                    severity: match p.severity {
+                        Severity::Error => DiagnosticSeverity::Error,
+                        Severity::Warning => DiagnosticSeverity::Warning,
+                    },
+                    message: p.message.into(),
+                    ..Default::default()
+                });
+            }
+            cx.notify();
+        });
+    }
+
+    /// The problems underlined now: (text, message).
+    #[cfg(test)]
+    pub fn marked(&self, cx: &App) -> Vec<(String, String)> {
+        let text = self.editor.read(cx).value().to_string();
+        self.kind
+            .problems(&text, self.database.as_ref())
+            .into_iter()
+            .map(|p| (text[p.range].to_string(), p.message))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn place_cursor(&self, at: usize, window: &mut Window, cx: &mut App) {
+        self.editor.update(cx, |e, cx| {
+            e.focus(window, cx);
+            e.set_selected_range(at..at, cx);
+        });
+    }
+
+    /// Whether a pattern's parts are hinted at the cursor.
+    #[cfg(test)]
+    pub fn hint_shown(&self, cx: &App) -> bool {
+        let editor = self.editor.read(cx);
+        self.hint_at.get() == Some((editor.cursor(), editor.value().len()))
+    }
+
+    /// Tab while a pattern's parts are hinted: nothing (the hint is no text).
+    fn keep_hint(&mut self, _: &IndentInline, _: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.editor.read(cx);
+        if self.hint_at.get() == Some((editor.cursor(), editor.value().len())) {
+            cx.stop_propagation();
         }
     }
 
@@ -247,6 +401,7 @@ impl Render for FileTab {
             .child(
                 div()
                     .key_context("QueryEditor")
+                    .capture_action(cx.listener(Self::keep_hint))
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
@@ -258,5 +413,152 @@ impl Render for FileTab {
 impl Focusable for FileTab {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.editor.read(cx).focus_handle(cx)
+    }
+}
+
+/// In a database's settings file: what its rules hit on hover, the parts of a
+/// pattern as a hint while typing it, and the database's names for the part.
+struct RulesEditing {
+    database: DatabaseFile,
+    hint_at: Rc<Cell<Option<(usize, usize)>>>,
+}
+
+impl HoverProvider for RulesEditing {
+    fn hover(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Task<Result<Option<Hover>>> {
+        let text = rope.to_string();
+        let schema = self.database.schema();
+        let hover = json::parse(&text).ok().and_then(|root| {
+            ai_rules::hover(&root, offset, schema.as_deref(), self.database.namespace)
+        });
+        Task::ready(Ok(hover.map(|(range, value)| Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value,
+            }),
+            range: Some(lsp_types::Range::new(
+                rope.offset_to_position(range.start),
+                rope.offset_to_position(range.end),
+            )),
+        })))
+    }
+}
+
+impl CompletionProvider for RulesEditing {
+    /// The database's names for the pattern's part, once a letter is typed.
+    fn completions(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        _: CompletionContext,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Task<Result<CompletionResponse>> {
+        let text = rope.to_string();
+        let items = ai_rules::typing(&text, offset)
+            .zip(self.database.schema())
+            .map(|(typing, schema)| {
+                let range = lsp_types::Range::new(
+                    rope.offset_to_position(typing.prefix_start),
+                    rope.offset_to_position(offset),
+                );
+                ai_rules::names(&typing, &schema)
+                    .into_iter()
+                    .map(|name| CompletionItem {
+                        label: name.clone(),
+                        kind: Some(match typing.part() {
+                            2 => CompletionItemKind::FIELD,
+                            1 => CompletionItemKind::STRUCT,
+                            _ => CompletionItemKind::MODULE,
+                        }),
+                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                            range,
+                            new_text: name,
+                        })),
+                        ..Default::default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Task::ready(Ok(CompletionResponse::Array(items)))
+    }
+
+    /// The parts still to type, as ghost text (`schema.table.column`).
+    fn inline_completion(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        _: InlineCompletionContext,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Task<Result<InlineCompletionResponse>> {
+        let hint = ai_rules::typing(&rope.to_string(), offset)
+            .and_then(|t| ai_rules::placeholder(&t, self.database.namespace));
+        self.hint_at
+            .set(hint.as_ref().map(|_| (offset, rope.len())));
+        let items = hint
+            .map(|insert_text| InlineCompletionItem {
+                insert_text,
+                filter_text: None,
+                range: None,
+                command: None,
+                insert_text_format: None,
+            })
+            .into_iter()
+            .collect();
+        Task::ready(Ok(InlineCompletionResponse::Array(items)))
+    }
+
+    /// Right away: the hint follows each key.
+    fn inline_completion_debounce(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    fn is_completion_trigger(&self, _: usize, new_text: &str, _: &mut App) -> bool {
+        new_text.chars().any(|c| c.is_alphanumeric() || c == '_')
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileKind, settings};
+
+    fn marked(kind: FileKind, text: &str) -> Vec<(String, String)> {
+        kind.problems(text, None)
+            .into_iter()
+            .map(|p| (text[p.range].to_string(), p.message))
+            .collect()
+    }
+
+    #[test]
+    fn every_kind_of_file_is_checked_value_by_value() {
+        let m = marked(
+            FileKind::Settings,
+            r#"{"theme": {"appearance": "dim"}, "safety": {"relock_after": "5 min"}, "nope": 1}"#,
+        );
+        assert_eq!(m.len(), 3, "{m:?}");
+        assert_eq!(m[0].0, "\"dim\"");
+        assert!(m[0].1.contains("`auto`, `dark`, `light`"), "{m:?}");
+        assert_eq!(m[1].0, "\"5 min\"");
+        assert!(m[1].1.contains("expected e.g. \"30s\""), "{m:?}");
+        assert_eq!(m[2].0, "\"nope\"");
+        assert!(m[2].1.starts_with("unknown key, not used"), "{m:?}");
+        assert!(marked(FileKind::Settings, &settings::defaults().to_string()).is_empty());
+
+        let m = marked(
+            FileKind::Database,
+            r#"{"ai": {"content_blocking": {"redact": ["..email", "users", "!.."], "hdie": []}}}"#,
+        );
+        let texts: Vec<&str> = m.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(texts, ["\"users\"", "\"hdie\"", "\"!..\""], "{m:?}");
+        assert!(m[0].1.contains("has no dot"), "{m:?}");
+        assert!(m[1].1.contains("unknown field `hdie`"), "{m:?}");
+
+        assert_eq!(marked(FileKind::Theme, "{").len(), 1);
     }
 }

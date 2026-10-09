@@ -1001,8 +1001,8 @@ async fn a_write_asked_for_by_the_model_is_refused_and_nothing_changes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn redacted_and_hidden_columns_as_ai_tools_see_them() {
     let columns: AiColumns = serde_json::from_value(json!({
-        "redact": ["*.email"],
-        "hide": ["orders.total"],
+        "redact": ["..email"],
+        "hide": [".orders.total"],
         "block_queries": ["redacted"]
     }))
     .unwrap();

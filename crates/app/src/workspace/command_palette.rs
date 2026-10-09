@@ -154,7 +154,7 @@ impl Workspace {
             .ok_or_else(|| "there is no config folder".to_string())
             .and_then(|dir| tangul_data::themes::save(&dir, &theme));
         match saved {
-            Ok(path) => self.open_file(path, FileKind::Theme, window, cx),
+            Ok(path) => self.open_file(path, FileKind::Theme, None, window, cx),
             Err(e) => window.push_notification(
                 Notification::error(format!("Could not save the theme: {e}")),
                 cx,
