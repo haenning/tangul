@@ -23,11 +23,11 @@ const CHATS_LISTED: usize = 50;
 /// The assistant's side of the window: where its tool calls hand their events.
 #[derive(Default)]
 pub(super) struct Assistant {
-    events: Option<(Task<()>, async_channel::Sender<AiEvent>)>,
+    pub(super) events: Option<(Task<()>, async_channel::Sender<AiEvent>)>,
     /// Whether a provider, model and key are set up for the chat; tabs only look
     /// for questions then.
     ready: Rc<Cell<bool>>,
-    calls: Arc<AtomicU64>,
+    pub(super) calls: Arc<AtomicU64>,
     /// Answers instead of the provider in the settings (tests).
     #[cfg(test)]
     pub(super) provider: Option<Arc<dyn llm::Provider>>,

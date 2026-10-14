@@ -423,15 +423,33 @@ impl QueryTab {
         elapsed: Duration,
         cx: &mut Context<Self>,
     ) {
-        self.started(query, sql, cx);
         let output = QueryOutput {
             rows: Some(result.row_count() as u64),
             results: vec![result],
             truncated,
             elapsed,
         };
+        self.show_output(query, sql, Ok(output), true, cx);
+    }
+
+    /// Shows `output` as the result of `sql`, run elsewhere; `refinable`: whether
+    /// sorting, filtering and paging may run queries around it (as you).
+    pub fn show_output(
+        &mut self,
+        query: QueryId,
+        sql: &str,
+        output: Result<QueryOutput, String>,
+        refinable: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.started(query, sql, cx);
         self.in_transaction = false;
-        self.results.update(cx, |r, cx| r.replay(Ok(output), cx));
+        self.results.update(cx, |r, cx| {
+            if !refinable {
+                r.not_refinable(cx);
+            }
+            r.replay(output, cx)
+        });
         cx.notify();
     }
 

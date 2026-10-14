@@ -1229,95 +1229,6 @@ fn the_empty_state_offers_a_new_board_once_connected(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_query_marked_ai_view_shows_what_ai_tools_see(cx: &mut TestAppContext) {
-    use crate::query_router::RunningQuery;
-    use tangul_assist::ai_view::{self, Rules};
-    use tangul_assist::lexer::Lexing;
-    use tangul_assist::schema::SchemaIndex;
-    use tangul_core::{ColumnMeta, SchemaInfo, TableInfo, TableKind};
-    use tangul_engine::Event;
-    let (handle, workspace) = open(cx);
-    let sql = ai_view::mark("select id, email, ssn from users");
-    // Not marked, or no database to ask: nothing to show differently.
-    cx.update(|cx| {
-        let ws = workspace.read(cx);
-        assert!(ws.ai_view_plan("app", "select 1").is_none());
-        assert!(ws.ai_view_plan("nobody", &sql).is_none());
-    });
-    let col = |name: &str| ColumnMeta {
-        schema: "public".into(),
-        table: "users".into(),
-        name: name.into(),
-        data_type: "text".into(),
-        nullable: true,
-        ..Default::default()
-    };
-    let schema = SchemaIndex::new(
-        SchemaInfo {
-            tables: vec![TableInfo {
-                schema: "public".into(),
-                name: "users".into(),
-                kind: TableKind::Table,
-                comment: None,
-                row_estimate: None,
-                size_bytes: None,
-            }],
-            columns: vec![col("id"), col("email"), col("ssn")],
-            ..Default::default()
-        },
-        tangul_assist::dialect::dialect_for(tangul_core::DriverKind::Postgres),
-        Some("public".into()),
-    );
-    let rules =
-        Rules::new(&serde_json::from_str(r#"{"redact": ["*.email"], "hide": ["*.ssn"]}"#).unwrap());
-    let plan = ai_view::plan(&sql, &schema, &rules, Lexing::default()).unwrap();
-    let tab = step(handle, cx, |window, cx| {
-        workspace.update(cx, |ws, cx| {
-            let tab = ws.add_tab(&sql, window, cx);
-            let query = QueryId(ws.next_id());
-            ws.router.view_as_ai(query, plan);
-            ws.router.started(
-                query,
-                RunningQuery {
-                    tab: tab.downgrade(),
-                    sql: sql.clone(),
-                    user_id: "app".into(),
-                    started_at: 0,
-                    derived: true,
-                },
-            );
-            tab.update(cx, |t, cx| t.started(query, &sql, cx));
-            let names = ["id", "email", "ssn"].map(|n| ColumnInfo { name: n.into() });
-            let mut rows = RowBatch::default();
-            for cell in [Some("1"), Some("ann@x.io"), Some("123")] {
-                rows.push_cell(cell);
-            }
-            rows.finish_row();
-            for event in [
-                QueryEvent::Exec(ExecEvent::ResultStart(names.to_vec())),
-                QueryEvent::Exec(ExecEvent::Rows(rows)),
-                QueryEvent::Finished {
-                    elapsed: Duration::ZERO,
-                    error: None,
-                    error_position: None,
-                    in_transaction: false,
-                    cancelled: false,
-                },
-            ] {
-                ws.on_engine_event(Event::Query { query, event }, window, cx);
-            }
-            tab
-        })
-    });
-    cx.update(|cx| {
-        let results = tab.read(cx).results().read(cx);
-        assert_eq!(results.columns(cx), ["id", "email"]);
-        assert_eq!(results.cell(0, 0, cx).as_deref(), Some("1"));
-        assert_eq!(results.cell(0, 1, cx).as_deref(), Some(ai_view::REDACTED));
-    });
-}
-
-#[gpui_kit::test]
 fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let sql =
@@ -2129,11 +2040,18 @@ fn the_theme_follows_the_appearance_setting(cx: &mut TestAppContext) {
     let set = |appearance: Appearance, light: &str, cx: &mut TestAppContext| {
         let mut s = Settings::default();
         s.theme.appearance = appearance;
+        s.theme.dark = "Tangul Dark".into();
         s.theme.light = light.into();
         cx.update(|cx| crate::settings::set_for_test(s, cx));
     };
     let background = |cx: &mut TestAppContext| cx.update(|cx| Theme::global(cx).background);
-    let dark = default_for(ThemeMode::Dark);
+    let named = |name: &str| {
+        tangul_data::themes::built_in()
+            .into_iter()
+            .find(|t| t.name == name)
+            .unwrap()
+    };
+    let dark = named("Tangul Dark");
     let light = default_for(ThemeMode::Light);
     set(Appearance::Dark, "Tangul Light", cx);
     assert_eq!(background(cx), crate::theme::color(dark.colors.background));
@@ -2221,22 +2139,22 @@ fn schema_only_opens_no_ai_connection(cx: &mut TestAppContext) {
             ws.set_ai_access("db", AiAccess::Data, window, cx);
             assert_eq!(offered(ws), (AiAccess::Data, true));
         });
-        // MCP clients only ever get the schema; the assistant may read.
+        // Schema only in the settings: for every AI tool alike.
         let mut s = crate::settings::Settings::default();
-        s.mcp.access = AiAccess::Schema;
+        s.ai.access = AiAccess::Schema;
         crate::settings::set_for_test(s, cx);
     });
     step(handle, cx, |_, cx| {
         workspace.update(cx, |ws, cx| {
+            ws.sync_ai_access(cx);
             let events = ws.test_events(cx);
             let calls = Arc::default();
-            let mcp = ws.ai_ctx_source("mcp", events.clone(), Arc::clone(&calls))();
-            let assistant = ws.ai_ctx_source("assistant", events, calls)();
-            assert!(!mcp.reads_data());
-            assert_eq!(mcp.exposed()[0].conn, None);
-            assert!(assistant.reads_data());
-            // The assistant still reads, so its connection stays.
-            assert_eq!(offered(ws), (AiAccess::Data, true));
+            for caller in ["mcp", "assistant", "ai view"] {
+                let ctx = ws.ai_ctx_source(caller, events.clone(), Arc::clone(&calls))();
+                assert!(!ctx.reads_data(), "{caller}");
+                assert_eq!(ctx.exposed()[0].conn, None, "{caller}");
+            }
+            assert_eq!(offered(ws), (AiAccess::Schema, false));
         });
     });
 }
@@ -3201,4 +3119,250 @@ fn an_empty_tab_shows_hints_until_something_is_typed(cx: &mut TestAppContext) {
         tab.update(cx, |t, cx| t.insert_sql("select 1", window, cx))
     });
     cx.update(|cx| assert!(!tab.read(cx).hints_shown(cx)));
+}
+
+#[gpui_kit::test]
+fn a_settings_file_is_upgraded_or_reverted_in_the_editor_unsaved(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let dir = std::env::temp_dir().join(format!("tangul-file-tab-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db1.json");
+    let old = r#"{"ai": {"content_blocking": {"redact": ["..company_id"]}}}"#;
+    std::fs::write(&path, old).unwrap();
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_file(
+                path.clone(),
+                crate::file_tab::FileKind::Database,
+                None,
+                window,
+                cx,
+            )
+        })
+    });
+    let tab = workspace.read_with(cx, |ws, _| {
+        ws.tabs.active().and_then(|t| t.file()).cloned().unwrap()
+    });
+    let parsed = |cx: &mut TestAppContext| -> tangul_core::ai_view::DatabaseSettings {
+        let text = tab.read_with(cx, |t, cx| t.text(cx));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
+    };
+
+    step(handle, cx, |window, cx| window.click("upgrade-file", cx));
+    assert_eq!(parsed(cx).ai.content_blocking.redact, ["..company_id"]);
+    assert!(tab.read_with(cx, |t, cx| t.has_unsaved_changes(cx)));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        old,
+        "not saved yet"
+    );
+
+    step(handle, cx, |window, cx| window.click("revert-file", cx));
+    assert_eq!(parsed(cx), Default::default());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui_kit::test]
+fn a_database_file_marks_explains_and_hints_its_patterns(cx: &mut TestAppContext) {
+    use tangul_assist::dialect::{Namespace, dialect_for};
+    use tangul_assist::schema::SchemaIndex;
+    use tangul_core::{ColumnMeta, ConnId, DriverKind, SchemaInfo, TableInfo};
+
+    let (handle, workspace) = open(cx);
+    let dir = std::env::temp_dir().join(format!("tangul-rules-tab-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db1.json");
+    let text = r#"{"ai": {"content_blocking": {"redact": ["users", "..nope"], "hide": []}}}"#;
+    std::fs::write(&path, text).unwrap();
+    let info = SchemaInfo {
+        tables: vec![TableInfo {
+            schema: "public".into(),
+            name: "users".into(),
+            ..Default::default()
+        }],
+        columns: vec![ColumnMeta {
+            schema: "public".into(),
+            table: "users".into(),
+            name: "email".into(),
+            data_type: "text".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            let schema = SchemaIndex::new(info, dialect_for(DriverKind::Postgres), None);
+            ws.knowledge
+                .set_schema("u1", "db1", ConnId(1), Arc::new(schema));
+            let database = crate::file_tab::DatabaseFile {
+                id: "db1".into(),
+                knowledge: ws.knowledge.clone(),
+                namespace: Namespace::Schema,
+            };
+            ws.open_file(
+                path.clone(),
+                crate::file_tab::FileKind::Database,
+                Some(database),
+                window,
+                cx,
+            )
+        })
+    });
+    let tab = workspace.read_with(cx, |ws, _| {
+        ws.tabs.active().and_then(|t| t.file()).cloned().unwrap()
+    });
+    let marked = tab.read_with(cx, |t, cx| t.marked(cx));
+    assert_eq!(marked.len(), 2, "{marked:?}");
+    assert!(marked[0].1.contains("has no dot"), "{marked:?}");
+    assert!(marked[1].1.contains("matches no column"), "{marked:?}");
+
+    // A quote in the empty list gets its pair, and the parts show as a hint that
+    // Tab leaves alone.
+    let inside = text.find("[]").unwrap() + 1;
+    step(handle, cx, |window, cx| {
+        tab.update(cx, |t, cx| t.place_cursor(inside, window, cx))
+    });
+    step(handle, cx, |window, cx| window.input("\"", cx));
+    cx.run_until_parked();
+    let typed = tab.read_with(cx, |t, cx| t.text(cx));
+    assert!(typed.contains(r#""hide": [""]"#), "{typed}");
+    assert!(tab.read_with(cx, |t, cx| t.hint_shown(cx)));
+    step(handle, cx, |window, cx| window.press("tab", cx));
+    assert_eq!(
+        tab.read_with(cx, |t, cx| t.text(cx)),
+        typed,
+        "Tab inserts nothing"
+    );
+    // Typing the closing quote steps over it, and the hint stays in the pattern.
+    step(handle, cx, |window, cx| window.input("\"", cx));
+    cx.run_until_parked();
+    assert_eq!(tab.read_with(cx, |t, cx| t.text(cx)), typed);
+    assert!(!tab.read_with(cx, |t, cx| t.hint_shown(cx)));
+    step(handle, cx, |window, cx| window.press("left", cx));
+
+    // A letter: the database's names for the part.
+    step(handle, cx, |window, cx| window.input("pub", cx));
+    cx.run_until_parked();
+    assert!(tab.read_with(cx, |t, cx| t.text(cx)).contains(r#"["pub"]"#));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MySQL database `db` (`shop`, user `app`) kept in `dir`, connected, its tab open
+/// on `sql`; `ai_tools`: offered to AI tools.
+fn mysql_shop_tab(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    dir: &std::path::Path,
+    ai_tools: bool,
+    sql: &str,
+    cx: &mut TestAppContext,
+) -> Entity<QueryTab> {
+    use tangul_core::{Database, DbUser, DriverKind, TlsMode};
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.data.profiles = tangul_data::profiles::Profiles::in_memory_at(
+                dir,
+                vec![Database {
+                    id: "db".into(),
+                    name: "shop".into(),
+                    driver: DriverKind::Mysql,
+                    host: "localhost".into(),
+                    port: 3306,
+                    database: "shop".into(),
+                    tls: TlsMode::Disable,
+                    users: vec![DbUser {
+                        id: "app".into(),
+                        user: "app".into(),
+                    }],
+                    ssh: None,
+                    assistant_user: None,
+                    ai_values: Default::default(),
+                    ai_access: Default::default(),
+                    ai_tools,
+                    editor_values: true,
+                }],
+            );
+            ws.connect("app", cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.open_sql("Items", sql, window, cx);
+            ws.tabs.active_query().unwrap().clone()
+        })
+    })
+}
+
+#[gpui_kit::test]
+fn a_query_marked_ai_view_runs_as_ai_tools_run_it_never_as_you(cx: &mut TestAppContext) {
+    use crate::query_tab::TabEvent;
+    let (handle, workspace) = open(cx);
+    let dir = std::env::temp_dir().join(format!("tangul-ai-view-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sql = "-- ai view\nselect * from items";
+    let error = |tab: &Entity<QueryTab>, cx: &mut TestAppContext| {
+        cx.update(|cx| tab.read(cx).results().read(cx).error())
+    };
+    // Not offered to AI tools: what they would get is that refusal.
+    let tab = mysql_shop_tab(handle, &workspace, &dir, false, sql, cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.on_tab_event(&tab, &TabEvent::Run(sql.into()), window, cx);
+            assert!(ws.router.is_idle(), "nothing ran as you");
+        })
+    });
+    let e = error(&tab, cx).unwrap();
+    assert!(
+        e.starts_with("AI tools would get:") && e.contains("isn't offered"),
+        "{e}"
+    );
+
+    // Offered: through the registry's run_readonly on the AI connection (the
+    // engine here answers nothing, so the read fails), never on your session.
+    let tab = mysql_shop_tab(handle, &workspace, &dir, true, sql, cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.on_tab_event(&tab, &TabEvent::Run(sql.into()), window, cx);
+            assert!(ws.router.is_idle(), "nothing ran as you");
+        })
+    });
+    cx.run_until_parked();
+    let e = error(&tab, cx).expect("an answer from the AI tools' path");
+    assert!(e.starts_with("AI tools would get:"), "{e}");
+    assert!(!e.contains("isn't offered"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui_kit::test]
+fn what_ai_tools_got_is_shown_as_is_and_cant_be_refined(cx: &mut TestAppContext) {
+    use tangul_ai::ToolOutput;
+    use tangul_assist::ai_view::REDACTED;
+    let (handle, workspace) = open(cx);
+    let dir = std::env::temp_dir().join(format!("tangul-ai-got-{}", std::process::id()));
+    let sql = "-- ai view\nselect * from items";
+    let tab = mysql_shop_tab(handle, &workspace, &dir, true, sql, cx);
+    // As run_readonly hands it to AI tools: `secret` hidden, `metadata` redacted.
+    let output = ToolOutput {
+        data: serde_json::json!({
+            "columns": ["id", "metadata"],
+            "rows": [["1", REDACTED], ["2", null]],
+            "truncated": false,
+        }),
+        text: String::new(),
+        rows: Some(2),
+    };
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            let query = QueryId(ws.next_id());
+            ws.show_ai_view(&tab, query, sql, Ok((output, Duration::ZERO)), window, cx);
+        })
+    });
+    cx.update(|cx| {
+        let results = tab.read(cx).results().read(cx);
+        assert_eq!(results.columns(cx), ["id", "metadata"]);
+        assert_eq!(results.cell(0, 1, cx).as_deref(), Some(REDACTED));
+        assert_eq!(results.cell(1, 1, cx), None);
+        assert!(!results.is_refinable(), "sorting would run as you");
+    });
 }

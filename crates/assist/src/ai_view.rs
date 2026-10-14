@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use tangul_core::ai_view::{AiColumns, Blocked};
+use tangul_core::ai_view::{AiColumns, Blocked, Pattern};
 use tangul_core::{ColumnInfo, ResultSet, RowBatch};
 
 use crate::analyze::{TableRef, analyze, is_reserved, significant_with};
@@ -49,72 +49,15 @@ impl Mode {
     }
 }
 
-/// With a dot a column (`table.column`, `schema.table.column`), else a table. A
-/// leading `!` makes it an exception to the patterns before it in its list.
-#[derive(Debug, Clone)]
-struct Pattern {
-    except: bool,
-    schema: Option<String>,
-    table: String,
-    /// `None`: all of the table's columns.
-    column: Option<String>,
-}
-
-impl Pattern {
-    fn new(text: &str) -> Self {
-        let text = text.trim();
-        let (except, text) = match text.strip_prefix('!') {
-            Some(rest) => (true, rest),
-            None => (false, text),
-        };
-        let parts: Vec<String> = text.split('.').map(|p| p.trim().to_lowercase()).collect();
-        let pattern = match parts.as_slice() {
-            [table, column] => Self {
-                except,
-                schema: None,
-                table: table.clone(),
-                column: Some(column.clone()),
-            },
-            [.., schema, table, column] => Self {
-                except,
-                schema: Some(schema.clone()),
-                table: table.clone(),
-                column: Some(column.clone()),
-            },
-            _ => Self {
-                except,
-                schema: None,
-                table: parts.concat(),
-                column: None,
-            },
-        };
-        Self { except, ..pattern }
-    }
-
-    fn matches(&self, schema: &str, table: &str, column: &str) -> bool {
-        glob(&self.table, table)
-            && self.column.as_deref().is_none_or(|p| glob(p, column))
-            && self.schema.as_deref().is_none_or(|p| glob(p, schema))
-    }
-}
-
-/// `pattern` (lower case, `*` for anything) against `text`, ignoring case.
-fn glob(pattern: &str, text: &str) -> bool {
-    let text = text.to_lowercase();
-    let parts: Vec<&str> = pattern.split('*').collect();
-    let [first, middle @ .., last] = parts.as_slice() else {
-        return pattern == text;
-    };
-    let Some(mut rest) = text.strip_prefix(first) else {
-        return false;
-    };
-    for part in middle {
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return false,
-        }
-    }
-    rest.len() >= last.len() && rest.ends_with(last)
+/// `text` as a pattern; one that can't be read (the file check refuses those)
+/// hides everything.
+fn pattern(text: &str) -> Pattern {
+    Pattern::parse(text).unwrap_or(Pattern {
+        except: false,
+        schema: "*".into(),
+        table: "*".into(),
+        column: None,
+    })
 }
 
 /// A database's rules, ready to match.
@@ -128,7 +71,7 @@ pub struct Rules {
 
 impl Rules {
     pub fn new(settings: &AiColumns) -> Self {
-        let patterns = |l: &[String]| l.iter().map(|p| Pattern::new(p)).collect();
+        let patterns = |l: &[String]| l.iter().map(|p| pattern(p)).collect();
         Self {
             redact: patterns(&settings.redact),
             hide: patterns(&settings.hide),
@@ -496,7 +439,8 @@ fn push_row<'a>(modes: &[Mode], out: &mut RowBatch, cell: impl Fn(usize) -> Opti
     for (c, mode) in modes.iter().enumerate() {
         match mode {
             Mode::Hidden => {}
-            Mode::Redacted => out.push_cell(cell(c).map(|_| REDACTED)),
+            // NULL too: that a value is missing can say something.
+            Mode::Redacted => out.push_cell(Some(REDACTED)),
             Mode::Visible => out.push_cell(cell(c)),
         }
     }
@@ -946,7 +890,7 @@ mod tests {
 
     /// The usual rules: email and the address redacted, ssn and the audit log hidden.
     fn usual() -> Rules {
-        rules(r#"{"redact": ["*.email", "orders.adr*"], "hide": ["*.ssn", "audit_*"]}"#)
+        rules(r#"{"redact": ["..email", ".orders.adr*"], "hide": ["..ssn", ".audit_*"]}"#)
     }
 
     fn modes(sql: &str, rules: &Rules, count: usize) -> Vec<Mode> {
@@ -959,12 +903,6 @@ mod tests {
 
     #[test]
     fn patterns_ignore_case_and_know_one_wildcard() {
-        assert!(glob("adr*", "ADR_street"));
-        assert!(glob("*token*", "api_token_hash"));
-        assert!(glob("a*c*e", "abcde"));
-        assert!(!glob("a*c*e", "abdx"));
-        assert!(!glob("name", "username"));
-        assert!(glob("*name", "username"));
         let r = usual();
         assert_eq!(r.mode("public", "users", "Email"), R);
         assert_eq!(r.mode("public", "orders", "adr_city"), R);
@@ -972,12 +910,12 @@ mod tests {
         assert_eq!(r.mode("public", "users", "ssn"), H);
         assert_eq!(r.mode("public", "audit_log", "id"), H);
         assert_eq!(r.mode("public", "users", "id"), V);
-        let r = rules(r#"{"redact": ["public.users.name", "other.*.id", "public.orders.*"]}"#);
+        let r = rules(r#"{"redact": ["public.users.name", "other..id", "public.orders"]}"#);
         assert_eq!(r.mode("public", "users", "name"), R);
         assert_eq!(r.mode("public", "users", "id"), V);
         assert_eq!(r.mode("public", "orders", "total"), R);
-        // Without a dot, a table: all its columns, nothing elsewhere named like it.
-        let r = rules(r#"{"redact": ["users"]}"#);
+        // `schema.table`: all its columns, nothing elsewhere named like it.
+        let r = rules(r#"{"redact": [".users"]}"#);
         assert_eq!(r.mode("public", "users", "id"), R);
         assert_eq!(r.mode("public", "orders", "users"), V);
     }
@@ -985,8 +923,8 @@ mod tests {
     #[test]
     fn the_last_matching_pattern_decides_and_hidden_beats_redacted() {
         let r = rules(
-            r#"{"hide": ["*", "!orders", "!users.id", "orders.total"],
-                "redact": ["*.adr*", "*.id"]}"#,
+            r#"{"hide": [".", "!.orders", "!.users.id", ".orders.total"],
+                "redact": ["..adr*", "..id"]}"#,
         );
         assert_eq!(r.mode("public", "orders", "user_id"), V);
         assert_eq!(r.mode("public", "orders", "adr_city"), R);
@@ -994,15 +932,15 @@ mod tests {
         assert_eq!(r.mode("public", "users", "id"), R);
         assert_eq!(r.mode("public", "users", "name"), H);
         // An exception only lifts patterns before it.
-        let r = rules(r#"{"hide": ["!orders", "*"]}"#);
+        let r = rules(r#"{"hide": ["!.orders", "."]}"#);
         assert_eq!(r.mode("public", "orders", "id"), H);
         // A schema as the exception; only exceptions hide nothing.
-        let r = rules(r#"{"hide": ["*", "!sales.*.*"]}"#);
+        let r = rules(r#"{"hide": [".", "!sales."]}"#);
         assert_eq!(r.mode("sales", "orders", "id"), V);
         assert_eq!(r.mode("public", "orders", "id"), H);
         assert!(!r.is_open());
-        assert!(rules(r#"{"hide": ["!orders"]}"#).is_open());
-        let both = rules(r#"{"redact": ["*.ssn"], "hide": ["*.ssn"]}"#);
+        assert!(rules(r#"{"hide": ["!.orders"]}"#).is_open());
+        let both = rules(r#"{"redact": ["..ssn"], "hide": ["..ssn"]}"#);
         assert_eq!(both.mode("public", "users", "ssn"), H);
     }
 
@@ -1177,7 +1115,7 @@ mod tests {
             dialect_for(DriverKind::Postgres),
             Some("public".into()),
         );
-        let r = rules(r#"{"redact": ["*.email"]}"#);
+        let r = rules(r#"{"redact": ["..email"]}"#);
         let modes =
             |sql: &str, n: usize| plan(sql, &schema, &r, Lexing::default()).unwrap().modes(n);
         assert_eq!(modes("select id, domain from users", 2), [V, R]);
@@ -1211,7 +1149,7 @@ mod tests {
     fn block_queries_keeps_redacted_columns_out_of_conditions() {
         let block = |level: &str| {
             rules(&format!(
-                r#"{{"redact": ["*.email"], "hide": ["*.ssn"], "block_queries": {level}}}"#
+                r#"{{"redact": ["..email"], "hide": ["..ssn"], "block_queries": {level}}}"#
             ))
         };
         let run = |sql: &str, r: &Rules| plan(sql, &shop(), r, Lexing::default()).map(|_| ());
@@ -1267,7 +1205,7 @@ mod tests {
         let names: Vec<&str> = seen.columns().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["id", "email"]);
         assert_eq!(seen.cell(0, 1), Some(REDACTED));
-        assert_eq!(seen.cell(1, 1), None, "NULL stays NULL");
+        assert_eq!(seen.cell(1, 1), Some(REDACTED), "NULL too");
         assert_eq!(seen.cell(1, 0), Some("2"));
         assert_eq!(
             note.unwrap(),

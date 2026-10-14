@@ -418,6 +418,15 @@ impl ResultView {
         cx.notify();
     }
 
+    /// The result can't be sorted, filtered or paged by queries around it.
+    pub fn not_refinable(&mut self, cx: &mut Context<Self>) {
+        self.base_sql = None;
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().refinable = false;
+            cx.notify();
+        });
+    }
+
     /// A derived query (filter, sort, next page) was sent. A new filter or sort
     /// replaces the rows; a page adds to them.
     pub fn started_derived(&mut self, query: QueryId, append: bool, cx: &mut Context<Self>) {
@@ -675,6 +684,21 @@ impl ResultView {
         });
         self.chart_request = Some((style, column));
         cx.notify();
+    }
+
+    /// Why the last run failed, if it did (tests).
+    #[cfg(test)]
+    pub fn error(&self) -> Option<String> {
+        match &self.status {
+            Status::Done { error, .. } => error.as_ref().map(ToString::to_string),
+            _ => None,
+        }
+    }
+
+    /// Whether queries around the result may sort, filter and page it (tests).
+    #[cfg(test)]
+    pub fn is_refinable(&self) -> bool {
+        self.base_sql.is_some()
     }
 
     /// Timing and row count of the last run, for the status bar.

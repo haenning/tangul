@@ -10,7 +10,7 @@ out of your way.
 
 ![tangul](docs/screenshot.png)
 
-**[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)** · **[Testing](docs/TESTING.md)**
+**[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)** · **[Testing](docs/TESTING.md)** · **[Settings](docs/settings.md)**
 
 [![tests](https://github.com/haenning/tangul/raw/badges/tests.svg)](docs/TESTING.md)
 [![coverage](https://github.com/haenning/tangul/raw/badges/coverage.svg)](https://github.com/haenning/tangul/blob/badges/summary.md)
@@ -80,8 +80,8 @@ out of your way.
   change tangul's `settings.json` and switch off read-only mode for your own users;
   only the database's grants hold against that.
 - **Redact or hide columns.** Per database, say which columns the AI gets only as
-  `⟦redacted⟧` or not at all (`*.email`, `orders.adr*`, whole tables), with
-  exceptions (`"hide": ["*", "!sales.*.*"]`). Renamed and computed columns count as the ones they come from.
+  `⟦redacted⟧` or not at all (`..email`, `.orders.adr*`, whole tables), with
+  exceptions (`"hide": [".", "!sales."]`). Renamed and computed columns count as the ones they come from.
   [How it works](docs/ai-view.md).
 - **You can see what it ran.** Every AI query is logged locally, under `-- ai view`:
   run it again and you see exactly what the AI saw.
@@ -145,7 +145,7 @@ to point at production.
 | `⌘D` | Bookmark the query |
 | `⌘B` | Show or hide the sidebar |
 | `⌘⇧P` | Command palette |
-| `⌘,` | Settings (`settings.json` in a tab, `⌘S` saves) |
+| `⌘,` | Settings (`settings.json` in a tab, `⌘S` saves; [all keys](docs/settings.md)) |
 
 ## Status
 

@@ -424,13 +424,14 @@ pub fn config(theme: &ThemeFile) -> ThemeConfig {
         "editor.line_number": hex(c.subtle),
         "editor.active_line_number": hex(c.foreground),
         "editor.invisible": hex(alpha(c.subtle, 0x66)),
+        // Opaque: these are also the backgrounds of the editor's problem popups.
         "error.border": hex(c.danger),
-        "error.background": hex(alpha(c.danger, 0x26)),
+        "error.background": hex(mix(c.background, c.danger, 0.15)),
         "warning.border": hex(c.warning),
-        "warning.background": hex(alpha(c.warning, 0x26)),
+        "warning.background": hex(mix(c.background, c.warning, 0.15)),
         "info.border": hex(c.info),
-        "info.background": hex(alpha(c.info, 0x26)),
-        "success.background": hex(alpha(c.success, 0x26)),
+        "info.background": hex(mix(c.background, c.info, 0.15)),
+        "success.background": hex(mix(c.background, c.success, 0.15)),
         "syntax": syntax,
     });
     let config = json!({

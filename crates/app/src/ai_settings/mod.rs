@@ -64,7 +64,7 @@ pub struct DatabaseAi {
     /// The user the AI connects as; `None`: the user selected in the app.
     pub ai_user: Option<String>,
     pub values: ValueAccess,
-    /// Its own level (the settings' ceilings may limit it further).
+    /// Its own level (the settings' ceiling, `ai.access`, may limit it further).
     pub access: AiAccess,
     pub ai_tools: bool,
     /// What is wrong with its AI user (gone, can't connect, may write).

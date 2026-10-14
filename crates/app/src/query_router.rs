@@ -5,9 +5,8 @@
 use std::collections::HashMap;
 
 use gpui_kit::*;
-use tangul_assist::ai_view::{self, Mode, Plan};
 use tangul_core::QueryId;
-use tangul_engine::{ExecEvent, Problem, QueryEvent};
+use tangul_engine::{Problem, QueryEvent};
 
 use crate::query_tab::QueryTab;
 
@@ -33,9 +32,6 @@ pub struct Finished {
 #[derive(Default)]
 pub struct QueryRouter {
     running: HashMap<QueryId, RunningQuery>,
-    /// Runs shown as AI tools see them (`-- ai view`), and the modes of the
-    /// columns of the result arriving.
-    ai_views: HashMap<QueryId, (Plan, Vec<Mode>)>,
     /// Pending editor checks: request → (tab, edit generation).
     checks: HashMap<u64, (WeakEntity<QueryTab>, u64)>,
 }
@@ -51,25 +47,7 @@ impl QueryRouter {
     }
 
     /// Hands the event to the query's tab; returns the run once it finished.
-    /// Shows `query`'s result as AI tools see it.
-    pub fn view_as_ai(&mut self, query: QueryId, plan: Plan) {
-        self.ai_views.insert(query, (plan, Vec::new()));
-    }
-
     pub fn deliver(&mut self, query: QueryId, event: QueryEvent, cx: &mut App) -> Option<Finished> {
-        let event = match (self.ai_views.get_mut(&query), event) {
-            (Some((plan, modes)), QueryEvent::Exec(ExecEvent::ResultStart(columns))) => {
-                *modes = plan.modes(columns.len());
-                QueryEvent::Exec(ExecEvent::ResultStart(ai_view::columns(modes, &columns)))
-            }
-            (Some((_, modes)), QueryEvent::Exec(ExecEvent::Rows(rows))) => {
-                QueryEvent::Exec(ExecEvent::Rows(ai_view::batch(modes, &rows)))
-            }
-            (_, event) => event,
-        };
-        if matches!(event, QueryEvent::Finished { .. }) {
-            self.ai_views.remove(&query);
-        }
         let finished = match &event {
             QueryEvent::Finished { elapsed, error, .. } => {
                 Some((error.clone(), elapsed.as_millis() as i64))

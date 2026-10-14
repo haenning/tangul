@@ -779,7 +779,7 @@ async fn schema_only_sees_structure_and_never_a_row() {
     let (dir, ctx) = shop_with("schema-only", ValueAccess::Values).await;
     let calls: Arc<Mutex<Vec<ToolCall>>> = Arc::default();
     let proposed: Arc<Mutex<Vec<SqlProposal>>> = Arc::default();
-    // The caller's ceiling (`mcp.access = "schema"`) wins over the database's data.
+    // The ceiling (`ai.access = "schema"`) wins over the database's data.
     let ctx = ctx
         .with_ceiling(AiAccess::Schema)
         .with_audit("mcp", {
@@ -1001,8 +1001,8 @@ async fn a_write_asked_for_by_the_model_is_refused_and_nothing_changes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn redacted_and_hidden_columns_as_ai_tools_see_them() {
     let columns: AiColumns = serde_json::from_value(json!({
-        "redact": ["*.email"],
-        "hide": ["orders.total"],
+        "redact": ["..email"],
+        "hide": [".orders.total"],
         "block_queries": ["redacted"]
     }))
     .unwrap();

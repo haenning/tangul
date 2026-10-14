@@ -11,10 +11,10 @@ use tangul_ai::{
     AuditSink, BoardCall, BoardSink, Ctx, Exposed, ProposalSink, SharedBookmark, ShowSink,
     ShownResult, SqlProposal, ToolCall,
 };
-use tangul_assist::ai_view::{self, Plan, Rules};
-use tangul_assist::schema::SchemaIndex;
-use tangul_core::SchemaInfo;
+use tangul_ai::{Registry, ToolOutput};
+use tangul_assist::ai_view;
 use tangul_core::board::AiCaller;
+use tangul_core::{ColumnInfo, ResultSet, RowBatch};
 use tangul_data::database_settings;
 use tangul_data::local::{AuditEntry, Source};
 use tangul_service::connections::assistant_user;
@@ -34,39 +34,17 @@ pub(super) enum AiEvent {
     Board(AiCaller, BoardCall),
 }
 
-/// The most each caller may see of any database (`ai.access`, `mcp.access`).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Ceilings {
-    pub(super) assistant: AiAccess,
-    pub(super) mcp: AiAccess,
-}
-
-impl Ceilings {
-    fn of(self, caller: &str) -> AiAccess {
-        if caller == "mcp" {
-            self.mcp
-        } else {
-            self.assistant
-        }
-    }
-
-    /// The most any caller may see.
-    pub(super) fn loosest(self) -> AiAccess {
-        if self.assistant.is_data() || self.mcp.is_data() {
-            AiAccess::Data
-        } else {
-            AiAccess::Schema
-        }
-    }
-}
+/// Most rows a query marked `-- ai view` shows: the most AI tools get of one.
+const AI_VIEW_ROWS: usize = 500;
 
 /// The databases offered to AI tools.
 #[derive(Default)]
 pub(super) struct Ai {
     /// Offered now; every tool call reads it.
     pub(super) exposed: Arc<RwLock<Vec<Exposed>>>,
-    /// As the settings say; every tool call reads it.
-    pub(super) ceilings: Arc<RwLock<Ceilings>>,
+    /// The most every AI tool may see of any database (`ai.access`); every tool
+    /// call reads it.
+    pub(super) ceiling: Arc<RwLock<AiAccess>>,
     /// Whether the assistant was used in this window: then the databases are
     /// offered (and their AI connections opened) even while MCP is off.
     pub(super) assistant_used: bool,
@@ -78,37 +56,32 @@ impl Workspace {
         self.mcp.running() || self.ai.assistant_used
     }
 
-    /// The callers' ceilings now.
-    pub(super) fn ai_ceilings(&self) -> Ceilings {
+    /// The ceiling of every AI tool now.
+    pub(super) fn ai_ceiling(&self) -> AiAccess {
         *self
             .ai
-            .ceilings
+            .ceiling
             .read()
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The most any AI caller may see of `db`: its own level under the loosest
-    /// ceiling. Schema only: no AI connection is opened for it.
+    /// The most AI tools may see of `db`: its own level under the ceiling. Schema
+    /// only: no AI connection is opened for it.
     pub(super) fn ai_access(&self, db: &Database) -> AiAccess {
-        db.ai_access.min(self.ai_ceilings().loosest())
+        db.ai_access.min(self.ai_ceiling())
     }
 
-    /// Takes `ai.access` and `mcp.access` from the settings; a change applies to
-    /// the next tool call.
+    /// Takes `ai.access` from the settings; a change applies to the next tool call.
     pub(super) fn sync_ai_access(&mut self, cx: &mut Context<Self>) {
-        let s = settings::current(cx);
-        let ceilings = Ceilings {
-            assistant: s.ai.access,
-            mcp: s.mcp.access,
-        };
-        if ceilings == self.ai_ceilings() {
+        let ceiling = settings::current(cx).ai.access;
+        if ceiling == self.ai_ceiling() {
             return;
         }
         *self
             .ai
-            .ceilings
+            .ceiling
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = ceilings;
+            .unwrap_or_else(PoisonError::into_inner) = ceiling;
         self.expose_to_ai();
         self.check_ai_user(cx);
         self.push_ai_settings(cx);
@@ -230,28 +203,122 @@ impl Workspace {
         }
     }
 
-    /// For a query marked `-- ai view`: what AI tools would see of its result on
-    /// `user_id`'s database, or why they would be refused. `None`: not marked.
-    pub(super) fn ai_view_plan(&self, user_id: &str, sql: &str) -> Option<Result<Plan, String>> {
-        if !ai_view::is_marked(sql) {
-            return None;
+    /// Runs `sql`, marked `-- ai view`, the way AI tools do: `run_readonly` through
+    /// the registry, on the database's AI connection, under the AI tools' ceiling
+    /// (audited as `ai view`). `tab` shows what they get, or why they are refused.
+    pub(super) fn run_as_ai(
+        &mut self,
+        tab: &Entity<QueryTab>,
+        sql: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conn) = tab.read(cx).conn_id(cx) else {
+            return;
+        };
+        let user_id = self
+            .connections
+            .tab_user(conn)
+            .unwrap_or_default()
+            .to_string();
+        let Some(db_id) = self.find_user(&user_id).map(|(db, _)| db.id.clone()) else {
+            return;
+        };
+        // Offered from now on, as once the assistant is used.
+        self.ai.assistant_used = true;
+        self.expose_to_ai();
+        let name = self
+            .ai_exposed()
+            .into_iter()
+            .find(|e| e.database == db_id)
+            .map(|e| e.name);
+        let query = QueryId(self.next_id());
+        tab.update(cx, |t, cx| t.started(query, sql, cx));
+        let Some(name) = name else {
+            let why = self.ai_problems.get(&db_id).cloned().unwrap_or_else(|| {
+                "this database isn't offered to AI tools (database form: AI tools)".into()
+            });
+            self.show_ai_view(tab, query, sql, Err(why), window, cx);
+            return;
+        };
+        if self.assistant.events.is_none() {
+            self.assistant.events = Some(self.ai_events(cx));
         }
-        let (db, _) = self.find_user(user_id)?;
-        let dialect = dialect_for(db.driver);
-        let columns = database_settings::load(self.data.profiles.dir(), &db.id)
-            .0
-            .ai
-            .content_blocking;
-        let schema = self
-            .knowledge
-            .schema(user_id)
-            .unwrap_or_else(|| Arc::new(SchemaIndex::new(SchemaInfo::default(), dialect, None)));
-        Some(ai_view::plan(
-            sql,
-            &schema,
-            &Rules::new(&columns),
-            dialect.lexing(),
-        ))
+        let Some(events) = self.assistant.events.as_ref().map(|(_, tx)| tx.clone()) else {
+            return;
+        };
+        let ctx = self.ai_ctx_source("ai view", events, self.assistant.calls.clone())();
+        let input = serde_json::json!({
+            "sql": sql,
+            "connection": name,
+            "limit": AI_VIEW_ROWS,
+        });
+        let started = std::time::Instant::now();
+        let job = async move {
+            Registry::standard()
+                .call(&ctx, "run_readonly", input)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        // On the AI tools' runtime. Tests keep it on their own executor, which
+        // allows no wake-ups from other threads.
+        #[cfg(not(test))]
+        let work = {
+            let handle = tangul_ai::runtime::spawn(job);
+            async move { handle.await.map_err(|e| e.to_string()).flatten() }
+        };
+        #[cfg(test)]
+        let work = cx.background_spawn(job);
+        let (tab, sql) = (tab.clone(), sql.to_string());
+        cx.spawn_in(window, async move |this, cx| {
+            let output = work.await.map(|output| (output, started.elapsed()));
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.show_ai_view(&tab, query, &sql, output, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Shows in `tab` what AI tools got for `sql`: the rows as handed to them, or
+    /// why they were refused. Only what they got: it can't be sorted, filtered or
+    /// paged (that would run as you).
+    pub(super) fn show_ai_view(
+        &mut self,
+        tab: &Entity<QueryTab>,
+        query: QueryId,
+        sql: &str,
+        output: Result<(ToolOutput, Duration), String>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let output = output.map(|(out, elapsed)| {
+            let data = &out.data;
+            let columns: Vec<ColumnInfo> = data["columns"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|c| ColumnInfo {
+                    name: c.as_str().unwrap_or_default().to_string(),
+                })
+                .collect();
+            let mut rows = RowBatch::default();
+            for row in data["rows"].as_array().into_iter().flatten() {
+                for cell in row.as_array().into_iter().flatten() {
+                    rows.push_cell(cell.as_str());
+                }
+                rows.finish_row();
+            }
+            let mut result = ResultSet::new(columns);
+            result.append(rows);
+            QueryOutput {
+                rows: Some(result.row_count() as u64),
+                results: vec![result],
+                truncated: data["truncated"].as_bool().unwrap_or(false),
+                elapsed,
+            }
+        });
+        let output = output.map_err(|e| format!("AI tools would get: {e}"));
+        tab.update(cx, |t, cx| t.show_output(query, sql, output, false, cx));
     }
 
     /// A tool context for `caller` (`mcp`, `assistant`) over the databases offered
@@ -264,7 +331,7 @@ impl Workspace {
         calls: Arc<AtomicU64>,
     ) -> Arc<dyn Fn() -> Ctx + Send + Sync> {
         let (knowledge, engine) = (self.knowledge.clone(), self.engine.clone());
-        let (exposed, ceilings) = (self.ai.exposed.clone(), self.ai.ceilings.clone());
+        let (exposed, ceiling) = (self.ai.exposed.clone(), self.ai.ceiling.clone());
         let dir = self.data.profiles.dir().map(std::path::Path::to_path_buf);
         let sink = self.ai_audit(events.clone(), calls);
         let proposals: ProposalSink = Arc::new({
@@ -299,10 +366,7 @@ impl Workspace {
                     .ai
                     .content_blocking;
             }
-            let ceiling = ceilings
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .of(caller);
+            let ceiling = *ceiling.read().unwrap_or_else(PoisonError::into_inner);
             // Without a connection that may read data, the context has no engine.
             Ctx::new(knowledge.clone(), Some(engine.clone()), exposed)
                 .with_ceiling(ceiling)

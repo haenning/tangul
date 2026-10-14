@@ -231,16 +231,16 @@ mod tests {
     #[test]
     fn themes_are_chosen_per_appearance_and_saved() {
         let themes = [
-            ("Tangul Dark".to_string(), ThemeMode::Dark),
-            ("Tangul Light".to_string(), ThemeMode::Light),
+            ("Tangul Dark Rainbow".to_string(), ThemeMode::Dark),
+            ("Tangul Light Rainbow".to_string(), ThemeMode::Light),
         ];
         let groups = groups(&[], &[], &themes, &ThemeSettings::default());
         let labels: Vec<_> = groups[0].items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"Appearance: follow the system  (current)"));
         assert!(labels.contains(&"Appearance: dark"));
-        assert!(labels.contains(&"Dark theme: Tangul Dark  (current)"));
-        assert!(labels.contains(&"Light theme: Tangul Light  (current)"));
-        assert!(labels.contains(&"Save theme as a file: Tangul Light"));
+        assert!(labels.contains(&"Dark theme: Tangul Dark Rainbow  (current)"));
+        assert!(labels.contains(&"Light theme: Tangul Light Rainbow  (current)"));
+        assert!(labels.contains(&"Save theme as a file: Tangul Light Rainbow"));
         let pick = groups[0]
             .items
             .iter()
@@ -250,7 +250,7 @@ mod tests {
             pick.action,
             PaletteAction::Theme {
                 mode: ThemeMode::Light,
-                name: "Tangul Light".into()
+                name: "Tangul Light Rainbow".into()
             }
         );
     }

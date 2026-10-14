@@ -2,7 +2,7 @@
 
 The AI sees the same schemas, tables and columns as you. Per database you decide
 what it reads from the rows: a column is **visible**, **redacted** (every value
-becomes `⟦redacted⟧`, `NULL` stays `NULL`) or **hidden** (left out). You always see
+becomes `⟦redacted⟧`, `NULL` too, since a missing value can say something) or **hidden** (left out). You always see
 everything, including results the AI opens for you.
 
 ## Where
@@ -15,8 +15,8 @@ apply to the AI's next query once saved.
 {
   "ai": {
     "content_blocking": {
-      "redact": ["*.email", "*.phone", "orders.adr*"],
-      "hide": ["*.ssn", "audit_*"],
+      "redact": ["..email", "..phone", ".orders.adr*"],
+      "hide": ["..ssn", ".audit_*"],
       "block_queries": []
     }
   }
@@ -25,24 +25,37 @@ apply to the AI's next query once saved.
 
 ## Patterns
 
-`*` is the only wildcard; case doesn't matter. With a dot a column, without one a
-table.
+Every pattern goes by position: `schema.table` for tables (all their columns),
+`schema.table.column` for columns. On MySQL the schema is the database. An empty
+part matches any name, `*` any text within a part, and case doesn't matter. A
+pattern without a dot is an error (the file then hides everything until it's
+fixed).
 
 | Pattern | Means |
 |---|---|
-| `users` | the table `users` |
-| `billing_*` | every table starting with `billing_` |
-| `*.email` | the column `email` in every table |
-| `orders.adr*` | `adr_street`, `adr_city`, … of `orders` |
-| `public.users.email` | with the schema (MySQL: the database) |
-| `public.users.*` | the table `users` in the schema `public` |
-| `sales.*.*` | the whole schema `sales` |
+| `.users` | the table `users` in every schema |
+| `public.users` | the table `users` in the schema `public` |
+| `.billing_*` | every table starting with `billing_` |
+| `..email` | the column `email` in every table |
+| `.orders.adr*` | `adr_street`, `adr_city`, … of `orders` |
+| `public.users.email` | one column |
+| `sales.` | the whole schema `sales` |
+| `orders.adr_*` | the tables starting with `adr_` in the schema `orders` |
+| `.` | everything |
+
+**In the file's tab:** a quote in `redact` or `hide` gets its pair, and the parts
+still to type show as a hint (`schema.table.column`, then `.table.column` once a
+letter is in, …); after a letter, the database's names for that part are offered.
+Hovering a pattern says what it means and which columns it matches; hovering
+`redact` or `hide` lists every column the file leaves that way. Patterns that
+can't be read are underlined in red, ones that match nothing (as tangul last read
+the database) or an exception that lifts everything before it in yellow.
 
 **`!` makes an exception, and the last matching pattern of a list wins**, as in
 `.gitignore`:
 
 ```json
-"hide": ["*", "!sales.*.*", "sales.payments.card_no"]
+"hide": [".", "!sales.", "sales.payments.card_no"]
 ```
 
 hides everything except the schema `sales`, and in it `payments.card_no`. Careful:
@@ -82,7 +95,12 @@ SELECT id, email FROM users
 ```
 
 Run it and you get exactly the AI's result. Put `-- ai view` as the first line of
-your own query to test your rules (case and spaces don't matter).
+your own query to test your rules (case and spaces don't matter): it doesn't run
+as you but the way AI tools run it (`run_readonly` on the AI's connection, with
+its refusals), and shows what they get, at most 500 rows. That result can't be
+sorted, filtered or paged, since that would run as you. The comment must be
+directly above the statement you run: with a blank line between, ⌘↵ runs the
+statement without it, as you.
 
 ## Good to know
 

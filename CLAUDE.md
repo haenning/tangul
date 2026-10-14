@@ -12,13 +12,19 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   (streamed into tabs) or `EngineHandle::query` (the whole result, for everything else).
   Its gate (`gate.rs`) is the only safety gate; see **Safety rules** below.
 - `crates/assist`: SQL logic without UI or I/O (lexer, dialects, analysis, completion,
-  filters); put testable logic here
+  filters; settings files read with positions and checked value by value: `json`;
+  editing content-blocking rules: `ai_rules`); put testable logic here
 - `crates/tunnel`: SSH tunnels
 - `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
   incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
   the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
   `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there;
-  each database's own settings: `database_settings.rs`, `databases/<id>.json` there)
+  each database's own settings: `database_settings.rs`, `databases/<id>.json` there;
+  `upgrade.rs`: every settings file brought to the current layout at start (its
+  `"version"`, a tangul version; `migrations.rs` runs the steps, JSON files in
+  `crates/data/migrations/`: see `CLAUDE.md` there; `make release` joins a
+  version's dev steps), the user's values kept, the old text as `.bak`; a new key
+  goes into the settings' struct and `docs/settings.md`)
 - `crates/service`: what every front end shares, no UI: open connections by purpose
   (the assistant uses the database's optional assistant user), scheduled bookmarks,
   `boards` (the one API that changes boards, for the UI and the AI tools, and when a
@@ -197,8 +203,9 @@ explicit OK, and keep them covered by tests.
   as anyone else instead.
 - **What AI tools see of rows.** Per database, in its own settings file
   (`core::ai_view`, `databases/<id>.json` under `ai.content_blocking`; no UI yet):
-  `redact` and `hide` lists of patterns (with a dot a column: `*.email`,
-  `orders.adr*`, `schema.table.column`; without one a table; `*` only, case ignored;
+  `redact` and `hide` lists of patterns by position (`schema.table`,
+  `schema.table.column`; an empty part any name: `..email`; no dot is an error;
+  `*` within a part, case ignored;
   `!` an exception, the last match in a list wins), `block_queries`. `assist::ai_view::plan` checks every AI read before it
   runs and traces each result column to the table columns it comes from (renames,
   expressions, `*`, CTEs, subqueries, `UNION`, generated columns, views); what it
@@ -207,10 +214,12 @@ explicit OK, and keep them covered by tests.
   redacted values as `⟦redacted⟧` and leaves hidden columns out; `show` still opens
   the full result for the user. Value profiles and known values skip these columns.
   AI queries go to history under `-- ai view`; a query whose first line is that
-  (case and spaces aside) shows its result as AI tools see it. A settings file that can't be read hides everything.
+  (case and spaces aside) never runs as the user: the app calls `run_readonly`
+  through the registry with a `Ctx` (caller `ai view`)
+  and shows what AI tools got, not refinable (`Workspace::run_as_ai`). A settings file that can't be read hides everything.
 - **Schema only.** A database's `ai_access` (`"data"` or `"schema"`), under the
-  callers' ceilings `ai.access` (assistant) and `mcp.access` (MCP) in `settings.json`;
-  the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no
+  ceiling `ai.access` in `settings.json`, one for every AI tool (the assistant, MCP
+  clients, `-- ai view`); the stricter applies. Schema only: no AI connection is opened (the `Exposed` has no
   `conn`, `Ctx` no engine when nothing may read data), value profiles are off,
   bookmarks are shown only as fingerprints, and tools that read rows
   (`Tool::reads_rows`: `run_readonly`, `get_cell`, `column_profile`) aren't offered and
