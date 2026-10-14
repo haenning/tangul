@@ -7,7 +7,10 @@ use tangul_core::pinned::PinnedTab;
 
 use super::Local;
 
-fn pinned_key(database_id: &str) -> String {
+/// The user the app opens with: the one last chosen.
+pub const LAST_USER: &str = "last_user";
+
+pub(super) fn pinned_key(database_id: &str) -> String {
     format!("pinned_tabs:{database_id}")
 }
 

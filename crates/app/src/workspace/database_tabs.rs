@@ -59,6 +59,13 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Drops database `db`'s waiting tabs (it was removed) and doesn't save its
+    /// pinned ones any more.
+    pub(super) fn forget_database_tabs(&mut self, db: &str) -> Option<Tabs> {
+        self.db_tabs.save = Task::ready(());
+        self.db_tabs.parked.remove(&Some(db.to_string()))
+    }
+
     /// Opens the tabs pinned for `db` when it was last shown, pinned, in order.
     /// Boards that are gone are skipped; a query whose user is gone takes the
     /// active one.

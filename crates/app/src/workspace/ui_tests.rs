@@ -3366,3 +3366,73 @@ fn what_ai_tools_got_is_shown_as_is_and_cant_be_refined(cx: &mut TestAppContext)
         assert!(!results.is_refinable(), "sorting would run as you");
     });
 }
+
+#[gpui_kit::test]
+fn removing_a_database_asks_first_then_deletes_it_with_its_tabs_and_data(cx: &mut TestAppContext) {
+    use tangul_service::boards;
+    let (handle, workspace) = open(cx);
+    cx.update(|cx| two_databases(&workspace, cx));
+    let board = cx.update(|cx| {
+        workspace.update(cx, |ws, _| {
+            boards::create(&mut ws.data.boards, "db1", "Growth")
+                .unwrap()
+                .id
+        })
+    });
+    step(handle, cx, |window, cx| {
+        show_db(&workspace, 2, window, cx);
+        titled_tab(&workspace, "select 2", "two", window, cx);
+        show_db(&workspace, 1, window, cx);
+        titled_tab(&workspace, "select 1", "one", window, cx);
+        workspace.update(cx, |ws, cx| {
+            let id = ws.tabs.active().unwrap().id(cx);
+            ws.toggle_tab_pin(id, cx);
+            ws.open_board(&board, window, cx);
+        });
+    });
+    cx.update(|cx| {
+        let local = &workspace.read(cx).data.local;
+        local.set_favorite("db1", "public", "t", true).unwrap();
+        assert!(!local.pinned_tabs("db1").is_empty());
+    });
+    // Asked first: cancelling keeps everything.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.ask_to_remove_database("db1", window, cx))
+    });
+    step(handle, cx, |window, cx| {
+        window.click("cancel-remove-database", cx)
+    });
+    cx.update(|cx| assert!(workspace.read(cx).data.profiles.database("db1").is_some()));
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.ask_to_remove_database("db1", window, cx))
+    });
+    step(handle, cx, |window, cx| window.click("remove-database", cx));
+    cx.update(|cx| {
+        let ws = workspace.read(cx);
+        assert!(ws.data.profiles.database("db1").is_none());
+        // The other database is shown, with its own tabs.
+        assert_eq!(ws.active_db.as_deref(), Some("db2"));
+        assert_eq!(tab_titles(&workspace, cx), ["two"]);
+        assert_eq!(ws.all_query_tabs().len(), 1);
+        assert!(!ws.conns.contains_key("u1"));
+        assert!(
+            ws.connections
+                .get(tangul_service::connections::Purpose::Tab, "u1")
+                .is_none()
+        );
+        assert!(ws.data.boards.get(&board).is_none());
+        assert!(ws.data.local.pinned_tabs("db1").is_empty());
+        assert!(ws.data.local.favorites("db1").is_empty());
+        assert!(ws.knowledge.user("u1").is_none());
+    });
+    // The last one: nothing is shown.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.remove_database("db2", window, cx))
+    });
+    cx.update(|cx| {
+        let ws = workspace.read(cx);
+        assert!(ws.data.profiles.databases.is_empty());
+        assert_eq!(ws.active_db, None);
+        assert!(ws.tabs.is_empty());
+    });
+}

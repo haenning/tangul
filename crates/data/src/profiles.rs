@@ -198,6 +198,26 @@ impl Profiles {
         self.save()
     }
 
+    /// Removes a database with its users and their secrets (the SSH one too, and
+    /// copies left under the old name). Unknown ids are fine.
+    pub fn remove_database(&mut self, id: &str) -> Result<()> {
+        let Some(at) = self.databases.iter().position(|d| d.id == id) else {
+            return Ok(());
+        };
+        let db = self.databases.remove(at);
+        self.save()?;
+        let accounts = db.users.iter().map(|u| u.id.clone());
+        for account in accounts.chain([SshConfig::secret_account(id)]) {
+            self.forget_secret(&account);
+            if !self.in_memory
+                && let Ok(entry) = keyring::Entry::new(LEGACY_NAME, &account)
+            {
+                let _ = entry.delete_credential();
+            }
+        }
+        Ok(())
+    }
+
     /// The config directory (where `profiles.toml` lives).
     pub fn dir(&self) -> Option<&std::path::Path> {
         self.path.as_deref().and_then(|p| p.parent())

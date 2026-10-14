@@ -15,7 +15,7 @@ mod usage;
 use std::path::Path;
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 use tangul_core::chart::ChartView;
 
@@ -187,6 +187,44 @@ impl Local {
         local
     }
 
+    /// Deletes everything kept for a database and its users, in one transaction:
+    /// history, learned usage, favorites, bookmarks (with their schedules), the
+    /// assistant's chats about it, pinned tabs, cached schemas, and the last user if
+    /// it was one of them. Returns the ids of the deleted bookmarks (their runs live
+    /// in `metrics.db`). The audit log stays.
+    pub fn delete_database(&self, database_id: &str, user_ids: &[String]) -> Result<Vec<String>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let bookmarks = {
+            let mut stmt = tx.prepare("SELECT id FROM bookmarks WHERE database_id = ?1")?;
+            stmt.query_map(params![database_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        for sql in [
+            "DELETE FROM history WHERE database_id = ?1",
+            "DELETE FROM usage WHERE database_id = ?1",
+            "DELETE FROM favorites WHERE database_id = ?1",
+            "DELETE FROM bookmarks WHERE database_id = ?1",
+            "DELETE FROM chat_messages
+             WHERE chat_id IN (SELECT id FROM chats WHERE database_id = ?1)",
+            "DELETE FROM chats WHERE database_id = ?1",
+        ] {
+            tx.execute(sql, params![database_id])?;
+        }
+        tx.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            params![kv::pinned_key(database_id)],
+        )?;
+        for user in user_ids {
+            tx.execute("DELETE FROM schema_cache WHERE user_id = ?1", params![user])?;
+            tx.execute(
+                "DELETE FROM settings WHERE key = ?1 AND value = ?2",
+                params![LAST_USER, user],
+            )?;
+        }
+        tx.commit()?;
+        Ok(bookmarks)
+    }
+
     #[cfg(test)]
     pub(crate) fn in_memory() -> Self {
         Self::open(None)
@@ -233,6 +271,7 @@ impl Local {
 pub use audit::AuditEntry;
 pub use bookmarks::bare_sql;
 pub use chats::ChatSummary;
+pub use kv::LAST_USER;
 
 #[cfg(test)]
 mod tests {

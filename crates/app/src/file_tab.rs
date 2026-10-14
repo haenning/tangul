@@ -160,6 +160,11 @@ pub struct FileTab {
 }
 
 impl FileTab {
+    /// The database whose own settings file this is, if it is one.
+    pub fn database_id(&self) -> Option<&str> {
+        self.database.as_ref().map(|d| d.id.as_str())
+    }
+
     pub fn new(
         id: TabId,
         path: PathBuf,
