@@ -67,6 +67,9 @@ pub(crate) async fn execute(pool: Arc<Pool>, events: Events, running: Running, j
     };
     if let Err(e) = synced {
         let in_tx = lease.session.in_transaction();
+        // Back in the pool before the tab hears it finished: its next statement
+        // must find the session, not open another.
+        pool.release(Some(tab), lease);
         finish(
             &events,
             query,
@@ -75,7 +78,6 @@ pub(crate) async fn execute(pool: Arc<Pool>, events: Events, running: Running, j
             in_tx,
             false,
         );
-        pool.release(Some(tab), lease);
         send_stats(&events, conn, &pool);
         return;
     }
@@ -113,8 +115,9 @@ pub(crate) async fn execute(pool: Arc<Pool>, events: Events, running: Running, j
         Some(started.elapsed()),
         None,
     );
-    finish(&events, query, started.elapsed(), error, in_tx, cancelled);
+    // Back in the pool before the tab hears it finished (see above).
     pool.release(Some(tab), lease);
+    finish(&events, query, started.elapsed(), error, in_tx, cancelled);
     send_stats(&events, conn, &pool);
 }
 
