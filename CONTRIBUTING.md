@@ -12,7 +12,8 @@ things will not be added, so please don't open pull requests for them:
   to migration tools such as [golang-migrate](https://github.com/golang-migrate/migrate);
 - editing cells in the grid: changing data stays explicit SQL.
 
-Feature requests are welcome through the issue template.
+Feature requests are welcome through the issue template. Security problems go through
+private reporting instead: see [SECURITY.md](SECURITY.md).
 
 ## License and CLA
 
