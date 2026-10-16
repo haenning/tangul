@@ -500,6 +500,14 @@ pub(super) fn database_menu(
                     let _ = ws.update(cx, |ws, cx| ws.open_database_settings(&id, window, cx));
                 }),
         );
+        let (ws, id) = (workspace.clone(), active.to_string());
+        menu = menu.item(
+            PopupMenuItem::new("Remove database…")
+                .icon(IconName::Delete)
+                .on_click(move |_, window, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.ask_to_remove_database(&id, window, cx));
+                }),
+        );
     }
     let ws = workspace.clone();
     menu.item(

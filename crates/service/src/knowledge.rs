@@ -99,6 +99,25 @@ impl Knowledge {
         });
     }
 
+    /// `database` was removed: everything known about it and its users goes.
+    pub fn forget_database(&self, database: &str) {
+        let users: Vec<String> = self.read(|p| {
+            p.users
+                .iter()
+                .filter(|(_, u)| u.database == database)
+                .map(|(id, _)| id.clone())
+                .collect()
+        });
+        for user in users {
+            self.forget_user(&user);
+        }
+        self.write(|p| {
+            p.usage.remove(database);
+            p.history.remove(database);
+            p.ai_writable.remove(database);
+        });
+    }
+
     /// How many tables the AI's user of `database` may change or drop, if checked.
     pub fn ai_writable(&self, database: &str) -> Option<u64> {
         self.read(|p| p.ai_writable.get(database).copied())
@@ -304,6 +323,24 @@ mod tests {
             tables(&k.database_schema("db1").unwrap()),
             ["orders", "items"]
         );
+    }
+
+    #[test]
+    fn a_removed_database_is_forgotten_with_its_users() {
+        let k = Knowledge::default();
+        for (user, db) in [("u1", "db1"), ("u2", "db1"), ("u3", "db2")] {
+            k.set_schema(user, db, ConnId(1), schema("users"));
+        }
+        for db in ["db1", "db2"] {
+            k.set_usage(db, Arc::new(Usage::default()));
+            k.set_history(db, Arc::new(Vec::new()));
+            k.set_ai_writable(db, 2);
+        }
+        k.forget_database("db1");
+        assert!(k.user("u1").is_none() && k.user("u2").is_none());
+        assert!(k.usage("db1").is_none() && k.ai_writable("db1").is_none());
+        assert!(k.user("u3").is_some() && k.usage("db2").is_some());
+        assert_eq!(k.ai_writable("db2"), Some(2));
     }
 
     #[test]

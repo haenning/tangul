@@ -19,6 +19,7 @@ mod empty_state;
 mod history;
 mod mcp;
 mod quick_values;
+mod remove_database;
 pub use quick_values::LookRequest;
 mod safety;
 mod scheduled;
@@ -120,7 +121,6 @@ const OPEN_ROWS: usize = 100;
 /// Successful runs after which the toolbar suggests bookmarking a query.
 const BOOKMARK_HINT_RUNS: u32 = 3;
 /// local.db setting: the user id connected last, reopened at startup.
-const LAST_USER_SETTING: &str = "last_user";
 const SIDEBAR_WIDTH_SETTING: &str = "sidebar_width";
 const RIGHT_SIDEBAR_WIDTH_SETTING: &str = "right_sidebar_width";
 
@@ -327,7 +327,7 @@ impl Workspace {
             _pump: pump,
         };
         // Reopen the connection used last (else the first one) right away.
-        let last = this.data.local.setting(LAST_USER_SETTING);
+        let last = this.data.local.setting(tangul_data::local::LAST_USER);
         let start = last
             .as_deref()
             .and_then(|id| this.find_user(id))

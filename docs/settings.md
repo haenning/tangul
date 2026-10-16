@@ -8,6 +8,11 @@ tangul keeps its settings as JSON next to each other in the config folder (macOS
 | `settings.json` | `⌘,` |
 | `databases/<id>.json`, one per database | database menu → **Database settings file** |
 
+Database menu → **Remove database…** (asked first) deletes the database's file
+with everything else tangul keeps for it: its users and their passwords, boards,
+bookmarks and their runs, history, the assistant's chats about it, pinned tabs.
+The audit log stays.
+
 Saved changes apply right away. A file that doesn't parse is kept as you wrote it
 but not applied; the tab says why. While you type, the tab underlines each value
 that can't be applied in red, with what it accepts on hover (`"dim"`: expected

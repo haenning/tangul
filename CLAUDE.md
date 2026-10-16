@@ -58,7 +58,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     compared one (B) and their diff; logic in `assist::value`; `tabs.rs`: the kinds of tab (`TabItem`: query,
     file, AI settings, board) and the open ones; `database_tabs.rs`: tabs belong to
     their database (switching shows its tabs, the others wait), pinned query and
-    board tabs kept per database in `local.db` and restored when it is first shown; `boards.rs`: opening boards, their
+    board tabs kept per database in `local.db` and restored when it is first shown; `remove_database.rs`: removing a
+    database (asked first) with everything kept for it (`Data::remove_database`; the
+    audit log stays); `boards.rs`: opening boards, their
     changes (through `service::boards`), "Add to board", a tile's own query tab (from the
     tile, or for a new one; saving there writes the tile, reads only; never pinned), the
     Boards panel; `ai.rs`: what the assistant

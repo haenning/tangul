@@ -235,7 +235,9 @@ impl Workspace {
         let old = self.active_db.replace(db_id);
         let same_db = old == self.active_db;
         self.active_user = Some(user_id.clone());
-        self.data.local.set_setting(LAST_USER_SETTING, &user_id);
+        self.data
+            .local
+            .set_setting(tangul_data::local::LAST_USER, &user_id);
         if same_db {
             // Another user of the same database: the current tab runs as them.
             self.assign_active_tab(&user_id, window, cx);
