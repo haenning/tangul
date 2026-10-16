@@ -3395,18 +3395,24 @@ fn removing_a_database_asks_first_then_deletes_it_with_its_tabs_and_data(cx: &mu
         local.set_favorite("db1", "public", "t", true).unwrap();
         assert!(!local.pinned_tabs("db1").is_empty());
     });
-    // Asked first: cancelling keeps everything.
+    // From the database's row in the switcher, asked first: cancelling keeps
+    // everything, and the row's button doesn't show the database it is on.
+    step(handle, cx, |window, cx| window.click("db-switcher", cx));
     step(handle, cx, |window, cx| {
-        workspace.update(cx, |ws, cx| ws.ask_to_remove_database("db1", window, cx))
+        window.click(("remove-database", 1usize), cx)
     });
+    cx.update(|cx| assert_eq!(workspace.read(cx).active_db.as_deref(), Some("db1")));
     step(handle, cx, |window, cx| {
         window.click("cancel-remove-database", cx)
     });
-    cx.update(|cx| assert!(workspace.read(cx).data.profiles.database("db1").is_some()));
+    cx.update(|cx| assert!(workspace.read(cx).data.profiles.database("db2").is_some()));
+    step(handle, cx, |window, cx| window.click("db-switcher", cx));
     step(handle, cx, |window, cx| {
-        workspace.update(cx, |ws, cx| ws.ask_to_remove_database("db1", window, cx))
+        window.click(("remove-database", 0usize), cx)
     });
-    step(handle, cx, |window, cx| window.click("remove-database", cx));
+    step(handle, cx, |window, cx| {
+        window.click("confirm-remove-database", cx)
+    });
     cx.update(|cx| {
         let ws = workspace.read(cx);
         assert!(ws.data.profiles.database("db1").is_none());
