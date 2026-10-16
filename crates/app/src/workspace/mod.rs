@@ -15,6 +15,8 @@ mod bookmarks;
 mod command_palette;
 mod connections;
 mod database_tabs;
+#[cfg(feature = "demo")]
+pub mod demo;
 mod empty_state;
 mod history;
 mod mcp;

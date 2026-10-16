@@ -8,7 +8,7 @@ can't break anything. Safe to point at production.
 tangul is a native macOS app for PostgreSQL and MySQL. It starts instantly and stays
 out of your way.
 
-![tangul](docs/screenshot.png)
+![tangul: run a query, inspect a value, show it as a chart, add it to a board](docs/demo.webp)
 
 **[Install](INSTALL.md)** · **[Contribute](CONTRIBUTING.md)** · **[Roadmap](ROADMAP.md)** · **[Testing](docs/TESTING.md)** · **[Settings](docs/settings.md)**
 

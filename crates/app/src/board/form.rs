@@ -478,7 +478,12 @@ impl Render for TileForm {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .gap_2()
-            .child(Input::new(&self.title))
+            .child(
+                div()
+                    .id("add-title")
+                    .test_support()
+                    .child(Input::new(&self.title)),
+            )
             .child(Textarea::new(&self.description))
     }
 }
@@ -635,7 +640,12 @@ impl Render for AddForm {
         };
         v_flex()
             .gap_2()
-            .child(Input::new(&self.title))
+            .child(
+                div()
+                    .id("add-title")
+                    .test_support()
+                    .child(Input::new(&self.title)),
+            )
             .child(
                 h_flex()
                     .gap_1()
@@ -677,7 +687,12 @@ impl Render for AddForm {
                     )),
             )
             .when(self.chosen.is_none(), |this| {
-                this.child(Input::new(&self.new_name))
+                this.child(
+                    div()
+                        .id("new-board-name")
+                        .test_support()
+                        .child(Input::new(&self.new_name)),
+                )
             })
             .when_some(self.error.clone(), |this, error| {
                 this.child(alert_card(Severity::Error, error, cx))
@@ -780,7 +795,12 @@ impl Render for QueryForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .gap_2()
-            .child(Input::new(&self.title))
+            .child(
+                div()
+                    .id("add-title")
+                    .test_support()
+                    .child(Input::new(&self.title)),
+            )
             .child(Textarea::new(&self.sql))
             .child(view_picker(
                 "query-view",

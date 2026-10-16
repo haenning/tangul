@@ -10,7 +10,7 @@ DEV_CONFIG := target/dev-config
 export TANGUL_SIGN_IDENTITY
 
 .DEFAULT_GOAL := help
-.PHONY: help setup tools docker-up db-up db-down db-reset db-logs psql mysql run run-release run-dev \
+.PHONY: help setup tools docker-up db-up db-down db-reset db-logs psql mysql run run-release run-dev demo \
         test test-live test-live-native fmt lint license license-check ci app dmg install signing-cert release
 
 help: ## List targets
@@ -60,6 +60,9 @@ run: ## Run the app (debug) with your normal profiles
 
 run-release: ## Run the app (release) with your normal profiles
 	cargo run --release
+
+demo: db-up ## Record docs/demo.webp, the README animation (macOS)
+	./scripts/demo.sh
 
 run-dev: db-up ## Start dev databases and run the app with dev profiles only
 	@mkdir -p $(DEV_CONFIG)

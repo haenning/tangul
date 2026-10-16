@@ -60,6 +60,7 @@ Run `make` to list all of them. The common ones:
 | `make license` | Checks licenses (own crates AGPL-3.0-only, dependencies allowed by `deny.toml`) and regenerates `THIRD_PARTY_LICENSES.md`; commit it when it changes |
 | `make tools` | Installs cargo-deny, cargo-machete and cargo-about |
 | `make install` / `make dmg` | Build the macOS app (and DMG), see [INSTALL.md](INSTALL.md) |
+| `make demo` | Records `docs/demo.webp`, the README animation: the real app on the dev Postgres, driven by `crates/app/src/workspace/demo.rs` (macOS, needs `img2webp`). Run it again when the UI changes |
 | `make ci` | Everything CI runs |
 
 Lint rules shared by all crates are in `[workspace.lints]` (root `Cargo.toml`);

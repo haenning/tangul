@@ -531,6 +531,7 @@ impl Workspace {
             // The context menu can't wrap the `Tab` itself, so it sits on the content.
             let content = h_flex()
                 .id(("tab-menu", id.0 as usize))
+                .test_support()
                 .gap_1()
                 .items_center()
                 .when(pinned, |this| this.child(Icon::new(Lucide::Pin).xsmall()))
