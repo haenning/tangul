@@ -18,8 +18,8 @@ private reporting instead: see [SECURITY.md](SECURITY.md).
 ## License and CLA
 
 tangul is licensed under [AGPL-3.0-only](LICENSE). Before your first pull request can be
-merged, you agree to the [Contributor License Agreement](CLA.md) by adding this line to
-the pull request description (the template has it):
+merged, you agree to the [Contributor License Agreement](CLA.md) by commenting this line
+on the pull request (a bot asks for it and records it; once is enough):
 
 > I have read the CLA (CLA.md) and agree to it for this and all my future contributions.
 
