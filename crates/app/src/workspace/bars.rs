@@ -468,14 +468,38 @@ pub(super) fn database_menu(
     if !databases.is_empty() {
         menu = menu.label("Databases");
     }
-    for (id, name) in databases {
-        let (ws, id) = (workspace.clone(), id.clone());
+    for (ix, (id, name)) in databases.iter().enumerate() {
+        let (ws, remove_ws, id, remove_id) =
+            (workspace.clone(), workspace.clone(), id.clone(), id.clone());
+        let name = name.clone();
         menu = menu.item(
-            PopupMenuItem::new(name.clone())
-                .checked(active == Some(id.as_str()))
-                .on_click(move |_, window, cx| {
-                    let _ = ws.update(cx, |ws, cx| ws.select_database(id.clone(), window, cx));
-                }),
+            PopupMenuItem::element(move |_, _| {
+                let (ws, id) = (remove_ws.clone(), remove_id.clone());
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_6()
+                    .child(name.clone())
+                    .child(
+                        Button::new(("remove-database", ix))
+                            .icon(IconName::Delete)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Remove database…")
+                            .on_click(move |_, window, cx| {
+                                // Not a click on the row: that would show the database.
+                                cx.stop_propagation();
+                                window.dispatch_action(Box::new(base::actions::Cancel), cx);
+                                let _ = ws.update(cx, |ws, cx| {
+                                    ws.ask_to_remove_database(&id, window, cx)
+                                });
+                            }),
+                    )
+            })
+            .checked(active == Some(id.as_str()))
+            .on_click(move |_, window, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.select_database(id.clone(), window, cx));
+            }),
         );
     }
     if !databases.is_empty() {
@@ -498,14 +522,6 @@ pub(super) fn database_menu(
                 .icon(IconName::File)
                 .on_click(move |_, window, cx| {
                     let _ = ws.update(cx, |ws, cx| ws.open_database_settings(&id, window, cx));
-                }),
-        );
-        let (ws, id) = (workspace.clone(), active.to_string());
-        menu = menu.item(
-            PopupMenuItem::new("Remove database…")
-                .icon(IconName::Delete)
-                .on_click(move |_, window, cx| {
-                    let _ = ws.update(cx, |ws, cx| ws.ask_to_remove_database(&id, window, cx));
                 }),
         );
     }

@@ -8,7 +8,7 @@ tangul keeps its settings as JSON next to each other in the config folder (macOS
 | `settings.json` | `⌘,` |
 | `databases/<id>.json`, one per database | database menu → **Database settings file** |
 
-Database menu → **Remove database…** (asked first) deletes the database's file
+The trash icon next to a database in the database menu (asked first) deletes its file
 with everything else tangul keeps for it: its users and their passwords, boards,
 bookmarks and their runs, history, the assistant's chats about it, pinned tabs.
 The audit log stays.

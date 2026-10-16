@@ -68,7 +68,7 @@ impl Workspace {
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            Button::new("remove-database")
+                            Button::new("confirm-remove-database")
                                 .label("Remove")
                                 .danger()
                                 .on_click(move |_, window, cx| {
