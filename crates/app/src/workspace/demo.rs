@@ -1,6 +1,7 @@
 //! `make demo`: the README's animation (`docs/demo.webp`). The real workspace in a
 //! headless window on the dev Postgres, driven like a user would: run a query,
-//! inspect a cell, show it as a chart, add it to a board. Each step is rendered by
+//! inspect a cell, show it as a chart, add it to a board (`dev/demo/`: the shop
+//! and its board). Each step is rendered by
 //! Metal and saved as a PNG with a drawn mouse pointer; `scripts/demo.sh` joins
 //! the frames. Only built with the `demo` feature.
 
@@ -13,7 +14,7 @@ use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, HeadlessAppContext, Hsla, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point,
-    Window, point, px, size,
+    ScrollDelta, ScrollWheelEvent, TouchPhase, Window, point, px, size,
 };
 use image::{Rgba, RgbaImage};
 use tangul_core::chart::{ChartStyle, ChartView};
@@ -27,8 +28,17 @@ const WIDTH: f32 = 1280.;
 const HEIGHT: f32 = 800.;
 /// One frame of pointer movement or typing, in ms.
 const FRAME: u32 = 40;
-const QUERY: &str = "select date_trunc('month', ordered)::date as month, sum(total) as revenue \
-from app.orders group by 1 order by 1";
+/// Typed several characters a frame: the query is long, the point is what it shows.
+const QUERY: &str = "select date_trunc('month', ordered)::date as month, \
+count(*) filter (where country = 'US') as \"US\", \
+count(*) filter (where country = 'DE') as \"DE\", \
+count(*) filter (where country = 'GB') as \"GB\", \
+count(*) filter (where country = 'FR') as \"FR\", \
+count(*) filter (where country = 'JP') as \"JP\" \
+from demo.orders group by 1 order by 1";
+/// The "Stacked areas" item in the chart menu: Table, a separator, the "All
+/// columns" label, Lines, Areas, then it.
+const STACKED_AREAS: usize = 5;
 
 /// Records the demo's frames into `out` (emptied first) and writes `frames.txt`:
 /// one line per frame, its duration in ms and its file.
@@ -105,11 +115,13 @@ impl Demo {
         // A new tab; the query typed into its editor.
         let tab = self.update(|ws, window, cx| {
             let tab = ws.add_tab("", window, cx);
+            // The workspace numbers everything it opens; the first tab is "Query 1".
+            tab.update(cx, |t, _| t.title = "Query 1".into());
             QueryTab::focus_editor(&tab, window, cx);
             tab
         });
         self.shot(900);
-        self.type_text(QUERY);
+        self.type_text(QUERY, 4);
         self.shot(500);
         // Run (formats first), then wait for the rows.
         self.in_window(|window, cx| window.press("secondary-enter", cx));
@@ -120,40 +132,36 @@ impl Demo {
         });
         self.shot(1400);
 
-        // Inspect a revenue cell.
-        let cell = self.bounds_within(("row", 4usize), ("cell", 1usize));
+        // Inspect a cell: Japan's orders in a month.
+        let cell = self.bounds_within(("row", 10usize), ("cell", 5usize));
         self.move_to(cell.center(), 600);
         self.double_click_here();
-        self.shot(2000);
+        self.shot(1800);
         // Esc closes the viewer again (like Quick Look).
         self.in_window(|window, cx| window.press("escape", cx));
         self.shot(400);
 
-        // Show it as a chart: the status bar's chart menu, bars of revenue.
+        // Show it as a chart: the status bar's chart menu, all countries stacked.
         let button = self.bounds("chart");
         self.move_to(button.center(), 700);
         self.click_here();
         self.shot(700);
-        let menu = self.bounds("popup-menu");
-        // "Bars" is the menu's last item.
-        let bars = point(
-            menu.origin.x + px(60.),
-            menu.origin.y + menu.size.height - px(18.),
-        );
-        self.move_to(bars, 450);
+        // Scoped by the chart button's popover: its submenus are popup menus too.
+        let item = self.bounds_within("popover:dropdown-menu:Name(\"chart\")", STACKED_AREAS);
+        self.move_to(item.center(), 450);
         self.hover_here();
         self.shot(350);
         self.click_here();
         self.wait_until("chart", move |_, cx| {
             tab.read(cx).chart_view(cx)
                 == Some(ChartView {
-                    style: ChartStyle::Bars,
-                    series: Some(0),
+                    style: ChartStyle::StackedArea,
+                    series: None,
                 })
         });
-        self.shot(1800);
+        self.shot(2000);
 
-        // Add to board: the tab's menu, a new board.
+        // Add to board: the tab's menu, the Sales board.
         let tab_title = self.active_tab_bounds();
         self.move_to(tab_title.center(), 700);
         let at = self.pointer;
@@ -171,17 +179,16 @@ impl Demo {
         self.click_here();
         // The dialog slides in: measure it once it stands.
         self.idle(400);
-        self.shot(900);
-        // The dialog: the tile's title, a name for the new board, then Add.
+        self.shot(500);
+        // The dialog: the tile's title, the board, then Add.
         let title = self.bounds("add-title");
         self.move_to(title.center(), 500);
         self.click_here();
         self.in_window(|window, cx| window.press("secondary-a", cx));
-        self.type_text("Revenue per month");
-        let name = self.bounds("new-board-name");
-        self.move_to(name.center(), 450);
+        self.type_text("Orders by country", 1);
+        let board = self.bounds(("add-to-board", 0usize));
+        self.move_to(board.center(), 450);
         self.click_here();
-        self.type_text("Sales");
         self.shot(500);
         let add = self.bounds("add");
         self.move_to(add.center(), 550);
@@ -190,12 +197,49 @@ impl Demo {
             ws.tabs.active().is_some_and(|t| t.board().is_some())
         });
         self.idle(1500);
+        self.shot(1500);
+
+        // Down to the new tile, and a look at one month.
+        let tiles = self.bounds("board-tiles");
+        self.move_to(tiles.center(), 400);
+        self.scroll_by(px(560.), 700);
+        self.shot(600);
+        let tiles = self.bounds("board-tiles");
+        let month = point(
+            tiles.origin.x + tiles.size.width * 0.78,
+            tiles.origin.y + tiles.size.height * 0.6,
+        );
+        self.move_to(month, 700);
         self.shot(3000);
     }
 
-    /// Types `text` into what has the focus, a frame per keystroke or two.
-    fn type_text(&mut self, text: &str) {
-        for chunk in typed(text) {
+    /// Scrolls what is under the pointer down by `by` over `ms`, eased.
+    fn scroll_by(&mut self, by: Pixels, ms: u32) {
+        let steps = (ms / FRAME).max(1);
+        let mut done = px(0.);
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let to = by * (t * t * (3. - 2. * t));
+            let (delta, at) = (to - done, self.pointer);
+            done = to;
+            self.in_window(move |window, cx| {
+                window.dispatch_event(
+                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        position: at,
+                        delta: ScrollDelta::Pixels(point(px(0.), -delta)),
+                        modifiers: Modifiers::default(),
+                        touch_phase: TouchPhase::Moved,
+                    }),
+                    cx,
+                );
+            });
+            self.shot(FRAME);
+        }
+    }
+
+    /// Types `text` into what has the focus, `per_frame` keystrokes a frame.
+    fn type_text(&mut self, text: &str, per_frame: usize) {
+        for chunk in typed(text).chunks(per_frame).map(|c| c.concat()) {
             self.in_window(move |window, cx| window.input(&chunk, cx));
             self.shot(FRAME + 25);
         }

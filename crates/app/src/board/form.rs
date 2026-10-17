@@ -594,6 +594,7 @@ impl Render for AddForm {
         let option = |ix: usize, label: String, chosen: bool, pick: Option<usize>| {
             div()
                 .id(("add-to-board", ix))
+                .test_support()
                 .px_2()
                 .py_1()
                 .rounded(theme.radius)

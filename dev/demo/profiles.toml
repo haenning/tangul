@@ -1,5 +1,5 @@
 # `make demo`: the one database the README animation shows (the dev Postgres), with
-# a SELECT-only user for the assistant (`scripts/demo.sh` creates it).
+# a SELECT-only user for the assistant (`dev/demo/shop.sql` creates both).
 
 [[databases]]
 id = "shop"

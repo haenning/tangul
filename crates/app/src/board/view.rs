@@ -782,6 +782,7 @@ impl Render for BoardTab {
             .child(
                 div()
                     .id("board-tiles")
+                    .test_support()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

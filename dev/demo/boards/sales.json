@@ -1,0 +1,50 @@
+{
+  "id": "demo-sales",
+  "name": "Sales",
+  "description": "Revenue and orders of the shop, refreshed when the board opens.\nTotals in EUR, all channels, cancelled orders included.",
+  "links": [
+    {
+      "label": "Shop admin",
+      "url": "https://example.com/admin"
+    },
+    {
+      "label": "Biggest orders",
+      "query": {
+        "sql": "select\n  *\nfrom\n  demo.orders\norder by\n  total desc\nlimit\n  100"
+      }
+    },
+    {
+      "label": "Orders per day",
+      "query": {
+        "sql": "select\n  ordered,\n  count(*) as orders\nfrom\n  demo.orders\ngroup by\n  1\norder by\n  1",
+        "view": "line"
+      }
+    }
+  ],
+  "database_id": "shop",
+  "refresh": "on_open",
+  "revision": "demoaa",
+  "tiles": [
+    {
+      "id": "revenue",
+      "title": "Revenue per month",
+      "description": "All orders, by the day they were placed.",
+      "sql": "select\n  date_trunc('month', ordered)::date as month,\n  sum(total) as revenue\nfrom\n  demo.orders\ngroup by\n  1\norder by\n  1",
+      "view": "bars",
+      "width": "half"
+    },
+    {
+      "id": "categories",
+      "title": "Revenue by category",
+      "sql": "select\n  date_trunc('quarter', ordered)::date as quarter,\n  sum(total) filter (where category = 'Electronics') as \"Electronics\",\n  sum(total) filter (where category = 'Home') as \"Home\",\n  sum(total) filter (where category = 'Fashion') as \"Fashion\",\n  sum(total) filter (where category = 'Sports') as \"Sports\",\n  sum(total) filter (where category = 'Books') as \"Books\"\nfrom\n  demo.orders\ngroup by\n  1\norder by\n  1",
+      "view": "stacked_bars",
+      "width": "half"
+    },
+    {
+      "id": "countries",
+      "title": "Countries",
+      "sql": "select\n  c.name as country,\n  count(*) as orders,\n  sum(o.total) as revenue,\n  round(avg(o.total), 2) as avg_order\nfrom\n  demo.orders o\n  join demo.countries c on c.code = o.country\ngroup by\n  1\norder by\n  revenue desc",
+      "width": "full"
+    }
+  ]
+}
