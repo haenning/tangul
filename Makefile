@@ -89,7 +89,7 @@ dmg: app ## Same as app (the DMG is built alongside)
 signing-cert: ## Create a local code-signing certificate, so installs keep Keychain access
 	scripts/local-signing-cert.sh
 
-release: ## Release main: asks for the version, bumps and tags it, merges main into dev
+release: ## Release main: asks for the version, bumps and tags it
 	scripts/release.sh
 
 install: app ## Build the app and copy it to /Applications

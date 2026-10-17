@@ -7,7 +7,7 @@
 How tangul is tested, what the numbers mean, and which tests back each promise the
 [README](../README.md) makes. The badges and the
 [full report](https://github.com/haenning/tangul/blob/badges/summary.md) (tests and
-coverage per crate and file) come from the latest CI run on `dev`.
+coverage per crate and file) come from the latest CI run on `main`.
 
 ## The layers
 
@@ -29,7 +29,7 @@ make test-live          # plus the live tests (Docker: docker-compose.yml)
 make test-live-native   # the same without Docker (Debian/Ubuntu, installs via apt)
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of it once per push to `dev` or `main` and per
+CI (`.github/workflows/ci.yml`) runs all of it once per push to `main` and per
 pull request, on Linux: every crate's tests, including the live and the UI tests, in
 one `cargo nextest` run that also measures coverage (`cargo llvm-cov`). Format,
 clippy and the dependency checks run beside it. Releases run the same before they

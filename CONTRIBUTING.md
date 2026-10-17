@@ -71,22 +71,21 @@ local Postgres or MySQL.
 
 ## Branches and CI
 
-Work happens on `dev`; pull requests into `main` are opened by hand. CI
-(`.github/workflows/ci.yml`) runs on every push to `dev` and `main` and on pull
-requests, on Linux: format, clippy and dependency checks in one job; every crate's
-tests (live database and headless UI tests included) once, with coverage, in the
-other. On `dev` it publishes the report and badges to the `badges` branch; see
+Branch off `main` and open pull requests into `main`. CI
+(`.github/workflows/ci.yml`) runs on every push to `main` and on pull requests, on
+Linux: format, clippy and dependency checks in one job; every crate's tests (live
+database and headless UI tests included) once, with coverage, in the other. On `main`
+it publishes the report and badges to the `badges` branch; see
 [docs/TESTING.md](docs/TESTING.md). Releases run it before they build. Pull requests
 into `main` and releases run `make license-check` (`.github/workflows/licenses.yml`).
 
 ## Releases
 
-Merge `dev` into `main` first (its pull request), then run `make release`. It
+Merge what goes into the release into `main` first, then run `make release`. It
 1. switches to `main` if you aren't on it (after asking) and pulls,
 2. asks for the version: higher than the current one, with its tag and release free,
 3. bumps `version` in the workspace `Cargo.toml` on `main`, commits, tags it
-   `vX.Y.Z` and pushes both,
-4. merges `main` into `dev`, so `dev` has the version too.
+   `vX.Y.Z` and pushes both.
 
 The tag starts the Release workflow: it runs CI, builds the universal DMG, signs it
 with the Developer ID certificate (hardened runtime), notarizes and staples it,
