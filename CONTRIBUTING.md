@@ -12,13 +12,14 @@ things will not be added, so please don't open pull requests for them:
   to migration tools such as [golang-migrate](https://github.com/golang-migrate/migrate);
 - editing cells in the grid: changing data stays explicit SQL.
 
-Feature requests are welcome through the issue template.
+Feature requests are welcome through the issue template. Security problems go through
+private reporting instead: see [SECURITY.md](SECURITY.md).
 
 ## License and CLA
 
 tangul is licensed under [AGPL-3.0-only](LICENSE). Before your first pull request can be
-merged, you agree to the [Contributor License Agreement](CLA.md) by adding this line to
-the pull request description (the template has it):
+merged, you agree to the [Contributor License Agreement](CLA.md) by commenting this line
+on the pull request (a bot asks for it and records it; once is enough):
 
 > I have read the CLA (CLA.md) and agree to it for this and all my future contributions.
 
@@ -59,6 +60,7 @@ Run `make` to list all of them. The common ones:
 | `make license` | Checks licenses (own crates AGPL-3.0-only, dependencies allowed by `deny.toml`) and regenerates `THIRD_PARTY_LICENSES.md`; commit it when it changes |
 | `make tools` | Installs cargo-deny, cargo-machete and cargo-about |
 | `make install` / `make dmg` | Build the macOS app (and DMG), see [INSTALL.md](INSTALL.md) |
+| `make demo` | Records `docs/demo.webp`, the README animation: the real app on the dev Postgres, driven by `crates/app/src/workspace/demo.rs` (macOS, needs `img2webp`). Run it again when the UI changes |
 | `make ci` | Everything CI runs |
 
 Lint rules shared by all crates are in `[workspace.lints]` (root `Cargo.toml`);
@@ -69,22 +71,21 @@ local Postgres or MySQL.
 
 ## Branches and CI
 
-Work happens on `dev`; pull requests into `main` are opened by hand. CI
-(`.github/workflows/ci.yml`) runs on every push to `dev` and `main` and on pull
-requests, on Linux: format, clippy and dependency checks in one job; every crate's
-tests (live database and headless UI tests included) once, with coverage, in the
-other. On `dev` it publishes the report and badges to the `badges` branch; see
+Branch off `main` and open pull requests into `main`. CI
+(`.github/workflows/ci.yml`) runs on every push to `main` and on pull requests, on
+Linux: format, clippy and dependency checks in one job; every crate's tests (live
+database and headless UI tests included) once, with coverage, in the other. On `main`
+it publishes the report and badges to the `badges` branch; see
 [docs/TESTING.md](docs/TESTING.md). Releases run it before they build. Pull requests
 into `main` and releases run `make license-check` (`.github/workflows/licenses.yml`).
 
 ## Releases
 
-Merge `dev` into `main` first (its pull request), then run `make release`. It
+Merge what goes into the release into `main` first, then run `make release`. It
 1. switches to `main` if you aren't on it (after asking) and pulls,
 2. asks for the version: higher than the current one, with its tag and release free,
 3. bumps `version` in the workspace `Cargo.toml` on `main`, commits, tags it
-   `vX.Y.Z` and pushes both,
-4. merges `main` into `dev`, so `dev` has the version too.
+   `vX.Y.Z` and pushes both.
 
 The tag starts the Release workflow: it runs CI, builds the universal DMG, signs it
 with the Developer ID certificate (hardened runtime), notarizes and staples it,

@@ -1,0 +1,3 @@
+# False positives: a comment naming the release secrets, not their values.
+6d341e4ca282bfae26c5dfceef56e4b0163b1c31:scripts/release-keychain.sh:generic-api-key:8
+12e81a20d6e105c91a3c036302ff5f016abac89b:scripts/release-keychain.sh:generic-api-key:8

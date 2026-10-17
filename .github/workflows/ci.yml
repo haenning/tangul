@@ -5,13 +5,13 @@ name: CI
 # - checks: format, clippy, dependencies, and that docs/TESTING.md names real tests
 # - tests: all tests with cargo-nextest under cargo-llvm-cov, the live ones against
 #   Postgres, MySQL and the SSH bastion (docker-compose.yml); the report goes to the
-#   run page and, on dev, to the `badges` branch (badges, tests.json, summary.md)
+#   run page and, on main, to the `badges` branch (badges, tests.json, summary.md)
 # Releases call this workflow before they build (release.yml).
 on:
   push:
-    branches: [dev, main]
+    branches: [main]
   pull_request:
-    branches: [dev, main]
+    branches: [main]
   workflow_dispatch:
   workflow_call:
 
@@ -67,7 +67,7 @@ jobs:
     # A build without cache (the first run, a changed Cargo.lock) takes most of it.
     timeout-minutes: 50
     permissions:
-      contents: write # the badges branch, on dev
+      contents: write # the badges branch, on main
     steps:
       - uses: actions/checkout@v4
       - name: Databases and SSH bastion
@@ -107,8 +107,8 @@ jobs:
           path: |
             report
             coverage-html/html
-      - name: Publish report (dev only)
-        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/dev'
+      - name: Publish report (main only)
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           cd report
           git init -q -b badges

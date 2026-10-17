@@ -59,6 +59,11 @@ fn main() {
             eprintln!("could not upgrade {problem}");
         }
     }
+    #[cfg(feature = "demo")]
+    if let Some(out) = std::env::var_os("TANGUL_DEMO") {
+        workspace::demo::record(std::path::Path::new(&out));
+        return;
+    }
     // The engine owns its own tokio runtime thread; the UI only exchanges messages.
     let (engine, events) = tangul_engine::start();
 

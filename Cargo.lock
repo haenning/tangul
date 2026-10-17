@@ -8242,6 +8242,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "gpui-kit",
+ "image",
  "lsp-types",
  "serde_json",
  "tangul-ai",

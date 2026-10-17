@@ -18,6 +18,12 @@ tangul-core = { path = "../core" }
 tangul-data = { path = "../data" }
 tangul-engine = { path = "../engine" }
 tangul-service = { path = "../service" }
+# Only for the demo: its frames as PNG.
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[features]
+# `make demo`: records the README animation (TANGUL_DEMO=<frames dir>).
+demo = ["gpui-kit/test-support", "dep:image"]
 
 [dev-dependencies]
 async-trait.workspace = true

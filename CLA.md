@@ -61,7 +61,8 @@ any kind.
 
 ## 6. How to agree
 
-Add this line to the description of your pull request:
+Comment this line on your pull request (a bot asks for it and records it with your
+GitHub account and the date):
 
 > I have read the CLA (CLA.md) and agree to it for this and all my future contributions.
 

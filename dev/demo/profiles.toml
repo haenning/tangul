@@ -1,0 +1,20 @@
+# `make demo`: the one database the README animation shows (the dev Postgres), with
+# a SELECT-only user for the assistant (`dev/demo/shop.sql` creates both).
+
+[[databases]]
+id = "shop"
+name = "shop"
+driver = "postgres"
+host = "127.0.0.1"
+port = 55432
+database = "postgres"
+tls = "disable"
+assistant_user = "shop-ai"
+
+[[databases.users]]
+id = "shop"
+user = "postgres"
+
+[[databases.users]]
+id = "shop-ai"
+user = "ai_reader"

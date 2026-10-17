@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Releases main: asks for the version, bumps it in Cargo.toml on main, tags that
 # commit and pushes both; the Release workflow then builds the universal DMG and
-# publishes the GitHub release. Merges main back into dev, so dev has the version.
+# publishes the GitHub release.
 #
 #   make release
 #
@@ -70,18 +70,6 @@ release() {
     git push --quiet --atomic origin main "$tag"
     echo "released $tag: the Release workflow builds and publishes it"
     echo "  gh run watch \$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
-
-    # dev gets the version too.
-    git switch --quiet dev
-    git pull --quiet --ff-only origin dev
-    if git merge --quiet --no-edit main; then
-        git push --quiet origin dev
-        echo "merged main into dev"
-    else
-        git merge --abort
-        echo "release: main didn't merge into dev cleanly; merge it by hand" >&2
-    fi
-    git switch --quiet main
 }
 
 release

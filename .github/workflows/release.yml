@@ -19,7 +19,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Every test first (the same run as on dev); nothing is built if one fails.
+  # Every test first (the same run as on main); nothing is built if one fails.
   ci:
     uses: ./.github/workflows/ci.yml
 
