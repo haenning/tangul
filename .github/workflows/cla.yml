@@ -33,8 +33,8 @@ jobs:
           path-to-document: https://github.com/haenning/tangul/blob/main/CLA.md
           path-to-signatures: signatures/cla.json
           branch: cla-signatures
-          # The maintainer, commits by Claude Code sessions, and bots.
-          allowlist: haenning,Claude,*[bot]
+          # The maintainer, commits by Claude Code sessions (GitHub login `claude`), and bots.
+          allowlist: haenning,Claude,claude,*[bot]
           custom-pr-sign-comment: I have read the CLA (CLA.md) and agree to it for this and all my future contributions.
           custom-notsigned-prcomment: >-
             Thanks for your pull request! Before it can be merged, please agree to the
