@@ -8770,7 +8770,7 @@ Used by:
 - [rmcp 3.4.1](https://github.com/modelcontextprotocol/rust-sdk/)
 - [russh-cryptovec 0.62.0](https://github.com/warp-tech/russh)
 - [russh-util 0.52.0](https://github.com/warp-tech/russh)
-- [russh 0.63.3](https://github.com/warp-tech/russh)
+- [russh 0.64.1](https://github.com/warp-tech/russh)
 - [rustc-hash 2.1.3](https://github.com/rust-lang/rustc-hash)
 - [rustversion 1.0.23](https://github.com/dtolnay/rustversion)
 - [ryu 1.0.23](https://github.com/dtolnay/ryu)
