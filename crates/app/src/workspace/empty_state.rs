@@ -20,6 +20,12 @@ impl Workspace {
             .child(div().absolute().top(px(-1.5)).left_0().child(word(shade)))
             .child(div().absolute().top(px(1.5)).left_0().child(word(light)))
             .child(word(fill));
+        let version = div()
+            .id("empty-version")
+            .test_support()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(version_label());
         let connected = self.active_conn(cx).is_some_and(Connection::is_connected);
         let (hover, muted) = (theme.accent, theme.muted_foreground);
         let action = |id: &'static str, icon: Icon, label: &'static str, keys: &'static str| {
@@ -47,7 +53,13 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap_8()
-            .child(wordmark)
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(wordmark)
+                    .child(version),
+            )
             .child(
                 v_flex()
                     .gap_0p5()
@@ -94,5 +106,26 @@ impl Workspace {
                     ),
             )
             .into_any_element()
+    }
+}
+
+/// The app's version as built, the one `Info.plist` gets; a debug build says so,
+/// so it isn't taken for a release.
+fn version_label() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    if cfg!(debug_assertions) {
+        format!("{version} dev")
+    } else {
+        version.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_version_is_the_crate_version() {
+        let label = super::version_label();
+        assert!(label.starts_with(env!("CARGO_PKG_VERSION")));
+        assert_eq!(label.ends_with(" dev"), cfg!(debug_assertions));
     }
 }

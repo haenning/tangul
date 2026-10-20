@@ -1212,7 +1212,8 @@ fn the_empty_state_offers_a_new_board_once_connected(cx: &mut TestAppContext) {
         assert!(
             window.try_find("empty-new-board").is_none(),
             "not connected yet"
-        )
+        );
+        assert!(window.try_find("empty-version").is_some());
     });
     step(handle, cx, |_, cx| {
         let conn = workspace.read(cx).tab_conn("app").unwrap();
