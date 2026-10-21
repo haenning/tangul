@@ -49,6 +49,10 @@ const HINTS: &[Hint] = &[
         text: "Right-click a query tab and pick Add to board to keep its result on a dashboard.",
     },
     Hint {
+        title: "Rename a tab",
+        text: "Double-click a tab's title and type the new one.",
+    },
+    Hint {
         title: "Ask in plain words",
         text: "With the assistant set up, a question typed here goes to it instead of the database.",
     },
