@@ -260,15 +260,17 @@ explicit OK, and keep them covered by tests.
 
 ## Git
 
-- Branch off `main` and open pull requests against `main`; `make release` commits the
-  version bump on `main` itself.
+- All code goes through `dev`. Branch off `dev` and open pull requests against `dev`,
+  never against `main`. Only `dev` → `main` targets `main`, and the version bump that
+  `make release` commits on `main` (it merges `main` back into `dev`).
 - **One branch and one pull request per feature or feature set**, not per commit.
   Commits make the branch reviewable step by step: one per finished part (an issue,
   a refactor), each passing `make test` and `make lint`, pushed as it is done. Don't
   stack pull requests on each other.
 - Issues close when their commit reaches `main`, so put `Closes #N` in the commit
-  message.
+  message. In a pull request into `dev` it has no effect.
 - Commit messages in lower case (the subject and the text; names as they are spelled).
-- CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull requests: every
+- CI (`.github/workflows/ci.yml`) runs on pushes to `dev` and `main` and on pull
+  requests into them: every
   crate's tests once, on Linux, with coverage; releases run it first.
   UI tests press `secondary-…` keys (cmd on macOS, ctrl elsewhere), never `cmd-…`.
