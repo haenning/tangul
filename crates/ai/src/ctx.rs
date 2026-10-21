@@ -96,7 +96,8 @@ pub struct Ctx {
 }
 
 /// Statements the assistant proposes: the app opens them in a new tab, unrun, on
-/// the user's connection. Only changes: reads are shown with [`ShownResult`].
+/// the user's connection. A result the assistant already got is handed over as a
+/// [`ShownResult`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlProposal {
     /// The exposed connection's name.
@@ -106,6 +107,8 @@ pub struct SqlProposal {
     pub sql: String,
     /// The tab's title; `None`: tangul names it.
     pub title: Option<String>,
+    /// A query's result is shown as this chart once the user runs it.
+    pub chart: Option<ChartRequest>,
 }
 
 /// Where proposals go.
