@@ -187,6 +187,8 @@ pub struct Workspace {
     quick_looks: quick_values::QuickLooks,
     /// The other databases' tabs, and saving the pinned ones.
     db_tabs: database_tabs::DatabaseTabs,
+    /// A tab's title being edited in the tab bar.
+    renaming: Option<tabs::Renaming>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _pump: Task<()>,
@@ -315,6 +317,7 @@ impl Workspace {
             shown_tab: None,
             quick_looks: quick_values::QuickLooks::start(cx),
             db_tabs: database_tabs::DatabaseTabs::default(),
+            renaming: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![
                 search_sub,
