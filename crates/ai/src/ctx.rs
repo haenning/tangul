@@ -210,7 +210,6 @@ pub(crate) struct Conn {
     pub known_values: KnownValues,
     /// The database user in the knowledge pool, and what may be read from rows.
     pub user: String,
-    pub access: AiAccess,
     pub values: ValueAccess,
     /// What AI tools see of its rows.
     pub rules: Rules,
@@ -412,7 +411,6 @@ impl Ctx {
             conn: exposed.conn,
             known_values,
             user: exposed.user.clone(),
-            access: exposed.access,
             values: exposed.values,
             rules,
             driver: exposed.driver,
