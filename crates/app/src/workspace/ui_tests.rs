@@ -3443,3 +3443,73 @@ fn removing_a_database_asks_first_then_deletes_it_with_its_tabs_and_data(cx: &mu
         assert!(ws.tabs.is_empty());
     });
 }
+
+#[gpui_kit::test]
+fn a_double_click_renames_a_tab_where_its_title_is(cx: &mut TestAppContext) {
+    use tangul_data::local::Bookmark;
+    let (handle, workspace) = open(cx);
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab("select 1", window, cx))
+    });
+    let id = cx.update(|cx| tab.read(cx).id.0 as usize);
+    let title = |cx: &mut TestAppContext| cx.update(|cx| tab.read(cx).title.to_string());
+    let before = title(cx);
+    // Esc keeps the title.
+    step(handle, cx, |window, cx| {
+        window.double_click(("tab-menu", id), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("tab-rename").visible());
+        window.input("Nope", cx);
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("tab-rename").is_none())
+    });
+    assert_eq!(title(cx), before);
+    // Enter keeps the new one (the old one is selected, so typing replaces it).
+    step(handle, cx, |window, cx| {
+        window.double_click(("tab-menu", id), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.input("Sales", cx);
+        window.press("enter", cx);
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("tab-rename").is_none())
+    });
+    assert_eq!(title(cx), "Sales");
+    // An empty title isn't one.
+    step(handle, cx, |window, cx| {
+        window.double_click(("tab-menu", id), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.press("backspace", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(title(cx), "Sales");
+    // A bookmarked tab's title is its bookmark's name: both change.
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            let bookmark = Bookmark {
+                id: "bm".into(),
+                name: "Sales".into(),
+                sql: "select 1".into(),
+                database_id: Some("db".into()),
+                ..Default::default()
+            };
+            ws.data.local.upsert_bookmark(&bookmark, "fp").unwrap();
+            tab.update(cx, |t, _| t.bookmark_id = Some("bm".into()));
+        })
+    });
+    step(handle, cx, |window, cx| {
+        window.double_click(("tab-menu", id), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.input("Revenue", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(title(cx), "Revenue");
+    let name = cx.update(|cx| workspace.read(cx).data.local.bookmark("bm").unwrap().name);
+    assert_eq!(name, "Revenue");
+}
