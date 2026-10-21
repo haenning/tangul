@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Releases main: asks for the version, bumps it in Cargo.toml on main, tags that
-# commit and pushes both; the Release workflow then builds the universal DMG and
-# publishes the GitHub release.
+# commit and pushes both, then merges main into dev; the Release workflow builds the
+# universal DMG and publishes the GitHub release.
 #
 #   make release
 #
@@ -68,6 +68,12 @@ release() {
     git tag -a "$tag" -m "tangul $tag"
     # Both or neither: the tag's build needs the commit.
     git push --quiet --atomic origin main "$tag"
+    # dev gets the new version (and the joined migration steps) too.
+    git switch --quiet dev
+    git pull --quiet --ff-only origin dev
+    git merge --quiet --no-edit main || die "merging main into dev failed: resolve it on dev and push"
+    git push --quiet origin dev
+    git switch --quiet main
     echo "released $tag: the Release workflow builds and publishes it"
     echo "  gh run watch \$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 }
