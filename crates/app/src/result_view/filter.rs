@@ -153,6 +153,13 @@ impl FilterPanel {
         let _ = self.view.update(cx, |view, cx| view.set_sort(sort, cx));
     }
 
+    /// The value and the upper end as typed (tests).
+    #[cfg(test)]
+    pub fn inputs(&self, cx: &App) -> (String, String) {
+        let text = |i: &Entity<InputState>| i.read(cx).value().to_string();
+        (text(&self.value), text(&self.to))
+    }
+
     fn op_button(&self, op: FilterOp, cx: &mut Context<Self>) -> Button {
         Button::new(SharedString::from(format!("op-{op:?}")))
             .label(op.label())
@@ -196,7 +203,13 @@ impl FilterPanel {
                         .gap_1()
                         .child(div().flex_1().child(Input::new(&self.value).small()))
                         .child("–")
-                        .child(div().flex_1().child(Input::new(&self.to).small())),
+                        .child(
+                            div()
+                                .id("filter-to")
+                                .test_support()
+                                .flex_1()
+                                .child(Input::new(&self.to).small()),
+                        ),
                 )
                 .child(
                     div()
