@@ -110,6 +110,9 @@ fn bind_keys(cx: &mut App) {
         // On a result: open the value viewer on the selected cell, or close it (like
         // Quick Look).
         KeyBinding::new("space", InspectValue, Some("DataTable")),
+        // In a text field Space is text, before the grid's binding above and a
+        // popover's (gpui-kit confirms with Space): a column filter's value.
+        KeyBinding::new("space", NoAction, Some("Input")),
         // Before the table's own Esc (clears the selection), which runs when the
         // viewer is closed. Popovers, inputs and dialogs inside are deeper and
         // close first.

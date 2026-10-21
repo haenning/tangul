@@ -686,6 +686,14 @@ impl ResultView {
         cx.notify();
     }
 
+    /// What the column filter's value and upper end hold (tests).
+    #[cfg(test)]
+    pub fn filter_inputs(&self, cx: &App) -> (String, String) {
+        let table = self.table.read(cx);
+        let panel = table.delegate().filter_panel().expect("a filter panel");
+        panel.read(cx).inputs(cx)
+    }
+
     /// Why the last run failed, if it did (tests).
     #[cfg(test)]
     pub fn error(&self) -> Option<String> {

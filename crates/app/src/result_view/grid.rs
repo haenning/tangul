@@ -102,6 +102,12 @@ impl ResultsDelegate {
         }
     }
 
+    /// The column filter's panel (tests).
+    #[cfg(test)]
+    pub fn filter_panel(&self) -> Option<&Entity<FilterPanel>> {
+        self.filter_panel.as_ref()
+    }
+
     pub fn reset(&mut self, cols: Vec<ColumnInfo>) {
         self.columns = cols
             .iter()
