@@ -1303,6 +1303,7 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         user: "app".into(),
         sql: sql.into(),
         title: None,
+        chart: None,
     });
     cx.run_until_parked();
     step(handle, cx, |_, cx| {
@@ -1312,8 +1313,32 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         assert_eq!(tab.sql(cx), sql);
         assert!(!tab.is_running(cx), "not run");
         assert_eq!(tab.row_count(cx), None, "no result");
+        assert_eq!(tab.chart_view(cx), None);
         let conn = tab.conn.as_ref().expect("on a connection");
         assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
+    });
+    // A query with a chart: unrun too, the chart waits for the user's run.
+    let query = "-- Proposed by the assistant\nSELECT day, total FROM sales";
+    sink(tangul_ai::SqlProposal {
+        connection: "shop".into(),
+        user: "app".into(),
+        sql: query.into(),
+        title: Some("Sales".into()),
+        chart: Some(tangul_ai::ChartRequest {
+            style: tangul_core::chart::ChartStyle::Bars,
+            column: None,
+        }),
+    });
+    cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        let tab = workspace.read(cx).tabs.active_query().unwrap().read(cx);
+        assert_eq!(tab.title.as_ref(), "Sales");
+        assert!(!tab.is_running(cx), "not run");
+        assert_eq!(tab.row_count(cx), None, "no result");
+        assert_eq!(
+            tab.chart_view(cx).map(|v| v.style),
+            Some(tangul_core::chart::ChartStyle::Bars)
+        );
     });
 }
 

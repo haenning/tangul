@@ -96,7 +96,8 @@ pub struct Ctx {
 }
 
 /// Statements the assistant proposes: the app opens them in a new tab, unrun, on
-/// the user's connection. Only changes: reads are shown with [`ShownResult`].
+/// the user's connection. A result the assistant already got is handed over as a
+/// [`ShownResult`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlProposal {
     /// The exposed connection's name.
@@ -106,6 +107,8 @@ pub struct SqlProposal {
     pub sql: String,
     /// The tab's title; `None`: tangul names it.
     pub title: Option<String>,
+    /// A query's result is shown as this chart once the user runs it.
+    pub chart: Option<ChartRequest>,
 }
 
 /// Where proposals go.
@@ -207,7 +210,6 @@ pub(crate) struct Conn {
     pub known_values: KnownValues,
     /// The database user in the knowledge pool, and what may be read from rows.
     pub user: String,
-    pub access: AiAccess,
     pub values: ValueAccess,
     /// What AI tools see of its rows.
     pub rules: Rules,
@@ -409,7 +411,6 @@ impl Ctx {
             conn: exposed.conn,
             known_values,
             user: exposed.user.clone(),
-            access: exposed.access,
             values: exposed.values,
             rules,
             driver: exposed.driver,
