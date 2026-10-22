@@ -1,20 +1,19 @@
 //! Virtualized result grid: the table only asks for visible cells, and cells are read
 //! straight from the ResultSet arena.
 //!
-//! Row selection is kept here rather than in the table (which knows a single row):
-//! click selects, ⇧-click extends, ⌘-click toggles. The table's own selection is a
-//! cell (moved with the arrow keys); a double click or Space makes it the inspected
-//! cell (A, shown in the value viewer), ⌥-click picks a cell to compare with it (B).
-//! A long hover on a value shows all of it.
-//! The right-click menu copies the
-//! selection, follows foreign keys to related rows and writes UPDATE / DELETE
-//! statements for the selected rows (to open elsewhere, not run).
+//! The mark (`tangul_assist::mark`: columns × rows) is kept here rather than in the
+//! table (which knows a single cell): click marks a cell, ⇧-click a rectangle,
+//! ⌘-click toggles a row. The table's own selection is a cell (moved with the arrow
+//! keys); a double click or Space makes it the inspected cell (A, shown in the value
+//! viewer), ⌥-click picks a cell to compare with it (B). A long hover on a value
+//! shows all of it. The right-click menu copies the mark, follows foreign keys to
+//! related rows and writes UPDATE / DELETE statements for the marked rows (to open
+//! elsewhere, not run).
 //!
 //! Column headers mark primary-key columns, show count / sum / avg / min / max of a
-//! numeric column on hover (over the selected rows, or all loaded ones), and open
-//! the column's filter and sort popover. Scrolling to the end loads the next page.
+//! numeric column on hover (over all loaded rows), and open the column's filter and
+//! sort popover. Scrolling to the end loads the next page.
 
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 use gpui_kit::component::{
@@ -31,6 +30,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_assist::columns::{ColumnFacts, TagKind};
+use tangul_assist::mark::{Keys, Mark, tsv};
 use tangul_assist::refine::{ColumnKind, Refine};
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::{ColumnInfo, ResultSet};
@@ -58,10 +58,9 @@ const RELATED_SHOWN: usize = 3;
 pub struct ResultsDelegate {
     pub result: ResultSet,
     columns: Vec<Column>,
-    selected: BTreeSet<usize>,
-    /// Start of a ⇧-click range.
-    anchor: Option<usize>,
-    /// Column under the last right click, for "Copy cell".
+    /// What is marked: columns × rows of the loaded result.
+    mark: Mark,
+    /// Column under the last right click (the cell the menu acts on).
     menu_col: Option<usize>,
     /// Foreign-key links of the current result, most used first (see
     /// `tangul_assist::related`).
@@ -87,7 +86,7 @@ pub struct ResultsDelegate {
     /// Column whose foreign-key card is open (hides the aggregates meanwhile).
     key_card: Option<usize>,
     filter_panel: Option<Entity<FilterPanel>>,
-    /// Bumped whenever the selection changes (invalidates `stats`).
+    /// Bumped whenever the mark changes (invalidates `stats`).
     selection_gen: u64,
     /// Aggregates of the hovered column: (column, rows, selection_gen) → stats.
     stats: Option<((usize, usize, u64), Option<ColumnStats>)>,
@@ -119,8 +118,7 @@ impl ResultsDelegate {
             })
             .collect();
         self.result = ResultSet::new(cols);
-        self.selected.clear();
-        self.anchor = None;
+        self.mark.clear();
         self.inspected = None;
         self.compared = None;
         self.menu_col = None;
@@ -146,8 +144,7 @@ impl ResultsDelegate {
     /// filtered or sorted version of the result is about to arrive.
     pub fn clear_rows(&mut self) {
         self.result = ResultSet::new(self.result.columns().to_vec());
-        self.selected.clear();
-        self.anchor = None;
+        self.mark.clear();
         self.inspected = None;
         self.compared = None;
         self.more = false;
@@ -168,7 +165,7 @@ impl ResultsDelegate {
         }
     }
 
-    /// Summary of a column over the selected rows, or all loaded rows.
+    /// Summary of a column over all loaded rows.
     fn stats(&mut self, col: usize) -> Option<&ColumnStats> {
         let key = (col, self.result.row_count(), self.selection_gen);
         if self.stats.as_ref().is_none_or(|(k, _)| *k != key) {
@@ -176,17 +173,10 @@ impl ResultsDelegate {
             // values look like numbers (codes, zip codes).
             let numeric = !matches!(self.facts.get(col),
                 Some(Some(f)) if ColumnKind::from_type(&f.data_type) != ColumnKind::Number);
-            let stats = if self.selected.is_empty() {
-                column_stats(
-                    (0..self.result.row_count()).map(|r| self.result.cell(r, col)),
-                    numeric,
-                )
-            } else {
-                column_stats(
-                    self.selected.iter().map(|&r| self.result.cell(r, col)),
-                    numeric,
-                )
-            };
+            let stats = column_stats(
+                (0..self.result.row_count()).map(|r| self.result.cell(r, col)),
+                numeric,
+            );
             self.stats = Some((key, stats));
         }
         self.stats.as_ref().and_then(|(_, s)| s.as_ref())
@@ -194,6 +184,12 @@ impl ResultsDelegate {
 
     pub fn clear(&mut self) {
         self.reset(Vec::new());
+    }
+
+    /// What is marked (tests).
+    #[cfg(test)]
+    pub fn mark(&self) -> Mark {
+        self.mark.clone()
     }
 
     /// The cell at `row`, `col` (tests).
@@ -210,32 +206,16 @@ impl ResultsDelegate {
             .collect()
     }
 
-    fn click(&mut self, row: usize, modifiers: Modifiers) {
+    /// The mark changed: cached summaries are stale.
+    fn marked(&mut self) {
         self.selection_gen += 1;
-        match self.anchor {
-            Some(anchor) if modifiers.shift => {
-                self.selected = (anchor.min(row)..=anchor.max(row)).collect();
-            }
-            _ if modifiers.secondary() => {
-                if !self.selected.remove(&row) {
-                    self.selected.insert(row);
-                }
-                self.anchor = Some(row);
-            }
-            _ => {
-                self.selected = BTreeSet::from([row]);
-                self.anchor = Some(row);
-            }
-        }
     }
 
-    /// The rows a menu opened on `row` acts on: the selection if `row` is in it.
-    fn target_rows(&self, row: usize) -> Vec<usize> {
-        if self.selected.contains(&row) {
-            self.selected.iter().copied().collect()
-        } else {
-            vec![row]
-        }
+    /// The rows a menu opened on `row` acts on: the mark's (it holds the clicked
+    /// cell), else that row.
+    fn menu_rows(&self, row: usize) -> Vec<usize> {
+        let rows = self.mark.rows(self.result.row_count());
+        if rows.is_empty() { vec![row] } else { rows }
     }
 
     /// All values of the rows.
@@ -278,27 +258,6 @@ impl ResultsDelegate {
                 };
                 view.update(cx, |_, cx| cx.emit(event.clone()));
             })
-    }
-
-    fn tsv(&self, rows: &[usize], headers: bool) -> String {
-        let cols = self.result.columns().len();
-        let mut lines = Vec::with_capacity(rows.len() + 1);
-        if headers {
-            let names: Vec<String> = self
-                .result
-                .columns()
-                .iter()
-                .map(|c| tsv_field(Some(&c.name)))
-                .collect();
-            lines.push(names.join("\t"));
-        }
-        for &row in rows {
-            let fields: Vec<String> = (0..cols)
-                .map(|col| tsv_field(self.result.cell(row, col)))
-                .collect();
-            lines.push(fields.join("\t"));
-        }
-        lines.join("\n")
     }
 }
 
@@ -701,13 +660,21 @@ fn format_float(x: f64, decimals: u32) -> String {
     }
 }
 
-/// A TSV field that pastes cleanly into spreadsheets: NULL is empty, values with
-/// tabs, line breaks or quotes are quoted.
-fn tsv_field(value: Option<&str>) -> String {
-    match value {
-        None => String::new(),
-        Some(v) if v.contains(['\t', '\n', '\r', '"']) => format!("\"{}\"", v.replace('"', "\"\"")),
-        Some(v) => v.to_string(),
+/// "Copy 3 rows", "Copy row".
+fn rows_label(verb: &str, n: usize) -> String {
+    if n == 1 {
+        format!("{verb} row")
+    } else {
+        format!("{verb} {n} rows")
+    }
+}
+
+/// "DELETE statements for 3 rows", "DELETE statement for 1 row".
+fn delete_label(n: usize) -> String {
+    if n == 1 {
+        "DELETE statement for 1 row".into()
+    } else {
+        format!("DELETE statements for {n} rows")
     }
 }
 
@@ -748,6 +715,10 @@ impl TableDelegate for ResultsDelegate {
         let sorted = self.refine.sort.filter(|s| s.column == col_ix);
         let active = filtered || sorted.is_some();
 
+        let header_fill = self
+            .mark
+            .col_marked(col_ix)
+            .then(|| crate::theme::grid(cx).header_mark);
         let table = cx.entity().downgrade();
         let filter_button = (self.refinable && (hovered || open || active)).then(|| {
             let icon = match sorted {
@@ -803,10 +774,7 @@ impl TableDelegate for ResultsDelegate {
             .then(|| self.stats(col_ix).cloned())
             .flatten()
             .map(|stats| {
-                let scope = if !self.selected.is_empty() {
-                    let n = self.selected.len();
-                    format!("{n} selected row{}", if n == 1 { "" } else { "s" })
-                } else if self.more {
+                let scope = if self.more {
                     format!("{} loaded rows", self.result.row_count())
                 } else {
                     format!("All {} rows", self.result.row_count())
@@ -835,6 +803,9 @@ impl TableDelegate for ResultsDelegate {
                 }
                 cx.notify();
             }))
+            .when_some(header_fill, |this, fill| {
+                this.child(div().absolute().inset_0().bg(fill))
+            })
             .children(key_icon)
             .child({
                 let s = settings::current(cx);
@@ -874,8 +845,9 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let selected = self.selected.contains(&row_ix);
-        let highlight = cx.theme().selection.opacity(0.35);
+        // A column mark covers every row: tinting them all would tint the grid.
+        let selected = !self.mark.is_column_mark() && self.mark.row_marked(row_ix);
+        let highlight = crate::theme::grid(cx).row;
         // Clicks are handled by the cells: the table stops them there (it selects
         // the cell), so they never reach the row.
         div().id(("row", row_ix)).relative().when(selected, |this| {
@@ -890,25 +862,12 @@ impl TableDelegate for ResultsDelegate {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        let rows = self.target_rows(row_ix);
+        let rows = self.menu_rows(row_ix);
         let n = rows.len();
-        let (s, count) = if n == 1 {
-            ("", String::new())
-        } else {
-            ("s", format!("{n} "))
-        };
-        if let Some(col) = self.menu_col.filter(|&c| c < self.result.columns().len()) {
-            let values: Vec<String> = rows
-                .iter()
-                .map(|&r| self.result.cell(r, col).unwrap_or_default().to_string())
-                .collect();
-            menu = menu.item(copy_item(format!("Copy {count}cell{s}"), values.join("\n")));
-        }
-        // The value viewer: this cell as A, or as B next to the inspected one.
-        if let (Some(col), Some(view)) = (
-            self.menu_col.filter(|&c| c < self.result.columns().len()),
-            self.view.clone(),
-        ) {
+        let n_cols = self.result.columns().len();
+        if let (Some(col), Some(view)) = (self.menu_col.filter(|&c| c < n_cols), self.view.clone())
+        {
+            // The value viewer: this cell as A, or as B next to the inspected one.
             let inspect = view.clone();
             menu = menu.item(
                 PopupMenuItem::new("Inspect value").on_click(move |_, _, cx| {
@@ -924,15 +883,36 @@ impl TableDelegate for ResultsDelegate {
             }
             menu = menu.separator();
         }
+        // The marked columns, or the clicked one / all when the mark is gone.
+        let cols = match self.mark.cols() {
+            c if !c.is_empty() => c,
+            _ => self
+                .menu_col
+                .filter(|&c| c < n_cols)
+                .map_or_else(|| (0..n_cols).collect(), |c| vec![c]),
+        };
+        let all_cols: Vec<usize> = (0..n_cols).collect();
+        let names = self.column_names();
+        let cell = |r, c| self.result.cell(r, c);
+        let table = cx.entity().downgrade();
         menu = menu
+            .item(copy_item("Copy".into(), tsv(&rows, &cols, cell, None)))
             .item(copy_item(
-                format!("Copy {count}row{s}"),
-                self.tsv(&rows, false),
+                "Copy with headers".into(),
+                tsv(&rows, &cols, cell, Some(&names)),
             ))
             .item(copy_item(
-                format!("Copy {count}row{s} with headers"),
-                self.tsv(&rows, true),
-            ));
+                rows_label("Copy", n),
+                tsv(&rows, &all_cols, cell, None),
+            ))
+            .item(PopupMenuItem::new("Mark row").on_click(move |_, _, cx| {
+                let _ = table.update(cx, |t, cx| {
+                    let d = t.delegate_mut();
+                    d.mark.click_row(row_ix, Keys::default(), n_cols);
+                    d.marked();
+                    cx.notify();
+                });
+            }));
 
         if let Some(edit) = &self.edit {
             let values = self.row_values(&rows);
@@ -987,7 +967,7 @@ impl TableDelegate for ResultsDelegate {
                 menu = menu.item(PopupMenuItem::submenu("UPDATE", submenu));
             }
             menu = menu.item(self.open_item(
-                format!("DELETE {count}row{s}"),
+                delete_label(n),
                 edit.delete(&values).map(|sql| ResultEvent::OpenSql {
                     title: title("delete"),
                     sql,
@@ -1033,6 +1013,11 @@ impl TableDelegate for ResultsDelegate {
         let font_size = s
             .table_font_size()
             .map_or_else(|| rems(0.75).to_pixels(window.rem_size()), px);
+        let loaded = self.result.row_count();
+        let marked = self.mark.contains(row_ix, col_ix).then(|| {
+            let (top, right, bottom, left) = self.mark.edges(row_ix, col_ix, loaded);
+            (crate::theme::grid(cx), top, right, bottom, left)
+        });
         let theme = cx.theme();
         let mark = if self.inspected == Some((row_ix, col_ix)) {
             Some(theme.info)
@@ -1051,6 +1036,19 @@ impl TableDelegate for ResultsDelegate {
             .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
             .whitespace_nowrap()
             .overflow_hidden()
+            .when_some(marked, |d, (style, top, right, bottom, left)| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(style.mark)
+                        .border_color(style.mark_border)
+                        .when(top, |d| d.border_t(style.mark_border_width))
+                        .when(right, |d| d.border_r(style.mark_border_width))
+                        .when(bottom, |d| d.border_b(style.mark_border_width))
+                        .when(left, |d| d.border_l(style.mark_border_width)),
+                )
+            })
             .when_some(mark, |d, color| {
                 d.child(
                     div()
@@ -1076,7 +1074,12 @@ impl TableDelegate for ResultsDelegate {
                             });
                         }
                     } else {
-                        d.click(row_ix, e.modifiers);
+                        let keys = Keys {
+                            shift: e.modifiers.shift,
+                            secondary: e.modifiers.secondary(),
+                        };
+                        d.mark.click_cell(row_ix, col_ix, keys);
+                        d.marked();
                     }
                     cx.notify();
                 }),
@@ -1092,10 +1095,9 @@ impl TableDelegate for ResultsDelegate {
                     cx.defer(move |cx| this.update(cx, |t, _| t.cell_selectable = true));
                     let d = table.delegate_mut();
                     d.menu_col = Some(col_ix);
-                    if !d.selected.contains(&row_ix) {
-                        d.selected = BTreeSet::from([row_ix]);
-                        d.anchor = Some(row_ix);
-                        d.selection_gen += 1;
+                    if !d.mark.contains(row_ix, col_ix) {
+                        d.mark.click_cell(row_ix, col_ix, Keys::default());
+                        d.marked();
                     }
                     cx.notify();
                 }),
@@ -1185,9 +1187,11 @@ fn display_value(value: &str) -> SharedString {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's `test` attribute would shadow the standard one.
-    use super::{KeyMarker, ResultsDelegate, column_stats, format_decimal};
-    use gpui_kit::Modifiers;
+    use super::{
+        KeyMarker, ResultsDelegate, column_stats, delete_label, format_decimal, rows_label,
+    };
     use tangul_assist::columns::{ColumnFacts, ForeignRef};
+    use tangul_assist::mark::{Keys, tsv};
     use tangul_core::{ColumnInfo, RowBatch};
 
     fn delegate() -> ResultsDelegate {
@@ -1225,8 +1229,23 @@ mod tests {
     #[test]
     fn copies_tsv() {
         let d = delegate();
-        assert_eq!(d.tsv(&[0, 1], true), "id\tnote\n1\t\"a\tb\"\n2\t");
-        assert_eq!(d.tsv(&[2], false), "3\t\"say \"\"hi\"\"\"");
+        let cell = |r, c| d.result.cell(r, c);
+        let names = d.column_names();
+        assert_eq!(
+            tsv(&[0, 1], &[0, 1], cell, Some(&names)),
+            "id\tnote\n1\t\"a\tb\"\n2\t"
+        );
+        assert_eq!(tsv(&[2], &[0, 1], cell, None), "3\t\"say \"\"hi\"\"\"");
+        // Only the marked columns.
+        assert_eq!(tsv(&[0, 1], &[1], cell, Some(&names)), "note\n\"a\tb\"\n");
+    }
+
+    #[test]
+    fn labels_state_the_count() {
+        assert_eq!(rows_label("Copy", 1), "Copy row");
+        assert_eq!(rows_label("Copy", 3), "Copy 3 rows");
+        assert_eq!(delete_label(1), "DELETE statement for 1 row");
+        assert_eq!(delete_label(100), "DELETE statements for 100 rows");
     }
 
     #[test]
@@ -1322,12 +1341,13 @@ mod tests {
     }
 
     #[test]
-    fn stats_follow_selection_and_new_results() {
+    fn stats_cover_all_rows_and_follow_new_results() {
         let mut d = numbers(&[Some("1"), Some("2"), Some("3")]);
         assert_eq!(d.stats(0).unwrap().sum, "6");
-        d.click(1, Modifiers::default());
-        d.click(2, Modifiers::secondary_key());
-        assert_eq!(d.stats(0).unwrap().sum, "5");
+        // A mark doesn't narrow the summary (the "Marked" section is separate).
+        d.mark.click_cell(1, 0, Keys::default());
+        d.marked();
+        assert_eq!(d.stats(0).unwrap().sum, "6");
 
         // A new result with the same number of rows (the bug of #79 / #81).
         d.reset(vec![ColumnInfo { name: "n".into() }]);
@@ -1390,19 +1410,42 @@ mod tests {
     }
 
     #[test]
-    fn selection() {
+    fn mark_is_cleared_with_the_rows_but_not_by_paging() {
         let mut d = delegate();
-        let none = Modifiers::default();
-        let shift = Modifiers {
-            shift: true,
-            ..Default::default()
-        };
-        d.click(0, none);
-        d.click(2, shift);
-        assert_eq!(d.target_rows(1), [0, 1, 2]);
-        d.click(1, Modifiers::secondary_key());
-        assert_eq!(d.target_rows(0), [0, 2]);
-        // A menu on an unselected row acts on that row only.
-        assert_eq!(d.target_rows(1), [1]);
+        d.mark.click_cell(0, 0, Keys::default());
+        d.mark.click_cell(
+            2,
+            1,
+            Keys {
+                shift: true,
+                ..Keys::default()
+            },
+        );
+        assert_eq!(d.menu_rows(1), [0, 1, 2]);
+        d.mark.click_cell(
+            1,
+            1,
+            Keys {
+                secondary: true,
+                ..Keys::default()
+            },
+        );
+        assert_eq!(d.menu_rows(0), [0, 2]);
+        // No mark: the menu acts on the row it was opened on.
+        d.mark.clear();
+        assert_eq!(d.menu_rows(1), [1]);
+
+        d.mark.click_cell(1, 0, Keys::default());
+        let mut batch = RowBatch::default();
+        batch.push_cell(Some("4"));
+        batch.push_cell(None);
+        batch.finish_row();
+        d.result.append(batch);
+        assert!(d.mark.contains(1, 0));
+        d.clear_rows();
+        assert!(d.mark.is_empty());
+        d.mark.click_cell(1, 0, Keys::default());
+        d.reset(Vec::new());
+        assert!(d.mark.is_empty());
     }
 }

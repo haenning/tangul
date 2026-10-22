@@ -362,6 +362,12 @@ impl ResultView {
         self.table.read(cx).delegate().cell(row, col)
     }
 
+    /// What is marked in the grid (tests).
+    #[cfg(test)]
+    pub fn mark(&self, cx: &App) -> tangul_assist::mark::Mark {
+        self.table.read(cx).delegate().mark()
+    }
+
     pub fn columns(&self, cx: &App) -> Vec<String> {
         self.table.read(cx).delegate().column_names()
     }

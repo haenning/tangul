@@ -214,8 +214,6 @@ pub fn engraving(cx: &App) -> Engraving {
 }
 
 /// How the result grid draws its mark.
-// Used by the result grid's mark (#43).
-#[allow(dead_code)]
 pub struct GridTheme {
     /// The rows the mark covers.
     pub row: Hsla,
@@ -231,8 +229,6 @@ pub struct GridTheme {
 
 /// The grid's mark in the current theme: its own `grid` colors, else derived from
 /// the selection and the accent.
-// Used by the result grid's mark (#43).
-#[allow(dead_code)]
 pub fn grid(cx: &App) -> GridTheme {
     let theme = current(cx);
     let g = theme.grid.resolve(&theme.colors);

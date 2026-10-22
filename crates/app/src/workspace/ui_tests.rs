@@ -3594,3 +3594,69 @@ fn a_double_click_renames_a_tab_where_its_title_is(cx: &mut TestAppContext) {
     let name = cx.update(|cx| workspace.read(cx).data.local.bookmark("bm").unwrap().name);
     assert_eq!(name, "Revenue");
 }
+
+/// What the grid of `tab` has marked, as (rows, columns) of the loaded `n` rows.
+fn marked(tab: &Entity<QueryTab>, n: usize, cx: &App) -> (Vec<usize>, Vec<usize>) {
+    let mark = tab.read(cx).results().read(cx).mark(cx);
+    (mark.rows(n), mark.cols())
+}
+
+fn grid_rows() -> [[Option<&'static str>; 2]; 4] {
+    [
+        [Some("1"), Some("one")],
+        [Some("2"), Some("two")],
+        [Some("3"), Some("three")],
+        [Some("4"), None],
+    ]
+}
+
+#[gpui_kit::test]
+fn clicks_mark_cells_rectangles_and_toggle_rows(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    let shift = Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    step(handle, cx, |window, cx| {
+        click_cell(window, 1, 0, Modifiers::default(), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![1], vec![0]));
+        click_cell(window, 3, 1, shift, cx);
+    });
+    step(handle, cx, |window, cx| {
+        // The rectangle between the cells.
+        assert_eq!(marked(&tab, 4, cx), (vec![1, 2, 3], vec![0, 1]));
+        click_cell(window, 2, 0, Modifiers::secondary_key(), cx);
+    });
+    step(handle, cx, |_, cx| {
+        // ⌘-click takes the row out.
+        assert_eq!(marked(&tab, 4, cx), (vec![1, 3], vec![0, 1]));
+    });
+}
+
+#[gpui_kit::test]
+fn paging_keeps_the_mark_and_a_submitted_sort_or_filter_clears_it(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_result(handle, &workspace, &grid_rows(), true, cx);
+    step(handle, cx, |window, cx| {
+        click_cell(window, 1, 1, Modifiers::default(), cx)
+    });
+    let results = tab.read_with(cx, |t, _| t.results().clone());
+    step(handle, cx, |_, cx| {
+        // The next page arrives.
+        results.update(cx, |r, cx| {
+            r.started_derived(QueryId(2), true, cx);
+            let mut batch = RowBatch::default();
+            batch.push_cell(Some("5"));
+            batch.push_cell(Some("five"));
+            batch.finish_row();
+            r.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+        });
+        assert_eq!(marked(&tab, 5, cx), (vec![1], vec![1]));
+        // A sort or filter was sent: other rows come.
+        results.update(cx, |r, cx| r.started_derived(QueryId(3), false, cx));
+        assert_eq!(marked(&tab, 5, cx), (vec![], vec![]));
+    });
+}
