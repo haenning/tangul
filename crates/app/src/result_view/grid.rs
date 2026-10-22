@@ -14,6 +14,8 @@
 //! numeric column on hover (over all loaded rows), and open the column's filter and
 //! sort popover. Scrolling to the end loads the next page.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::{
@@ -957,17 +959,28 @@ fn over_cell<E: Styled>(overlay: E) -> E {
 
 /// An overlay over a cell drawn after the rows, so it also covers the row's line
 /// under the cell (the table clips a cell to above that line). Otherwise clipped
-/// like the cell: to it and to the grid's view, grown by the line only where the
-/// cell's bottom is in view (nothing reaches past the grid's bottom edge).
+/// like the cell's text: to it and to the grid's view, grown by the line only where
+/// the cell's bottom is in view (nothing reaches past the grid's bottom edge).
+///
+/// The clip is taken while painting: while laying out, the table clips the right
+/// edge short by its scrollbar's width, so a mark taken from then stopped short of
+/// the last visible column's end. The overlay paints after the rows, with it.
 struct OverRowLine {
     child: Option<AnyElement>,
     priority: usize,
+    clip: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 fn over_row_line(child: impl IntoElement, priority: usize) -> OverRowLine {
+    let clip = Rc::<Cell<Option<Bounds<Pixels>>>>::default();
+    let child = Clipped {
+        child: child.into_any_element(),
+        clip: clip.clone(),
+    };
     OverRowLine {
         child: Some(child.into_any_element()),
         priority,
+        clip,
     }
 }
 
@@ -998,18 +1011,80 @@ impl Element for OverRowLine {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _: Bounds<Pixels>,
         _: &mut (),
         window: &mut Window,
         _: &mut App,
     ) {
-        let mut mask = window.content_mask();
-        // The overlay reaches over the line; the cell's clip ends just above it.
-        if mask.bounds.bottom() >= bounds.bottom() - ROW_LINE {
-            mask.bounds.size.height = bounds.bottom() - mask.bounds.top();
-        }
         let child = self.child.take().expect("prepainted once");
-        window.defer_draw(child, window.element_offset(), self.priority, Some(mask));
+        window.defer_draw(child, window.element_offset(), self.priority, None);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        let mut clip = window.content_mask().bounds;
+        // The overlay reaches over the line; the cell's clip ends just above it.
+        if clip.bottom() >= bounds.bottom() - ROW_LINE {
+            clip.size.height = bounds.bottom() - clip.top();
+        }
+        self.clip.set(Some(clip));
+    }
+}
+
+impl IntoElement for OverRowLine {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+/// What [`OverRowLine`] draws later, painted within the clip it took.
+struct Clipped {
+    child: AnyElement,
+    clip: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl Element for Clipped {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
     }
 
     fn paint(
@@ -1019,13 +1094,20 @@ impl Element for OverRowLine {
         _: Bounds<Pixels>,
         _: &mut (),
         _: &mut (),
-        _: &mut Window,
-        _: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
+        // Nothing to clip to: the cell wasn't painted, so neither is its mark.
+        let Some(bounds) = self.clip.get() else {
+            return;
+        };
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            self.child.paint(window, cx)
+        });
     }
 }
 
-impl IntoElement for OverRowLine {
+impl IntoElement for Clipped {
     type Element = Self;
 
     fn into_element(self) -> Self {
