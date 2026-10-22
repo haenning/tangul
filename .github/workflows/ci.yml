@@ -7,6 +7,10 @@ name: CI
 #   Postgres, MySQL and the SSH bastion (docker-compose.yml); the report goes to the
 #   run page and, on main, to the `badges` branch (badges, tests.json, summary.md)
 # Releases call this workflow before they build (release.yml).
+#
+# Caches: only pushes to dev and main save them (pull requests restore their base
+# branch's), so the repo's 10 GB hold dev's and main's and none get evicted for a
+# pull request's copy. The system libraries are cached too.
 on:
   push:
     branches: [main, dev]
@@ -41,13 +45,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: System libraries
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq $LINUX_LIBS
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: ${{ env.LINUX_LIBS }}
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks
           cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny,cargo-machete
@@ -70,10 +77,14 @@ jobs:
       contents: write # the badges branch, on main
     steps:
       - uses: actions/checkout@v4
-      - name: Databases and SSH bastion
-        run: docker compose up -d --wait
+      # Pulled and started in the background, so they boot while the rest is set
+      # up; the "ready" step below waits for them before the tests.
+      - name: Databases and SSH bastion (start)
+        run: (docker compose up -d > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.status") &
       - name: System libraries
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq $LINUX_LIBS
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: ${{ env.LINUX_LIBS }}
       - name: Install toolchain (rust-toolchain.toml)
         run: |
           rustup toolchain install
@@ -86,6 +97,13 @@ jobs:
           shared-key: tests
           # Keep the build even when a test fails, so the next run starts warm.
           cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Databases and SSH bastion (ready)
+        run: |
+          while [ ! -f "$RUNNER_TEMP/compose.status" ]; do sleep 1; done
+          cat "$RUNNER_TEMP/compose.log"
+          [ "$(cat "$RUNNER_TEMP/compose.status")" = 0 ]
+          docker compose up -d --wait
       - name: Tests with coverage (incl. live and UI tests)
         env:
           TANGUL_TEST_PG: postgres:@127.0.0.1:55432/postgres

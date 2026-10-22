@@ -17,6 +17,7 @@ pub mod hints;
 pub mod join_graph;
 pub mod json;
 pub mod lexer;
+pub mod mark;
 pub mod nl;
 pub mod profile;
 pub mod redact;

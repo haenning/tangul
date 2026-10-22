@@ -31,6 +31,13 @@ actions!(
         FormatQuery,
         InspectValue,
         CloseValueViewer,
+        CopyMark,
+        MarkAll,
+        ExtendMarkUp,
+        ExtendMarkDown,
+        ExtendMarkLeft,
+        ExtendMarkRight,
+        ClearMark,
         ToggleRightSidebar,
         BookmarkQuery,
         SaveFile,
@@ -113,6 +120,15 @@ fn bind_keys(cx: &mut App) {
         // In a text field Space is text, before the grid's binding above and a
         // popover's (gpui-kit confirms with Space): a column filter's value.
         KeyBinding::new("space", NoAction, Some("Input")),
+        // The result grid's mark. Esc: registered before the viewer's, so it is tried
+        // after it (the viewer propagates when closed), then the table's own Esc.
+        KeyBinding::new("secondary-c", CopyMark, Some("DataTable")),
+        KeyBinding::new("secondary-a", MarkAll, Some("DataTable")),
+        KeyBinding::new("shift-up", ExtendMarkUp, Some("DataTable")),
+        KeyBinding::new("shift-down", ExtendMarkDown, Some("DataTable")),
+        KeyBinding::new("shift-left", ExtendMarkLeft, Some("DataTable")),
+        KeyBinding::new("shift-right", ExtendMarkRight, Some("DataTable")),
+        KeyBinding::new("escape", ClearMark, Some("DataTable")),
         // Before the table's own Esc (clears the selection), which runs when the
         // viewer is closed. Popovers, inputs and dialogs inside are deeper and
         // close first.
