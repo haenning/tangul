@@ -97,6 +97,11 @@ pub struct ResultsDelegate {
     handle_hovered: Option<usize>,
     /// A drag that marks, while the button is held.
     drag: Option<Drag>,
+    /// Where the pointer was last seen during that drag (window coordinates).
+    drag_pointer: Point<Pixels>,
+    /// The chip above the grid showed when the drag began: it stays meanwhile
+    /// (rows must not move under the pointer).
+    drag_keeps_chip: bool,
     /// The inspected cell (A) and the one compared with it (B): (row, column).
     pub inspected: Option<(usize, usize)>,
     pub compared: Option<(usize, usize)>,
@@ -250,6 +255,83 @@ impl ResultsDelegate {
         self.selection_gen += 1;
     }
 
+    /// ⌘/Ctrl+C: the mark as TSV without headers; without a mark the selected cell's
+    /// value alone (NULL as empty); None when there is neither.
+    pub(super) fn copy_text(&self, selected: Option<(usize, usize)>) -> Option<String> {
+        let cell = |r: usize, c: usize| self.result.cell(r, c);
+        if !self.mark.is_empty() {
+            let rows = self.mark.rows(self.result.row_count());
+            return Some(tsv(&rows, &self.mark.cols(), cell, None));
+        }
+        let (row, col) = selected
+            .filter(|&(r, c)| r < self.result.row_count() && c < self.result.columns().len())?;
+        Some(tsv(&[row], &[col], cell, None))
+    }
+
+    /// ⇧+arrows: the mark's moving corner moves; returns it (to scroll to) and
+    /// `None` in an empty result. `from` is the selected cell, if any.
+    pub(super) fn extend_mark(
+        &mut self,
+        from: Option<(usize, usize)>,
+        d_row: isize,
+        d_col: isize,
+    ) -> Option<(usize, usize)> {
+        let (rows, cols) = (self.result.row_count(), self.result.columns().len());
+        self.mark
+            .extend(from.unwrap_or((0, 0)), d_row, d_col, rows, cols);
+        self.marked();
+        self.mark.end()
+    }
+
+    /// ⌘/Ctrl+A.
+    pub(super) fn mark_all(&mut self) {
+        self.mark.all(self.result.columns().len());
+        self.marked();
+    }
+
+    /// Esc: clears the mark; false when there was none.
+    pub(super) fn clear_mark(&mut self) -> bool {
+        if self.mark.is_empty() {
+            return false;
+        }
+        self.mark.clear();
+        self.marked();
+        true
+    }
+
+    /// The chip's text: None unless more than one cell is marked.
+    /// The chip above the grid: what is marked, when more than a cell is. During a
+    /// drag it neither comes nor goes (the rows would move under the pointer).
+    pub(super) fn mark_chip(&self) -> Option<String> {
+        let loaded = self.result.row_count();
+        let shown = match self.drag {
+            Some(_) => self.drag_keeps_chip,
+            None => self.mark.cell_count(loaded) > 1,
+        };
+        shown.then(|| self.mark.describe(loaded))
+    }
+
+    /// A drag begins at `pointer` (before the click changes the mark).
+    fn start_drag(&mut self, drag: Drag, pointer: Point<Pixels>) {
+        self.drag_keeps_chip = self.mark_chip().is_some();
+        self.drag = Some(drag);
+        self.drag_pointer = pointer;
+    }
+
+    /// While a drag marks more than a cell: what is marked, shown next to the
+    /// pointer (the chip above the grid would push the rows away under it), and
+    /// where the pointer is.
+    pub(super) fn drag_chip(&self) -> Option<(String, Point<Pixels>)> {
+        let loaded = self.result.row_count();
+        (self.drag.is_some() && self.mark.cell_count(loaded) > 1)
+            .then(|| (self.mark.describe(loaded), self.drag_pointer))
+    }
+
+    /// The button was released: the drag is over (the chip goes above the grid).
+    fn end_drag(&mut self) -> bool {
+        self.drag.take().is_some()
+    }
+
     /// The rows a menu opened on `row` acts on: the mark's (it holds the clicked
     /// cell), else that row.
     fn menu_rows(&self, row: usize) -> Vec<usize> {
@@ -398,8 +480,8 @@ impl ResultsDelegate {
                     cx.listener(move |table, e: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
                         let d = table.delegate_mut();
+                        d.start_drag(Drag::Rows(row_ix), e.position);
                         d.mark.click_row(row_ix, keys(e.modifiers), n_cols);
-                        d.drag = Some(Drag::Rows(row_ix));
                         d.marked();
                         cx.notify();
                     }),
@@ -407,8 +489,16 @@ impl ResultsDelegate {
                 .on_mouse_move(cx.listener(move |table, e: &MouseMoveEvent, _, cx| {
                     let d = table.delegate_mut();
                     if e.pressed_button != Some(MouseButton::Left) {
-                        d.drag = None;
-                    } else if matches!(d.drag, Some(Drag::Rows(r)) if r != row_ix) {
+                        if d.end_drag() {
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    if d.drag.is_some() {
+                        d.drag_pointer = e.position;
+                        cx.notify();
+                    }
+                    if matches!(d.drag, Some(Drag::Rows(r)) if r != row_ix) {
                         let shift = Keys {
                             shift: true,
                             ..Keys::default()
@@ -418,7 +508,15 @@ impl ResultsDelegate {
                         d.marked();
                         cx.notify();
                     }
-                })),
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|table, _, _, cx| {
+                        if table.delegate_mut().end_drag() {
+                            cx.notify();
+                        }
+                    }),
+                ),
         )
         .with_priority(1)
     }
@@ -1309,8 +1407,8 @@ impl TableDelegate for ResultsDelegate {
                             });
                         }
                     } else {
+                        d.start_drag(Drag::Cells(row_ix, col_ix), e.position);
                         d.mark.click_cell(row_ix, col_ix, keys(e.modifiers));
-                        d.drag = Some(Drag::Cells(row_ix, col_ix));
                         d.marked();
                     }
                     cx.notify();
@@ -1320,14 +1418,29 @@ impl TableDelegate for ResultsDelegate {
             .on_mouse_move(cx.listener(move |table, e: &MouseMoveEvent, _, cx| {
                 let d = table.delegate_mut();
                 if e.pressed_button != Some(MouseButton::Left) {
-                    d.drag = None;
-                } else if matches!(d.drag, Some(Drag::Cells(r, c)) if (r, c) != (row_ix, col_ix)) {
+                    if d.end_drag() {
+                        cx.notify();
+                    }
+                    return;
+                }
+                if d.drag.is_some() {
+                    d.drag_pointer = e.position;
+                    cx.notify();
+                }
+                if matches!(d.drag, Some(Drag::Cells(r, c)) if (r, c) != (row_ix, col_ix)) {
                     d.mark.drag_to(row_ix, col_ix);
                     d.drag = Some(Drag::Cells(row_ix, col_ix));
                     d.marked();
-                    cx.notify();
                 }
             }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|table, _, _, cx| {
+                    if table.delegate_mut().end_drag() {
+                        cx.notify();
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |table, _, _, cx| {
@@ -1621,6 +1734,29 @@ mod tests {
     }
 
     #[test]
+    fn the_chip_neither_comes_nor_goes_during_a_drag() {
+        use super::Drag;
+        let mut d = delegate();
+        let at = gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.));
+        // A drag from one cell: no chip above the grid, one at the pointer.
+        d.start_drag(Drag::Cells(0, 0), at);
+        d.mark.click_cell(0, 0, Keys::default());
+        d.mark.drag_to(2, 1);
+        assert_eq!(d.mark_chip(), None);
+        assert_eq!(d.drag_chip().unwrap().0, "2 columns × 3 rows");
+        // Released: the chip goes above the grid.
+        assert!(d.end_drag());
+        assert_eq!(d.mark_chip().as_deref(), Some("2 columns × 3 rows"));
+        assert!(d.drag_chip().is_none());
+        // A drag that starts with the chip shown keeps it, even on one cell.
+        d.start_drag(Drag::Cells(1, 1), at);
+        d.mark.click_cell(1, 1, Keys::default());
+        assert_eq!(d.mark_chip().as_deref(), Some("1 column × 1 row"));
+        d.end_drag();
+        assert_eq!(d.mark_chip(), None);
+    }
+
+    #[test]
     fn marked_cells_get_their_own_sums() {
         let mut d = numbers(&[Some("1"), Some("2"), Some("3"), None]);
         // Nothing marked, or one row: no section.
@@ -1654,6 +1790,56 @@ mod tests {
         d.mark.click_column(0, Keys::default());
         d.marked();
         assert_eq!(d.marked_stats(0).unwrap().sum, "6");
+    }
+
+    #[test]
+    fn copy_text_is_the_mark_or_the_selected_cell() {
+        let mut d = delegate();
+        assert_eq!(d.copy_text(None), None);
+        // No mark: the selected cell alone, NULL empty, values quoted as in TSV.
+        assert_eq!(d.copy_text(Some((0, 1))).as_deref(), Some("\"a\tb\""));
+        assert_eq!(d.copy_text(Some((1, 1))).as_deref(), Some(""));
+        assert_eq!(d.copy_text(Some((9, 0))), None);
+        // A mark wins over the selection, without headers.
+        d.mark.click_cell(0, 0, Keys::default());
+        d.mark.click_cell(
+            1,
+            1,
+            Keys {
+                shift: true,
+                secondary: false,
+            },
+        );
+        assert_eq!(
+            d.copy_text(Some((2, 0))).as_deref(),
+            Some("1\t\"a\tb\"\n2\t")
+        );
+    }
+
+    #[test]
+    fn keys_extend_all_and_clear_the_mark() {
+        let mut d = delegate();
+        assert!(!d.clear_mark());
+        assert_eq!(d.mark_chip(), None);
+        // From the selected cell, or (0, 0).
+        assert_eq!(d.extend_mark(Some((1, 0)), 1, 0), Some((2, 0)));
+        assert_eq!(d.mark.rows(3), vec![1, 2]);
+        assert_eq!(d.mark_chip().as_deref(), Some("1 column × 2 rows"));
+        assert_eq!(d.extend_mark(None, 0, 1), Some((2, 1)));
+        // Kept within the result.
+        assert_eq!(d.extend_mark(None, 5, 5), Some((2, 1)));
+        d.mark_all();
+        assert_eq!(
+            d.mark_chip().as_deref(),
+            Some("2 columns × 3 of 3 rows loaded")
+        );
+        assert!(d.clear_mark());
+        assert!(d.mark.is_empty());
+        // One cell: no chip.
+        d.mark.click_cell(0, 0, Keys::default());
+        assert_eq!(d.mark_chip(), None);
+        let mut empty = ResultsDelegate::default();
+        assert_eq!(empty.extend_mark(None, 1, 0), None);
     }
 
     #[test]

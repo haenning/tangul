@@ -3912,12 +3912,54 @@ fn handle_center(window: &mut Window, row: usize) -> gpui_kit::Point<gpui_kit::P
 fn dragging_from_a_cell_marks_the_rectangle(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let tab = tab_with_wide_rows(handle, &workspace, cx);
-    step(handle, cx, |window, cx| {
+    let to = step(handle, cx, |window, cx| {
         let from = cell_center(window, 0, 1);
-        let path = [cell_center(window, 1, 2), cell_center(window, 3, 4)];
-        drag_through(window, from, &path, cx);
+        let to = cell_center(window, 3, 4);
+        window.dispatch_event(
+            gpui_kit::PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: from,
+                modifiers: Modifiers::default(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        for position in [cell_center(window, 1, 2), to] {
+            window.dispatch_event(
+                gpui_kit::PlatformInput::MouseMove(gpui_kit::MouseMoveEvent {
+                    position,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::default(),
+                }),
+                cx,
+            );
+            window.render_frame(cx);
+        }
+        to
     });
-    step(handle, cx, |_, cx| {
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 5, cx), (vec![0, 1, 2, 3], vec![1, 2, 3, 4]));
+        // While the button is held, what is marked shows at the pointer and the
+        // rows stay where they are.
+        assert!(window.find("mark-drag-chip").visible());
+        assert!(window.try_find("mark-chip").is_none());
+        assert_eq!(cell_center(window, 3, 4), to);
+        window.dispatch_event(
+            gpui_kit::PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: to,
+                modifiers: Modifiers::default(),
+                click_count: 1,
+            }),
+            cx,
+        );
+        window.render_frame(cx);
+    });
+    step(handle, cx, |window, cx| {
+        // Released: the chip goes above the grid.
+        assert!(window.try_find("mark-drag-chip").is_none());
+        assert!(window.find("mark-chip").visible());
         assert_eq!(marked(&tab, 5, cx), (vec![0, 1, 2, 3], vec![1, 2, 3, 4]));
     });
 }
@@ -4007,5 +4049,110 @@ fn the_row_handle_stays_left_and_leaves_the_cell_clickable(cx: &mut TestAppConte
     step(handle, cx, |_, cx| {
         assert_eq!(marked(&tab, 5, cx).0, vec![1]);
         assert_eq!(marked(&tab, 5, cx).1.len(), 20);
+    });
+}
+
+fn clipboard(cx: &App) -> Option<String> {
+    cx.read_from_clipboard().and_then(|c| c.text())
+}
+
+fn selected(tab: &Entity<QueryTab>, cx: &App) -> Option<(usize, usize)> {
+    tab.read(cx).results().read(cx).selected_cell(cx)
+}
+
+#[gpui_kit::test]
+fn shift_arrows_extend_the_mark_and_copy_copies_it(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| {
+        click_cell(window, 0, 0, Modifiers::default(), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.press("shift-down", cx);
+        window.press("shift-down", cx);
+        window.press("shift-right", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2], vec![0, 1]));
+        window.press("secondary-c", cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(clipboard(cx).as_deref(), Some("1\tone\n2\ttwo\n3\tthree"));
+    });
+    // Back up and left: shrinks towards the anchor.
+    step(handle, cx, |window, cx| {
+        window.press("shift-up", cx);
+        window.press("shift-left", cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![0, 1], vec![0]));
+    });
+}
+
+#[gpui_kit::test]
+fn select_all_shows_a_chip_that_clears_the_mark(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| {
+        click_cell(window, 1, 1, Modifiers::default(), cx)
+    });
+    // One marked cell: no chip.
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("mark-chip").is_none());
+    });
+    step(handle, cx, |window, cx| window.press("secondary-a", cx));
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2, 3], vec![0, 1]));
+        assert!(window.find("mark-chip").visible());
+        window.click("mark-chip-clear", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
+        assert!(window.try_find("mark-chip").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn escape_closes_the_viewer_then_clears_the_mark_then_the_selection(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 0, cx));
+    step(handle, cx, |window, cx| {
+        click_cell(window, 2, 1, shift_key(), cx)
+    });
+    step(handle, cx, |_, cx| {
+        assert!(viewer_open(&workspace, cx));
+        assert_eq!(marked(&tab, 4, cx).0, vec![0, 1, 2]);
+    });
+    step(handle, cx, |window, cx| window.press("escape", cx));
+    step(handle, cx, |_, cx| {
+        assert!(!viewer_open(&workspace, cx));
+        assert_eq!(marked(&tab, 4, cx).0, vec![0, 1, 2]);
+    });
+    step(handle, cx, |window, cx| window.press("escape", cx));
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
+        assert!(selected(&tab, cx).is_some());
+    });
+    step(handle, cx, |window, cx| window.press("escape", cx));
+    step(handle, cx, |_, cx| {
+        assert_eq!(selected(&tab, cx), None);
+    });
+}
+
+#[gpui_kit::test]
+fn copy_without_a_mark_copies_the_selected_cell(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| {
+        click_cell(window, 1, 1, Modifiers::default(), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.press("escape", cx);
+        assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
+        window.press("secondary-c", cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(clipboard(cx).as_deref(), Some("two"));
     });
 }

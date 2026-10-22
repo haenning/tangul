@@ -257,6 +257,17 @@ impl Mark {
         self.anchor
     }
 
+    /// The rectangle's moving corner as (row, column): where ⇧+arrows continue; None
+    /// after a column mark or ⌘/Ctrl+A.
+    pub fn end(&self) -> Option<(usize, usize)> {
+        self.end
+    }
+
+    /// How many cells are marked among the `loaded` rows.
+    pub fn cell_count(&self, loaded: usize) -> usize {
+        self.rows(loaded).len() * self.cols().len()
+    }
+
     /// For the chip: "3 columns × 120 rows"; a column mark adds what is loaded:
     /// "1 column × 4000 of 4000 rows loaded" (a partial column is never mistaken
     /// for the whole table). Singular for one ("1 column × 1 row"); "" when empty.
@@ -361,6 +372,19 @@ mod tests {
         let mut m = Mark::default();
         m.click_column(col, PLAIN);
         m
+    }
+
+    #[test]
+    fn end_and_cell_count() {
+        let mut m = Mark::default();
+        assert_eq!((m.end(), m.cell_count(10)), (None, 0));
+        m = rect((1, 1), (3, 2));
+        assert_eq!(m.end(), Some((3, 2)));
+        assert_eq!(m.cell_count(10), 6);
+        m.all(2);
+        assert_eq!(m.end(), None);
+        assert_eq!(m.cell_count(4), 8);
+        assert_eq!(cell(0, 0).cell_count(4), 1);
     }
 
     #[test]
