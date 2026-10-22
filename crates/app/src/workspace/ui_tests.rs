@@ -27,6 +27,10 @@ use crate::query_tab::QueryTab;
 fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Workspace>) {
     cx.update(|cx| {
         gpui_kit::init(cx);
+        // Animations run on the real clock, not the test's: a dialog sliding in
+        // moves its buttons between the frames of one click, which then misses on
+        // a slow machine (CI). Without motion every animation shows its end.
+        cx.set_reduce_motion(true);
         crate::syntax::init();
         Theme::change(ThemeMode::Dark, None, cx);
         crate::settings::init_defaults(cx);
