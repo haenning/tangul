@@ -13,7 +13,7 @@ use std::time::Duration;
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{
-    App, AppContext as _, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+    App, AppContext as _, ElementId, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
     TestAppContext, Window, WindowHandle, px, size,
 };
 use tangul_core::{ColumnInfo, QueryId, RowBatch};
@@ -2101,7 +2101,7 @@ fn tool_calls_show_a_few_then_pages_of_25(cx: &mut TestAppContext) {
 fn the_status_bar_ends_with_the_ai_then_the_value_viewer(cx: &mut TestAppContext) {
     let (handle, _) = open(cx);
     step(handle, cx, |window, _| {
-        let x = |id: gpui_kit::ElementId| window.find(id).bounds().origin.x;
+        let x = |id: ElementId| window.find(id).bounds().origin.x;
         let assistant = x(button(Panel::Assistant).into());
         let mcp = x("mcp".into());
         let value = x(button(Panel::Value).into());
@@ -3658,5 +3658,145 @@ fn paging_keeps_the_mark_and_a_submitted_sort_or_filter_clears_it(cx: &mut TestA
         // A sort or filter was sent: other rows come.
         results.update(cx, |r, cx| r.started_derived(QueryId(3), false, cx));
         assert_eq!(marked(&tab, 5, cx), (vec![], vec![]));
+    });
+}
+
+/// A left click on the element `id` with `modifiers` held, at its center.
+fn click_with(window: &mut Window, id: impl Into<ElementId>, modifiers: Modifiers, cx: &mut App) {
+    window.render_frame(cx);
+    let position = window.find(id).bounds().center();
+    window.dispatch_event(
+        gpui_kit::PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        }),
+        cx,
+    );
+    window.dispatch_event(
+        gpui_kit::PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers,
+            click_count: 1,
+        }),
+        cx,
+    );
+    window.render_frame(cx);
+}
+
+fn shift_key() -> Modifiers {
+    Modifiers {
+        shift: true,
+        ..Default::default()
+    }
+}
+
+#[gpui_kit::test]
+fn a_column_name_marks_the_column(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| {
+        window.click(("th-name", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2, 3], vec![1]));
+        assert!(window.try_find("filter-apply").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn shift_click_on_a_column_name_adds_it(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    // A column mark: the whole column joins.
+    step(handle, cx, |window, cx| {
+        window.click(("th-name", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        click_with(window, ("th-name", 1usize), shift_key(), cx)
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2, 3], vec![0, 1]));
+    });
+    // A cell rectangle: the column joins for its rows only.
+    step(handle, cx, |window, cx| {
+        click_cell(window, 1, 0, Modifiers::default(), cx);
+        click_cell(window, 2, 0, shift_key(), cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![1, 2], vec![0]));
+    });
+    step(handle, cx, |window, cx| {
+        click_with(window, ("th-name", 1usize), shift_key(), cx)
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![1, 2], vec![0, 1]));
+    });
+}
+
+#[gpui_kit::test]
+fn secondary_click_toggles_a_column(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| {
+        window.click(("th-name", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        click_with(window, ("th-name", 1usize), shift_key(), cx)
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2, 3], vec![0, 1]));
+    });
+    step(handle, cx, |window, cx| {
+        click_with(window, ("th-name", 0usize), Modifiers::secondary_key(), cx)
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2, 3], vec![1]));
+    });
+    step(handle, cx, |window, cx| {
+        click_with(window, ("th-name", 1usize), Modifiers::secondary_key(), cx)
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
+    });
+}
+
+#[gpui_kit::test]
+fn the_filter_zone_opens_and_closes_the_popover(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| {
+        window.click(("col-filter-button", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("filter-apply").visible());
+        assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
+        // The value field has focus.
+        type_keys(window, "x", cx);
+    });
+    step(handle, cx, |_, cx| {
+        let results = tab.read(cx).results().clone();
+        assert_eq!(results.read(cx).filter_inputs(cx).0, "x");
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("col-filter-button", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("filter-apply").is_none());
+        assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
+    });
+}
+
+#[gpui_kit::test]
+fn a_narrow_column_keeps_its_filter_zone(cx: &mut TestAppContext) {
+    // Resizing a column isn't reachable from the tests: the default width only.
+    let (handle, workspace) = open(cx);
+    tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, _| {
+        let zone = window.find(("col-filter-button", 1usize)).bounds();
+        assert!(zone.size.width >= px(28.), "{:?}", zone.size.width);
     });
 }
