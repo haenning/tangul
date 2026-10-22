@@ -9,7 +9,7 @@
 use std::rc::Rc;
 
 use gpui_kit::component::{Theme, ThemeConfig, ThemeMode};
-use gpui_kit::{App, Global, Hsla, Rgba, Window, WindowAppearance, black, white};
+use gpui_kit::{App, Global, Hsla, Pixels, Rgba, Window, WindowAppearance, black, px, white};
 use serde_json::{Value, json};
 use tangul_data::settings::{Appearance, Rgb};
 use tangul_data::themes::{self, Theme as ThemeFile, ThemeMode as FileMode};
@@ -210,6 +210,38 @@ pub fn engraving(cx: &App) -> Engraving {
             shade: black().opacity(0.12),
             light: white().opacity(0.95),
         }
+    }
+}
+
+/// How the result grid draws its mark.
+// Used by the result grid's mark (#43).
+#[allow(dead_code)]
+pub struct GridTheme {
+    /// The rows the mark covers.
+    pub row: Hsla,
+    /// Marked cells.
+    pub mark: Hsla,
+    /// The outline around the mark's outer edge.
+    pub mark_border: Hsla,
+    /// Its width (zero: none).
+    pub mark_border_width: Pixels,
+    /// A marked column's header cell.
+    pub header_mark: Hsla,
+}
+
+/// The grid's mark in the current theme: its own `grid` colors, else derived from
+/// the selection and the accent.
+// Used by the result grid's mark (#43).
+#[allow(dead_code)]
+pub fn grid(cx: &App) -> GridTheme {
+    let theme = current(cx);
+    let g = theme.grid.resolve(&theme.colors);
+    GridTheme {
+        row: color(g.row),
+        mark: color(g.mark),
+        mark_border: color(g.mark_border),
+        mark_border_width: px(g.mark_border_width),
+        header_mark: color(g.header_mark),
     }
 }
 
@@ -446,6 +478,7 @@ pub fn config(theme: &ThemeFile) -> ThemeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::BorrowAppContext as _;
 
     #[test]
     fn every_theme_maps_onto_gpui_kit() {
@@ -468,6 +501,25 @@ mod tests {
             assert_eq!(unset, Vec::<String>::new(), "{}", theme.name);
             assert!(config.highlight.is_some());
         }
+    }
+
+    #[test]
+    fn the_grid_follows_the_current_theme() {
+        let cx = gpui_kit::TestAppContext::single();
+        cx.update(|cx| {
+            init_built_in(cx);
+            let theme = current(cx).clone();
+            let g = grid(cx);
+            assert_eq!(g.mark, color(theme.grid.mark.unwrap()));
+            assert_eq!(g.mark_border, color(theme.colors.accent));
+            assert_eq!(g.mark_border_width, px(1.));
+            assert!(g.row.a < g.mark.a);
+            // Without its own colors the theme's selection and accent apply.
+            cx.update_global::<Themes, _>(|t, _| t.current.grid = Default::default());
+            let g = grid(cx);
+            assert_eq!(g.mark, color(theme.colors.selection));
+            assert_eq!(g.header_mark, color(theme.colors.selection));
+        });
     }
 
     #[test]

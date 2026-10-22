@@ -1,8 +1,9 @@
 //! Color themes as JSON files: every color tangul uses, under semantic names, for one
 //! appearance (dark or light). Built-in themes ship with the app; more live in the
 //! `themes` folder next to `settings.json`, where tangul also saves them. A file
-//! that misses a color doesn't load. `settings.json` picks one dark and one light
-//! theme (`theme.dark`, `theme.light`).
+//! that misses a color doesn't load (the optional `grid` keys are the exception:
+//! they fall back to colors derived from `selection` and `accent`). `settings.json`
+//! picks one dark and one light theme (`theme.dark`, `theme.light`).
 //!
 //! ```json
 //! {
@@ -51,6 +52,10 @@ pub struct Theme {
     /// One color: every series in shades of it. Several: one per series, in turn.
     pub charts: Vec<Rgb>,
     pub syntax: SyntaxColors,
+    /// How the result grid's mark looks. Optional: users' themes in the `themes` folder
+    /// aren't migrated, and a missing required color makes a theme fail to load.
+    #[serde(default, skip_serializing_if = "GridColors::is_empty")]
+    pub grid: GridColors,
 }
 
 /// Every color of the app. All are required.
@@ -107,9 +112,68 @@ pub struct SyntaxColors {
     pub punctuation: Rgb,
 }
 
+/// The widest outline of the grid's mark, in pixels.
+const MAX_MARK_BORDER: f32 = 8.;
+
+/// The result grid's mark (the cells and rows a selection covers). Every key is
+/// optional: what is missing comes from `selection` and `accent` (see `resolve`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GridColors {
+    /// Highlight of the rows the mark covers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<Rgb>,
+    /// Fill of the marked cells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<Rgb>,
+    /// Outline around the mark's outer edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_border: Option<Rgb>,
+    /// Width of that outline in pixels, 0 to 8 (0: no outline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_border_width: Option<f32>,
+    /// Fill of a marked column's header cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_mark: Option<Rgb>,
+}
+
+/// The grid's mark with every value known.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Grid {
+    pub row: Rgb,
+    pub mark: Rgb,
+    pub mark_border: Rgb,
+    pub mark_border_width: f32,
+    pub header_mark: Rgb,
+}
+
+impl GridColors {
+    /// No key set.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The values to draw: the set ones, the rest from `colors`. Rows are the
+    /// selection at 35% of its alpha, the mark and its header the selection, the
+    /// outline the accent, 1 px wide.
+    pub fn resolve(&self, colors: &ThemeColors) -> Grid {
+        let selection = colors.selection;
+        Grid {
+            row: self.row.unwrap_or(Rgb {
+                a: (f32::from(selection.a) * 0.35).round() as u8,
+                ..selection
+            }),
+            mark: self.mark.unwrap_or(selection),
+            mark_border: self.mark_border.unwrap_or(colors.accent),
+            mark_border_width: self.mark_border_width.unwrap_or(1.),
+            header_mark: self.header_mark.unwrap_or(selection),
+        }
+    }
+}
+
 impl Theme {
-    /// A theme from its JSON, checked: every color is there and `charts` isn't
-    /// empty.
+    /// A theme from its JSON, checked: every color is there (but for the optional
+    /// `grid` keys), `charts` isn't empty and the mark's outline is 0 to 8 px.
     pub fn parse(text: &str) -> Result<Self, String> {
         let theme: Theme = serde_json::from_str(text).map_err(|e| e.to_string())?;
         if theme.name.trim().is_empty() {
@@ -117,6 +181,13 @@ impl Theme {
         }
         if theme.charts.is_empty() {
             return Err("\"charts\" needs at least one color".into());
+        }
+        if let Some(width) = theme.grid.mark_border_width
+            && !(0. ..=MAX_MARK_BORDER).contains(&width)
+        {
+            return Err(format!(
+                "\"grid.mark_border_width\" is {width}, it has to be between 0 and {MAX_MARK_BORDER}"
+            ));
         }
         Ok(theme)
     }
@@ -307,6 +378,89 @@ mod tests {
         assert!(Theme::parse(&unknown).unwrap_err().contains("glow"));
         let nameless = BUILT_IN[0].replace("\"Tangul Dark\"", "\" \"");
         assert!(Theme::parse(&nameless).is_err());
+    }
+
+    #[test]
+    fn a_theme_without_grid_gets_the_default_mark() {
+        let theme = Theme::parse(&strip_grid(BUILT_IN[0])).unwrap();
+        assert!(theme.grid.is_empty());
+        let rgb = |s: &str| Rgb::parse(s).unwrap();
+        // The selection is #e5484d40: rows at 35% of its alpha (0x40 * 0.35 = 22).
+        assert_eq!(
+            theme.grid.resolve(&theme.colors),
+            Grid {
+                row: rgb("#e5484d16"),
+                mark: rgb("#e5484d40"),
+                mark_border: rgb("#e5484d"),
+                mark_border_width: 1.,
+                header_mark: rgb("#e5484d40"),
+            }
+        );
+        assert!(!theme.to_json().contains("grid"));
+    }
+
+    #[test]
+    fn a_partial_grid_fills_the_rest_from_the_defaults() {
+        let text = strip_grid(BUILT_IN[0]).replace(
+            "\"syntax\"",
+            "\"grid\": { \"mark\": \"#00ff0080\", \"mark_border_width\": 0 }, \"syntax\"",
+        );
+        let theme = Theme::parse(&text).unwrap();
+        let grid = theme.grid.resolve(&theme.colors);
+        assert_eq!(grid.mark.to_hex(), "#00ff0080");
+        assert_eq!(grid.mark_border_width, 0.);
+        assert_eq!(grid.row.to_hex(), "#e5484d16");
+        assert_eq!(grid.mark_border, theme.colors.accent);
+        assert_eq!(grid.header_mark, theme.colors.selection);
+        // Only what was set is written back.
+        let json = theme.to_json();
+        assert!(json.contains("\"mark\": \"#00ff0080\""), "{json}");
+        assert!(!json.contains("\"row\""), "{json}");
+        assert_eq!(Theme::parse(&json).unwrap(), theme);
+    }
+
+    #[test]
+    fn a_bad_grid_doesnt_load() {
+        let with = |grid: &str| {
+            strip_grid(BUILT_IN[0])
+                .replace("\"syntax\"", &format!("\"grid\": {{ {grid} }}, \"syntax\""))
+        };
+        let e = Theme::parse(&with("\"glow\": \"#fff\"")).unwrap_err();
+        assert!(e.contains("glow"), "{e}");
+        for width in ["-1", "8.5", "100"] {
+            let e = Theme::parse(&with(&format!("\"mark_border_width\": {width}"))).unwrap_err();
+            assert!(e.contains("mark_border_width"), "{e}");
+        }
+        assert!(Theme::parse(&with("\"mark_border_width\": 8")).is_ok());
+        assert!(Theme::parse(&with("\"mark\": \"red\"")).is_err());
+    }
+
+    #[test]
+    fn every_built_in_theme_sets_the_whole_mark() {
+        for theme in built_in() {
+            let g = &theme.grid;
+            assert!(
+                g.row.is_some()
+                    && g.mark.is_some()
+                    && g.mark_border.is_some()
+                    && g.mark_border_width.is_some()
+                    && g.header_mark.is_some(),
+                "{}",
+                theme.name
+            );
+            // Rows are fainter than the mark.
+            assert!(g.row.unwrap().a < g.mark.unwrap().a, "{}", theme.name);
+            assert_eq!(Theme::parse(&theme.to_json()).unwrap(), theme);
+        }
+    }
+
+    /// A built-in theme's text without its `grid` section (the last one).
+    fn strip_grid(text: &str) -> String {
+        let start = text.find("  \"grid\"").unwrap();
+        let end = start + text[start..].find("  }").unwrap() + "  }".len();
+        // The comma before the section goes with it.
+        let before = text[..start].trim_end().trim_end_matches(',');
+        format!("{before}{}", &text[end..])
     }
 
     #[test]

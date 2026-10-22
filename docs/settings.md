@@ -88,6 +88,30 @@ means unset (the app's own value) or no limit.
 | `ai.max_tool_rounds` | Most tool rounds per question (1–50) |
 | `ai.questions_in_editor` | A question run in the editor goes to the assistant |
 
+## `themes/<name>.json`
+
+Color themes (the built-in ones can be overridden by a file with the same name). Every
+color is required except the optional `grid` section, which sets how the result grid's
+mark looks; a key left out is derived from `selection` and `accent`.
+
+```json
+"grid": {
+  "row": "#e5484d14",
+  "mark": "#e5484d40",
+  "mark_border": "#e5484d",
+  "mark_border_width": 1,
+  "header_mark": "#e5484d33"
+}
+```
+
+| Key | |
+| --- | --- |
+| `row` | Highlight of the rows the mark covers (default: `selection` at 35% of its alpha) |
+| `mark` | Fill of marked cells (default: `selection`) |
+| `mark_border` | Outline around the mark's outer edge (default: `accent`) |
+| `mark_border_width` | Outline width in pixels, 0 to 8; 0 draws none (default: 1) |
+| `header_mark` | Fill of a marked column's header cell (default: `selection`) |
+
 ## `databases/<id>.json`
 
 ```json
