@@ -93,6 +93,8 @@ pub struct ResultsDelegate {
     selection_gen: u64,
     /// Aggregates of the hovered column: (column, rows, selection_gen) → stats.
     stats: Option<((usize, usize, u64), Option<ColumnStats>)>,
+    /// The same over the marked rows only.
+    marked_stats: Option<((usize, usize, u64), Option<ColumnStats>)>,
 }
 
 impl ResultsDelegate {
@@ -134,6 +136,7 @@ impl ResultsDelegate {
         self.key_card = None;
         self.selection_gen += 1;
         self.stats = None;
+        self.marked_stats = None;
     }
 
     /// What the schema says about the columns; they decide which columns get
@@ -141,6 +144,7 @@ impl ResultsDelegate {
     pub fn set_facts(&mut self, facts: Vec<Option<ColumnFacts>>) {
         self.facts = facts;
         self.stats = None;
+        self.marked_stats = None;
     }
 
     /// Drops the rows but keeps the columns (and their widths, keys, filters): a
@@ -155,6 +159,7 @@ impl ResultsDelegate {
         self.selection_gen += 1;
         // Same row count as before is likely (a full page): don't reuse old stats.
         self.stats = None;
+        self.marked_stats = None;
     }
 
     /// What the column holds: by its type when it is a known table column,
@@ -172,17 +177,32 @@ impl ResultsDelegate {
     fn stats(&mut self, col: usize) -> Option<&ColumnStats> {
         let key = (col, self.result.row_count(), self.selection_gen);
         if self.stats.as_ref().is_none_or(|(k, _)| *k != key) {
-            // A column the schema says is not a number gets no sums, even if its
-            // values look like numbers (codes, zip codes).
-            let numeric = !matches!(self.facts.get(col),
-                Some(Some(f)) if ColumnKind::from_type(&f.data_type) != ColumnKind::Number);
-            let stats = column_stats(
-                (0..self.result.row_count()).map(|r| self.result.cell(r, col)),
-                numeric,
-            );
-            self.stats = Some((key, stats));
+            let rows: Vec<usize> = (0..self.result.row_count()).collect();
+            self.stats = Some((key, self.column_stats(col, &rows)));
         }
         self.stats.as_ref().and_then(|(_, s)| s.as_ref())
+    }
+
+    /// Summary of a marked column over the marked rows, when more than one row is
+    /// marked (one value needs no sums).
+    fn marked_stats(&mut self, col: usize) -> Option<&ColumnStats> {
+        let rows = self.mark.rows(self.result.row_count());
+        if !self.mark.col_marked(col) || rows.len() < 2 {
+            return None;
+        }
+        let key = (col, self.result.row_count(), self.selection_gen);
+        if self.marked_stats.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.marked_stats = Some((key, self.column_stats(col, &rows)));
+        }
+        self.marked_stats.as_ref().and_then(|(_, s)| s.as_ref())
+    }
+
+    fn column_stats(&self, col: usize, rows: &[usize]) -> Option<ColumnStats> {
+        // A column the schema says is not a number gets no sums, even if its
+        // values look like numbers (codes, zip codes).
+        let numeric = !matches!(self.facts.get(col),
+            Some(Some(f)) if ColumnKind::from_type(&f.data_type) != ColumnKind::Number);
+        column_stats(rows.iter().map(|&r| self.result.cell(r, col)), numeric)
     }
 
     pub fn clear(&mut self) {
@@ -468,21 +488,12 @@ fn schema_tags(facts: &ColumnFacts, cx: &App) -> impl IntoElement {
 fn stats_card(
     scope: String,
     stats: &ColumnStats,
+    marked: Option<(String, ColumnStats)>,
     facts: Option<&ColumnFacts>,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let row = |label: &'static str, value: SharedString| {
-        h_flex()
-            .gap_4()
-            .justify_between()
-            .child(div().text_color(theme.muted_foreground).child(label))
-            .child(
-                div()
-                    .font_family(theme.mono_font_family.clone())
-                    .child(value),
-            )
-    };
+    let label = |text: String| div().pb_1().text_color(theme.muted_foreground).child(text);
     v_flex()
         .id("column-stats")
         .test_support()
@@ -497,8 +508,41 @@ fn stats_card(
         .bg(theme.popover)
         .text_color(theme.popover_foreground)
         .shadow_md()
-        .child(div().pb_1().text_color(theme.muted_foreground).child(scope))
+        .child(label(scope))
         .children(facts.map(|f| schema_tags(f, cx)))
+        .child(stats_rows(stats, cx))
+        .when_some(marked, |this, (scope, stats)| {
+            this.child(
+                v_flex()
+                    .id("column-stats-marked")
+                    .test_support()
+                    .mt_1()
+                    .pt_1p5()
+                    .gap_0p5()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(label(scope))
+                    .child(stats_rows(&stats, cx)),
+            )
+        })
+}
+
+/// Count / sum / avg / min / max of one summary, label left, value right.
+fn stats_rows(stats: &ColumnStats, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let row = |label: &'static str, value: SharedString| {
+        h_flex()
+            .gap_4()
+            .justify_between()
+            .child(div().text_color(theme.muted_foreground).child(label))
+            .child(
+                div()
+                    .font_family(theme.mono_font_family.clone())
+                    .child(value),
+            )
+    };
+    v_flex()
+        .gap_0p5()
         .child(row("rows", stats.rows.to_string().into()))
         .when(stats.nulls > 0, |this| {
             this.child(row("non-null", stats.count.to_string().into()))
@@ -838,12 +882,16 @@ impl TableDelegate for ResultsDelegate {
                 } else {
                     format!("All {} rows", self.result.row_count())
                 };
+                let marked = self
+                    .marked_stats(col_ix)
+                    .cloned()
+                    .map(|marked| (format!("Marked: {} rows", marked.rows), marked));
                 div().absolute().top_full().left_1_2().child(deferred(
                     anchored()
                         .anchor(Anchor::TopCenter)
                         .offset(point(px(0.), px(8.)))
                         .snap_to_window_with_margin(px(8.))
-                        .child(stats_card(scope, &stats, facts.as_ref(), cx)),
+                        .child(stats_card(scope, &stats, marked, facts.as_ref(), cx)),
                 ))
             });
 
@@ -1447,6 +1495,51 @@ mod tests {
         let s = d.stats(0).unwrap();
         assert!(!s.numeric());
         assert_eq!((s.rows, s.distinct), (3, 1));
+    }
+
+    #[test]
+    fn marked_cells_get_their_own_sums() {
+        let mut d = numbers(&[Some("1"), Some("2"), Some("3"), None]);
+        // Nothing marked, or one row: no section.
+        assert!(d.marked_stats(0).is_none());
+        d.mark.click_cell(1, 0, Keys::default());
+        d.marked();
+        assert!(d.marked_stats(0).is_none());
+        // Rows 1 to 3.
+        let shift = Keys {
+            shift: true,
+            ..Keys::default()
+        };
+        d.mark.click_cell(3, 0, shift);
+        d.marked();
+        let s = d.marked_stats(0).unwrap();
+        assert_eq!((s.rows, s.nulls, s.sum.as_str()), (3, 1, "5"));
+        // The overall summary stays over all rows.
+        assert_eq!(d.stats(0).unwrap().sum, "6");
+        // Taking a row out changes the marked sums.
+        d.mark.click_cell(
+            2,
+            0,
+            Keys {
+                secondary: true,
+                ..Keys::default()
+            },
+        );
+        d.marked();
+        assert_eq!(d.marked_stats(0).unwrap().sum, "2");
+        // A column mark: all loaded rows.
+        d.mark.click_column(0, Keys::default());
+        d.marked();
+        assert_eq!(d.marked_stats(0).unwrap().sum, "6");
+    }
+
+    #[test]
+    fn an_unmarked_column_has_no_marked_sums() {
+        let mut d = delegate();
+        d.mark.click_column(1, Keys::default());
+        d.marked();
+        assert!(d.marked_stats(0).is_none());
+        assert_eq!(d.marked_stats(1).unwrap().rows, 3);
     }
 
     fn facts(data_type: &str, primary_key: bool, references: Option<&str>) -> ColumnFacts {
