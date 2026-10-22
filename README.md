@@ -28,8 +28,10 @@ out of your way.
   stacked areas, bars side by side or stacked bars, for all columns or a single one,
   with a hover tooltip for exact values. Charts are a view of the result and are never
   stored.
-- **Copy what you see.** Select rows (⇧-click, ⌘-click) and copy cells, rows or rows
-  with headers; the format pastes cleanly into spreadsheets.
+- **Copy what you see.** Mark cells, rows or whole columns (click a column name; ⇧-click
+  or drag for a rectangle, ⌘-click to take a row out or add it) and copy them, with
+  headers if you like; the format pastes cleanly into spreadsheets. The column summary
+  adds up the marked cells.
 - **Schema at a glance.** Browse tables and views in the sidebar, click one to query it,
   and get query suggestions for it based on what you ran before.
 - **Favorites.** Star the tables and views you use most; they stay on top of the

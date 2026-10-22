@@ -29,8 +29,8 @@ const HINTS: &[Hint] = &[
         text: "Select rows, right-click, and open the rows they reference or the rows that reference them.",
     },
     Hint {
-        title: "Copy",
-        text: "Select rows (⇧-click, ⌘-click) and copy them with headers into a spreadsheet.",
+        title: "Mark and copy",
+        text: "Click a column name to mark it, ⇧-click or drag for a rectangle; ⌘C copies the mark.",
     },
     Hint {
         title: "Command palette",

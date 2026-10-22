@@ -4156,3 +4156,36 @@ fn copy_without_a_mark_copies_the_selected_cell(cx: &mut TestAppContext) {
         assert_eq!(clipboard(cx).as_deref(), Some("two"));
     });
 }
+
+#[gpui_kit::test]
+fn the_summary_shows_the_marked_cells_of_a_marked_column(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| {
+        click_cell(window, 0, 0, Modifiers::default(), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats").visible());
+        assert!(window.try_find("column-stats-marked").is_none());
+    });
+    step(handle, cx, |window, cx| {
+        click_cell(window, 2, 0, shift_key(), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2], vec![0]));
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("column-stats-marked").visible())
+    });
+    // A column that is not marked has no such section.
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("column-stats-marked").is_none())
+    });
+}
