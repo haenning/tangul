@@ -302,7 +302,17 @@ mod tests {
             "only the later two"
         );
         assert_eq!(run(Some("0.2.0")), json!({"a": "x"}));
-        assert_eq!(steps.current(), Version::parse("0.2.0").unwrap());
+        // The app's own version, or a later step's: neither may depend on the release.
+        let app = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        assert_eq!(
+            steps.current(),
+            app.clone().max(Version::parse("0.2.0").unwrap())
+        );
+        assert_eq!(Steps(&[]).current(), app);
+        assert_eq!(
+            Steps(&[("99.0.0-dev.1", "[]")]).current(),
+            Version::parse("99.0.0-dev.1").unwrap()
+        );
         assert!(Steps(&[("1.0", "[]")]).apply(&mut json!({}), None).is_err());
     }
 
