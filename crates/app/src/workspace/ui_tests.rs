@@ -4248,3 +4248,23 @@ fn the_mark_covers_its_cells_and_the_row_lines(cx: &mut TestAppContext) {
         assert_eq!(fill.bottom(), below.top());
     });
 }
+
+#[gpui_kit::test]
+fn shift_on_a_row_handle_keeps_the_marked_columns(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_wide_rows(handle, &workspace, cx);
+    step(handle, cx, |window, cx| {
+        click_cell(window, 0, 1, Modifiers::default(), cx)
+    });
+    step(handle, cx, |window, cx| {
+        click_cell(window, 1, 3, shift_key(), cx)
+    });
+    step(handle, cx, |window, cx| {
+        let at = handle_center(window, 3);
+        click_at(window, at, shift_key(), cx);
+    });
+    step(handle, cx, |_, cx| {
+        // More rows, the same columns: still a rectangle.
+        assert_eq!(marked(&tab, 5, cx), (vec![0, 1, 2, 3], vec![1, 2, 3]));
+    });
+}

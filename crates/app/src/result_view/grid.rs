@@ -76,6 +76,8 @@ enum Drag {
 
 /// The filter zone right of a column's name is never narrower (the name gives way).
 const FILTER_ZONE: Pixels = px(28.);
+/// The filter button's square, at the zone's right end.
+const FILTER_BUTTON: Pixels = px(22.);
 
 /// Related tables listed directly in the menu (the most used); the rest are under
 /// "Show all".
@@ -1151,13 +1153,27 @@ impl TableDelegate for ResultsDelegate {
                 .flex_1()
                 .min_w(FILTER_ZONE)
                 .h_full()
+                .group(SharedString::from(format!("col-filter-{col_ix}")))
                 .justify_end()
                 .items_center()
-                .px_1()
-                .rounded(theme.radius)
-                .when(open, |this| this.bg(theme.tokens.table_active))
-                .hover(|this| this.bg(theme.tokens.table_hover))
-                .when(hovered || open || active, |this| this.child(icon.size_4()))
+                // The button: a square at the right; the free space left of it
+                // opens the popover too.
+                .when(hovered || open || active, |this| {
+                    this.child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .size(FILTER_BUTTON)
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme.radius)
+                            .when(open, |this| this.bg(theme.tokens.table_hover))
+                            .group_hover(format!("col-filter-{col_ix}"), |this| {
+                                this.bg(theme.tokens.table_hover)
+                            })
+                            .child(icon.size_4()),
+                    )
+                })
                 // Clicked while open: the popover may have closed on this very
                 // click already (it closes on clicks outside it), so only a state
                 // still as drawn is toggled, like gpui-kit's own triggers.

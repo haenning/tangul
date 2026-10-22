@@ -117,8 +117,10 @@ impl Mark {
     /// A click on a row's handle (or "Mark row" in its menu), the result having
     /// `n_cols` columns.
     /// - plain: the whole row (all columns; anchor at its first cell, end at its last)
-    /// - ⇧ with an anchor: all columns of the rows from the anchor's row to it (also
-    ///   while dragging along the handles); without an anchor like plain
+    /// - ⇧: the rows from the anchor's row to it (also while dragging along the
+    ///   handles), in the columns already marked, so it stays a rectangle (like ⇧ on
+    ///   a column name); a column mark (no anchor) gets just that row; on an empty
+    ///   mark like plain
     /// - ⌘/Ctrl: toggles the row; on an empty mark like plain
     pub fn click_row(&mut self, row: usize, keys: Keys, n_cols: usize) {
         if keys.secondary && !self.is_empty() {
@@ -133,9 +135,12 @@ impl Mark {
         }
         let last = (row, n_cols - 1);
         match self.anchor {
-            Some((ar, _)) if keys.shift => {
-                self.rectangle((ar, 0), last);
-                self.end = Some(last);
+            _ if keys.shift && !self.is_empty() => {
+                let from = self.anchor.map_or(row, |(ar, _)| ar);
+                self.rows = Rows::Only((from.min(row)..=from.max(row)).collect());
+                let col = self.cols.first().copied().unwrap_or(0);
+                self.anchor = Some((from, col));
+                self.end = Some((row, self.cols.last().copied().unwrap_or(0)));
             }
             _ => {
                 self.rectangle((row, 0), last);
@@ -571,6 +576,21 @@ mod tests {
         assert_eq!(m.anchor(), Some((3, 0)));
         m.click_row(5, SHIFT, 3);
         assert_eq!(m.rows(10), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn row_click_with_shift_keeps_the_marked_columns() {
+        // A rectangle in columns 1 and 2: more rows, the same columns.
+        let mut m = cell(2, 1);
+        m.click_cell(3, 2, SHIFT);
+        m.click_row(5, SHIFT, 4);
+        assert_eq!(m.rows(10), vec![2, 3, 4, 5]);
+        assert_eq!(m.cols(), vec![1, 2]);
+        // A column mark: just that row of its columns.
+        let mut m = column(3);
+        m.click_row(4, SHIFT, 5);
+        assert_eq!(m.rows(10), vec![4]);
+        assert_eq!(m.cols(), vec![3]);
     }
 
     #[test]
