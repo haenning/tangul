@@ -100,6 +100,7 @@ mark looks; a key left out is derived from `selection` and `accent`.
   "mark": "#e5484d40",
   "mark_border": "#e5484d",
   "mark_border_width": 2,
+  "mark_radius": 4,
   "header_mark": "#e5484d33"
 }
 ```
@@ -110,6 +111,7 @@ mark looks; a key left out is derived from `selection` and `accent`.
 | `mark` | Fill of marked cells (default: `selection`) |
 | `mark_border` | Outline around the mark's outer edge (default: `accent`) |
 | `mark_border_width` | Outline width in pixels, 0 to 8; 0 draws none (default: 2) |
+| `mark_radius` | Radius of the mark's outer corners in pixels, 0 to 8; 0 is square (default: 4) |
 | `header_mark` | Fill of a marked column's header cell (default: `selection`) |
 
 ## `databases/<id>.json`

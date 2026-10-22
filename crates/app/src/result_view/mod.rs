@@ -257,10 +257,16 @@ impl ResultView {
         event: &TableEvent,
         cx: &mut Context<Self>,
     ) {
-        // A click or the arrow keys only select; the viewer changes on a double
-        // click, Space or "Inspect value".
-        if let TableEvent::DoubleClickedCell(row, col) = event {
-            self.inspect(*row, *col, true, cx);
+        // A click or the arrow keys only select (the keys move the mark); the
+        // viewer changes on a double click, Space or "Inspect value".
+        match *event {
+            TableEvent::DoubleClickedCell(row, col) => self.inspect(row, col, true, cx),
+            TableEvent::SelectCell(row, col) => self.table.update(cx, |t, cx| {
+                if t.delegate_mut().cursor_moved(row, col) {
+                    cx.notify();
+                }
+            }),
+            _ => {}
         }
     }
 
@@ -298,8 +304,12 @@ impl ResultView {
     }
 
     /// Esc: clears the mark; without one the table's own Esc runs.
+    /// Esc (after the viewer's): clears the mark and the table's selected cell
+    /// with it (that one is never drawn); with neither the table's own Esc runs.
     fn clear_mark_action(&mut self, _: &ClearMark, _: &mut Window, cx: &mut Context<Self>) {
-        if self.clear_grid_mark(cx) {
+        let selected = self.table.read(cx).selected_cell().is_some();
+        if self.clear_grid_mark(cx) || selected {
+            self.table.update(cx, |t, cx| t.clear_selection(cx));
             cx.notify();
         } else {
             cx.propagate();
@@ -351,8 +361,10 @@ impl ResultView {
 
     /// "Inspect value" in the menu: selects the cell (A) and shows it.
     pub(super) fn inspect_cell(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
-        self.table
-            .update(cx, |t, cx| t.set_selected_cell(row, col, cx));
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().selecting(row, col);
+            t.set_selected_cell(row, col, cx);
+        });
         self.inspect(row, col, true, cx);
     }
 
@@ -1048,7 +1060,7 @@ impl ResultView {
                             .child(label),
                     ),
             )
-            .with_priority(3)
+            .with_priority(grid::LAYER_DRAG_CHIP)
             .into_any_element(),
         )
     }

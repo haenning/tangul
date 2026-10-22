@@ -50,6 +50,18 @@ const PEEK_WIDTH: f32 = 420.;
 const PEEK_HEIGHT: f32 = 240.;
 const PEEK_CHARS: usize = 2_000;
 
+/// What the grid draws after the rows (gpui's deferred priorities), bottom to top:
+/// the mark, the inspected and compared cells, the row handles, the column summary,
+/// the count beside the pointer while dragging.
+const LAYER_MARK: usize = 0;
+const LAYER_INSPECTED: usize = 1;
+const LAYER_HANDLE: usize = 2;
+const LAYER_SUMMARY: usize = 3;
+pub(super) const LAYER_DRAG_CHIP: usize = 4;
+
+/// The line the table draws under each row (outside its cells).
+const ROW_LINE: Pixels = px(1.);
+
 /// The strip at a row's left edge that shows its handle when the pointer is in it.
 const ROW_HANDLE: Pixels = px(30.);
 
@@ -97,6 +109,9 @@ pub struct ResultsDelegate {
     handle_hovered: Option<usize>,
     /// A drag that marks, while the button is held.
     drag: Option<Drag>,
+    /// Cells clicks went to, oldest first: the table selects each too (its event
+    /// comes later), which must not move the mark again (see `cursor_moved`).
+    clicked: Vec<(usize, usize)>,
     /// Where the pointer was last seen during that drag (window coordinates).
     drag_pointer: Point<Pixels>,
     /// The chip above the grid showed when the drag began: it stays meanwhile
@@ -290,6 +305,24 @@ impl ResultsDelegate {
     }
 
     /// Esc: clears the mark; false when there was none.
+    /// The table's own selected cell (never drawn; the keys move it) is now `row`,
+    /// `col`. A click marked already; the keys make it the mark, one cell.
+    pub(super) fn cursor_moved(&mut self, row: usize, col: usize) -> bool {
+        if let Some(i) = self.clicked.iter().position(|&c| c == (row, col)) {
+            self.clicked.drain(..=i);
+            return false;
+        }
+        self.mark.click_cell(row, col, Keys::default());
+        self.marked();
+        true
+    }
+
+    /// The table is about to select `row`, `col` for something that marked or
+    /// shows it already (a click, "Inspect value").
+    pub(super) fn selecting(&mut self, row: usize, col: usize) {
+        self.clicked.push((row, col));
+    }
+
     pub(super) fn clear_mark(&mut self) -> bool {
         if self.mark.is_empty() {
             return false;
@@ -518,7 +551,7 @@ impl ResultsDelegate {
                     }),
                 ),
         )
-        .with_priority(1)
+        .with_priority(LAYER_HANDLE)
     }
 
     /// Key and link markers left of a column name: a gold key for a primary-key
@@ -910,7 +943,7 @@ fn format_float(x: f64, decimals: u32) -> String {
 /// An overlay over a whole cell: the table pads what a cell (or a header) draws,
 /// and marks reach over that padding to the cell's edges, like the table's own
 /// selected cell. The grid's size is `xsmall` (see `ResultView::render_body`).
-fn over_cell(overlay: Div) -> Div {
+fn over_cell<E: Styled>(overlay: E) -> E {
     let p = Size::XSmall.table_cell_padding();
     overlay
         .absolute()
@@ -918,6 +951,84 @@ fn over_cell(overlay: Div) -> Div {
         .bottom(-p.bottom)
         .left(-p.left)
         .right(-p.right)
+}
+
+/// An overlay over a cell drawn after the rows, so it also covers the row's line
+/// under the cell (the table clips a cell to above that line). Otherwise clipped
+/// like the cell: to it and to the grid's view, grown by the line only where the
+/// cell's bottom is in view (nothing reaches past the grid's bottom edge).
+struct OverRowLine {
+    child: Option<AnyElement>,
+    priority: usize,
+}
+
+fn over_row_line(child: impl IntoElement, priority: usize) -> OverRowLine {
+    OverRowLine {
+        child: Some(child.into_any_element()),
+        priority,
+    }
+}
+
+impl Element for OverRowLine {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let child = self.child.as_mut().expect("laid out once");
+        (child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        let mut mask = window.content_mask();
+        // The overlay reaches over the line; the cell's clip ends just above it.
+        if mask.bounds.bottom() >= bounds.bottom() - ROW_LINE {
+            mask.bounds.size.height = bounds.bottom() - mask.bounds.top();
+        }
+        let child = self.child.take().expect("prepainted once");
+        window.defer_draw(child, window.element_offset(), self.priority, Some(mask));
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        _: &mut Window,
+        _: &mut App,
+    ) {
+    }
+}
+
+impl IntoElement for OverRowLine {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
 }
 
 /// The keys held, as the mark takes them.
@@ -1108,7 +1219,7 @@ impl TableDelegate for ResultsDelegate {
                             .snap_to_window_with_margin(px(8.))
                             .child(stats_card(scope, &stats, marked, facts.as_ref(), cx)),
                     )
-                    .with_priority(2),
+                    .with_priority(LAYER_SUMMARY),
                 )
             });
 
@@ -1381,23 +1492,34 @@ impl TableDelegate for ResultsDelegate {
             .text_xs()
             .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
             .when_some(marked, |d, (style, top, right, bottom, left)| {
-                d.child(
-                    over_cell(div())
+                let (width, radius) = (style.mark_border_width, style.mark_radius);
+                let p = Size::XSmall.table_cell_padding();
+                d.child(over_row_line(
+                    // Down over the row's line, so marked rows run together.
+                    over_cell(div().id(("mark-fill", col_ix)).test_support())
+                        .bottom(-(p.bottom + ROW_LINE))
                         .bg(style.mark)
                         .border_color(style.mark_border)
-                        .when(top, |d| d.border_t(style.mark_border_width))
-                        .when(right, |d| d.border_r(style.mark_border_width))
-                        .when(bottom, |d| d.border_b(style.mark_border_width))
-                        .when(left, |d| d.border_l(style.mark_border_width)),
-                )
+                        .when(top, |d| d.border_t(width))
+                        .when(right, |d| d.border_r(width))
+                        .when(bottom, |d| d.border_b(width))
+                        .when(left, |d| d.border_l(width))
+                        // The mark's outer corners.
+                        .when(top && left, |d| d.rounded_tl(radius))
+                        .when(top && right, |d| d.rounded_tr(radius))
+                        .when(bottom && right, |d| d.rounded_br(radius))
+                        .when(bottom && left, |d| d.rounded_bl(radius)),
+                    LAYER_MARK,
+                ))
             })
             .when_some(mark, |d, color| {
-                d.child(
+                d.child(over_row_line(
                     over_cell(div())
                         .border_1()
                         .border_color(color)
                         .bg(color.opacity(0.12)),
-                )
+                    LAYER_INSPECTED,
+                ))
             })
             // The table selects the cell and stops the event, so the row
             // selection happens here, before it.
@@ -1415,6 +1537,7 @@ impl TableDelegate for ResultsDelegate {
                         }
                     } else {
                         d.start_drag(Drag::Cells(row_ix, col_ix), e.position);
+                        d.selecting(row_ix, col_ix);
                         d.mark.click_cell(row_ix, col_ix, keys(e.modifiers));
                         d.marked();
                     }
@@ -1435,6 +1558,8 @@ impl TableDelegate for ResultsDelegate {
                     cx.notify();
                 }
                 if matches!(d.drag, Some(Drag::Cells(r, c)) if (r, c) != (row_ix, col_ix)) {
+                    // Dragged off the cell: no click follows for the table.
+                    d.clicked.clear();
                     d.mark.drag_to(row_ix, col_ix);
                     d.drag = Some(Drag::Cells(row_ix, col_ix));
                     d.marked();

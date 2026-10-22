@@ -4113,7 +4113,7 @@ fn select_all_shows_a_chip_that_clears_the_mark(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn escape_closes_the_viewer_then_clears_the_mark_then_the_selection(cx: &mut TestAppContext) {
+fn escape_closes_the_viewer_then_clears_the_mark(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
     step(handle, cx, |window, cx| double_click_cell(window, 0, 0, cx));
@@ -4131,12 +4131,39 @@ fn escape_closes_the_viewer_then_clears_the_mark_then_the_selection(cx: &mut Tes
     });
     step(handle, cx, |window, cx| window.press("escape", cx));
     step(handle, cx, |_, cx| {
+        // The mark goes, and the table's selected cell with it (never drawn).
         assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
-        assert!(selected(&tab, cx).is_some());
-    });
-    step(handle, cx, |window, cx| window.press("escape", cx));
-    step(handle, cx, |_, cx| {
         assert_eq!(selected(&tab, cx), None);
+    });
+}
+
+#[gpui_kit::test]
+fn arrow_keys_move_the_mark(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| {
+        click_cell(window, 1, 0, Modifiers::default(), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![1], vec![0]));
+        window.press("down", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![2], vec![0]));
+        window.press("right", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![2], vec![1]));
+        // A rectangle becomes one cell again on a plain arrow.
+        window.press("shift-up", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 4, cx), (vec![1, 2], vec![1]));
+        window.press("left", cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 4, cx).1.len(), 1);
+        assert_eq!(marked(&tab, 4, cx).0.len(), 1);
     });
 }
 
@@ -4147,8 +4174,11 @@ fn copy_without_a_mark_copies_the_selected_cell(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| {
         click_cell(window, 1, 1, Modifiers::default(), cx)
     });
+    // ⌘-click takes the only row out: no mark, the cell stays selected.
     step(handle, cx, |window, cx| {
-        window.press("escape", cx);
+        click_cell(window, 1, 1, Modifiers::secondary_key(), cx)
+    });
+    step(handle, cx, |window, cx| {
         assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
         window.press("secondary-c", cx);
     });
@@ -4187,5 +4217,34 @@ fn the_summary_shows_the_marked_cells_of_a_marked_column(cx: &mut TestAppContext
     });
     step(handle, cx, |window, _| {
         assert!(window.try_find("column-stats-marked").is_none())
+    });
+}
+
+#[gpui_kit::test]
+fn the_mark_covers_its_cells_and_the_row_lines(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(handle, &workspace, &grid_rows(), cx);
+    step(handle, cx, |window, cx| {
+        click_cell(window, 1, 1, Modifiers::default(), cx);
+        click_cell(window, 2, 1, shift_key(), cx);
+    });
+    step(handle, cx, |window, _| {
+        let cell = window
+            .within(("row", 1usize))
+            .find(("cell", 1usize))
+            .bounds();
+        let fill = window
+            .within(("row", 1usize))
+            .find(("mark-fill", 1usize))
+            .bounds();
+        let below = window
+            .within(("row", 2usize))
+            .find(("mark-fill", 1usize))
+            .bounds();
+        // Over the cell's padding, and down over the row's line to the next fill.
+        assert!(fill.left() < cell.left() && fill.right() > cell.right());
+        assert!(fill.bottom() > cell.bottom());
+        // No gap between marked rows: the line between them is covered.
+        assert_eq!(fill.bottom(), below.top());
     });
 }

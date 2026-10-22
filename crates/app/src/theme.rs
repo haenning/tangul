@@ -223,6 +223,8 @@ pub struct GridTheme {
     pub mark_border: Hsla,
     /// Its width (zero: none).
     pub mark_border_width: Pixels,
+    /// Radius of the mark's outer corners.
+    pub mark_radius: Pixels,
     /// A marked column's header cell.
     pub header_mark: Hsla,
 }
@@ -237,6 +239,7 @@ pub fn grid(cx: &App) -> GridTheme {
         mark: color(g.mark),
         mark_border: color(g.mark_border),
         mark_border_width: px(g.mark_border_width),
+        mark_radius: px(g.mark_radius),
         header_mark: color(g.header_mark),
     }
 }
@@ -361,8 +364,10 @@ pub fn config(theme: &ThemeFile) -> ThemeConfig {
         ("table.foot.background", hex(c.surface)),
         ("table.foot.foreground", hex(c.muted)),
         ("table.hover.background", hex(c.hover)),
-        ("table.active.background", hex(c.selection)),
-        ("table.active.border", hex(c.accent)),
+        // The result grid draws its own mark; the table's cursor and right-clicked
+        // cell stay invisible (the grid is the only table).
+        ("table.active.background", hex(alpha(c.selection, 0))),
+        ("table.active.border", hex(alpha(c.accent, 0))),
         ("table.row.border", hex(c.border)),
         ("chart.1", chart(0)),
         ("chart.2", chart(1)),

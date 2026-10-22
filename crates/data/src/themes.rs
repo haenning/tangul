@@ -112,8 +112,9 @@ pub struct SyntaxColors {
     pub punctuation: Rgb,
 }
 
-/// The widest outline of the grid's mark, in pixels.
+/// The widest outline of the grid's mark, and its roundest corners, in pixels.
 const MAX_MARK_BORDER: f32 = 8.;
+const MAX_MARK_RADIUS: f32 = 8.;
 
 /// The result grid's mark (the cells and rows a selection covers). Every key is
 /// optional: what is missing comes from `selection` and `accent` (see `resolve`).
@@ -132,6 +133,9 @@ pub struct GridColors {
     /// Width of that outline in pixels, 0 to 8 (0: no outline).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark_border_width: Option<f32>,
+    /// Radius of the mark's outer corners in pixels, 0 to 8 (0: square).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_radius: Option<f32>,
     /// Fill of a marked column's header cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_mark: Option<Rgb>,
@@ -144,6 +148,7 @@ pub struct Grid {
     pub mark: Rgb,
     pub mark_border: Rgb,
     pub mark_border_width: f32,
+    pub mark_radius: f32,
     pub header_mark: Rgb,
 }
 
@@ -155,7 +160,7 @@ impl GridColors {
 
     /// The values to draw: the set ones, the rest from `colors`. Rows are the
     /// selection at 35% of its alpha, the mark and its header the selection, the
-    /// outline the accent, 2 px wide.
+    /// outline the accent, 2 px wide, its corners rounded by 4 px.
     pub fn resolve(&self, colors: &ThemeColors) -> Grid {
         let selection = colors.selection;
         Grid {
@@ -166,6 +171,7 @@ impl GridColors {
             mark: self.mark.unwrap_or(selection),
             mark_border: self.mark_border.unwrap_or(colors.accent),
             mark_border_width: self.mark_border_width.unwrap_or(2.),
+            mark_radius: self.mark_radius.unwrap_or(4.),
             header_mark: self.header_mark.unwrap_or(selection),
         }
     }
@@ -173,7 +179,8 @@ impl GridColors {
 
 impl Theme {
     /// A theme from its JSON, checked: every color is there (but for the optional
-    /// `grid` keys), `charts` isn't empty and the mark's outline is 0 to 8 px.
+    /// `grid` keys), `charts` isn't empty and the mark's outline and corners are
+    /// 0 to 8 px.
     pub fn parse(text: &str) -> Result<Self, String> {
         let theme: Theme = serde_json::from_str(text).map_err(|e| e.to_string())?;
         if theme.name.trim().is_empty() {
@@ -182,12 +189,22 @@ impl Theme {
         if theme.charts.is_empty() {
             return Err("\"charts\" needs at least one color".into());
         }
-        if let Some(width) = theme.grid.mark_border_width
-            && !(0. ..=MAX_MARK_BORDER).contains(&width)
-        {
-            return Err(format!(
-                "\"grid.mark_border_width\" is {width}, it has to be between 0 and {MAX_MARK_BORDER}"
-            ));
+        let sizes = [
+            (
+                "mark_border_width",
+                theme.grid.mark_border_width,
+                MAX_MARK_BORDER,
+            ),
+            ("mark_radius", theme.grid.mark_radius, MAX_MARK_RADIUS),
+        ];
+        for (key, value, max) in sizes {
+            if let Some(value) = value
+                && !(0. ..=max).contains(&value)
+            {
+                return Err(format!(
+                    "\"grid.{key}\" is {value}, it has to be between 0 and {max}"
+                ));
+            }
         }
         Ok(theme)
     }
@@ -393,6 +410,7 @@ mod tests {
                 mark: rgb("#e5484d40"),
                 mark_border: rgb("#e5484d"),
                 mark_border_width: 2.,
+                mark_radius: 4.,
                 header_mark: rgb("#e5484d40"),
             }
         );
@@ -432,6 +450,11 @@ mod tests {
             assert!(e.contains("mark_border_width"), "{e}");
         }
         assert!(Theme::parse(&with("\"mark_border_width\": 8")).is_ok());
+        for radius in ["-2", "9"] {
+            let e = Theme::parse(&with(&format!("\"mark_radius\": {radius}"))).unwrap_err();
+            assert!(e.contains("mark_radius"), "{e}");
+        }
+        assert!(Theme::parse(&with("\"mark_radius\": 0")).is_ok());
         assert!(Theme::parse(&with("\"mark\": \"red\"")).is_err());
     }
 
@@ -444,6 +467,7 @@ mod tests {
                     && g.mark.is_some()
                     && g.mark_border.is_some()
                     && g.mark_border_width.is_some()
+                    && g.mark_radius.is_some()
                     && g.header_mark.is_some(),
                 "{}",
                 theme.name

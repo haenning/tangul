@@ -37,6 +37,7 @@
     "mark": "#e5484d40",
     "mark_border": "#e5484d",
     "mark_border_width": 2,
+    "mark_radius": 4,
     "header_mark": "#e5484d33"
   }
 }

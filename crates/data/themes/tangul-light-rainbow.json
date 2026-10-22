@@ -45,6 +45,7 @@
     "mark": "#dc262633",
     "mark_border": "#dc2626",
     "mark_border_width": 2,
+    "mark_radius": 4,
     "header_mark": "#dc26262e"
   }
 }
