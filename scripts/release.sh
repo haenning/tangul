@@ -51,6 +51,9 @@ release() {
         fi
     done
 
+    # Before anything changes: the dev migration steps have to be this version's.
+    scripts/release-migrations.py --check "$version"
+
     read -rp "Release main ($(git rev-parse --short HEAD)) as $tag? [y/N] " answer
     [[ "$answer" == [yY] ]] || die "stopped"
 
