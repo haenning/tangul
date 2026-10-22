@@ -59,7 +59,7 @@ struct Show {
 /// The chart styles tangul draws (see `tangul_features`).
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum Chart {
+pub(crate) enum Chart {
     Line,
     Area,
     StackedArea,
@@ -68,7 +68,7 @@ enum Chart {
 }
 
 impl Chart {
-    fn style(self) -> ChartStyle {
+    pub(crate) fn style(self) -> ChartStyle {
         match self {
             Chart::Line => ChartStyle::Line,
             Chart::Area => ChartStyle::Area,
@@ -205,14 +205,13 @@ impl Tool for RunReadonly {
     fn description(&self) -> &'static str {
         "Run one read-only statement, or a bookmark (list_bookmarks) by name, and get \
          its rows (tab-separated). It runs once, in a read-only transaction that is \
-         rolled back, with a time limit. Writes are never run: use propose_sql for them. \
-         Keep results small (LIMIT, aggregates). Cells longer than 200 characters are \
-         cut and say how to get the whole value with get_cell (no need to query again). \
-         Set `show` to also open the result in tangul for the user, in a new tab: the \
-         whole result in the grid, or as a chart (line, area, stacked_area, bars, \
-         stacked_bars; GROUP BY reads best). Use it to visualize data, draw a graph, or \
-         hand the user a finished query with its result; the user doesn't need to run \
-         it again."
+         rolled back, with a time limit. Writes are never run. Keep results small \
+         (LIMIT, aggregates). Cells longer than 200 characters are cut and say how to \
+         get the whole value with get_cell (no need to query again). Set `show` to hand \
+         the user the result you got, in a new tab, without running it again: the whole \
+         result in the grid, or as a chart (line, area, stacked_area, bars, \
+         stacked_bars; GROUP BY reads best). To hand over a query unrun instead, use \
+         propose_sql."
     }
 
     fn input_schema(&self) -> Value {

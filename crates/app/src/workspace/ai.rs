@@ -495,7 +495,8 @@ impl Workspace {
         }
     }
 
-    /// Opens a proposal in a new tab, not run, on your connection to its database.
+    /// Opens a proposal in a new tab, not run, on your connection to its database; a
+    /// chart it asks for is drawn once you run it.
     pub(super) fn open_proposal(
         &mut self,
         proposal: SqlProposal,
@@ -510,9 +511,15 @@ impl Workspace {
         let Some(tab) = self.tabs.active_query().cloned() else {
             return;
         };
-        if let Some(conn) = self.tab_conn(&proposal.user) {
-            tab.update(cx, |t, cx| t.set_conn(conn, cx));
-        }
+        let conn = self.tab_conn(&proposal.user);
+        tab.update(cx, |t, cx| {
+            if let Some(conn) = conn {
+                t.set_conn(conn, cx);
+            }
+            if let Some(chart) = proposal.chart {
+                t.request_chart(chart.style, chart.column, cx);
+            }
+        });
         cx.notify();
     }
 

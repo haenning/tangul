@@ -395,14 +395,43 @@ async fn proposals_open_for_the_user_and_never_run() {
             user: "u1".into(),
             sql: format!("-- Proposed by the assistant: drop the test order\n{sql}"),
             title: Some("Drop 1".into()),
+            chart: None,
         }]
     );
-    // Only changes: reads are shown with run_readonly.
+    // A query too, here with its chart for when the user runs it.
     assert_eq!(
-        call(&ctx, "propose_sql", json!({"sql": "SELECT 1"})).await,
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": "SELECT status, count(*) FROM orders GROUP BY 1",
+                   "chart": "bars", "column": " count(*) "})
+        )
+        .await
+        .unwrap(),
+        "Opened in tangul in a new tab on shop for the user to review and run. It was not \
+         run. Its result is the user's: it never comes back to you."
+    );
+    assert_eq!(
+        proposed.lock().unwrap()[1].chart,
+        Some(ChartRequest {
+            style: ChartStyle::Bars,
+            column: Some("count(*)".into()),
+        })
+    );
+    assert_eq!(
+        call(&ctx, "propose_sql", json!({"sql": sql, "chart": "line"})).await,
         Err(ToolError::BadInput(
-            "this only reads; use run_readonly (with show to open it for the user)".into()
+            "only a query's result can be a chart".into()
         ))
+    );
+    assert_eq!(
+        call(
+            &ctx,
+            "propose_sql",
+            json!({"sql": "SELECT 1", "column": "a"})
+        )
+        .await,
+        Err(ToolError::BadInput("column needs a chart".into()))
     );
     // What it showed before is gone.
     for gone in [
@@ -422,7 +451,7 @@ async fn proposals_open_for_the_user_and_never_run() {
         call(&ctx, "propose_sql", json!({"sql": " "})).await,
         Err(ToolError::BadInput("sql is empty".into()))
     );
-    assert_eq!(proposed.lock().unwrap().len(), 1);
+    assert_eq!(proposed.lock().unwrap().len(), 2);
     // Nothing ran.
     assert_eq!(
         call(

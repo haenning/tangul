@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// A tab's title edited where it is shown: Enter or a click elsewhere keeps it,
+/// Esc drops it.
+pub(super) struct Renaming {
+    tab: TabId,
+    pub(super) input: Entity<InputState>,
+    _events: Subscription,
+}
+
 impl Workspace {
     pub(super) fn add_tab(
         &mut self,
@@ -237,6 +245,67 @@ impl Workspace {
             self.save_pinned_tabs(cx);
             cx.notify();
         }
+    }
+
+    /// Edits a query tab's title in the tab bar (not a board tile's: it shows the
+    /// tile's title).
+    pub(super) fn rename_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .query_tab(id, cx)
+            .filter(|t| t.read(cx).board_tile.is_none())
+        else {
+            return;
+        };
+        let title = tab.read(cx).title.clone();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(title));
+        // After the click: the tab bar focuses the tab's editor on it.
+        let field = input.clone();
+        cx.defer_in(window, move |_, window, cx| {
+            field.update(cx, |i, cx| {
+                i.focus(window, cx);
+                i.select_all(window, cx);
+            });
+        });
+        let events = cx.subscribe_in(&input, window, |this, _, e: &InputEvent, window, cx| {
+            if matches!(e, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                this.finish_rename(true, window, cx);
+            }
+        });
+        self.renaming = Some(Renaming {
+            tab: id,
+            input,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    /// Ends editing a tab's title, keeping the new one (unless it is empty) or not.
+    /// A bookmarked tab's title is its bookmark's name: that is renamed too.
+    fn finish_rename(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renaming) = self.renaming.take() else {
+            return;
+        };
+        let name = renaming.input.read(cx).value().trim().to_string();
+        let tab = self.query_tab(renaming.tab, cx);
+        if let Some(tab) = tab.as_ref().filter(|_| keep && !name.is_empty()) {
+            let bookmark = tab
+                .read(cx)
+                .bookmark_id
+                .as_deref()
+                .and_then(|id| self.data.local.bookmark(id));
+            match bookmark {
+                Some(mut bookmark) => {
+                    bookmark.name = name;
+                    self.save_bookmark(bookmark, window, cx);
+                }
+                None => tab.update(cx, |t, _| t.title = name.into()),
+            }
+            self.save_pinned_tabs(cx);
+        }
+        if let Some(tab) = tab {
+            QueryTab::focus_editor(&tab, window, cx);
+        }
+        cx.notify();
     }
 
     /// Removes the tab's bookmark, or asks for a name and bookmarks its query.
@@ -528,6 +597,11 @@ impl Workspace {
             } else {
                 title
             };
+            let renaming = self
+                .renaming
+                .as_ref()
+                .filter(|r| r.tab == id)
+                .map(|r| r.input.clone());
             // The context menu can't wrap the `Tab` itself, so it sits on the content.
             let content = h_flex()
                 .id(("tab-menu", id.0 as usize))
@@ -539,7 +613,30 @@ impl Workspace {
                 .when(from_tile, |this| {
                     this.child(Icon::new(Lucide::LayoutDashboard).xsmall())
                 })
-                .child(label.clone())
+                .map(|this| match renaming {
+                    // The title is edited where it is shown.
+                    Some(input) => this.child(
+                        div()
+                            .id("tab-rename")
+                            .test_support()
+                            .w(px(160.))
+                            // Esc in the field: the input lets it through as this action.
+                            .on_action(cx.listener(
+                                |this, _: &component::input::Escape, window, cx| {
+                                    this.finish_rename(false, window, cx)
+                                },
+                            ))
+                            .child(Input::new(&input).appearance(false)),
+                    ),
+                    // A double click on the title edits it.
+                    None => this.child(label.clone()).on_click(cx.listener(
+                        move |this, e: &ClickEvent, window, cx| {
+                            if e.click_count() == 2 {
+                                this.rename_tab(id, window, cx);
+                            }
+                        },
+                    )),
+                })
                 .context_menu({
                     let weak = weak.clone();
                     move |menu, _, _| {

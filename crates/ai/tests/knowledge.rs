@@ -212,7 +212,7 @@ async fn says_what_the_app_can_do() {
     let text = text(&ctx(false), "tangul_features", json!({})).await;
     assert_eq!(text, tangul_ai::features::text());
     assert!(
-        text.contains("run_readonly with \"show\" opens its result in tangul"),
+        text.contains("run_readonly with \"show\" hands the user the result you got"),
         "{text}"
     );
 }

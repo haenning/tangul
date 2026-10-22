@@ -424,6 +424,62 @@ fn esc_closes_a_filter_popover_before_the_viewer(cx: &mut TestAppContext) {
     });
 }
 
+/// Types `text` as the keyboard sends it: a space is the key `space` with its text,
+/// so key bindings for Space see it.
+fn type_keys(window: &mut Window, text: &str, cx: &mut App) {
+    for c in text.chars() {
+        let text = c.to_string();
+        let mut key =
+            gpui_kit::Keystroke::parse(if c == ' ' { "space" } else { &text }).expect("a key");
+        key.key_char = Some(text);
+        window.dispatch_keystroke(key, cx);
+        window.refresh();
+    }
+}
+
+#[gpui_kit::test]
+fn space_in_a_column_filter_is_text(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_rows(handle, &workspace, &[[Some("1"), Some("one")]], cx);
+    let inputs = |cx: &mut App| tab.read(cx).results().read(cx).filter_inputs(cx);
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("col-filter-button", 1usize), cx)
+    });
+    // The value field has focus.
+    step(handle, cx, |window, cx| type_keys(window, "a b", cx));
+    step(handle, cx, |_, cx| {
+        assert_eq!(inputs(cx).0, "a b");
+        assert!(viewer_open(&workspace, cx), "the viewer stays open");
+    });
+    // The upper end of a range (the id column holds numbers).
+    step(handle, cx, |window, cx| window.press("escape", cx));
+    step(handle, cx, |window, cx| {
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("col-filter-button", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| window.click("op-Between", cx));
+    step(handle, cx, |window, cx| window.click("filter-to", cx));
+    step(handle, cx, |window, cx| type_keys(window, "a b", cx));
+    step(handle, cx, |_, cx| {
+        assert_eq!(inputs(cx).1, "a b");
+        assert!(viewer_open(&workspace, cx), "the viewer stays open");
+    });
+    // The editor of a new tab, too.
+    let editor = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab("", window, cx))
+    });
+    step(handle, cx, |window, cx| type_keys(window, "a b", cx));
+    step(handle, cx, |_, cx| {
+        assert_eq!(editor.read(cx).sql(cx), "a b")
+    });
+}
+
 #[gpui_kit::test]
 fn alt_click_compares_and_the_x_stops_it(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
@@ -1247,6 +1303,7 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         user: "app".into(),
         sql: sql.into(),
         title: None,
+        chart: None,
     });
     cx.run_until_parked();
     step(handle, cx, |_, cx| {
@@ -1256,8 +1313,32 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         assert_eq!(tab.sql(cx), sql);
         assert!(!tab.is_running(cx), "not run");
         assert_eq!(tab.row_count(cx), None, "no result");
+        assert_eq!(tab.chart_view(cx), None);
         let conn = tab.conn.as_ref().expect("on a connection");
         assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
+    });
+    // A query with a chart: unrun too, the chart waits for the user's run.
+    let query = "-- Proposed by the assistant\nSELECT day, total FROM sales";
+    sink(tangul_ai::SqlProposal {
+        connection: "shop".into(),
+        user: "app".into(),
+        sql: query.into(),
+        title: Some("Sales".into()),
+        chart: Some(tangul_ai::ChartRequest {
+            style: tangul_core::chart::ChartStyle::Bars,
+            column: None,
+        }),
+    });
+    cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        let tab = workspace.read(cx).tabs.active_query().unwrap().read(cx);
+        assert_eq!(tab.title.as_ref(), "Sales");
+        assert!(!tab.is_running(cx), "not run");
+        assert_eq!(tab.row_count(cx), None, "no result");
+        assert_eq!(
+            tab.chart_view(cx).map(|v| v.style),
+            Some(tangul_core::chart::ChartStyle::Bars)
+        );
     });
 }
 
@@ -3442,4 +3523,74 @@ fn removing_a_database_asks_first_then_deletes_it_with_its_tabs_and_data(cx: &mu
         assert_eq!(ws.active_db, None);
         assert!(ws.tabs.is_empty());
     });
+}
+
+#[gpui_kit::test]
+fn a_double_click_renames_a_tab_where_its_title_is(cx: &mut TestAppContext) {
+    use tangul_data::local::Bookmark;
+    let (handle, workspace) = open(cx);
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab("select 1", window, cx))
+    });
+    let id = cx.update(|cx| tab.read(cx).id.0 as usize);
+    let title = |cx: &mut TestAppContext| cx.update(|cx| tab.read(cx).title.to_string());
+    let before = title(cx);
+    // Esc keeps the title.
+    step(handle, cx, |window, cx| {
+        window.double_click(("tab-menu", id), cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("tab-rename").visible());
+        window.input("Nope", cx);
+        window.press("escape", cx);
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("tab-rename").is_none())
+    });
+    assert_eq!(title(cx), before);
+    // Enter keeps the new one (the old one is selected, so typing replaces it).
+    step(handle, cx, |window, cx| {
+        window.double_click(("tab-menu", id), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.input("Sales", cx);
+        window.press("enter", cx);
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("tab-rename").is_none())
+    });
+    assert_eq!(title(cx), "Sales");
+    // An empty title isn't one.
+    step(handle, cx, |window, cx| {
+        window.double_click(("tab-menu", id), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.press("backspace", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(title(cx), "Sales");
+    // A bookmarked tab's title is its bookmark's name: both change.
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            let bookmark = Bookmark {
+                id: "bm".into(),
+                name: "Sales".into(),
+                sql: "select 1".into(),
+                database_id: Some("db".into()),
+                ..Default::default()
+            };
+            ws.data.local.upsert_bookmark(&bookmark, "fp").unwrap();
+            tab.update(cx, |t, _| t.bookmark_id = Some("bm".into()));
+        })
+    });
+    step(handle, cx, |window, cx| {
+        window.double_click(("tab-menu", id), cx)
+    });
+    step(handle, cx, |window, cx| {
+        window.input("Revenue", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(title(cx), "Revenue");
+    let name = cx.update(|cx| workspace.read(cx).data.local.bookmark("bm").unwrap().name);
+    assert_eq!(name, "Revenue");
 }
