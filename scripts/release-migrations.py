@@ -2,11 +2,14 @@
 """Run by `make release` (scripts/release.sh) once the version is bumped:
 
     scripts/release-migrations.py 0.1.3
+    scripts/release-migrations.py --check 0.1.3
 
 For each settings file (crates/data/migrations/<file>/), the steps made while this
 version was developed (`0.1.3-dev.N.json`) become one step, `0.1.3.json`, their
 operations in order; and the layout this release writes becomes a fixture
 (`fixtures/<file>/0.1.3.json`) if it differs from the last one. See CLAUDE.md there.
+With `--check` it only checks that the dev steps can be joined and changes nothing,
+so the release stops before it bumps the version.
 """
 
 import json
@@ -20,7 +23,8 @@ DEV = re.compile(r"^(\d+\.\d+\.\d+)-dev\.(\d+)\.json$")
 RELEASE = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.json$")
 
 
-def merge_dev_steps(kind: str, version: str) -> None:
+def dev_steps(kind: str, version: str) -> list[tuple[int, Path]]:
+    """This version's dev steps, or exits if they can't be joined."""
     folder = ROOT / kind
     steps = []
     for path in folder.glob("*.json"):
@@ -30,11 +34,17 @@ def merge_dev_steps(kind: str, version: str) -> None:
         if match.group(1) != version:
             sys.exit(f"{path}: a step for {match.group(1)}, but this is {version}")
         steps.append((int(match.group(2)), path))
+    target = folder / f"{version}.json"
+    if steps and target.exists():
+        sys.exit(f"{target} exists already")
+    return steps
+
+
+def merge_dev_steps(kind: str, version: str) -> None:
+    steps = dev_steps(kind, version)
     if not steps:
         return
-    target = folder / f"{version}.json"
-    if target.exists():
-        sys.exit(f"{target} exists already")
+    target = ROOT / kind / f"{version}.json"
     ops = []
     for _, path in sorted(steps):
         ops += json.loads(path.read_text())
@@ -66,9 +76,17 @@ def keep_fixture(kind: str, version: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 2 or not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]):
-        sys.exit("usage: release-migrations.py x.y.z")
-    version = sys.argv[1]
+    args = sys.argv[1:]
+    check = args[:1] == ["--check"]
+    if check:
+        args = args[1:]
+    if len(args) != 1 or not re.fullmatch(r"\d+\.\d+\.\d+", args[0]):
+        sys.exit("usage: release-migrations.py [--check] x.y.z")
+    version = args[0]
+    if check:
+        for kind in ("settings", "database"):
+            dev_steps(kind, version)
+        return
     for kind in ("settings", "database"):
         merge_dev_steps(kind, version)
         keep_fixture(kind, version)
