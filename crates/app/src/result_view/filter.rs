@@ -118,6 +118,12 @@ impl FilterPanel {
         cx.notify();
     }
 
+    /// What takes the focus when the panel opens: the value, where one is typed
+    /// (dates are picked in the calendar).
+    pub fn focus_target(&self, cx: &App) -> Option<FocusHandle> {
+        (!self.kind.is_date() && self.op.takes_value()).then(|| self.value.focus_handle(cx))
+    }
+
     fn apply(&mut self, cx: &mut Context<Self>) {
         let value = self.value.read(cx).value().trim().to_string();
         let to = self.to.read(cx).value().trim().to_string();

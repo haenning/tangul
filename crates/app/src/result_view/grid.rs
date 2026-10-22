@@ -17,8 +17,8 @@
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme as _, Icon, IconName, Selectable, Sizable as _,
+    button::Button,
     h_flex,
     hover_card::HoverCard,
     menu::{PopupMenu, PopupMenuItem},
@@ -49,6 +49,9 @@ const PEEK_DELAY: Duration = Duration::from_secs(1);
 const PEEK_WIDTH: f32 = 420.;
 const PEEK_HEIGHT: f32 = 240.;
 const PEEK_CHARS: usize = 2_000;
+
+/// The filter zone right of a column's name is never narrower (the name gives way).
+const FILTER_ZONE: Pixels = px(28.);
 
 /// Related tables listed directly in the menu (the most used); the rest are under
 /// "Show all".
@@ -660,6 +663,38 @@ fn format_float(x: f64, decimals: u32) -> String {
     }
 }
 
+/// The keys held, as the mark takes them.
+fn keys(modifiers: Modifiers) -> Keys {
+    Keys {
+        shift: modifiers.shift,
+        secondary: modifiers.secondary(),
+    }
+}
+
+/// What a column's filter popover hangs from: nothing to see or click (the filter
+/// zone around it opens and closes the popover).
+#[derive(IntoElement, Default)]
+struct PopoverAnchor {
+    selected: bool,
+}
+
+impl Selectable for PopoverAnchor {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for PopoverAnchor {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div().size_0()
+    }
+}
+
 /// "Copy 3 rows", "Copy row".
 fn rows_label(verb: &str, n: usize) -> String {
     if n == 1 {
@@ -697,8 +732,9 @@ impl TableDelegate for ResultsDelegate {
         self.columns[col_ix].clone()
     }
 
-    /// Key icon, name, and on hover the filter button (over the end of a long name)
-    /// and the aggregates below the cell.
+    /// Key icon and name (a click marks the column), then the filter zone: the free
+    /// space right of the name, with the funnel / sort icon on hover, opens the
+    /// column's filter and sort popover. Below the cell on hover, the aggregates.
     fn render_th(
         &mut self,
         col_ix: usize,
@@ -720,7 +756,7 @@ impl TableDelegate for ResultsDelegate {
             .col_marked(col_ix)
             .then(|| crate::theme::grid(cx).header_mark);
         let table = cx.entity().downgrade();
-        let filter_button = (self.refinable && (hovered || open || active)).then(|| {
+        let filter_zone = self.refinable.then(|| {
             let icon = match sorted {
                 Some(s) if !filtered => Icon::new(if s.descending {
                     IconName::SortDescending
@@ -732,41 +768,64 @@ impl TableDelegate for ResultsDelegate {
             let icon = if active {
                 icon.text_color(theme.primary)
             } else {
-                icon
+                icon.text_color(theme.muted_foreground)
             };
             let panel = self.filter_panel.clone();
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right_0()
-                .flex()
+            // Opened from outside, the popover focuses itself as it is drawn: the
+            // value field must be the one it focuses.
+            let focus = open
+                .then(|| panel.as_ref().and_then(|p| p.read(cx).focus_target(cx)))
+                .flatten();
+            h_flex()
+                .id(("col-filter-button", col_ix))
+                .test_support()
+                .relative()
+                .flex_1()
+                .min_w(FILTER_ZONE)
+                .h_full()
+                .justify_end()
                 .items_center()
-                .pl_1()
-                .bg(theme.tokens.table_head)
+                .px_1()
+                .rounded(theme.radius)
+                .when(open, |this| this.bg(theme.tokens.table_active))
+                .hover(|this| this.bg(theme.tokens.table_hover))
+                .when(hovered || open || active, |this| this.child(icon.size_4()))
+                // Clicked while open: the popover may have closed on this very
+                // click already (it closes on clicks outside it), so only a state
+                // still as drawn is toggled, like gpui-kit's own triggers.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |table, _, window, cx| {
+                        cx.stop_propagation();
+                        let d = table.delegate_mut();
+                        if (d.filter_open == Some(col_ix)) == open {
+                            d.filter_opened(col_ix, !open, window, cx);
+                        }
+                        cx.notify();
+                    }),
+                )
                 .child(
-                    Popover::new(("col-filter", col_ix))
-                        .anchor(Anchor::TopRight)
-                        .trigger(
-                            Button::new(("col-filter-button", col_ix))
-                                .icon(icon)
-                                .xsmall()
-                                .ghost()
-                                .selected(open),
-                        )
-                        .open(open)
-                        .on_open_change(move |open, window, cx| {
-                            let _ = table.update(cx, |t, cx| {
-                                t.delegate_mut().filter_opened(col_ix, *open, window, cx);
-                                cx.notify();
-                            });
-                        })
-                        .content(move |_, _, _| {
-                            panel
-                                .clone()
-                                .map(|p| p.into_any_element())
-                                .unwrap_or_else(|| div().into_any_element())
-                        }),
+                    // The popover hangs from the zone's bottom right corner; the
+                    // zone opens and closes it.
+                    div().absolute().right_0().bottom_0().child(
+                        Popover::new(("col-filter", col_ix))
+                            .anchor(Anchor::TopRight)
+                            .trigger(PopoverAnchor::default())
+                            .when_some(focus, |p, focus| p.track_focus(&focus))
+                            .open(open)
+                            .on_open_change(move |open, window, cx| {
+                                let _ = table.update(cx, |t, cx| {
+                                    t.delegate_mut().filter_opened(col_ix, *open, window, cx);
+                                    cx.notify();
+                                });
+                            })
+                            .content(move |_, _, _| {
+                                panel
+                                    .clone()
+                                    .map(|p| p.into_any_element())
+                                    .unwrap_or_else(|| div().into_any_element())
+                            }),
+                    ),
                 )
         });
 
@@ -806,19 +865,37 @@ impl TableDelegate for ResultsDelegate {
             .when_some(header_fill, |this, fill| {
                 this.child(div().absolute().inset_0().bg(fill))
             })
-            .children(key_icon)
             .child({
                 let s = settings::current(cx);
-                div()
+                h_flex()
+                    .id(("th-name", col_ix))
+                    .test_support()
                     .min_w_0()
-                    .overflow_hidden()
-                    .when_some(s.table.family(), |d, family| {
-                        d.font_family(SharedString::from(family.to_string()))
-                    })
-                    .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
-                    .child(name)
+                    .h_full()
+                    .gap_1()
+                    .items_center()
+                    .children(key_icon)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .when_some(s.table.family(), |d, family| {
+                                d.font_family(SharedString::from(family.to_string()))
+                            })
+                            .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
+                            .child(name),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |table, e: &MouseDownEvent, _, cx| {
+                            let d = table.delegate_mut();
+                            d.mark.click_column(col_ix, keys(e.modifiers));
+                            d.marked();
+                            cx.notify();
+                        }),
+                    )
             })
-            .children(filter_button)
+            .children(filter_zone)
             .children(stats_card)
     }
 
@@ -1074,11 +1151,7 @@ impl TableDelegate for ResultsDelegate {
                             });
                         }
                     } else {
-                        let keys = Keys {
-                            shift: e.modifiers.shift,
-                            secondary: e.modifiers.secondary(),
-                        };
-                        d.mark.click_cell(row_ix, col_ix, keys);
+                        d.mark.click_cell(row_ix, col_ix, keys(e.modifiers));
                         d.marked();
                     }
                     cx.notify();
