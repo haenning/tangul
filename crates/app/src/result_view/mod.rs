@@ -700,6 +700,12 @@ impl ResultView {
         panel.read(cx).inputs(cx)
     }
 
+    /// Scrolls the grid sideways to column `col` (tests).
+    #[cfg(test)]
+    pub fn scroll_to_col(&self, col: usize, cx: &mut App) {
+        self.table.update(cx, |t, cx| t.scroll_to_col(col, cx));
+    }
+
     /// Why the last run failed, if it did (tests).
     #[cfg(test)]
     pub fn error(&self) -> Option<String> {

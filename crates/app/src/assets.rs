@@ -14,6 +14,7 @@ gpui_kit::assets::icon_assets!(
     [
         Archive,
         ArrowRightLeft,
+        ArrowRightToLine,
         Bookmark,
         Braces,
         ChartArea,

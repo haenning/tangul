@@ -3665,6 +3665,16 @@ fn paging_keeps_the_mark_and_a_submitted_sort_or_filter_clears_it(cx: &mut TestA
 fn click_with(window: &mut Window, id: impl Into<ElementId>, modifiers: Modifiers, cx: &mut App) {
     window.render_frame(cx);
     let position = window.find(id).bounds().center();
+    click_at(window, position, modifiers, cx);
+}
+
+/// A left click at `position` with `modifiers` held.
+fn click_at(
+    window: &mut Window,
+    position: gpui_kit::Point<gpui_kit::Pixels>,
+    modifiers: Modifiers,
+    cx: &mut App,
+) {
     window.dispatch_event(
         gpui_kit::PlatformInput::MouseDown(MouseDownEvent {
             button: MouseButton::Left,
@@ -3798,5 +3808,204 @@ fn a_narrow_column_keeps_its_filter_zone(cx: &mut TestAppContext) {
     step(handle, cx, |window, _| {
         let zone = window.find(("col-filter-button", 1usize)).bounds();
         assert!(zone.size.width >= px(28.), "{:?}", zone.size.width);
+    });
+}
+
+/// A tab with 20 columns (wider than the window) of 5 rows: `r{row}c{col}`.
+fn tab_with_wide_rows(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    cx: &mut TestAppContext,
+) -> Entity<QueryTab> {
+    cx.update_window(handle.into(), |_, window, cx| {
+        let tab = workspace.update(cx, |ws, cx| ws.add_tab("select * from t", window, cx));
+        tab.update(cx, |t, cx| {
+            t.started(QueryId(1), "select * from t", cx);
+            let cols = (0..20)
+                .map(|i| ColumnInfo {
+                    name: format!("c{i}"),
+                })
+                .collect();
+            t.on_query_event(QueryEvent::Exec(ExecEvent::ResultStart(cols)), cx);
+            let mut batch = RowBatch::default();
+            for r in 0..5 {
+                for c in 0..20 {
+                    batch.push_cell(Some(&format!("r{r}c{c}")));
+                }
+                batch.finish_row();
+            }
+            t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+            t.on_query_event(
+                QueryEvent::Finished {
+                    elapsed: Default::default(),
+                    error: None,
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        tab
+    })
+    .unwrap()
+}
+
+/// Mouse down at `from`, moves with the button held through `path`, up at the last.
+fn drag_through(
+    window: &mut Window,
+    from: gpui_kit::Point<gpui_kit::Pixels>,
+    path: &[gpui_kit::Point<gpui_kit::Pixels>],
+    cx: &mut App,
+) {
+    window.dispatch_event(
+        gpui_kit::PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: from,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }),
+        cx,
+    );
+    for &position in path {
+        window.dispatch_event(
+            gpui_kit::PlatformInput::MouseMove(gpui_kit::MouseMoveEvent {
+                position,
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::default(),
+            }),
+            cx,
+        );
+        window.render_frame(cx);
+    }
+    window.dispatch_event(
+        gpui_kit::PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: *path.last().unwrap_or(&from),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        }),
+        cx,
+    );
+    window.render_frame(cx);
+}
+
+fn cell_center(window: &mut Window, row: usize, col: usize) -> gpui_kit::Point<gpui_kit::Pixels> {
+    window
+        .within(("row", row))
+        .find(("cell", col))
+        .bounds()
+        .center()
+}
+
+fn handle_center(window: &mut Window, row: usize) -> gpui_kit::Point<gpui_kit::Pixels> {
+    window
+        .within(("row", row))
+        .find(("row-handle", row))
+        .bounds()
+        .center()
+}
+
+#[gpui_kit::test]
+fn dragging_from_a_cell_marks_the_rectangle(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_wide_rows(handle, &workspace, cx);
+    step(handle, cx, |window, cx| {
+        let from = cell_center(window, 0, 1);
+        let path = [cell_center(window, 1, 2), cell_center(window, 3, 4)];
+        drag_through(window, from, &path, cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 5, cx), (vec![0, 1, 2, 3], vec![1, 2, 3, 4]));
+    });
+}
+
+#[gpui_kit::test]
+fn the_row_handle_marks_whole_rows(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_wide_rows(handle, &workspace, cx);
+    let all: Vec<usize> = (0..20).collect();
+    step(handle, cx, |window, cx| {
+        window
+            .within(("row", 1usize))
+            .hover(("row-handle", 1usize), cx);
+    });
+    step(handle, cx, |window, cx| {
+        // Under the pointer it shows the row's number and its button.
+        assert!(window.find(("row-handle-mark", 1usize)).visible());
+        let at = handle_center(window, 1);
+        click_at(window, at, Modifiers::default(), cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 5, cx), (vec![1], all.clone()));
+        let at = handle_center(window, 3);
+        click_at(window, at, shift_key(), cx);
+    });
+    step(handle, cx, |window, cx| {
+        // ⇧: the rows from the first.
+        assert_eq!(marked(&tab, 5, cx), (vec![1, 2, 3], all.clone()));
+        let at = handle_center(window, 2);
+        click_at(window, at, Modifiers::secondary_key(), cx);
+    });
+    step(handle, cx, |window, cx| {
+        // ⌘: takes the row out.
+        assert_eq!(marked(&tab, 5, cx), (vec![1, 3], all.clone()));
+        // Dragging along the handles.
+        let from = handle_center(window, 0);
+        let path = [handle_center(window, 1), handle_center(window, 2)];
+        drag_through(window, from, &path, cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 5, cx), (vec![0, 1, 2], all.clone()));
+    });
+}
+
+#[gpui_kit::test]
+fn the_row_handle_stays_left_and_leaves_the_cell_clickable(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_wide_rows(handle, &workspace, cx);
+    step(handle, cx, |window, cx| {
+        // Clear of the handle's strip, the first cell takes the click.
+        let cell = window
+            .within(("row", 1usize))
+            .find(("cell", 0usize))
+            .bounds();
+        let at = gpui_kit::point(cell.origin.x + px(60.), cell.center().y);
+        click_at(window, at, Modifiers::default(), cx);
+    });
+    let before = step(handle, cx, |window, cx| {
+        assert_eq!(marked(&tab, 5, cx), (vec![1], vec![0]));
+        window
+            .within(("row", 1usize))
+            .find(("row-handle", 1usize))
+            .bounds()
+    });
+    step(handle, cx, |_, cx| {
+        let results = tab.read(cx).results().clone();
+        results.update(cx, |r, cx| r.scroll_to_col(18, cx));
+    });
+    step(handle, cx, |window, cx| {
+        window.render_frame(cx);
+        let after = window
+            .within(("row", 1usize))
+            .find(("row-handle", 1usize))
+            .bounds();
+        assert_eq!(
+            before.origin.x, after.origin.x,
+            "the handle stays at the left edge"
+        );
+        assert!(
+            window
+                .within(("row", 1usize))
+                .try_find(("cell", 0usize))
+                .is_none()
+        );
+        click_at(window, after.center(), Modifiers::default(), cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(marked(&tab, 5, cx).0, vec![1]);
+        assert_eq!(marked(&tab, 5, cx).1.len(), 20);
     });
 }

@@ -50,6 +50,18 @@ const PEEK_WIDTH: f32 = 420.;
 const PEEK_HEIGHT: f32 = 240.;
 const PEEK_CHARS: usize = 2_000;
 
+/// The strip at a row's left edge that shows its handle when the pointer is in it.
+const ROW_HANDLE: Pixels = px(20.);
+
+/// What a drag with the button held marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drag {
+    /// From a cell: the rectangle to the cell under the pointer (last seen).
+    Cells(usize, usize),
+    /// Along the row handles: whole rows down to the one under the pointer.
+    Rows(usize),
+}
+
 /// The filter zone right of a column's name is never narrower (the name gives way).
 const FILTER_ZONE: Pixels = px(28.);
 
@@ -81,6 +93,10 @@ pub struct ResultsDelegate {
     /// More rows than loaded: scrolling to the end loads the next page.
     pub more: bool,
     hovered: Option<usize>,
+    /// Row whose handle (left edge) is under the pointer.
+    handle_hovered: Option<usize>,
+    /// A drag that marks, while the button is held.
+    drag: Option<Drag>,
     /// The inspected cell (A) and the one compared with it (B): (row, column).
     pub inspected: Option<(usize, usize)>,
     pub compared: Option<(usize, usize)>,
@@ -319,6 +335,92 @@ impl ResultsDelegate {
 
     pub fn close_filter(&mut self) {
         self.filter_open = None;
+    }
+
+    /// The handle at a row's left edge: a narrow strip that, under the pointer,
+    /// shows the row's number and marks the whole row (⇧: the rows from the
+    /// anchor, ⌘: toggles it; dragging along the handles marks the rows passed).
+    /// Drawn over the row, so it stays at the left edge when the grid scrolls
+    /// sideways; it covers the first cell only while shown.
+    fn row_handle(&self, row_ix: usize, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
+        let theme = cx.theme();
+        let shown = self.handle_hovered == Some(row_ix);
+        let n_cols = self.columns.len();
+        deferred(
+            h_flex()
+                .id(("row-handle", row_ix))
+                .test_support()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .min_w(ROW_HANDLE)
+                .items_center()
+                .when(shown, |this| {
+                    this.gap_1()
+                        .px_1p5()
+                        .bg(theme.tokens.table_head)
+                        .border_r_1()
+                        .border_color(theme.border)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            div()
+                                .font_family(theme.mono_font_family.clone())
+                                .child((row_ix + 1).to_string()),
+                        )
+                        .child(
+                            div()
+                                .id(("row-handle-mark", row_ix))
+                                .test_support()
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Mark entire row").build(window, cx)
+                                })
+                                .child(
+                                    Icon::new(Lucide::ArrowRightToLine)
+                                        .size_3()
+                                        .text_color(theme.foreground),
+                                ),
+                        )
+                })
+                .occlude()
+                .on_hover(cx.listener(move |table, hovered: &bool, _, cx| {
+                    let d = table.delegate_mut();
+                    if *hovered {
+                        d.handle_hovered = Some(row_ix);
+                    } else if d.handle_hovered == Some(row_ix) {
+                        d.handle_hovered = None;
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |table, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        let d = table.delegate_mut();
+                        d.mark.click_row(row_ix, keys(e.modifiers), n_cols);
+                        d.drag = Some(Drag::Rows(row_ix));
+                        d.marked();
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |table, e: &MouseMoveEvent, _, cx| {
+                    let d = table.delegate_mut();
+                    if e.pressed_button != Some(MouseButton::Left) {
+                        d.drag = None;
+                    } else if matches!(d.drag, Some(Drag::Rows(r)) if r != row_ix) {
+                        let shift = Keys {
+                            shift: true,
+                            ..Keys::default()
+                        };
+                        d.mark.click_row(row_ix, shift, n_cols);
+                        d.drag = Some(Drag::Rows(row_ix));
+                        d.marked();
+                        cx.notify();
+                    }
+                })),
+        )
+        .with_priority(1)
     }
 
     /// Key and link markers left of a column name: a gold key for a primary-key
@@ -886,13 +988,17 @@ impl TableDelegate for ResultsDelegate {
                     .marked_stats(col_ix)
                     .cloned()
                     .map(|marked| (format!("Marked: {} rows", marked.rows), marked));
-                div().absolute().top_full().left_1_2().child(deferred(
-                    anchored()
-                        .anchor(Anchor::TopCenter)
-                        .offset(point(px(0.), px(8.)))
-                        .snap_to_window_with_margin(px(8.))
-                        .child(stats_card(scope, &stats, marked, facts.as_ref(), cx)),
-                ))
+                // Above the rows' handles (deferred too).
+                div().absolute().top_full().left_1_2().child(
+                    deferred(
+                        anchored()
+                            .anchor(Anchor::TopCenter)
+                            .offset(point(px(0.), px(8.)))
+                            .snap_to_window_with_margin(px(8.))
+                            .child(stats_card(scope, &stats, marked, facts.as_ref(), cx)),
+                    )
+                    .with_priority(2),
+                )
             });
 
         h_flex()
@@ -975,9 +1081,13 @@ impl TableDelegate for ResultsDelegate {
         let highlight = crate::theme::grid(cx).row;
         // Clicks are handled by the cells: the table stops them there (it selects
         // the cell), so they never reach the row.
-        div().id(("row", row_ix)).relative().when(selected, |this| {
-            this.child(div().absolute().inset_0().bg(highlight))
-        })
+        div()
+            .id(("row", row_ix))
+            .relative()
+            .when(selected, |this| {
+                this.child(div().absolute().inset_0().bg(highlight))
+            })
+            .child(self.row_handle(row_ix, cx))
     }
 
     fn context_menu(
@@ -1200,11 +1310,24 @@ impl TableDelegate for ResultsDelegate {
                         }
                     } else {
                         d.mark.click_cell(row_ix, col_ix, keys(e.modifiers));
+                        d.drag = Some(Drag::Cells(row_ix, col_ix));
                         d.marked();
                     }
                     cx.notify();
                 }),
             )
+            // Dragging from a cell marks the rectangle to the cell under the pointer.
+            .on_mouse_move(cx.listener(move |table, e: &MouseMoveEvent, _, cx| {
+                let d = table.delegate_mut();
+                if e.pressed_button != Some(MouseButton::Left) {
+                    d.drag = None;
+                } else if matches!(d.drag, Some(Drag::Cells(r, c)) if (r, c) != (row_ix, col_ix)) {
+                    d.mark.drag_to(row_ix, col_ix);
+                    d.drag = Some(Drag::Cells(row_ix, col_ix));
+                    d.marked();
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |table, _, _, cx| {
