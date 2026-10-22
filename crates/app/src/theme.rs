@@ -9,7 +9,7 @@
 use std::rc::Rc;
 
 use gpui_kit::component::{Theme, ThemeConfig, ThemeMode};
-use gpui_kit::{App, Global, Hsla, Rgba, Window, WindowAppearance, black, white};
+use gpui_kit::{App, Global, Hsla, Pixels, Rgba, Window, WindowAppearance, black, px, white};
 use serde_json::{Value, json};
 use tangul_data::settings::{Appearance, Rgb};
 use tangul_data::themes::{self, Theme as ThemeFile, ThemeMode as FileMode};
@@ -213,6 +213,37 @@ pub fn engraving(cx: &App) -> Engraving {
     }
 }
 
+/// How the result grid draws its mark.
+pub struct GridTheme {
+    /// The rows the mark covers.
+    pub row: Hsla,
+    /// Marked cells.
+    pub mark: Hsla,
+    /// The outline around the mark's outer edge.
+    pub mark_border: Hsla,
+    /// Its width (zero: none).
+    pub mark_border_width: Pixels,
+    /// Radius of the mark's outer corners.
+    pub mark_radius: Pixels,
+    /// A marked column's header cell.
+    pub header_mark: Hsla,
+}
+
+/// The grid's mark in the current theme: its own `grid` colors, else derived from
+/// the selection and the accent.
+pub fn grid(cx: &App) -> GridTheme {
+    let theme = current(cx);
+    let g = theme.grid.resolve(&theme.colors);
+    GridTheme {
+        row: color(g.row),
+        mark: color(g.mark),
+        mark_border: color(g.mark_border),
+        mark_border_width: px(g.mark_border_width),
+        mark_radius: px(g.mark_radius),
+        header_mark: color(g.header_mark),
+    }
+}
+
 /// `color` mixed into `background`: an opaque tint, so stacked layers painted over
 /// each other keep their own color.
 pub fn tint(color: Hsla, background: Hsla, amount: f32) -> Hsla {
@@ -333,8 +364,10 @@ pub fn config(theme: &ThemeFile) -> ThemeConfig {
         ("table.foot.background", hex(c.surface)),
         ("table.foot.foreground", hex(c.muted)),
         ("table.hover.background", hex(c.hover)),
-        ("table.active.background", hex(c.selection)),
-        ("table.active.border", hex(c.accent)),
+        // The result grid draws its own mark; the table's cursor and right-clicked
+        // cell stay invisible (the grid is the only table).
+        ("table.active.background", hex(alpha(c.selection, 0))),
+        ("table.active.border", hex(alpha(c.accent, 0))),
         ("table.row.border", hex(c.border)),
         ("chart.1", chart(0)),
         ("chart.2", chart(1)),
@@ -446,6 +479,7 @@ pub fn config(theme: &ThemeFile) -> ThemeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::BorrowAppContext as _;
 
     #[test]
     fn every_theme_maps_onto_gpui_kit() {
@@ -468,6 +502,25 @@ mod tests {
             assert_eq!(unset, Vec::<String>::new(), "{}", theme.name);
             assert!(config.highlight.is_some());
         }
+    }
+
+    #[test]
+    fn the_grid_follows_the_current_theme() {
+        let cx = gpui_kit::TestAppContext::single();
+        cx.update(|cx| {
+            init_built_in(cx);
+            let theme = current(cx).clone();
+            let g = grid(cx);
+            assert_eq!(g.mark, color(theme.grid.mark.unwrap()));
+            assert_eq!(g.mark_border, color(theme.colors.accent));
+            assert_eq!(g.mark_border_width, px(2.));
+            assert!(g.row.a < g.mark.a);
+            // Without its own colors the theme's selection and accent apply.
+            cx.update_global::<Themes, _>(|t, _| t.current.grid = Default::default());
+            let g = grid(cx);
+            assert_eq!(g.mark, color(theme.colors.selection));
+            assert_eq!(g.header_mark, color(theme.colors.selection));
+        });
     }
 
     #[test]

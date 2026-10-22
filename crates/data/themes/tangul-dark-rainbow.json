@@ -39,5 +39,13 @@
     "property": "#bcc4e0",
     "operator": "#caccca",
     "punctuation": "#caccca"
+  },
+  "grid": {
+    "row": "#e5484d14",
+    "mark": "#e5484d40",
+    "mark_border": "#e5484d",
+    "mark_border_width": 2,
+    "mark_radius": 4,
+    "header_mark": "#e5484d33"
   }
 }

@@ -1,25 +1,24 @@
 //! Virtualized result grid: the table only asks for visible cells, and cells are read
 //! straight from the ResultSet arena.
 //!
-//! Row selection is kept here rather than in the table (which knows a single row):
-//! click selects, ⇧-click extends, ⌘-click toggles. The table's own selection is a
-//! cell (moved with the arrow keys); a double click or Space makes it the inspected
-//! cell (A, shown in the value viewer), ⌥-click picks a cell to compare with it (B).
-//! A long hover on a value shows all of it.
-//! The right-click menu copies the
-//! selection, follows foreign keys to related rows and writes UPDATE / DELETE
-//! statements for the selected rows (to open elsewhere, not run).
+//! The mark (`tangul_assist::mark`: columns × rows) is kept here rather than in the
+//! table (which knows a single cell): click marks a cell, ⇧-click a rectangle,
+//! ⌘-click toggles a row. The table's own selection is a cell (moved with the arrow
+//! keys); a double click or Space makes it the inspected cell (A, shown in the value
+//! viewer), ⌥-click picks a cell to compare with it (B). A long hover on a value
+//! shows all of it. The right-click menu copies the mark, follows foreign keys to
+//! related rows and writes UPDATE / DELETE statements for the marked rows (to open
+//! elsewhere, not run).
 //!
 //! Column headers mark primary-key columns, show count / sum / avg / min / max of a
-//! numeric column on hover (over the selected rows, or all loaded ones), and open
-//! the column's filter and sort popover. Scrolling to the end loads the next page.
+//! numeric column on hover (over all loaded rows), and open the column's filter and
+//! sort popover. Scrolling to the end loads the next page.
 
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme as _, Icon, IconName, Selectable, Sizable as _, Size,
+    button::Button,
     h_flex,
     hover_card::HoverCard,
     menu::{PopupMenu, PopupMenuItem},
@@ -31,6 +30,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_assist::columns::{ColumnFacts, TagKind};
+use tangul_assist::mark::{Keys, Mark, tsv};
 use tangul_assist::refine::{ColumnKind, Refine};
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::{ColumnInfo, ResultSet};
@@ -50,6 +50,35 @@ const PEEK_WIDTH: f32 = 420.;
 const PEEK_HEIGHT: f32 = 240.;
 const PEEK_CHARS: usize = 2_000;
 
+/// What the grid draws after the rows (gpui's deferred priorities), bottom to top:
+/// the mark, the inspected and compared cells, the row handles, the column summary,
+/// the count beside the pointer while dragging.
+const LAYER_MARK: usize = 0;
+const LAYER_INSPECTED: usize = 1;
+const LAYER_HANDLE: usize = 2;
+const LAYER_SUMMARY: usize = 3;
+pub(super) const LAYER_DRAG_CHIP: usize = 4;
+
+/// The line the table draws under each row (outside its cells).
+const ROW_LINE: Pixels = px(1.);
+
+/// The strip at a row's left edge that shows its handle when the pointer is in it.
+const ROW_HANDLE: Pixels = px(30.);
+
+/// What a drag with the button held marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drag {
+    /// From a cell: the rectangle to the cell under the pointer (last seen).
+    Cells(usize, usize),
+    /// Along the row handles: whole rows down to the one under the pointer.
+    Rows(usize),
+}
+
+/// The filter zone right of a column's name is never narrower (the name gives way).
+const FILTER_ZONE: Pixels = px(28.);
+/// The filter button's square, at the zone's right end.
+const FILTER_BUTTON: Pixels = px(22.);
+
 /// Related tables listed directly in the menu (the most used); the rest are under
 /// "Show all".
 const RELATED_SHOWN: usize = 3;
@@ -58,10 +87,9 @@ const RELATED_SHOWN: usize = 3;
 pub struct ResultsDelegate {
     pub result: ResultSet,
     columns: Vec<Column>,
-    selected: BTreeSet<usize>,
-    /// Start of a ⇧-click range.
-    anchor: Option<usize>,
-    /// Column under the last right click, for "Copy cell".
+    /// What is marked: columns × rows of the loaded result.
+    mark: Mark,
+    /// Column under the last right click (the cell the menu acts on).
     menu_col: Option<usize>,
     /// Foreign-key links of the current result, most used first (see
     /// `tangul_assist::related`).
@@ -79,6 +107,18 @@ pub struct ResultsDelegate {
     /// More rows than loaded: scrolling to the end loads the next page.
     pub more: bool,
     hovered: Option<usize>,
+    /// Row whose handle (left edge) is under the pointer.
+    handle_hovered: Option<usize>,
+    /// A drag that marks, while the button is held.
+    drag: Option<Drag>,
+    /// Cells clicks went to, oldest first: the table selects each too (its event
+    /// comes later), which must not move the mark again (see `cursor_moved`).
+    clicked: Vec<(usize, usize)>,
+    /// Where the pointer was last seen during that drag (window coordinates).
+    drag_pointer: Point<Pixels>,
+    /// The chip above the grid showed when the drag began: it stays meanwhile
+    /// (rows must not move under the pointer).
+    drag_keeps_chip: bool,
     /// The inspected cell (A) and the one compared with it (B): (row, column).
     pub inspected: Option<(usize, usize)>,
     pub compared: Option<(usize, usize)>,
@@ -87,10 +127,12 @@ pub struct ResultsDelegate {
     /// Column whose foreign-key card is open (hides the aggregates meanwhile).
     key_card: Option<usize>,
     filter_panel: Option<Entity<FilterPanel>>,
-    /// Bumped whenever the selection changes (invalidates `stats`).
+    /// Bumped whenever the mark changes (invalidates `stats`).
     selection_gen: u64,
     /// Aggregates of the hovered column: (column, rows, selection_gen) → stats.
     stats: Option<((usize, usize, u64), Option<ColumnStats>)>,
+    /// The same over the marked rows only.
+    marked_stats: Option<((usize, usize, u64), Option<ColumnStats>)>,
 }
 
 impl ResultsDelegate {
@@ -119,8 +161,7 @@ impl ResultsDelegate {
             })
             .collect();
         self.result = ResultSet::new(cols);
-        self.selected.clear();
-        self.anchor = None;
+        self.mark.clear();
         self.inspected = None;
         self.compared = None;
         self.menu_col = None;
@@ -133,6 +174,7 @@ impl ResultsDelegate {
         self.key_card = None;
         self.selection_gen += 1;
         self.stats = None;
+        self.marked_stats = None;
     }
 
     /// What the schema says about the columns; they decide which columns get
@@ -140,14 +182,14 @@ impl ResultsDelegate {
     pub fn set_facts(&mut self, facts: Vec<Option<ColumnFacts>>) {
         self.facts = facts;
         self.stats = None;
+        self.marked_stats = None;
     }
 
     /// Drops the rows but keeps the columns (and their widths, keys, filters): a
     /// filtered or sorted version of the result is about to arrive.
     pub fn clear_rows(&mut self) {
         self.result = ResultSet::new(self.result.columns().to_vec());
-        self.selected.clear();
-        self.anchor = None;
+        self.mark.clear();
         self.inspected = None;
         self.compared = None;
         self.more = false;
@@ -155,6 +197,7 @@ impl ResultsDelegate {
         self.selection_gen += 1;
         // Same row count as before is likely (a full page): don't reuse old stats.
         self.stats = None;
+        self.marked_stats = None;
     }
 
     /// What the column holds: by its type when it is a known table column,
@@ -168,32 +211,46 @@ impl ResultsDelegate {
         }
     }
 
-    /// Summary of a column over the selected rows, or all loaded rows.
+    /// Summary of a column over all loaded rows.
     fn stats(&mut self, col: usize) -> Option<&ColumnStats> {
         let key = (col, self.result.row_count(), self.selection_gen);
         if self.stats.as_ref().is_none_or(|(k, _)| *k != key) {
-            // A column the schema says is not a number gets no sums, even if its
-            // values look like numbers (codes, zip codes).
-            let numeric = !matches!(self.facts.get(col),
-                Some(Some(f)) if ColumnKind::from_type(&f.data_type) != ColumnKind::Number);
-            let stats = if self.selected.is_empty() {
-                column_stats(
-                    (0..self.result.row_count()).map(|r| self.result.cell(r, col)),
-                    numeric,
-                )
-            } else {
-                column_stats(
-                    self.selected.iter().map(|&r| self.result.cell(r, col)),
-                    numeric,
-                )
-            };
-            self.stats = Some((key, stats));
+            let rows: Vec<usize> = (0..self.result.row_count()).collect();
+            self.stats = Some((key, self.column_stats(col, &rows)));
         }
         self.stats.as_ref().and_then(|(_, s)| s.as_ref())
     }
 
+    /// Summary of a marked column over the marked rows, when more than one row is
+    /// marked (one value needs no sums).
+    fn marked_stats(&mut self, col: usize) -> Option<&ColumnStats> {
+        let rows = self.mark.rows(self.result.row_count());
+        if !self.mark.col_marked(col) || rows.len() < 2 {
+            return None;
+        }
+        let key = (col, self.result.row_count(), self.selection_gen);
+        if self.marked_stats.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.marked_stats = Some((key, self.column_stats(col, &rows)));
+        }
+        self.marked_stats.as_ref().and_then(|(_, s)| s.as_ref())
+    }
+
+    fn column_stats(&self, col: usize, rows: &[usize]) -> Option<ColumnStats> {
+        // A column the schema says is not a number gets no sums, even if its
+        // values look like numbers (codes, zip codes).
+        let numeric = !matches!(self.facts.get(col),
+            Some(Some(f)) if ColumnKind::from_type(&f.data_type) != ColumnKind::Number);
+        column_stats(rows.iter().map(|&r| self.result.cell(r, col)), numeric)
+    }
+
     pub fn clear(&mut self) {
         self.reset(Vec::new());
+    }
+
+    /// What is marked (tests).
+    #[cfg(test)]
+    pub fn mark(&self) -> Mark {
+        self.mark.clone()
     }
 
     /// The cell at `row`, `col` (tests).
@@ -210,32 +267,111 @@ impl ResultsDelegate {
             .collect()
     }
 
-    fn click(&mut self, row: usize, modifiers: Modifiers) {
+    /// The mark changed: cached summaries are stale.
+    fn marked(&mut self) {
         self.selection_gen += 1;
-        match self.anchor {
-            Some(anchor) if modifiers.shift => {
-                self.selected = (anchor.min(row)..=anchor.max(row)).collect();
-            }
-            _ if modifiers.secondary() => {
-                if !self.selected.remove(&row) {
-                    self.selected.insert(row);
-                }
-                self.anchor = Some(row);
-            }
-            _ => {
-                self.selected = BTreeSet::from([row]);
-                self.anchor = Some(row);
-            }
-        }
     }
 
-    /// The rows a menu opened on `row` acts on: the selection if `row` is in it.
-    fn target_rows(&self, row: usize) -> Vec<usize> {
-        if self.selected.contains(&row) {
-            self.selected.iter().copied().collect()
-        } else {
-            vec![row]
+    /// ⌘/Ctrl+C: the mark as TSV without headers; without a mark the selected cell's
+    /// value alone (NULL as empty); None when there is neither.
+    pub(super) fn copy_text(&self, selected: Option<(usize, usize)>) -> Option<String> {
+        let cell = |r: usize, c: usize| self.result.cell(r, c);
+        if !self.mark.is_empty() {
+            let rows = self.mark.rows(self.result.row_count());
+            return Some(tsv(&rows, &self.mark.cols(), cell, None));
         }
+        let (row, col) = selected
+            .filter(|&(r, c)| r < self.result.row_count() && c < self.result.columns().len())?;
+        Some(tsv(&[row], &[col], cell, None))
+    }
+
+    /// ⇧+arrows: the mark's moving corner moves; returns it (to scroll to) and
+    /// `None` in an empty result. `from` is the selected cell, if any.
+    pub(super) fn extend_mark(
+        &mut self,
+        from: Option<(usize, usize)>,
+        d_row: isize,
+        d_col: isize,
+    ) -> Option<(usize, usize)> {
+        let (rows, cols) = (self.result.row_count(), self.result.columns().len());
+        self.mark
+            .extend(from.unwrap_or((0, 0)), d_row, d_col, rows, cols);
+        self.marked();
+        self.mark.end()
+    }
+
+    /// ⌘/Ctrl+A.
+    pub(super) fn mark_all(&mut self) {
+        self.mark.all(self.result.columns().len());
+        self.marked();
+    }
+
+    /// Esc: clears the mark; false when there was none.
+    /// The table's own selected cell (never drawn; the keys move it) is now `row`,
+    /// `col`. A click marked already; the keys make it the mark, one cell.
+    pub(super) fn cursor_moved(&mut self, row: usize, col: usize) -> bool {
+        if let Some(i) = self.clicked.iter().position(|&c| c == (row, col)) {
+            self.clicked.drain(..=i);
+            return false;
+        }
+        self.mark.click_cell(row, col, Keys::default());
+        self.marked();
+        true
+    }
+
+    /// The table is about to select `row`, `col` for something that marked or
+    /// shows it already (a click, "Inspect value").
+    pub(super) fn selecting(&mut self, row: usize, col: usize) {
+        self.clicked.push((row, col));
+    }
+
+    pub(super) fn clear_mark(&mut self) -> bool {
+        if self.mark.is_empty() {
+            return false;
+        }
+        self.mark.clear();
+        self.marked();
+        true
+    }
+
+    /// The chip's text: None unless more than one cell is marked.
+    /// The chip above the grid: what is marked, when more than a cell is. During a
+    /// drag it neither comes nor goes (the rows would move under the pointer).
+    pub(super) fn mark_chip(&self) -> Option<String> {
+        let loaded = self.result.row_count();
+        let shown = match self.drag {
+            Some(_) => self.drag_keeps_chip,
+            None => self.mark.cell_count(loaded) > 1,
+        };
+        shown.then(|| self.mark.describe(loaded))
+    }
+
+    /// A drag begins at `pointer` (before the click changes the mark).
+    fn start_drag(&mut self, drag: Drag, pointer: Point<Pixels>) {
+        self.drag_keeps_chip = self.mark_chip().is_some();
+        self.drag = Some(drag);
+        self.drag_pointer = pointer;
+    }
+
+    /// While a drag marks more than a cell: what is marked, shown next to the
+    /// pointer (the chip above the grid would push the rows away under it), and
+    /// where the pointer is.
+    pub(super) fn drag_chip(&self) -> Option<(String, Point<Pixels>)> {
+        let loaded = self.result.row_count();
+        (self.drag.is_some() && self.mark.cell_count(loaded) > 1)
+            .then(|| (self.mark.describe(loaded), self.drag_pointer))
+    }
+
+    /// The button was released: the drag is over (the chip goes above the grid).
+    fn end_drag(&mut self) -> bool {
+        self.drag.take().is_some()
+    }
+
+    /// The rows a menu opened on `row` acts on: the mark's (it holds the clicked
+    /// cell), else that row.
+    fn menu_rows(&self, row: usize) -> Vec<usize> {
+        let rows = self.mark.rows(self.result.row_count());
+        if rows.is_empty() { vec![row] } else { rows }
     }
 
     /// All values of the rows.
@@ -279,27 +415,6 @@ impl ResultsDelegate {
                 view.update(cx, |_, cx| cx.emit(event.clone()));
             })
     }
-
-    fn tsv(&self, rows: &[usize], headers: bool) -> String {
-        let cols = self.result.columns().len();
-        let mut lines = Vec::with_capacity(rows.len() + 1);
-        if headers {
-            let names: Vec<String> = self
-                .result
-                .columns()
-                .iter()
-                .map(|c| tsv_field(Some(&c.name)))
-                .collect();
-            lines.push(names.join("\t"));
-        }
-        for &row in rows {
-            let fields: Vec<String> = (0..cols)
-                .map(|col| tsv_field(self.result.cell(row, col)))
-                .collect();
-            lines.push(fields.join("\t"));
-        }
-        lines.join("\n")
-    }
 }
 
 impl ResultsDelegate {
@@ -337,6 +452,108 @@ impl ResultsDelegate {
 
     pub fn close_filter(&mut self) {
         self.filter_open = None;
+    }
+
+    /// The handle at a row's left edge: a narrow strip that, under the pointer,
+    /// shows the row's number and marks the whole row (⇧: the rows from the
+    /// anchor, ⌘: toggles it; dragging along the handles marks the rows passed).
+    /// Drawn over the row, so it stays at the left edge when the grid scrolls
+    /// sideways; it covers the first cell only while shown.
+    fn row_handle(&self, row_ix: usize, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
+        let theme = cx.theme();
+        let shown = self.handle_hovered == Some(row_ix);
+        let n_cols = self.columns.len();
+        deferred(
+            h_flex()
+                .id(("row-handle", row_ix))
+                .test_support()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .min_w(ROW_HANDLE)
+                .items_center()
+                .when(shown, |this| {
+                    this.gap_1()
+                        .px_1p5()
+                        .bg(theme.tokens.table_head)
+                        .border_r_1()
+                        .border_color(theme.border)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            div()
+                                .font_family(theme.mono_font_family.clone())
+                                .child((row_ix + 1).to_string()),
+                        )
+                        .child(
+                            div()
+                                .id(("row-handle-mark", row_ix))
+                                .test_support()
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Mark entire row").build(window, cx)
+                                })
+                                .child(
+                                    Icon::new(Lucide::ArrowRightToLine)
+                                        .size_3()
+                                        .text_color(theme.foreground),
+                                ),
+                        )
+                })
+                .occlude()
+                .on_hover(cx.listener(move |table, hovered: &bool, _, cx| {
+                    let d = table.delegate_mut();
+                    if *hovered {
+                        d.handle_hovered = Some(row_ix);
+                    } else if d.handle_hovered == Some(row_ix) {
+                        d.handle_hovered = None;
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |table, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        let d = table.delegate_mut();
+                        d.start_drag(Drag::Rows(row_ix), e.position);
+                        d.mark.click_row(row_ix, keys(e.modifiers), n_cols);
+                        d.marked();
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |table, e: &MouseMoveEvent, _, cx| {
+                    let d = table.delegate_mut();
+                    if e.pressed_button != Some(MouseButton::Left) {
+                        if d.end_drag() {
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    if d.drag.is_some() {
+                        d.drag_pointer = e.position;
+                        cx.notify();
+                    }
+                    if matches!(d.drag, Some(Drag::Rows(r)) if r != row_ix) {
+                        let shift = Keys {
+                            shift: true,
+                            ..Keys::default()
+                        };
+                        d.mark.click_row(row_ix, shift, n_cols);
+                        d.drag = Some(Drag::Rows(row_ix));
+                        d.marked();
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|table, _, _, cx| {
+                        if table.delegate_mut().end_drag() {
+                            cx.notify();
+                        }
+                    }),
+                ),
+        )
+        .with_priority(LAYER_HANDLE)
     }
 
     /// Key and link markers left of a column name: a gold key for a primary-key
@@ -506,21 +723,12 @@ fn schema_tags(facts: &ColumnFacts, cx: &App) -> impl IntoElement {
 fn stats_card(
     scope: String,
     stats: &ColumnStats,
+    marked: Option<(String, ColumnStats)>,
     facts: Option<&ColumnFacts>,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let row = |label: &'static str, value: SharedString| {
-        h_flex()
-            .gap_4()
-            .justify_between()
-            .child(div().text_color(theme.muted_foreground).child(label))
-            .child(
-                div()
-                    .font_family(theme.mono_font_family.clone())
-                    .child(value),
-            )
-    };
+    let label = |text: String| div().pb_1().text_color(theme.muted_foreground).child(text);
     v_flex()
         .id("column-stats")
         .test_support()
@@ -535,8 +743,41 @@ fn stats_card(
         .bg(theme.popover)
         .text_color(theme.popover_foreground)
         .shadow_md()
-        .child(div().pb_1().text_color(theme.muted_foreground).child(scope))
+        .child(label(scope))
         .children(facts.map(|f| schema_tags(f, cx)))
+        .child(stats_rows(stats, cx))
+        .when_some(marked, |this, (scope, stats)| {
+            this.child(
+                v_flex()
+                    .id("column-stats-marked")
+                    .test_support()
+                    .mt_1()
+                    .pt_1p5()
+                    .gap_0p5()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(label(scope))
+                    .child(stats_rows(&stats, cx)),
+            )
+        })
+}
+
+/// Count / sum / avg / min / max of one summary, label left, value right.
+fn stats_rows(stats: &ColumnStats, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let row = |label: &'static str, value: SharedString| {
+        h_flex()
+            .gap_4()
+            .justify_between()
+            .child(div().text_color(theme.muted_foreground).child(label))
+            .child(
+                div()
+                    .font_family(theme.mono_font_family.clone())
+                    .child(value),
+            )
+    };
+    v_flex()
+        .gap_0p5()
         .child(row("rows", stats.rows.to_string().into()))
         .when(stats.nulls > 0, |this| {
             this.child(row("non-null", stats.count.to_string().into()))
@@ -701,13 +942,144 @@ fn format_float(x: f64, decimals: u32) -> String {
     }
 }
 
-/// A TSV field that pastes cleanly into spreadsheets: NULL is empty, values with
-/// tabs, line breaks or quotes are quoted.
-fn tsv_field(value: Option<&str>) -> String {
-    match value {
-        None => String::new(),
-        Some(v) if v.contains(['\t', '\n', '\r', '"']) => format!("\"{}\"", v.replace('"', "\"\"")),
-        Some(v) => v.to_string(),
+/// An overlay over a whole cell: the table pads what a cell (or a header) draws,
+/// and marks reach over that padding to the cell's edges, like the table's own
+/// selected cell. The grid's size is `xsmall` (see `ResultView::render_body`).
+fn over_cell<E: Styled>(overlay: E) -> E {
+    let p = Size::XSmall.table_cell_padding();
+    overlay
+        .absolute()
+        .top(-p.top)
+        .bottom(-p.bottom)
+        .left(-p.left)
+        .right(-p.right)
+}
+
+/// An overlay over a cell drawn after the rows, so it also covers the row's line
+/// under the cell (the table clips a cell to above that line). Otherwise clipped
+/// like the cell: to it and to the grid's view, grown by the line only where the
+/// cell's bottom is in view (nothing reaches past the grid's bottom edge).
+struct OverRowLine {
+    child: Option<AnyElement>,
+    priority: usize,
+}
+
+fn over_row_line(child: impl IntoElement, priority: usize) -> OverRowLine {
+    OverRowLine {
+        child: Some(child.into_any_element()),
+        priority,
+    }
+}
+
+impl Element for OverRowLine {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let child = self.child.as_mut().expect("laid out once");
+        (child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        let mut mask = window.content_mask();
+        // The overlay reaches over the line; the cell's clip ends just above it.
+        if mask.bounds.bottom() >= bounds.bottom() - ROW_LINE {
+            mask.bounds.size.height = bounds.bottom() - mask.bounds.top();
+        }
+        let child = self.child.take().expect("prepainted once");
+        window.defer_draw(child, window.element_offset(), self.priority, Some(mask));
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        _: &mut Window,
+        _: &mut App,
+    ) {
+    }
+}
+
+impl IntoElement for OverRowLine {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+/// The keys held, as the mark takes them.
+fn keys(modifiers: Modifiers) -> Keys {
+    Keys {
+        shift: modifiers.shift,
+        secondary: modifiers.secondary(),
+    }
+}
+
+/// What a column's filter popover hangs from: nothing to see or click (the filter
+/// zone around it opens and closes the popover).
+#[derive(IntoElement, Default)]
+struct PopoverAnchor {
+    selected: bool,
+}
+
+impl Selectable for PopoverAnchor {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for PopoverAnchor {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div().size_0()
+    }
+}
+
+/// "Copy 3 rows", "Copy row".
+fn rows_label(verb: &str, n: usize) -> String {
+    if n == 1 {
+        format!("{verb} row")
+    } else {
+        format!("{verb} {n} rows")
+    }
+}
+
+/// "DELETE statements for 3 rows", "DELETE statement for 1 row".
+fn delete_label(n: usize) -> String {
+    if n == 1 {
+        "DELETE statement for 1 row".into()
+    } else {
+        format!("DELETE statements for {n} rows")
     }
 }
 
@@ -730,8 +1102,9 @@ impl TableDelegate for ResultsDelegate {
         self.columns[col_ix].clone()
     }
 
-    /// Key icon, name, and on hover the filter button (over the end of a long name)
-    /// and the aggregates below the cell.
+    /// Key icon and name (a click marks the column), then the filter zone: the free
+    /// space right of the name, with the funnel / sort icon on hover, opens the
+    /// column's filter and sort popover. Below the cell on hover, the aggregates.
     fn render_th(
         &mut self,
         col_ix: usize,
@@ -748,8 +1121,12 @@ impl TableDelegate for ResultsDelegate {
         let sorted = self.refine.sort.filter(|s| s.column == col_ix);
         let active = filtered || sorted.is_some();
 
+        let header_fill = self
+            .mark
+            .col_marked(col_ix)
+            .then(|| crate::theme::grid(cx).header_mark);
         let table = cx.entity().downgrade();
-        let filter_button = (self.refinable && (hovered || open || active)).then(|| {
+        let filter_zone = self.refinable.then(|| {
             let icon = match sorted {
                 Some(s) if !filtered => Icon::new(if s.descending {
                     IconName::SortDescending
@@ -761,41 +1138,78 @@ impl TableDelegate for ResultsDelegate {
             let icon = if active {
                 icon.text_color(theme.primary)
             } else {
-                icon
+                icon.text_color(theme.muted_foreground)
             };
             let panel = self.filter_panel.clone();
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right_0()
-                .flex()
+            // Opened from outside, the popover focuses itself as it is drawn: the
+            // value field must be the one it focuses.
+            let focus = open
+                .then(|| panel.as_ref().and_then(|p| p.read(cx).focus_target(cx)))
+                .flatten();
+            h_flex()
+                .id(("col-filter-button", col_ix))
+                .test_support()
+                .relative()
+                .flex_1()
+                .min_w(FILTER_ZONE)
+                .h_full()
+                .group(SharedString::from(format!("col-filter-{col_ix}")))
+                .justify_end()
                 .items_center()
-                .pl_1()
-                .bg(theme.tokens.table_head)
+                // The button: a square at the right; the free space left of it
+                // opens the popover too.
+                .when(hovered || open || active, |this| {
+                    this.child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .size(FILTER_BUTTON)
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme.radius)
+                            .when(open, |this| this.bg(theme.tokens.table_hover))
+                            .group_hover(format!("col-filter-{col_ix}"), |this| {
+                                this.bg(theme.tokens.table_hover)
+                            })
+                            .child(icon.size_4()),
+                    )
+                })
+                // Clicked while open: the popover may have closed on this very
+                // click already (it closes on clicks outside it), so only a state
+                // still as drawn is toggled, like gpui-kit's own triggers.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |table, _, window, cx| {
+                        cx.stop_propagation();
+                        let d = table.delegate_mut();
+                        if (d.filter_open == Some(col_ix)) == open {
+                            d.filter_opened(col_ix, !open, window, cx);
+                        }
+                        cx.notify();
+                    }),
+                )
                 .child(
-                    Popover::new(("col-filter", col_ix))
-                        .anchor(Anchor::TopRight)
-                        .trigger(
-                            Button::new(("col-filter-button", col_ix))
-                                .icon(icon)
-                                .xsmall()
-                                .ghost()
-                                .selected(open),
-                        )
-                        .open(open)
-                        .on_open_change(move |open, window, cx| {
-                            let _ = table.update(cx, |t, cx| {
-                                t.delegate_mut().filter_opened(col_ix, *open, window, cx);
-                                cx.notify();
-                            });
-                        })
-                        .content(move |_, _, _| {
-                            panel
-                                .clone()
-                                .map(|p| p.into_any_element())
-                                .unwrap_or_else(|| div().into_any_element())
-                        }),
+                    // The popover hangs from the zone's bottom right corner; the
+                    // zone opens and closes it.
+                    div().absolute().right_0().bottom_0().child(
+                        Popover::new(("col-filter", col_ix))
+                            .anchor(Anchor::TopRight)
+                            .trigger(PopoverAnchor::default())
+                            .when_some(focus, |p, focus| p.track_focus(&focus))
+                            .open(open)
+                            .on_open_change(move |open, window, cx| {
+                                let _ = table.update(cx, |t, cx| {
+                                    t.delegate_mut().filter_opened(col_ix, *open, window, cx);
+                                    cx.notify();
+                                });
+                            })
+                            .content(move |_, _, _| {
+                                panel
+                                    .clone()
+                                    .map(|p| p.into_any_element())
+                                    .unwrap_or_else(|| div().into_any_element())
+                            }),
+                    ),
                 )
         });
 
@@ -803,21 +1217,26 @@ impl TableDelegate for ResultsDelegate {
             .then(|| self.stats(col_ix).cloned())
             .flatten()
             .map(|stats| {
-                let scope = if !self.selected.is_empty() {
-                    let n = self.selected.len();
-                    format!("{n} selected row{}", if n == 1 { "" } else { "s" })
-                } else if self.more {
+                let scope = if self.more {
                     format!("{} loaded rows", self.result.row_count())
                 } else {
                     format!("All {} rows", self.result.row_count())
                 };
-                div().absolute().top_full().left_1_2().child(deferred(
-                    anchored()
-                        .anchor(Anchor::TopCenter)
-                        .offset(point(px(0.), px(8.)))
-                        .snap_to_window_with_margin(px(8.))
-                        .child(stats_card(scope, &stats, facts.as_ref(), cx)),
-                ))
+                let marked = self
+                    .marked_stats(col_ix)
+                    .cloned()
+                    .map(|marked| (format!("Marked: {} rows", marked.rows), marked));
+                // Above the rows' handles (deferred too).
+                div().absolute().top_full().left_1_2().child(
+                    deferred(
+                        anchored()
+                            .anchor(Anchor::TopCenter)
+                            .offset(point(px(0.), px(8.)))
+                            .snap_to_window_with_margin(px(8.))
+                            .child(stats_card(scope, &stats, marked, facts.as_ref(), cx)),
+                    )
+                    .with_priority(LAYER_SUMMARY),
+                )
             });
 
         h_flex()
@@ -835,19 +1254,40 @@ impl TableDelegate for ResultsDelegate {
                 }
                 cx.notify();
             }))
-            .children(key_icon)
+            .when_some(header_fill, |this, fill| {
+                this.child(over_cell(div()).bg(fill))
+            })
             .child({
                 let s = settings::current(cx);
-                div()
+                h_flex()
+                    .id(("th-name", col_ix))
+                    .test_support()
                     .min_w_0()
-                    .overflow_hidden()
-                    .when_some(s.table.family(), |d, family| {
-                        d.font_family(SharedString::from(family.to_string()))
-                    })
-                    .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
-                    .child(name)
+                    .h_full()
+                    .gap_1()
+                    .items_center()
+                    .children(key_icon)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .when_some(s.table.family(), |d, family| {
+                                d.font_family(SharedString::from(family.to_string()))
+                            })
+                            .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
+                            .child(name),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |table, e: &MouseDownEvent, _, cx| {
+                            let d = table.delegate_mut();
+                            d.mark.click_column(col_ix, keys(e.modifiers));
+                            d.marked();
+                            cx.notify();
+                        }),
+                    )
             })
-            .children(filter_button)
+            .children(filter_zone)
             .children(stats_card)
     }
 
@@ -874,13 +1314,18 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let selected = self.selected.contains(&row_ix);
-        let highlight = cx.theme().selection.opacity(0.35);
+        // A column mark covers every row: tinting them all would tint the grid.
+        let selected = !self.mark.is_column_mark() && self.mark.row_marked(row_ix);
+        let highlight = crate::theme::grid(cx).row;
         // Clicks are handled by the cells: the table stops them there (it selects
         // the cell), so they never reach the row.
-        div().id(("row", row_ix)).relative().when(selected, |this| {
-            this.child(div().absolute().inset_0().bg(highlight))
-        })
+        div()
+            .id(("row", row_ix))
+            .relative()
+            .when(selected, |this| {
+                this.child(div().absolute().inset_0().bg(highlight))
+            })
+            .child(self.row_handle(row_ix, cx))
     }
 
     fn context_menu(
@@ -890,25 +1335,12 @@ impl TableDelegate for ResultsDelegate {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        let rows = self.target_rows(row_ix);
+        let rows = self.menu_rows(row_ix);
         let n = rows.len();
-        let (s, count) = if n == 1 {
-            ("", String::new())
-        } else {
-            ("s", format!("{n} "))
-        };
-        if let Some(col) = self.menu_col.filter(|&c| c < self.result.columns().len()) {
-            let values: Vec<String> = rows
-                .iter()
-                .map(|&r| self.result.cell(r, col).unwrap_or_default().to_string())
-                .collect();
-            menu = menu.item(copy_item(format!("Copy {count}cell{s}"), values.join("\n")));
-        }
-        // The value viewer: this cell as A, or as B next to the inspected one.
-        if let (Some(col), Some(view)) = (
-            self.menu_col.filter(|&c| c < self.result.columns().len()),
-            self.view.clone(),
-        ) {
+        let n_cols = self.result.columns().len();
+        if let (Some(col), Some(view)) = (self.menu_col.filter(|&c| c < n_cols), self.view.clone())
+        {
+            // The value viewer: this cell as A, or as B next to the inspected one.
             let inspect = view.clone();
             menu = menu.item(
                 PopupMenuItem::new("Inspect value").on_click(move |_, _, cx| {
@@ -924,15 +1356,36 @@ impl TableDelegate for ResultsDelegate {
             }
             menu = menu.separator();
         }
+        // The marked columns, or the clicked one / all when the mark is gone.
+        let cols = match self.mark.cols() {
+            c if !c.is_empty() => c,
+            _ => self
+                .menu_col
+                .filter(|&c| c < n_cols)
+                .map_or_else(|| (0..n_cols).collect(), |c| vec![c]),
+        };
+        let all_cols: Vec<usize> = (0..n_cols).collect();
+        let names = self.column_names();
+        let cell = |r, c| self.result.cell(r, c);
+        let table = cx.entity().downgrade();
         menu = menu
+            .item(copy_item("Copy".into(), tsv(&rows, &cols, cell, None)))
             .item(copy_item(
-                format!("Copy {count}row{s}"),
-                self.tsv(&rows, false),
+                "Copy with headers".into(),
+                tsv(&rows, &cols, cell, Some(&names)),
             ))
             .item(copy_item(
-                format!("Copy {count}row{s} with headers"),
-                self.tsv(&rows, true),
-            ));
+                rows_label("Copy", n),
+                tsv(&rows, &all_cols, cell, None),
+            ))
+            .item(PopupMenuItem::new("Mark row").on_click(move |_, _, cx| {
+                let _ = table.update(cx, |t, cx| {
+                    let d = t.delegate_mut();
+                    d.mark.click_row(row_ix, Keys::default(), n_cols);
+                    d.marked();
+                    cx.notify();
+                });
+            }));
 
         if let Some(edit) = &self.edit {
             let values = self.row_values(&rows);
@@ -987,7 +1440,7 @@ impl TableDelegate for ResultsDelegate {
                 menu = menu.item(PopupMenuItem::submenu("UPDATE", submenu));
             }
             menu = menu.item(self.open_item(
-                format!("DELETE {count}row{s}"),
+                delete_label(n),
                 edit.delete(&values).map(|sql| ResultEvent::OpenSql {
                     title: title("delete"),
                     sql,
@@ -1033,6 +1486,11 @@ impl TableDelegate for ResultsDelegate {
         let font_size = s
             .table_font_size()
             .map_or_else(|| rems(0.75).to_pixels(window.rem_size()), px);
+        let loaded = self.result.row_count();
+        let marked = self.mark.contains(row_ix, col_ix).then(|| {
+            let (top, right, bottom, left) = self.mark.edges(row_ix, col_ix, loaded);
+            (crate::theme::grid(cx), top, right, bottom, left)
+        });
         let theme = cx.theme();
         let mark = if self.inspected == Some((row_ix, col_ix)) {
             Some(theme.info)
@@ -1049,17 +1507,35 @@ impl TableDelegate for ResultsDelegate {
             .font_family(family.clone())
             .text_xs()
             .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
-            .whitespace_nowrap()
-            .overflow_hidden()
+            .when_some(marked, |d, (style, top, right, bottom, left)| {
+                let (width, radius) = (style.mark_border_width, style.mark_radius);
+                let p = Size::XSmall.table_cell_padding();
+                d.child(over_row_line(
+                    // Down over the row's line, so marked rows run together.
+                    over_cell(div().id(("mark-fill", col_ix)).test_support())
+                        .bottom(-(p.bottom + ROW_LINE))
+                        .bg(style.mark)
+                        .border_color(style.mark_border)
+                        .when(top, |d| d.border_t(width))
+                        .when(right, |d| d.border_r(width))
+                        .when(bottom, |d| d.border_b(width))
+                        .when(left, |d| d.border_l(width))
+                        // The mark's outer corners.
+                        .when(top && left, |d| d.rounded_tl(radius))
+                        .when(top && right, |d| d.rounded_tr(radius))
+                        .when(bottom && right, |d| d.rounded_br(radius))
+                        .when(bottom && left, |d| d.rounded_bl(radius)),
+                    LAYER_MARK,
+                ))
+            })
             .when_some(mark, |d, color| {
-                d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
+                d.child(over_row_line(
+                    over_cell(div())
                         .border_1()
                         .border_color(color)
                         .bg(color.opacity(0.12)),
-                )
+                    LAYER_INSPECTED,
+                ))
             })
             // The table selects the cell and stops the event, so the row
             // selection happens here, before it.
@@ -1076,9 +1552,41 @@ impl TableDelegate for ResultsDelegate {
                             });
                         }
                     } else {
-                        d.click(row_ix, e.modifiers);
+                        d.start_drag(Drag::Cells(row_ix, col_ix), e.position);
+                        d.selecting(row_ix, col_ix);
+                        d.mark.click_cell(row_ix, col_ix, keys(e.modifiers));
+                        d.marked();
                     }
                     cx.notify();
+                }),
+            )
+            // Dragging from a cell marks the rectangle to the cell under the pointer.
+            .on_mouse_move(cx.listener(move |table, e: &MouseMoveEvent, _, cx| {
+                let d = table.delegate_mut();
+                if e.pressed_button != Some(MouseButton::Left) {
+                    if d.end_drag() {
+                        cx.notify();
+                    }
+                    return;
+                }
+                if d.drag.is_some() {
+                    d.drag_pointer = e.position;
+                    cx.notify();
+                }
+                if matches!(d.drag, Some(Drag::Cells(r, c)) if (r, c) != (row_ix, col_ix)) {
+                    // Dragged off the cell: no click follows for the table.
+                    d.clicked.clear();
+                    d.mark.drag_to(row_ix, col_ix);
+                    d.drag = Some(Drag::Cells(row_ix, col_ix));
+                    d.marked();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|table, _, _, cx| {
+                    if table.delegate_mut().end_drag() {
+                        cx.notify();
+                    }
                 }),
             )
             .on_mouse_down(
@@ -1092,32 +1600,33 @@ impl TableDelegate for ResultsDelegate {
                     cx.defer(move |cx| this.update(cx, |t, _| t.cell_selectable = true));
                     let d = table.delegate_mut();
                     d.menu_col = Some(col_ix);
-                    if !d.selected.contains(&row_ix) {
-                        d.selected = BTreeSet::from([row_ix]);
-                        d.anchor = Some(row_ix);
-                        d.selection_gen += 1;
+                    if !d.mark.contains(row_ix, col_ix) {
+                        d.mark.click_cell(row_ix, col_ix, Keys::default());
+                        d.marked();
                     }
                     cx.notify();
                 }),
             );
-        match self.result.cell(row_ix, col_ix) {
-            None => cell.text_color(theme.muted_foreground).child("NULL"),
+        // The value, clipped to the cell (the marks above reach over its padding).
+        let value = div().size_full().overflow_hidden().whitespace_nowrap();
+        cell.child(match self.result.cell(row_ix, col_ix) {
+            None => value.text_color(theme.muted_foreground).child("NULL"),
             // Nothing more to show for an empty string.
-            Some("") => cell,
-            Some(value) => {
-                let full: SharedString = peek_text(value).into();
-                cell.child(
+            Some("") => value,
+            Some(text) => {
+                let full: SharedString = peek_text(text).into();
+                value.child(
                     HoverCard::new(("peek", col_ix))
                         .anchor(Anchor::TopLeft)
                         .open_delay(PEEK_DELAY)
                         .appearance(false)
-                        .trigger(div().child(display_value(value)))
+                        .trigger(div().child(display_value(text)))
                         .content(move |_, _, cx| {
                             peek_card(full.clone(), family.clone(), font_size, cx)
                         }),
                 )
             }
-        }
+        })
     }
 }
 
@@ -1185,9 +1694,11 @@ fn display_value(value: &str) -> SharedString {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's `test` attribute would shadow the standard one.
-    use super::{KeyMarker, ResultsDelegate, column_stats, format_decimal};
-    use gpui_kit::Modifiers;
+    use super::{
+        KeyMarker, ResultsDelegate, column_stats, delete_label, format_decimal, rows_label,
+    };
     use tangul_assist::columns::{ColumnFacts, ForeignRef};
+    use tangul_assist::mark::{Keys, tsv};
     use tangul_core::{ColumnInfo, RowBatch};
 
     fn delegate() -> ResultsDelegate {
@@ -1225,8 +1736,23 @@ mod tests {
     #[test]
     fn copies_tsv() {
         let d = delegate();
-        assert_eq!(d.tsv(&[0, 1], true), "id\tnote\n1\t\"a\tb\"\n2\t");
-        assert_eq!(d.tsv(&[2], false), "3\t\"say \"\"hi\"\"\"");
+        let cell = |r, c| d.result.cell(r, c);
+        let names = d.column_names();
+        assert_eq!(
+            tsv(&[0, 1], &[0, 1], cell, Some(&names)),
+            "id\tnote\n1\t\"a\tb\"\n2\t"
+        );
+        assert_eq!(tsv(&[2], &[0, 1], cell, None), "3\t\"say \"\"hi\"\"\"");
+        // Only the marked columns.
+        assert_eq!(tsv(&[0, 1], &[1], cell, Some(&names)), "note\n\"a\tb\"\n");
+    }
+
+    #[test]
+    fn labels_state_the_count() {
+        assert_eq!(rows_label("Copy", 1), "Copy row");
+        assert_eq!(rows_label("Copy", 3), "Copy 3 rows");
+        assert_eq!(delete_label(1), "DELETE statement for 1 row");
+        assert_eq!(delete_label(100), "DELETE statements for 100 rows");
     }
 
     #[test]
@@ -1322,12 +1848,13 @@ mod tests {
     }
 
     #[test]
-    fn stats_follow_selection_and_new_results() {
+    fn stats_cover_all_rows_and_follow_new_results() {
         let mut d = numbers(&[Some("1"), Some("2"), Some("3")]);
         assert_eq!(d.stats(0).unwrap().sum, "6");
-        d.click(1, Modifiers::default());
-        d.click(2, Modifiers::secondary_key());
-        assert_eq!(d.stats(0).unwrap().sum, "5");
+        // A mark doesn't narrow the summary (the "Marked" section is separate).
+        d.mark.click_cell(1, 0, Keys::default());
+        d.marked();
+        assert_eq!(d.stats(0).unwrap().sum, "6");
 
         // A new result with the same number of rows (the bug of #79 / #81).
         d.reset(vec![ColumnInfo { name: "n".into() }]);
@@ -1354,6 +1881,124 @@ mod tests {
         let s = d.stats(0).unwrap();
         assert!(!s.numeric());
         assert_eq!((s.rows, s.distinct), (3, 1));
+    }
+
+    #[test]
+    fn the_chip_neither_comes_nor_goes_during_a_drag() {
+        use super::Drag;
+        let mut d = delegate();
+        let at = gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.));
+        // A drag from one cell: no chip above the grid, one at the pointer.
+        d.start_drag(Drag::Cells(0, 0), at);
+        d.mark.click_cell(0, 0, Keys::default());
+        d.mark.drag_to(2, 1);
+        assert_eq!(d.mark_chip(), None);
+        assert_eq!(d.drag_chip().unwrap().0, "2 columns × 3 rows");
+        // Released: the chip goes above the grid.
+        assert!(d.end_drag());
+        assert_eq!(d.mark_chip().as_deref(), Some("2 columns × 3 rows"));
+        assert!(d.drag_chip().is_none());
+        // A drag that starts with the chip shown keeps it, even on one cell.
+        d.start_drag(Drag::Cells(1, 1), at);
+        d.mark.click_cell(1, 1, Keys::default());
+        assert_eq!(d.mark_chip().as_deref(), Some("1 column × 1 row"));
+        d.end_drag();
+        assert_eq!(d.mark_chip(), None);
+    }
+
+    #[test]
+    fn marked_cells_get_their_own_sums() {
+        let mut d = numbers(&[Some("1"), Some("2"), Some("3"), None]);
+        // Nothing marked, or one row: no section.
+        assert!(d.marked_stats(0).is_none());
+        d.mark.click_cell(1, 0, Keys::default());
+        d.marked();
+        assert!(d.marked_stats(0).is_none());
+        // Rows 1 to 3.
+        let shift = Keys {
+            shift: true,
+            ..Keys::default()
+        };
+        d.mark.click_cell(3, 0, shift);
+        d.marked();
+        let s = d.marked_stats(0).unwrap();
+        assert_eq!((s.rows, s.nulls, s.sum.as_str()), (3, 1, "5"));
+        // The overall summary stays over all rows.
+        assert_eq!(d.stats(0).unwrap().sum, "6");
+        // Taking a row out changes the marked sums.
+        d.mark.click_cell(
+            2,
+            0,
+            Keys {
+                secondary: true,
+                ..Keys::default()
+            },
+        );
+        d.marked();
+        assert_eq!(d.marked_stats(0).unwrap().sum, "2");
+        // A column mark: all loaded rows.
+        d.mark.click_column(0, Keys::default());
+        d.marked();
+        assert_eq!(d.marked_stats(0).unwrap().sum, "6");
+    }
+
+    #[test]
+    fn copy_text_is_the_mark_or_the_selected_cell() {
+        let mut d = delegate();
+        assert_eq!(d.copy_text(None), None);
+        // No mark: the selected cell alone, NULL empty, values quoted as in TSV.
+        assert_eq!(d.copy_text(Some((0, 1))).as_deref(), Some("\"a\tb\""));
+        assert_eq!(d.copy_text(Some((1, 1))).as_deref(), Some(""));
+        assert_eq!(d.copy_text(Some((9, 0))), None);
+        // A mark wins over the selection, without headers.
+        d.mark.click_cell(0, 0, Keys::default());
+        d.mark.click_cell(
+            1,
+            1,
+            Keys {
+                shift: true,
+                secondary: false,
+            },
+        );
+        assert_eq!(
+            d.copy_text(Some((2, 0))).as_deref(),
+            Some("1\t\"a\tb\"\n2\t")
+        );
+    }
+
+    #[test]
+    fn keys_extend_all_and_clear_the_mark() {
+        let mut d = delegate();
+        assert!(!d.clear_mark());
+        assert_eq!(d.mark_chip(), None);
+        // From the selected cell, or (0, 0).
+        assert_eq!(d.extend_mark(Some((1, 0)), 1, 0), Some((2, 0)));
+        assert_eq!(d.mark.rows(3), vec![1, 2]);
+        assert_eq!(d.mark_chip().as_deref(), Some("1 column × 2 rows"));
+        assert_eq!(d.extend_mark(None, 0, 1), Some((2, 1)));
+        // Kept within the result.
+        assert_eq!(d.extend_mark(None, 5, 5), Some((2, 1)));
+        d.mark_all();
+        assert_eq!(
+            d.mark_chip().as_deref(),
+            Some("2 columns × 3 of 3 rows loaded")
+        );
+        assert!(d.clear_mark());
+        assert!(d.mark.is_empty());
+        // One cell: no chip.
+        d.mark.click_cell(0, 0, Keys::default());
+        assert_eq!(d.mark_chip(), None);
+        let mut empty = ResultsDelegate::default();
+        assert_eq!(empty.extend_mark(None, 1, 0), None);
+    }
+
+    #[test]
+    fn an_unmarked_column_has_no_marked_sums() {
+        let mut d = delegate();
+        d.mark.click_column(1, Keys::default());
+        d.marked();
+        assert!(d.marked_stats(0).is_none());
+        assert_eq!(d.marked_stats(1).unwrap().rows, 3);
     }
 
     fn facts(data_type: &str, primary_key: bool, references: Option<&str>) -> ColumnFacts {
@@ -1390,19 +2035,42 @@ mod tests {
     }
 
     #[test]
-    fn selection() {
+    fn mark_is_cleared_with_the_rows_but_not_by_paging() {
         let mut d = delegate();
-        let none = Modifiers::default();
-        let shift = Modifiers {
-            shift: true,
-            ..Default::default()
-        };
-        d.click(0, none);
-        d.click(2, shift);
-        assert_eq!(d.target_rows(1), [0, 1, 2]);
-        d.click(1, Modifiers::secondary_key());
-        assert_eq!(d.target_rows(0), [0, 2]);
-        // A menu on an unselected row acts on that row only.
-        assert_eq!(d.target_rows(1), [1]);
+        d.mark.click_cell(0, 0, Keys::default());
+        d.mark.click_cell(
+            2,
+            1,
+            Keys {
+                shift: true,
+                ..Keys::default()
+            },
+        );
+        assert_eq!(d.menu_rows(1), [0, 1, 2]);
+        d.mark.click_cell(
+            1,
+            1,
+            Keys {
+                secondary: true,
+                ..Keys::default()
+            },
+        );
+        assert_eq!(d.menu_rows(0), [0, 2]);
+        // No mark: the menu acts on the row it was opened on.
+        d.mark.clear();
+        assert_eq!(d.menu_rows(1), [1]);
+
+        d.mark.click_cell(1, 0, Keys::default());
+        let mut batch = RowBatch::default();
+        batch.push_cell(Some("4"));
+        batch.push_cell(None);
+        batch.finish_row();
+        d.result.append(batch);
+        assert!(d.mark.contains(1, 0));
+        d.clear_rows();
+        assert!(d.mark.is_empty());
+        d.mark.click_cell(1, 0, Keys::default());
+        d.reset(Vec::new());
+        assert!(d.mark.is_empty());
     }
 }

@@ -27,10 +27,13 @@ use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::QueryId;
 use tangul_engine::{ExecEvent, QueryEvent, QueryOutput};
 
-use crate::InspectValue;
 use crate::assets::{Lucide, style_icon};
 use crate::chart::{self, ResultChart};
 use crate::settings;
+use crate::{
+    ClearMark, CopyMark, ExtendMarkDown, ExtendMarkLeft, ExtendMarkRight, ExtendMarkUp,
+    InspectValue, MarkAll,
+};
 use filter::FilterPanel;
 use grid::ResultsDelegate;
 
@@ -254,10 +257,16 @@ impl ResultView {
         event: &TableEvent,
         cx: &mut Context<Self>,
     ) {
-        // A click or the arrow keys only select; the viewer changes on a double
-        // click, Space or "Inspect value".
-        if let TableEvent::DoubleClickedCell(row, col) = event {
-            self.inspect(*row, *col, true, cx);
+        // A click or the arrow keys only select (the keys move the mark); the
+        // viewer changes on a double click, Space or "Inspect value".
+        match *event {
+            TableEvent::DoubleClickedCell(row, col) => self.inspect(row, col, true, cx),
+            TableEvent::SelectCell(row, col) => self.table.update(cx, |t, cx| {
+                if t.delegate_mut().cursor_moved(row, col) {
+                    cx.notify();
+                }
+            }),
+            _ => {}
         }
     }
 
@@ -277,6 +286,65 @@ impl ResultView {
         cx.emit(ResultEvent::ToggleViewer);
     }
 
+    /// ⌘/Ctrl+C: the mark (else the selected cell) to the clipboard, without headers.
+    fn copy_mark_action(&mut self, _: &CopyMark, _: &mut Window, cx: &mut Context<Self>) {
+        let table = self.table.read(cx);
+        match table.delegate().copy_text(table.selected_cell()) {
+            Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            None => cx.propagate(),
+        }
+    }
+
+    /// ⌘/Ctrl+A: marks every column and row.
+    fn mark_all_action(&mut self, _: &MarkAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().mark_all();
+            cx.notify();
+        });
+    }
+
+    /// Esc: clears the mark; without one the table's own Esc runs.
+    /// Esc (after the viewer's): clears the mark and the table's selected cell
+    /// with it (that one is never drawn); with neither the table's own Esc runs.
+    fn clear_mark_action(&mut self, _: &ClearMark, _: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.table.read(cx).selected_cell().is_some();
+        if self.clear_grid_mark(cx) || selected {
+            self.table.update(cx, |t, cx| t.clear_selection(cx));
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn clear_grid_mark(&mut self, cx: &mut Context<Self>) -> bool {
+        self.table.update(cx, |t, cx| {
+            let cleared = t.delegate_mut().clear_mark();
+            cx.notify();
+            cleared
+        })
+    }
+
+    /// ⇧+arrows: moves the mark's end, scrolling only when it leaves the view.
+    fn extend_mark(&mut self, d_row: isize, d_col: isize, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            let from = t.selected_cell();
+            if let Some((row, col)) = t.delegate_mut().extend_mark(from, d_row, d_col) {
+                let visible = t.visible_range();
+                let (show_row, show_col) = (
+                    !visible.rows().contains(&row),
+                    !visible.cols().contains(&col),
+                );
+                if d_row != 0 && show_row {
+                    t.scroll_to_row(row, cx);
+                }
+                if d_col != 0 && show_col {
+                    t.scroll_to_col(col, cx);
+                }
+            }
+            cx.notify();
+        });
+    }
+
     /// The viewer opens on Space: the selected cell becomes A. False without one.
     pub fn inspect_selected(&mut self, cx: &mut Context<Self>) -> bool {
         let Some((row, col)) = self.table.read(cx).selected_cell() else {
@@ -293,8 +361,10 @@ impl ResultView {
 
     /// "Inspect value" in the menu: selects the cell (A) and shows it.
     pub(super) fn inspect_cell(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
-        self.table
-            .update(cx, |t, cx| t.set_selected_cell(row, col, cx));
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().selecting(row, col);
+            t.set_selected_cell(row, col, cx);
+        });
         self.inspect(row, col, true, cx);
     }
 
@@ -360,6 +430,12 @@ impl ResultView {
     #[cfg(test)]
     pub fn cell(&self, row: usize, col: usize, cx: &App) -> Option<String> {
         self.table.read(cx).delegate().cell(row, col)
+    }
+
+    /// What is marked in the grid (tests).
+    #[cfg(test)]
+    pub fn mark(&self, cx: &App) -> tangul_assist::mark::Mark {
+        self.table.read(cx).delegate().mark()
     }
 
     pub fn columns(&self, cx: &App) -> Vec<String> {
@@ -694,6 +770,18 @@ impl ResultView {
         panel.read(cx).inputs(cx)
     }
 
+    /// The table's selected cell (tests).
+    #[cfg(test)]
+    pub fn selected_cell(&self, cx: &App) -> Option<(usize, usize)> {
+        self.table.read(cx).selected_cell()
+    }
+
+    /// Scrolls the grid sideways to column `col` (tests).
+    #[cfg(test)]
+    pub fn scroll_to_col(&self, col: usize, cx: &mut App) {
+        self.table.update(cx, |t, cx| t.scroll_to_col(col, cx));
+    }
+
     /// Why the last run failed, if it did (tests).
     #[cfg(test)]
     pub fn error(&self) -> Option<String> {
@@ -850,9 +938,11 @@ impl ResultView {
     /// One chip per filter and for the sort; clicking a chip's ✕ removes it.
     fn render_refine_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let d = self.table.read(cx).delegate();
-        if d.refine.is_empty() || matches!(self.status, Status::Idle) {
+        let mark = d.mark_chip();
+        if (d.refine.is_empty() && mark.is_none()) || matches!(self.status, Status::Idle) {
             return None;
         }
+        let filtered = !d.refine.is_empty();
         let names = d.column_names();
         let name = |c: usize| names.get(c).cloned().unwrap_or_default();
         let sort = d.refine.sort.map(|sort| {
@@ -877,11 +967,13 @@ impl ResultView {
                 .border_b_1()
                 .border_color(theme.border)
                 .text_xs()
-                .child(
-                    Icon::new(Lucide::Funnel)
-                        .xsmall()
-                        .text_color(theme.muted_foreground),
-                )
+                .when(filtered, |bar| {
+                    bar.child(
+                        Icon::new(Lucide::Funnel)
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    )
+                })
                 .children(chips.enumerate().map(
                     |(i, (label, filter)): (usize, (SharedString, Option<usize>))| {
                         h_flex()
@@ -908,14 +1000,68 @@ impl ResultView {
                             )
                     },
                 ))
-                .child(
-                    Button::new("refine-clear")
-                        .label("Clear all")
-                        .xsmall()
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| this.clear_refine(cx))),
-                )
+                .when(filtered, |bar| {
+                    bar.child(
+                        Button::new("refine-clear")
+                            .label("Clear all")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_refine(cx))),
+                    )
+                })
+                .when_some(mark, |bar, label| {
+                    bar.child(
+                        h_flex()
+                            .id("mark-chip")
+                            .test_support()
+                            .pl_2()
+                            .gap_0p5()
+                            .items_center()
+                            .rounded(theme.radius)
+                            .bg(theme.secondary)
+                            .child(label)
+                            .child(
+                                Button::new("mark-chip-clear")
+                                    .icon(IconName::Close)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Clear mark")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.clear_grid_mark(cx);
+                                    })),
+                            ),
+                    )
+                })
                 .into_any_element(),
+        )
+    }
+
+    /// While a drag marks: what is marked, next to the pointer.
+    fn render_drag_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (label, pointer) = self.table.read(cx).delegate().drag_chip()?;
+        let theme = cx.theme();
+        Some(
+            deferred(
+                anchored()
+                    .position(pointer + point(px(14.), px(14.)))
+                    .child(
+                        div()
+                            .id("mark-drag-chip")
+                            .test_support()
+                            .px_2()
+                            .py_0p5()
+                            .text_xs()
+                            .rounded(theme.radius)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.popover)
+                            .text_color(theme.popover_foreground)
+                            .shadow_md()
+                            .child(label),
+                    ),
+            )
+            .with_priority(grid::LAYER_DRAG_CHIP)
+            .into_any_element(),
         )
     }
 
@@ -965,11 +1111,20 @@ impl Render for ResultView {
     /// The result, with the active filters and sort above it.
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let chips = self.render_refine_bar(cx);
+        let drag_chip = self.render_drag_chip(cx);
         let body = self.render_body(cx);
         v_flex()
             .size_full()
             .on_action(cx.listener(Self::inspect_action))
+            .on_action(cx.listener(Self::copy_mark_action))
+            .on_action(cx.listener(Self::mark_all_action))
+            .on_action(cx.listener(Self::clear_mark_action))
+            .on_action(cx.listener(|this, _: &ExtendMarkUp, _, cx| this.extend_mark(-1, 0, cx)))
+            .on_action(cx.listener(|this, _: &ExtendMarkDown, _, cx| this.extend_mark(1, 0, cx)))
+            .on_action(cx.listener(|this, _: &ExtendMarkLeft, _, cx| this.extend_mark(0, -1, cx)))
+            .on_action(cx.listener(|this, _: &ExtendMarkRight, _, cx| this.extend_mark(0, 1, cx)))
             .children(chips)
             .child(div().flex_1().min_h_0().child(body))
+            .children(drag_chip)
     }
 }
