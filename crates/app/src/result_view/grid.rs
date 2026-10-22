@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Selectable, Sizable as _, Size,
     button::Button,
     h_flex,
     hover_card::HoverCard,
@@ -51,7 +51,7 @@ const PEEK_HEIGHT: f32 = 240.;
 const PEEK_CHARS: usize = 2_000;
 
 /// The strip at a row's left edge that shows its handle when the pointer is in it.
-const ROW_HANDLE: Pixels = px(20.);
+const ROW_HANDLE: Pixels = px(30.);
 
 /// What a drag with the button held marks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -907,6 +907,19 @@ fn format_float(x: f64, decimals: u32) -> String {
     }
 }
 
+/// An overlay over a whole cell: the table pads what a cell (or a header) draws,
+/// and marks reach over that padding to the cell's edges, like the table's own
+/// selected cell. The grid's size is `xsmall` (see `ResultView::render_body`).
+fn over_cell(overlay: Div) -> Div {
+    let p = Size::XSmall.table_cell_padding();
+    overlay
+        .absolute()
+        .top(-p.top)
+        .bottom(-p.bottom)
+        .left(-p.left)
+        .right(-p.right)
+}
+
 /// The keys held, as the mark takes them.
 fn keys(modifiers: Modifiers) -> Keys {
     Keys {
@@ -1115,7 +1128,7 @@ impl TableDelegate for ResultsDelegate {
                 cx.notify();
             }))
             .when_some(header_fill, |this, fill| {
-                this.child(div().absolute().inset_0().bg(fill))
+                this.child(over_cell(div()).bg(fill))
             })
             .child({
                 let s = settings::current(cx);
@@ -1367,13 +1380,9 @@ impl TableDelegate for ResultsDelegate {
             .font_family(family.clone())
             .text_xs()
             .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
-            .whitespace_nowrap()
-            .overflow_hidden()
             .when_some(marked, |d, (style, top, right, bottom, left)| {
                 d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
+                    over_cell(div())
                         .bg(style.mark)
                         .border_color(style.mark_border)
                         .when(top, |d| d.border_t(style.mark_border_width))
@@ -1384,9 +1393,7 @@ impl TableDelegate for ResultsDelegate {
             })
             .when_some(mark, |d, color| {
                 d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
+                    over_cell(div())
                         .border_1()
                         .border_color(color)
                         .bg(color.opacity(0.12)),
@@ -1459,24 +1466,26 @@ impl TableDelegate for ResultsDelegate {
                     cx.notify();
                 }),
             );
-        match self.result.cell(row_ix, col_ix) {
-            None => cell.text_color(theme.muted_foreground).child("NULL"),
+        // The value, clipped to the cell (the marks above reach over its padding).
+        let value = div().size_full().overflow_hidden().whitespace_nowrap();
+        cell.child(match self.result.cell(row_ix, col_ix) {
+            None => value.text_color(theme.muted_foreground).child("NULL"),
             // Nothing more to show for an empty string.
-            Some("") => cell,
-            Some(value) => {
-                let full: SharedString = peek_text(value).into();
-                cell.child(
+            Some("") => value,
+            Some(text) => {
+                let full: SharedString = peek_text(text).into();
+                value.child(
                     HoverCard::new(("peek", col_ix))
                         .anchor(Anchor::TopLeft)
                         .open_delay(PEEK_DELAY)
                         .appearance(false)
-                        .trigger(div().child(display_value(value)))
+                        .trigger(div().child(display_value(text)))
                         .content(move |_, _, cx| {
                             peek_card(full.clone(), family.clone(), font_size, cx)
                         }),
                 )
             }
-        }
+        })
     }
 }
 

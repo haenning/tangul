@@ -155,7 +155,7 @@ impl GridColors {
 
     /// The values to draw: the set ones, the rest from `colors`. Rows are the
     /// selection at 35% of its alpha, the mark and its header the selection, the
-    /// outline the accent, 1 px wide.
+    /// outline the accent, 2 px wide.
     pub fn resolve(&self, colors: &ThemeColors) -> Grid {
         let selection = colors.selection;
         Grid {
@@ -165,7 +165,7 @@ impl GridColors {
             }),
             mark: self.mark.unwrap_or(selection),
             mark_border: self.mark_border.unwrap_or(colors.accent),
-            mark_border_width: self.mark_border_width.unwrap_or(1.),
+            mark_border_width: self.mark_border_width.unwrap_or(2.),
             header_mark: self.header_mark.unwrap_or(selection),
         }
     }
@@ -392,7 +392,7 @@ mod tests {
                 row: rgb("#e5484d16"),
                 mark: rgb("#e5484d40"),
                 mark_border: rgb("#e5484d"),
-                mark_border_width: 1.,
+                mark_border_width: 2.,
                 header_mark: rgb("#e5484d40"),
             }
         );

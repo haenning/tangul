@@ -99,7 +99,7 @@ mark looks; a key left out is derived from `selection` and `accent`.
   "row": "#e5484d14",
   "mark": "#e5484d40",
   "mark_border": "#e5484d",
-  "mark_border_width": 1,
+  "mark_border_width": 2,
   "header_mark": "#e5484d33"
 }
 ```
@@ -109,7 +109,7 @@ mark looks; a key left out is derived from `selection` and `accent`.
 | `row` | Highlight of the rows the mark covers (default: `selection` at 35% of its alpha) |
 | `mark` | Fill of marked cells (default: `selection`) |
 | `mark_border` | Outline around the mark's outer edge (default: `accent`) |
-| `mark_border_width` | Outline width in pixels, 0 to 8; 0 draws none (default: 1) |
+| `mark_border_width` | Outline width in pixels, 0 to 8; 0 draws none (default: 2) |
 | `header_mark` | Fill of a marked column's header cell (default: `selection`) |
 
 ## `databases/<id>.json`

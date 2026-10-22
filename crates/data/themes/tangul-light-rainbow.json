@@ -44,7 +44,7 @@
     "row": "#dc262614",
     "mark": "#dc262633",
     "mark_border": "#dc2626",
-    "mark_border_width": 1,
+    "mark_border_width": 2,
     "header_mark": "#dc26262e"
   }
 }

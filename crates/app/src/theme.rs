@@ -508,7 +508,7 @@ mod tests {
             let g = grid(cx);
             assert_eq!(g.mark, color(theme.grid.mark.unwrap()));
             assert_eq!(g.mark_border, color(theme.colors.accent));
-            assert_eq!(g.mark_border_width, px(1.));
+            assert_eq!(g.mark_border_width, px(2.));
             assert!(g.row.a < g.mark.a);
             // Without its own colors the theme's selection and accent apply.
             cx.update_global::<Themes, _>(|t, _| t.current.grid = Default::default());
