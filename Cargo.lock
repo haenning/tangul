@@ -1579,9 +1579,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
  "subtle",
@@ -8235,7 +8235,7 @@ dependencies = [
 
 [[package]]
 name = "tangul"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8255,7 +8255,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-ai"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -8278,7 +8278,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-assist"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -8289,7 +8289,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -8297,7 +8297,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-data"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
@@ -8313,7 +8313,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-drivers"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8329,7 +8329,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-engine"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8345,7 +8345,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-llm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -8358,7 +8358,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-service"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tangul-assist",
  "tangul-core",
@@ -8369,7 +8369,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-tunnel"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "russh",
