@@ -47,7 +47,7 @@ PERFORMANCE OF THIS SOFTWARE.
 Used by:
 
 - [cmov 0.5.4](https://github.com/RustCrypto/utils)
-- [ctutils 0.4.2](https://github.com/RustCrypto/utils)
+- [ctutils 0.4.5](https://github.com/RustCrypto/utils)
 - [encoding_rs 0.8.41](https://github.com/hsivonen/encoding_rs)
 - [kurbo 0.13.1](https://github.com/linebender/kurbo)
 - [multiversion-macros 0.9.0](https://github.com/calebzulawski/multiversion)
