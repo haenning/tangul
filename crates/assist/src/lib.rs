@@ -11,6 +11,7 @@ pub mod copy;
 pub mod dialect;
 pub mod digest;
 pub mod edit;
+pub mod export;
 pub mod format;
 pub mod grammar;
 pub mod guard;

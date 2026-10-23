@@ -29,7 +29,8 @@
 //!     "max_tool_rounds": 12,
 //!     "questions_in_editor": true,
 //!     "access": "data"
-//!   }
+//!   },
+//!   "export": { "line_endings": "lf", "bom": false }
 //! }
 //! ```
 
@@ -67,6 +68,26 @@ pub struct Settings {
     pub theme: ThemeSettings,
     pub mcp: McpSettings,
     pub ai: AiSettings,
+    pub export: ExportSettings,
+}
+
+/// Files a result is saved to ("Save as" in the grid's menu).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExportSettings {
+    /// How lines end in text files; values keep their own line breaks.
+    pub line_endings: LineEndings,
+    /// CSV and TSV files start with a byte order mark, so Excel reads them as UTF-8.
+    pub bom: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LineEndings {
+    #[default]
+    Lf,
+    /// Windows.
+    Crlf,
 }
 
 /// The color themes (see [`crate::themes`]): one for dark, one for light, and

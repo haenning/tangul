@@ -37,6 +37,10 @@ const HINTS: &[Hint] = &[
         text: "Right-click a result: Copy gives CSV or an IN list, Copy with headers CSV, JSON, Markdown or INSERT statements.",
     },
     Hint {
+        title: "Save as Excel, CSV, JSON",
+        text: "Right-click a result and pick Save as: the mark, or everything loaded, as a file.",
+    },
+    Hint {
         title: "Command palette",
         text: "⌘⇧P searches commands, bookmarks and history.",
     },

@@ -34,13 +34,15 @@ use gpui_kit::*;
 use tangul_assist::columns::{ColumnFacts, TagKind};
 use tangul_assist::copy;
 use tangul_assist::dialect::Dialect;
+use tangul_assist::export::{self, Quoted};
 use tangul_assist::mark::{Keys, Mark, tsv};
 use tangul_assist::refine::{ColumnKind, Refine};
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
 use tangul_core::{ColumnInfo, ResultSet};
+use tangul_data::settings::LineEndings;
 
 use super::filter::FilterPanel;
-use super::{ResultEvent, ResultView};
+use super::{Contents, ResultEvent, ResultView, SaveFile, xlsx};
 use crate::assets::Lucide;
 use crate::settings;
 
@@ -489,6 +491,118 @@ impl ResultsDelegate {
         });
         let label = if headers { "Copy with headers" } else { "Copy" };
         PopupMenuItem::submenu(label, submenu)
+    }
+
+    /// What "Save as" covers: the mark, else the whole loaded result.
+    fn save_scope(&self) -> CopyScope {
+        let n_rows = self.result.row_count();
+        if self.mark.is_empty() {
+            CopyScope {
+                rows: (0..n_rows).collect(),
+                cols: (0..self.result.columns().len()).collect(),
+            }
+        } else {
+            CopyScope {
+                rows: self.mark.rows(n_rows),
+                cols: self.mark.cols(),
+            }
+        }
+    }
+
+    /// The file formats for the scope (INSERT as in "Copy with headers").
+    fn save_formats(&self, scope: &CopyScope) -> Vec<SaveAs> {
+        let insert = self
+            .copy_formats(scope, true, false)
+            .contains(&CopyAs::Insert);
+        [
+            SaveAs::Csv,
+            SaveAs::Tsv,
+            SaveAs::Excel,
+            SaveAs::Json,
+            SaveAs::Markdown,
+        ]
+        .into_iter()
+        .chain(insert.then_some(SaveAs::Insert))
+        .collect()
+    }
+
+    /// The scope as a file in `format`, named after the result's table: lines
+    /// ending in `\r\n` when `crlf`, CSV and TSV with a byte order mark when `bom`.
+    fn save_file(
+        &self,
+        format: SaveAs,
+        scope: &CopyScope,
+        crlf: bool,
+        bom: bool,
+    ) -> Option<SaveFile> {
+        let stem = self.edit.as_ref().map_or("result", |e| e.table.as_str());
+        let name = format!("{stem}.{}", format.extension());
+        let contents = match format.text() {
+            Some((text, quoted)) => {
+                let bom = bom && matches!(format, SaveAs::Csv | SaveAs::Tsv);
+                let text = self.copy_as(text, true, scope, None)?;
+                Contents::Bytes(export::file_bytes(&text, quoted, crlf, bom))
+            }
+            None => {
+                let rows = (scope.rows.iter())
+                    .filter(|&&r| r < self.result.row_count())
+                    .map(|&r| {
+                        (scope.cols.iter())
+                            .map(|&c| self.result.cell(r, c).map(str::to_string))
+                            .collect()
+                    })
+                    .collect();
+                let names = self.column_names();
+                Contents::Excel(xlsx::Sheet {
+                    names: scope.cols.iter().map(|&c| names[c].clone()).collect(),
+                    numeric: (scope.cols.iter())
+                        .map(|&c| (self.facts.get(c).cloned().flatten()).is_some_and(|f| f.numeric))
+                        .collect(),
+                    rows,
+                })
+            }
+        };
+        Some(SaveFile { name, contents })
+    }
+
+    /// "Save as" with the file formats; the file is made on click. Without a mark
+    /// while more rows exist it says it saves the loaded ones.
+    fn save_menu_item(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Option<PopupMenuItem> {
+        let view = self.view.clone()?;
+        let scope = Rc::new(self.save_scope());
+        let table = cx.entity().downgrade();
+        let items: Vec<PopupMenuItem> = self
+            .save_formats(&scope)
+            .into_iter()
+            .map(|format| {
+                let (table, scope, view) = (table.clone(), scope.clone(), view.clone());
+                PopupMenuItem::new(format.label()).on_click(move |_, window, cx| {
+                    let Some(table) = table.upgrade() else { return };
+                    let export = &settings::current(cx).export;
+                    let (crlf, bom) = (export.line_endings == LineEndings::Crlf, export.bom);
+                    let file = table
+                        .read(cx)
+                        .delegate()
+                        .save_file(format, &scope, crlf, bom);
+                    if let Some(file) = file {
+                        let _ = view.update(cx, |v, cx| v.save(file, window, cx));
+                    }
+                })
+            })
+            .collect();
+        let submenu = PopupMenu::build(window, cx, move |menu, _, _| {
+            items.into_iter().fold(menu, PopupMenu::item)
+        });
+        let label = if self.mark.is_empty() && self.more {
+            "Save loaded rows as"
+        } else {
+            "Save as"
+        };
+        Some(PopupMenuItem::submenu(label, submenu))
     }
 
     fn related_item(&self, link: &RelatedLink, rows: &[usize]) -> PopupMenuItem {
@@ -1305,6 +1419,54 @@ impl CopyAs {
     }
 }
 
+/// A file format of "Save as".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveAs {
+    Csv,
+    Tsv,
+    Json,
+    Markdown,
+    Insert,
+    Excel,
+}
+
+impl SaveAs {
+    fn label(self) -> &'static str {
+        match self {
+            SaveAs::Csv => "CSV",
+            SaveAs::Tsv => "Tab-separated",
+            SaveAs::Json => "JSON",
+            SaveAs::Markdown => "Markdown",
+            SaveAs::Insert => "INSERT statements",
+            SaveAs::Excel => "Excel",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            SaveAs::Csv => "csv",
+            SaveAs::Tsv => "tsv",
+            SaveAs::Json => "json",
+            SaveAs::Markdown => "md",
+            SaveAs::Insert => "sql",
+            SaveAs::Excel => "xlsx",
+        }
+    }
+
+    /// The text format it writes, with where its values may hold line breaks;
+    /// `None` for Excel.
+    fn text(self) -> Option<(CopyAs, Quoted)> {
+        match self {
+            SaveAs::Csv => Some((CopyAs::Csv, export::FIELDS)),
+            SaveAs::Tsv => Some((CopyAs::Tsv, export::FIELDS)),
+            SaveAs::Json => Some((CopyAs::Json, export::ESCAPED)),
+            SaveAs::Markdown => Some((CopyAs::Markdown, export::ESCAPED)),
+            SaveAs::Insert => Some((CopyAs::Insert, export::LITERALS)),
+            SaveAs::Excel => None,
+        }
+    }
+}
+
 fn copy_item(label: String, text: String) -> PopupMenuItem {
     PopupMenuItem::new(label).on_click(move |_, _, cx| {
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
@@ -1590,15 +1752,18 @@ impl TableDelegate for ResultsDelegate {
             .item(copy_item(
                 rows_label("Copy", n),
                 tsv(&rows, &all_cols, cell, None),
-            ))
-            .item(PopupMenuItem::new("Mark row").on_click(move |_, _, cx| {
-                let _ = table.update(cx, |t, cx| {
-                    let d = t.delegate_mut();
-                    d.mark.click_row(row_ix, Keys::default(), n_cols);
-                    d.marked();
-                    cx.notify();
-                });
-            }));
+            ));
+        if let Some(save) = self.save_menu_item(window, cx) {
+            menu = menu.item(save);
+        }
+        menu = menu.item(PopupMenuItem::new("Mark row").on_click(move |_, _, cx| {
+            let _ = table.update(cx, |t, cx| {
+                let d = t.delegate_mut();
+                d.mark.click_row(row_ix, Keys::default(), n_cols);
+                d.marked();
+                cx.notify();
+            });
+        }));
 
         if let Some(edit) = &self.edit {
             let values = self.row_values(&rows);
@@ -1908,8 +2073,8 @@ fn display_value(value: &str) -> SharedString {
 mod tests {
     // Not `super::*`: gpui's `test` attribute would shadow the standard one.
     use super::{
-        CopyAs, CopyScope, KeyMarker, ResultsDelegate, column_stats, delete_label, format_decimal,
-        rows_label,
+        Contents, CopyAs, CopyScope, KeyMarker, ResultsDelegate, SaveAs, column_stats,
+        delete_label, format_decimal, rows_label,
     };
     use tangul_assist::columns::{ColumnFacts, ForeignRef};
     use tangul_assist::dialect::dialect_for;
@@ -2290,11 +2455,82 @@ mod tests {
             !d.copy_formats(&scope, false, false)
                 .contains(&CopyAs::Insert)
         );
+        // Saved as a file named after the table.
+        assert!(d.save_formats(&scope).contains(&SaveAs::Insert));
+        let file = d.save_file(SaveAs::Insert, &scope, false, true).unwrap();
+        assert_eq!(file.name, "t.sql");
         assert_eq!(
             d.copy_as(CopyAs::Insert, true, &scope, None).as_deref(),
             Some(
                 "INSERT INTO t (id, note) VALUES\n    (1, 'a\tb'),\n    (2, NULL),\n    (3, 'say \"hi\"');"
             )
+        );
+    }
+
+    #[test]
+    fn save_as_writes_the_mark_or_the_whole_result() {
+        let mut d = delegate();
+        let bytes = |file: Option<super::SaveFile>| match file.map(|f| (f.name, f.contents)) {
+            Some((name, Contents::Bytes(bytes))) => (name, String::from_utf8(bytes).unwrap()),
+            _ => panic!("not a text file"),
+        };
+        // No mark: everything loaded, with the column names.
+        let all = d.save_scope();
+        assert_eq!((all.rows.len(), all.cols.len()), (3, 2));
+        assert_eq!(
+            d.save_formats(&all),
+            [
+                SaveAs::Csv,
+                SaveAs::Tsv,
+                SaveAs::Excel,
+                SaveAs::Json,
+                SaveAs::Markdown
+            ]
+        );
+        assert_eq!(
+            bytes(d.save_file(SaveAs::Csv, &all, false, false)),
+            (
+                "result.csv".into(),
+                "id,note\n1,a\tb\n2,\n3,\"say \"\"hi\"\"\"".into()
+            )
+        );
+        // Line endings and a byte order mark (CSV and TSV only).
+        assert_eq!(
+            bytes(d.save_file(SaveAs::Tsv, &all, true, true)).1,
+            "\u{feff}id\tnote\r\n1\t\"a\tb\"\r\n2\t\r\n3\t\"say \"\"hi\"\"\""
+        );
+        assert_eq!(
+            bytes(d.save_file(SaveAs::Json, &all, true, true)),
+            (
+                "result.json".into(),
+                "[\r\n  {\"id\":\"1\",\"note\":\"a\\tb\"},\r\n  {\"id\":\"2\",\"note\":null},\r\n  \
+                 {\"id\":\"3\",\"note\":\"say \\\"hi\\\"\"}\r\n]"
+                    .into()
+            )
+        );
+        // Excel gets the values as they are, numbers where the column is numeric.
+        d.facts = vec![Some(facts("integer", true, None)), None];
+        d.mark.click_column(0, Keys::default());
+        let column = d.save_scope();
+        let Some(super::SaveFile {
+            name,
+            contents: Contents::Excel(sheet),
+        }) = d.save_file(SaveAs::Excel, &column, false, false)
+        else {
+            panic!("not a workbook")
+        };
+        assert_eq!(name, "result.xlsx");
+        assert_eq!(
+            sheet,
+            super::xlsx::Sheet {
+                names: vec!["id".into()],
+                numeric: vec![true],
+                rows: vec![
+                    vec![Some("1".into())],
+                    vec![Some("2".into())],
+                    vec![Some("3".into())]
+                ],
+            }
         );
     }
 
