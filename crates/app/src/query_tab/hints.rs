@@ -34,7 +34,7 @@ const HINTS: &[Hint] = &[
     },
     Hint {
         title: "Copy as CSV, JSON, INSERT",
-        text: "Right-click a result and pick Copy as: CSV, JSON, Markdown, INSERT statements or an IN list.",
+        text: "Right-click a result: Copy gives CSV or an IN list, Copy with headers CSV, JSON, Markdown or INSERT statements.",
     },
     Hint {
         title: "Command palette",
