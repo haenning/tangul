@@ -7,6 +7,7 @@ pub mod analyze;
 pub mod chart;
 pub mod columns;
 pub mod complete;
+pub mod copy;
 pub mod dialect;
 pub mod digest;
 pub mod edit;
