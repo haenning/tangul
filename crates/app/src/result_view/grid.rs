@@ -32,6 +32,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_assist::columns::{ColumnFacts, TagKind};
+use tangul_assist::copy;
+use tangul_assist::dialect::Dialect;
 use tangul_assist::mark::{Keys, Mark, tsv};
 use tangul_assist::refine::{ColumnKind, Refine};
 use tangul_assist::{edit::RowEdit, related::RelatedLink};
@@ -382,6 +384,104 @@ impl ResultsDelegate {
         rows.iter()
             .map(|&r| (0..cols).map(|c| self.result.cell(r, c)).collect())
             .collect()
+    }
+
+    /// What "Copy as" covers: the mark, else the whole loaded result; and the column
+    /// for an IN list: the marked one, else the clicked one.
+    fn copy_as_scope(&self) -> CopyScope {
+        let n_cols = self.result.columns().len();
+        let (rows, cols) = if self.mark.is_empty() {
+            (
+                (0..self.result.row_count()).collect(),
+                (0..n_cols).collect(),
+            )
+        } else {
+            (self.mark.rows(self.result.row_count()), self.mark.cols())
+        };
+        let in_list = match &cols[..] {
+            [col] => Some(*col),
+            _ if self.mark.is_empty() => self.menu_col.filter(|&c| c < n_cols),
+            _ => None,
+        };
+        CopyScope {
+            rows,
+            cols,
+            in_list,
+        }
+    }
+
+    /// The formats "Copy as" offers for the scope: INSERT only for a result from one
+    /// table with one of its columns in the scope, an IN list only for one column
+    /// (and with the dialect known).
+    fn copy_as_formats(&self, scope: &CopyScope, dialect: bool) -> Vec<CopyAs> {
+        let mut formats = vec![CopyAs::Csv, CopyAs::Json, CopyAs::Markdown];
+        if (self.edit.as_ref()).is_some_and(|e| scope.cols.iter().any(|&c| e.editable(c))) {
+            formats.push(CopyAs::Insert);
+        }
+        if let (Some(col), true) = (scope.in_list, dialect) {
+            formats.push(CopyAs::InList(col));
+        }
+        formats
+    }
+
+    /// The scope's rows in `format` (rows no longer loaded left out).
+    fn copy_as(
+        &self,
+        format: CopyAs,
+        scope: &CopyScope,
+        dialect: Option<&dyn Dialect>,
+    ) -> Option<String> {
+        let rows: Vec<usize> = (scope.rows.iter().copied())
+            .filter(|&r| r < self.result.row_count())
+            .collect();
+        let cols = &scope.cols;
+        let cell = |r, c| self.result.cell(r, c);
+        let names = self.column_names();
+        match format {
+            CopyAs::Csv => Some(copy::csv(&rows, cols, cell, &names)),
+            CopyAs::Json => Some(copy::json(&rows, cols, cell, &names)),
+            CopyAs::Markdown => Some(copy::markdown(&rows, cols, cell, &names)),
+            CopyAs::Insert => self.edit.as_ref()?.insert(cols, &self.row_values(&rows)),
+            CopyAs::InList(col) => {
+                let numeric = (self.facts.get(col).cloned().flatten()).is_some_and(|f| f.numeric);
+                Some(copy::in_list(
+                    rows.iter().map(|&r| cell(r, col)),
+                    dialect?,
+                    numeric,
+                ))
+            }
+        }
+    }
+
+    /// "Copy as" with the formats for the scope; the text is made on click.
+    fn copy_as_item(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> PopupMenuItem {
+        let dialect = (self.view.as_ref())
+            .and_then(WeakEntity::upgrade)
+            .and_then(|v| v.read(cx).dialect);
+        let scope = Rc::new(self.copy_as_scope());
+        let table = cx.entity().downgrade();
+        let items: Vec<PopupMenuItem> = self
+            .copy_as_formats(&scope, dialect.is_some())
+            .into_iter()
+            .map(|format| {
+                let (table, scope) = (table.clone(), scope.clone());
+                PopupMenuItem::new(format.label()).on_click(move |_, _, cx| {
+                    let Some(table) = table.upgrade() else { return };
+                    let text = table.read(cx).delegate().copy_as(format, &scope, dialect);
+                    if let Some(text) = text {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                })
+            })
+            .collect();
+        let submenu = PopupMenu::build(window, cx, move |menu, _, _| {
+            items.into_iter().fold(menu, PopupMenu::item)
+        });
+        PopupMenuItem::submenu("Copy as", submenu)
     }
 
     fn related_item(&self, link: &RelatedLink, rows: &[usize]) -> PopupMenuItem {
@@ -1165,6 +1265,38 @@ fn delete_label(n: usize) -> String {
     }
 }
 
+/// The rows and columns "Copy as" copies, in grid order.
+#[derive(Debug, Clone, PartialEq)]
+struct CopyScope {
+    rows: Vec<usize>,
+    cols: Vec<usize>,
+    /// The column an IN list is made of.
+    in_list: Option<usize>,
+}
+
+/// A format of "Copy as".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyAs {
+    Csv,
+    Json,
+    Markdown,
+    Insert,
+    /// The values of the column, for `IN (...)`.
+    InList(usize),
+}
+
+impl CopyAs {
+    fn label(self) -> &'static str {
+        match self {
+            CopyAs::Csv => "CSV",
+            CopyAs::Json => "JSON",
+            CopyAs::Markdown => "Markdown",
+            CopyAs::Insert => "INSERT statements",
+            CopyAs::InList(_) => "IN list",
+        }
+    }
+}
+
 fn copy_item(label: String, text: String) -> PopupMenuItem {
     PopupMenuItem::new(label).on_click(move |_, _, cx| {
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
@@ -1460,6 +1592,7 @@ impl TableDelegate for ResultsDelegate {
                 rows_label("Copy", n),
                 tsv(&rows, &all_cols, cell, None),
             ))
+            .item(self.copy_as_item(window, cx))
             .item(PopupMenuItem::new("Mark row").on_click(move |_, _, cx| {
                 let _ = table.update(cx, |t, cx| {
                     let d = t.delegate_mut();
@@ -1777,11 +1910,16 @@ fn display_value(value: &str) -> SharedString {
 mod tests {
     // Not `super::*`: gpui's `test` attribute would shadow the standard one.
     use super::{
-        KeyMarker, ResultsDelegate, column_stats, delete_label, format_decimal, rows_label,
+        CopyAs, CopyScope, KeyMarker, ResultsDelegate, column_stats, delete_label, format_decimal,
+        rows_label,
     };
     use tangul_assist::columns::{ColumnFacts, ForeignRef};
+    use tangul_assist::dialect::dialect_for;
+    use tangul_assist::edit::row_edit;
     use tangul_assist::mark::{Keys, tsv};
+    use tangul_assist::schema::SchemaIndex;
     use tangul_core::{ColumnInfo, RowBatch};
+    use tangul_core::{ColumnMeta, DriverKind, SchemaInfo, TableInfo};
 
     fn delegate() -> ResultsDelegate {
         let mut d = ResultsDelegate::default();
@@ -2022,6 +2160,107 @@ mod tests {
         d.mark.click_column(0, Keys::default());
         d.marked();
         assert_eq!(d.marked_stats(0).unwrap().sum, "6");
+    }
+
+    #[test]
+    fn copy_as_takes_the_mark_or_the_whole_result() {
+        let mut d = delegate();
+        let all = CopyScope {
+            rows: vec![0, 1, 2],
+            cols: vec![0, 1],
+            in_list: None,
+        };
+        assert_eq!(d.copy_as_scope(), all);
+        // Without an edit nor a dialect: no INSERT, no IN list.
+        assert_eq!(
+            d.copy_as_formats(&all, true),
+            [CopyAs::Csv, CopyAs::Json, CopyAs::Markdown]
+        );
+        assert_eq!(
+            d.copy_as(CopyAs::Csv, &all, None).as_deref(),
+            Some("id,note\n1,a\tb\n2,\n3,\"say \"\"hi\"\"\"")
+        );
+        assert_eq!(
+            d.copy_as(CopyAs::Markdown, &all, None).as_deref(),
+            Some("| id | note |\n| --- | --- |\n| 1 | a\tb |\n| 2 | NULL |\n| 3 | say \"hi\" |")
+        );
+        // The clicked column makes the IN list of the whole result.
+        d.menu_col = Some(0);
+        let scope = d.copy_as_scope();
+        assert_eq!(scope.in_list, Some(0));
+        assert_eq!(d.copy_as_formats(&scope, false).len(), 3);
+        assert_eq!(d.copy_as_formats(&scope, true)[3], CopyAs::InList(0));
+        let pg = dialect_for(DriverKind::Postgres);
+        assert_eq!(
+            d.copy_as(CopyAs::InList(0), &scope, Some(pg)).as_deref(),
+            Some("'1', '2', '3'")
+        );
+        d.facts = vec![Some(facts("integer", true, None)), None];
+        assert_eq!(
+            d.copy_as(CopyAs::InList(0), &scope, Some(pg)).as_deref(),
+            Some("1, 2, 3")
+        );
+        assert_eq!(d.copy_as(CopyAs::InList(0), &scope, None), None);
+        // A mark wins; of two columns there is no IN list.
+        d.mark.click_cell(1, 0, Keys::default());
+        d.mark.click_cell(
+            2,
+            1,
+            Keys {
+                shift: true,
+                secondary: false,
+            },
+        );
+        let marked = d.copy_as_scope();
+        assert_eq!((marked.rows.clone(), marked.in_list), (vec![1, 2], None));
+        assert_eq!(
+            d.copy_as(CopyAs::Json, &marked, None).as_deref(),
+            Some(
+                "[\n  {\"id\":\"2\",\"note\":null},\n  {\"id\":\"3\",\"note\":\"say \\\"hi\\\"\"}\n]"
+            )
+        );
+        // Rows gone since the menu opened are left out.
+        d.result = tangul_core::ResultSet::new(d.result.columns().to_vec());
+        assert_eq!(
+            d.copy_as(CopyAs::Csv, &marked, None).as_deref(),
+            Some("id,note")
+        );
+    }
+
+    #[test]
+    fn copy_as_insert_for_a_table_result() {
+        let mut d = delegate();
+        let column = |name: &str, data_type: &str, primary_key| ColumnMeta {
+            schema: "public".into(),
+            table: "t".into(),
+            name: name.into(),
+            data_type: data_type.into(),
+            primary_key,
+            ..Default::default()
+        };
+        let info = SchemaInfo {
+            tables: vec![TableInfo {
+                schema: "public".into(),
+                name: "t".into(),
+                ..Default::default()
+            }],
+            columns: vec![column("id", "integer", true), column("note", "text", false)],
+            ..Default::default()
+        };
+        let schema = SchemaIndex::new(
+            info,
+            dialect_for(DriverKind::Postgres),
+            Some("public".into()),
+        );
+        d.edit = row_edit("select id, note from t", &d.column_names(), &schema);
+        let scope = d.copy_as_scope();
+        assert!(d.copy_as_formats(&scope, false).contains(&CopyAs::Insert));
+        assert_eq!(
+            d.copy_as(CopyAs::Insert, &scope, None).as_deref(),
+            Some(
+                "INSERT INTO t (id, note) VALUES\n    (1, 'a\tb'),\n    (2, NULL),\n    (3, 'say \"hi\"');"
+            )
+        );
     }
 
     #[test]

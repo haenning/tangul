@@ -203,6 +203,36 @@ impl RowEdit {
         ))
     }
 
+    /// One `INSERT … VALUES` for the rows, with the result columns `cols` that are
+    /// table columns (the others are left out). `rows` hold all result columns.
+    /// `None` without rows or without a table column among `cols`.
+    pub fn insert(&self, cols: &[usize], rows: &[Vec<Option<&str>>]) -> Option<String> {
+        let columns: Vec<(usize, &EditColumn)> = cols
+            .iter()
+            .filter_map(|&i| Some((i, self.columns.get(i)?.as_ref()?)))
+            .collect();
+        if columns.is_empty() || rows.is_empty() {
+            return None;
+        }
+        let names: Vec<&str> = columns.iter().map(|(_, c)| c.sql.as_str()).collect();
+        let values: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                let values: Vec<String> = columns
+                    .iter()
+                    .map(|&(i, c)| self.value(c, row.get(i).copied().flatten()))
+                    .collect();
+                format!("({})", values.join(", "))
+            })
+            .collect();
+        Some(format!(
+            "INSERT INTO {} ({}) VALUES\n    {};",
+            self.table_sql,
+            names.join(", "),
+            values.join(",\n    ")
+        ))
+    }
+
     /// Matches exactly the given rows (duplicates once); `None` without rows.
     fn filter(&self, rows: &[Vec<Option<&str>>]) -> Option<String> {
         let mut keys: Vec<Vec<Option<&str>>> = Vec::new();
@@ -335,6 +365,32 @@ mod tests {
              DELETE FROM app.orders\n\
              WHERE (user_id = 3 AND total IS NULL)\n   OR (user_id = 4 AND total = '9.5');"
         );
+    }
+
+    #[test]
+    fn inserts_the_table_columns() {
+        let s = sample();
+        let e = row_edit(
+            "select id, email, 1 + 1 from app.users",
+            &cols(&["id", "email", "?column?"]),
+            &s,
+        )
+        .unwrap();
+        let rows = [
+            vec![Some("7"), Some("o'k@x"), Some("2")],
+            vec![Some("8"), None, Some("2")],
+        ];
+        // The expression column isn't a table column: left out.
+        assert_eq!(
+            e.insert(&[0, 1, 2], &rows).unwrap(),
+            "INSERT INTO app.users (id, email) VALUES\n    (7, 'o''k@x'),\n    (8, NULL);"
+        );
+        assert_eq!(
+            e.insert(&[1], &rows[..1]).unwrap(),
+            "INSERT INTO app.users (email) VALUES\n    ('o''k@x');"
+        );
+        assert_eq!(e.insert(&[2], &rows), None);
+        assert_eq!(e.insert(&[0], &[]), None);
     }
 
     #[test]

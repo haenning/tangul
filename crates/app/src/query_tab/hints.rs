@@ -33,6 +33,10 @@ const HINTS: &[Hint] = &[
         text: "Click a column name to mark it, ⇧-click or drag for a rectangle; ⌘C copies the mark.",
     },
     Hint {
+        title: "Copy as CSV, JSON, INSERT",
+        text: "Right-click a result and pick Copy as: CSV, JSON, Markdown, INSERT statements or an IN list.",
+    },
+    Hint {
         title: "Command palette",
         text: "⌘⇧P searches commands, bookmarks and history.",
     },
