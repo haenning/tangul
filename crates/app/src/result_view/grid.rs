@@ -78,7 +78,8 @@ enum Drag {
     Rows(usize),
 }
 
-/// The filter zone right of a column's name is never narrower (the name gives way).
+/// While its button shows, the filter zone right of a column's name is never
+/// narrower (the name gives way).
 const FILTER_ZONE: Pixels = px(28.);
 /// The filter button's square, at the zone's right end.
 const FILTER_BUTTON: Pixels = px(22.);
@@ -1360,19 +1361,22 @@ impl TableDelegate for ResultsDelegate {
             let focus = open
                 .then(|| panel.as_ref().and_then(|p| p.read(cx).focus_target(cx)))
                 .flatten();
+            // Only while the button is drawn does the zone take its width from the
+            // name; otherwise the name may use the whole cell.
+            let shown = hovered || open || active;
             h_flex()
                 .id(("col-filter-button", col_ix))
                 .test_support()
                 .relative()
                 .flex_1()
-                .min_w(FILTER_ZONE)
+                .when(shown, |this| this.min_w(FILTER_ZONE))
                 .h_full()
                 .group(SharedString::from(format!("col-filter-{col_ix}")))
                 .justify_end()
                 .items_center()
                 // The button: a square at the right; the free space left of it
                 // opens the popover too.
-                .when(hovered || open || active, |this| {
+                .when(shown, |this| {
                     this.child(
                         div()
                             .flex()

@@ -3815,6 +3815,47 @@ fn a_narrow_column_keeps_its_filter_zone(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui_kit::test]
+fn a_long_column_name_uses_the_cell_until_hovered(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        let tab = workspace.update(cx, |ws, cx| ws.add_tab("select * from t", window, cx));
+        tab.update(cx, |t, cx| {
+            t.started(QueryId(1), "select * from t", cx);
+            let cols = vec![ColumnInfo {
+                name: "a_rather_long_column_name_wider_than_its_cell".into(),
+            }];
+            t.on_query_event(QueryEvent::Exec(ExecEvent::ResultStart(cols)), cx);
+            let mut batch = RowBatch::default();
+            batch.push_cell(Some("x"));
+            batch.finish_row();
+            t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+            t.on_query_event(
+                QueryEvent::Finished {
+                    elapsed: Default::default(),
+                    error: None,
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+                cx,
+            );
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    step(handle, cx, |window, cx| {
+        // No button drawn: nothing kept free for it.
+        let zone = window.find(("col-filter-button", 0usize)).bounds();
+        assert!(zone.size.width < px(28.), "{:?}", zone.size.width);
+        window.hover(("col-header", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        let zone = window.find(("col-filter-button", 0usize)).bounds();
+        assert!(zone.size.width >= px(28.), "{:?}", zone.size.width);
+    });
+}
+
 /// A tab with 20 columns (wider than the window) of 5 rows: `r{row}c{col}`.
 fn tab_with_wide_rows(
     handle: WindowHandle<Root>,
