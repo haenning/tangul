@@ -113,7 +113,7 @@
           }
         }
       ],
-      "lighting": "combined",
+      "lighting": "individual",
       "name": "Helix",
       "shadow": {
         "kind": "neutral",
