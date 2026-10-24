@@ -70,6 +70,15 @@ jobs:
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: scripts/notarize-macos.sh target/bundle/tangul-*-universal.dmg
+      # The DMG's signature as a file of its own (<dmg>.sig), over its final bytes:
+      # what the updater checks before it mounts a download. A signature inside
+      # the DMG makes Gatekeeper check it when opened, which a self-signed one fails.
+      - name: Detached signature for the updater
+        if: env.SIGNED == 'true'
+        run: |
+          dmg=$(ls target/bundle/tangul-*-universal.dmg)
+          codesign --sign "$TANGUL_SIGN_IDENTITY" --identifier io.github.haenning.tangul.dmg \
+            --timestamp=none --detached "$dmg.sig" "$dmg"
       - name: Verify signature (and notarization)
         if: env.SIGNED == 'true'
         run: |
@@ -80,8 +89,10 @@ jobs:
           # keeps the Keychain's "Always Allow" across releases.
           codesign -d -r- "$app"
           # The DMG, signed like the app: the updater checks it before mounting.
+          codesign --verify --strict --verbose=2 --detached "$dmg.sig" "$dmg"
+          codesign -d -r- --detached "$dmg.sig" "$dmg"
+          # Signed inside too until v0.2.6, for v0.2.4's updater.
           codesign --verify --strict --verbose=2 "$dmg"
-          codesign -d -r- "$dmg"
           if [ "$NOTARIZE" = true ]; then
             spctl -a -t exec -vv "$app"
             spctl -a -t open --context context:primary-signature -vv "$dmg"
@@ -91,7 +102,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" target/bundle/tangul-*-universal.dmg \
+          gh release create "$GITHUB_REF_NAME" target/bundle/tangul-*-universal.dmg* \
             --title "tangul $GITHUB_REF_NAME" --generate-notes
       - name: Remove the keychain and keys
         if: always()

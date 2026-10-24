@@ -103,7 +103,10 @@ fi
 rm -rf "$staging"
 # Signed with the app's certificate (not ad hoc), under an identifier of its own: the
 # updater checks it before it mounts a downloaded DMG (crates/update). A Developer ID
-# also needs the secure timestamp for notarization.
+# also needs the secure timestamp for notarization. Transition: the updater checks
+# the release's detached <dmg>.sig (release.yml) when there is one; only v0.2.4's
+# updater needs this signature inside, which makes Gatekeeper check the DMG when
+# opened. From v0.2.6 only a Developer ID signs the DMG itself.
 dmg_id=io.github.haenning.tangul.dmg
 if $developer_id; then
   codesign --sign "$identity" --identifier "$dmg_id" --timestamp "$dmg"

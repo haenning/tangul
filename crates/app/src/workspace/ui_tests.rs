@@ -4316,14 +4316,17 @@ fn shift_on_a_row_handle_keeps_the_marked_columns(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn a_newer_release_is_offered_in_the_title_bar(cx: &mut TestAppContext) {
-    use tangul_update::{Blocked, Release, Version};
+    use tangul_update::{Blocked, Download, Release, Version};
     let (handle, workspace) = open(cx);
     let release = Release {
         version: Version::parse("9.0.0").unwrap(),
         notes: String::new(),
         page: "https://github.com/haenning/tangul/releases/tag/v9.0.0".into(),
-        dmg: "https://example.invalid/tangul.dmg".into(),
-        dmg_size: 1,
+        dmg: Download {
+            url: "https://example.invalid/tangul.dmg".into(),
+            size: 1,
+        },
+        signature: None,
     };
     // Nothing known: no notice.
     step(handle, cx, |window, _| {
