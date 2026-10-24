@@ -51,6 +51,9 @@ impl Keychain {
             run(&mut command, "set up the test keychain").unwrap();
         };
         security(&["create-keychain", "-p", &keychain.password]);
+        // Never locks by itself while the test runs (a new keychain does after a
+        // few minutes).
+        security(&["set-keychain-settings"]);
         security(&["unlock-keychain", "-p", &keychain.password]);
         let mut searched = vec![keychain.path.to_string_lossy().into_owned()];
         searched.extend(keychain.searched.iter().cloned());
@@ -137,6 +140,21 @@ impl Keychain {
         )
         .unwrap();
     }
+
+    /// Signs `dmg` detached, into `signature`, as the release workflow does.
+    fn sign_detached(&self, dmg: &Path, signature: &Path, name: &str, id: &str) {
+        run(
+            Command::new("codesign")
+                .args(["--force", "--timestamp=none", "--identifier", id])
+                .arg("--keychain")
+                .arg(&self.path)
+                .args(["--sign", name, "--detached"])
+                .arg(signature)
+                .arg(dmg),
+            "sign detached",
+        )
+        .unwrap();
+    }
 }
 
 impl Drop for Keychain {
@@ -217,16 +235,19 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
     // Each attack as the DMG it would arrive in, the DMG signed like a release's
     // (certificate A, the bundle id with `.dmg`) unless the DMG is what's attacked.
     let dmg_id = format!("{ID}.dmg");
-    let image = |name: &str, make: &dyn Fn(&Path), signer: Option<(&str, &str)>| -> PathBuf {
+    let image = |name: &str, make: &dyn Fn(&Path), signer: Option<(&str, &str)>| -> Downloaded {
         let staging = dir.join(name);
         make(&staging);
         let dmg = dmg(&dir, &staging);
         if let Some((identity, id)) = signer {
             keychain.sign(&dmg, identity, id);
         }
-        dmg
+        Downloaded {
+            dmg,
+            signature: None,
+        }
     };
-    let attack = |name: &str, make: &dyn Fn(&Path)| -> PathBuf {
+    let attack = |name: &str, make: &dyn Fn(&Path)| -> Downloaded {
         image(name, make, Some(("tangul test A", &dmg_id)))
     };
     let signed_a = |staging: &Path| {
@@ -237,17 +258,64 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
     let good_app = |s: &Path| {
         signed_a(s);
     };
+    // The DMG unsigned, its signature beside it (`<dmg>.sig`, v0.2.5 on).
+    let detached = |name: &str, (identity, id): (&str, &str)| -> Downloaded {
+        let unsigned = image(name, &good_app, None);
+        let signature = unsigned.dmg.with_extension("dmg.sig");
+        keychain.sign_detached(&unsigned.dmg, &signature, identity, id);
+        Downloaded {
+            signature: Some(signature),
+            ..unsigned
+        }
+    };
+    let flip_a_byte = |path: &Path| {
+        let mut bytes = std::fs::read(path).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        std::fs::write(path, bytes).unwrap();
+    };
     const DOWNLOAD: &str = "Could not verify the download's signature";
     const APP: &str = "Could not verify the update's signature";
     let changed_after_signing = {
-        let dmg = attack("changed-dmg", &good_app);
-        let mut bytes = std::fs::read(&dmg).unwrap();
-        let middle = bytes.len() / 2;
-        bytes[middle] ^= 0xff;
-        std::fs::write(&dmg, bytes).unwrap();
-        dmg
+        let download = attack("changed-dmg", &good_app);
+        flip_a_byte(&download.dmg);
+        download
+    };
+    let changed_after_detached = {
+        let download = detached("changed-detached", ("tangul test A", &dmg_id));
+        flip_a_byte(&download.dmg);
+        download
+    };
+    let signature_of_another = Downloaded {
+        signature: detached("sig-elsewhere", ("tangul test A", &dmg_id)).signature,
+        ..image("sig-mismatch", &good_app, None)
     };
     let refused = [
+        // A detached signature: of the same certificate, as this DMG, for this DMG.
+        (
+            "a detached signature from another certificate",
+            detached("sig-other-cert", ("tangul test B", &dmg_id)),
+            v("0.2.4"),
+            DOWNLOAD,
+        ),
+        (
+            "a detached signature as something else",
+            detached("sig-other-id", ("tangul test A", ID)),
+            v("0.2.4"),
+            DOWNLOAD,
+        ),
+        (
+            "a detached signature of another DMG",
+            signature_of_another,
+            v("0.2.4"),
+            DOWNLOAD,
+        ),
+        (
+            "a DMG changed after its detached signature",
+            changed_after_detached,
+            v("0.2.4"),
+            DOWNLOAD,
+        ),
         // The DMG itself: checked before anything reads it.
         (
             "an unsigned DMG",
@@ -379,12 +447,13 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
             );
         }
         assert!(
-            !dmg.with_extension("mount").exists(),
+            !dmg.dmg.with_extension("mount").exists(),
             "{what}: still mounted"
         );
     }
 
-    // The real one: certificate A, the app's bundle id, the version announced.
+    // The real ones: certificate A, the app's bundle id, the version announced; the
+    // DMG signed inside (up to v0.2.5), or unsigned with its detached signature.
     let good = attack("good", &|s| {
         signed_a(s);
     });
@@ -397,6 +466,11 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
     );
     remove_old(&running);
     assert!(!dir.join("Applications/.tangul.app.old").exists());
+
+    let good = detached("good-detached", ("tangul test A", &dmg_id));
+    install(&good, &running, &requirement, v("0.2.4")).unwrap();
+    verify(&running, &requirement).unwrap();
+    remove_old(&running);
 
     drop(keychain);
     std::fs::remove_dir_all(&dir).unwrap();
