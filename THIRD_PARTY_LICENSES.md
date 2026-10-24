@@ -6686,7 +6686,7 @@ Used by:
 - [cpubits 0.1.1](https://github.com/RustCrypto/utils)
 - [cpufeatures 0.2.17](https://github.com/RustCrypto/utils)
 - [cpufeatures 0.3.1](https://github.com/RustCrypto/utils)
-- [crypto-bigint 0.7.5](https://github.com/RustCrypto/crypto-bigint)
+- [crypto-bigint 0.7.6](https://github.com/RustCrypto/crypto-bigint)
 - [crypto-common 0.1.7](https://github.com/RustCrypto/traits)
 - [crypto-common 0.2.2](https://github.com/RustCrypto/traits)
 - [ctr 0.10.1](https://github.com/RustCrypto/block-modes)
