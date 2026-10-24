@@ -31,8 +31,9 @@ out of your way.
 - **Copy what you see.** Mark cells, rows or whole columns (click a column name; ⇧-click
   or drag for a rectangle, ⌘-click to take a row out or add it) and copy them, with
   headers if you like; the format pastes cleanly into spreadsheets. Copy as CSV, JSON,
-  a Markdown table, INSERT statements or a list for `IN (…)`. The column summary adds
-  up the marked cells.
+  a Markdown table, INSERT statements or a list for `IN (…)`, or save them as a file:
+  CSV, TSV, Excel, JSON, Markdown or INSERT statements. The column summary adds up
+  the marked cells.
 - **Schema at a glance.** Browse tables and views in the sidebar, click one to query it,
   and get query suggestions for it based on what you ran before.
 - **Favorites.** Star the tables and views you use most; they stay on top of the
