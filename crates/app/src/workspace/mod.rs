@@ -30,6 +30,7 @@ mod sidebar;
 mod tabs;
 #[cfg(test)]
 mod ui_tests;
+mod update;
 mod value_panel;
 
 use sidebar::{HistoryList, Panel, Panels, SchemaTree, Side, Sidebar, SidebarRow};
@@ -176,6 +177,8 @@ pub struct Workspace {
     ai_keys: Option<std::collections::HashSet<tangul_ai::llm::ProviderKind>>,
     /// The MCP server, while `mcp.enabled` is set.
     mcp: mcp::Mcp,
+    /// A newer release of tangul, while `updates.check` is set.
+    updates: update::Updates,
     /// The assistant's chat: where its tool calls go.
     assistant: assistant::Assistant,
     /// The board the assistant was last asked for a tile from, and the question:
@@ -267,6 +270,7 @@ impl Workspace {
             this.sync_ai_access(cx);
             this.sync_mcp(cx);
             this.sync_assistant(cx);
+            this.sync_updates(cx);
         });
         // "auto": the theme follows the system's appearance as it changes.
         let appearance_sub = cx.observe_window_appearance(window, |_, window, cx| {
@@ -312,6 +316,7 @@ impl Workspace {
             ai: ai::Ai::default(),
             ai_keys: None,
             mcp: mcp::Mcp::default(),
+            updates: update::Updates::default(),
             assistant: assistant::Assistant::default(),
             board_asked: None,
             shown_tab: None,
@@ -360,6 +365,8 @@ impl Workspace {
         this.sync_ai_access(cx);
         this.sync_mcp(cx);
         this.sync_assistant(cx);
+        Self::tidy_after_update(cx);
+        this.sync_updates(cx);
         // Starts on the empty state; keys like ⌘T need a focused element.
         window.focus(&this.focus_handle, cx);
         this

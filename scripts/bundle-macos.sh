@@ -11,8 +11,8 @@
 # TANGUL_SIGN_IDENTITY set (e.g. in .env, see `make signing-cert`) it is signed with
 # that certificate instead: the Keychain then keeps "Always Allow" across builds. A
 # "Developer ID Application: …" identity (releases, see release.yml) also gets the
-# hardened runtime and a secure timestamp, and signs the DMG, as notarization needs
-# (scripts/notarize-macos.sh).
+# hardened runtime and a secure timestamp, as notarization needs
+# (scripts/notarize-macos.sh). Any certificate also signs the DMG.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -89,6 +89,11 @@ staging="$out/dmg"
 rm -rf "$staging" "$dmg" && mkdir -p "$staging"
 cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
+# The volume shows tangul's icon: .VolumeIcon.icns at its root, and the root's
+# "has custom icon" Finder flag (FinderInfo byte 8: 0x04), which the image keeps.
+cp "$app/Contents/Resources/tangul.icns" "$staging/.VolumeIcon.icns"
+xattr -wx com.apple.FinderInfo \
+  0000000000000000040000000000000000000000000000000000000000000000 "$staging"
 # Its progress goes to the terminal; shown only when it fails.
 if ! log=$(diskutil image create from --format UDZO --volumeName "tangul $version" \
     "$staging" "$dmg" 2>&1); then
@@ -96,8 +101,14 @@ if ! log=$(diskutil image create from --format UDZO --volumeName "tangul $versio
     exit 1
 fi
 rm -rf "$staging"
+# Signed with the app's certificate (not ad hoc), under an identifier of its own: the
+# updater checks it before it mounts a downloaded DMG (crates/update). A Developer ID
+# also needs the secure timestamp for notarization.
+dmg_id=io.github.haenning.tangul.dmg
 if $developer_id; then
-  codesign --sign "$identity" --timestamp "$dmg"
+  codesign --sign "$identity" --identifier "$dmg_id" --timestamp "$dmg"
+elif [[ "$identity" != "-" ]]; then
+  codesign --sign "$identity" --identifier "$dmg_id" --timestamp=none "$dmg"
 fi
 
 echo "app: $app"
