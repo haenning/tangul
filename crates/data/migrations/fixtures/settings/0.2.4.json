@@ -1,0 +1,69 @@
+{
+  "version": "0.2.4",
+  "editor": {
+    "font_size": null,
+    "font_family": null
+  },
+  "table": {
+    "font_size": null,
+    "font_family": null
+  },
+  "chart": {
+    "primary_color": null,
+    "font_size": null,
+    "font_family": null
+  },
+  "safety": {
+    "read_only_users": [],
+    "confirm_unfiltered_writes": true,
+    "relock_after": null,
+    "max_query_time": "1m"
+  },
+  "monitoring": {
+    "interval": "1d",
+    "schedule_new_bookmarks": false,
+    "max_points": 10000,
+    "max_age": "365d",
+    "max_mb": 50.0
+  },
+  "theme": {
+    "appearance": "auto",
+    "dark": "Tangul Dark Rainbow",
+    "light": "Tangul Light Rainbow"
+  },
+  "mcp": {
+    "enabled": false,
+    "port": 7433
+  },
+  "ai": {
+    "provider": null,
+    "providers": {
+      "anthropic": {
+        "model": null,
+        "base_url": null
+      },
+      "openai": {
+        "model": null,
+        "base_url": null
+      },
+      "gemini": {
+        "model": null,
+        "base_url": null
+      },
+      "ollama": {
+        "model": null,
+        "base_url": null
+      }
+    },
+    "max_tool_rounds": 12,
+    "questions_in_editor": true,
+    "access": "data"
+  },
+  "export": {
+    "line_endings": "lf",
+    "bom": false
+  },
+  "updates": {
+    "check": true
+  }
+}

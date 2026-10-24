@@ -8244,7 +8244,7 @@ dependencies = [
 
 [[package]]
 name = "tangul"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8266,7 +8266,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-ai"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -8289,7 +8289,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-assist"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -8300,7 +8300,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -8308,7 +8308,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-data"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
@@ -8324,7 +8324,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-drivers"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8340,7 +8340,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-engine"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8356,7 +8356,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-llm"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -8369,7 +8369,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-service"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "tangul-assist",
  "tangul-core",
@@ -8380,7 +8380,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-tunnel"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "russh",
@@ -8390,7 +8390,7 @@ dependencies = [
 
 [[package]]
 name = "tangul-update"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "futures",
  "reqwest",
