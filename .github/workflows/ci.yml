@@ -45,19 +45,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: System libraries
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
           packages: ${{ env.LINUX_LIBS }}
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: checks
           cache-on-failure: true
           save-if: ${{ github.event_name == 'push' }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-deny,cargo-machete
       - name: Format
@@ -95,23 +95,23 @@ jobs:
     permissions:
       contents: write # the badges branch, on main
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Pulled and started in the background, so they boot while the rest is set
       # up; the "ready" step below waits for them before the tests.
       - name: Databases and SSH bastion (start)
         run: (docker compose up -d > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.status") &
       - name: System libraries
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
           packages: ${{ env.LINUX_LIBS }}
       - name: Install toolchain (rust-toolchain.toml)
         run: |
           rustup toolchain install
           rustup component add llvm-tools-preview
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-llvm-cov,cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: tests
           # Keep the build even when a test fails, so the next run starts warm.
@@ -137,7 +137,7 @@ jobs:
           junit=$(find target -path '*nextest/ci/junit.xml' | head -1)
           python3 scripts/test-report.py coverage.json "${junit:-none}" docker-compose.yml report
           cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: test-report
