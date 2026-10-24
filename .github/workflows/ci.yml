@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: System libraries
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
@@ -91,7 +91,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - name: tangul-update's tests
@@ -104,7 +104,7 @@ jobs:
     permissions:
       contents: write # the badges branch, from a dev → main pull request
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pulled and started in the background, so they boot while the rest is set
       # up; the "ready" step below waits for them before the tests.
       - name: Databases and SSH bastion (start)
@@ -153,7 +153,7 @@ jobs:
           junit=$(find target -path '*nextest/ci/junit.xml' | head -1)
           python3 scripts/test-report.py coverage.json "${junit:-none}" docker-compose.yml report
           cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && env.WARM != 'true'
         with:
           name: test-report
