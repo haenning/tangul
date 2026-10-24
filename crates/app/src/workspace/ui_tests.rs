@@ -4358,3 +4358,53 @@ fn a_newer_release_is_offered_in_the_title_bar(cx: &mut TestAppContext) {
         assert!(window.find("update-installing").visible());
     });
 }
+
+#[gpui_kit::test]
+fn a_performance_board_is_created_from_what_the_server_has(cx: &mut TestAppContext) {
+    use super::perf_boards::PerfMenu;
+    use tangul_assist::perf::{Facts, Kind, Stats};
+    let (handle, workspace) = open(cx);
+    // No database: no performance boards.
+    cx.update(|cx| assert!(workspace.read(cx).perf_menu().is_none()));
+    step(handle, cx, |_, cx| shop_with_ai_user(&workspace, None, cx));
+    // Not checked yet (not connected): the menu says it is checking.
+    cx.update(|cx| {
+        assert!(matches!(
+            workspace.read(cx).perf_menu(),
+            Some(PerfMenu::Checking)
+        ))
+    });
+    // A server without pg_stat_statements: Queries says what it needs.
+    let facts = Facts {
+        version: (16, 4),
+        mariadb: false,
+        statements: Stats::Missing,
+    };
+    cx.update(|cx| workspace.update(cx, |ws, _| ws.set_perf_facts("db", facts)));
+    let offers = cx.update(|cx| match workspace.read(cx).perf_menu() {
+        Some(PerfMenu::Offers(offers)) => offers,
+        _ => panic!("no offers"),
+    });
+    let available: Vec<(Kind, bool)> = (offers.iter())
+        .map(|o| (o.board.kind, o.unavailable.is_none()))
+        .collect();
+    assert_eq!(
+        available,
+        [
+            (Kind::Indexes, true),
+            (Kind::Queries, false),
+            (Kind::Storage, true)
+        ]
+    );
+    // Created: an ordinary board of the database, opened, with the template's tiles.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.create_perf_board(Kind::Indexes, window, cx))
+    });
+    cx.update(|cx| {
+        let board = board_tab(&workspace, cx).read(cx).board().clone();
+        assert_eq!(board.name, "Performance: Indexes");
+        assert_eq!(board.database_id, "db");
+        assert_eq!(board.tiles.len(), offers[0].board.tiles.len());
+        assert_eq!(board.tiles[0].title, offers[0].board.tiles[0].title);
+    });
+}

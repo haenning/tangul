@@ -1,8 +1,11 @@
 use tangul_core::DriverKind;
 
 use crate::lexer::Lexing;
+use crate::perf::{Facts, Offer};
 
 use super::{AI_CONNECTION_LIMIT, Dialect, Namespace, Syntax, Upsert, quote_ident};
+
+mod perf;
 
 pub(super) struct Postgres;
 
@@ -243,6 +246,14 @@ impl Dialect for Postgres {
 
     fn array_syntax(&self) -> bool {
         true
+    }
+
+    fn perf_facts_sql(&self) -> Option<&'static str> {
+        Some(perf::FACTS)
+    }
+
+    fn perf_boards(&self, facts: &Facts) -> Vec<Offer> {
+        perf::boards(facts)
     }
 
     fn explain_sql(&self, sql: &str) -> Option<String> {

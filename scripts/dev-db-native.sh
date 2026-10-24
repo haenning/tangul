@@ -44,7 +44,9 @@ fi
 if ! listening $PG_PORT; then
     version="$(ls /usr/lib/postgresql | sort -V | tail -1)"
     if ! pg_lsclusters -h | awk '{print $2}' | grep -qx tangul; then
-        $SUDO pg_createcluster "$version" tangul -p $PG_PORT -- --auth=trust >/dev/null
+        # Statement statistics for the Queries performance board.
+        $SUDO pg_createcluster "$version" tangul -p $PG_PORT \
+            -o shared_preload_libraries=pg_stat_statements -- --auth=trust >/dev/null
     fi
     $SUDO pg_ctlcluster "$version" tangul start
     wait_for $PG_PORT

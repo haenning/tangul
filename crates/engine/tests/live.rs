@@ -850,6 +850,7 @@ async fn postgres() {
     .await;
     board_checks(&mut h, "SELECT tangul_ai_sneak()").await;
     plan_checks(&mut h, DriverKind::Postgres).await;
+    perf_board_checks(&mut h, DriverKind::Postgres).await;
     editor_checks(&mut h, DriverKind::Postgres, "SELECT tangul_ai_sneak()").await;
     h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak()").await;
     lock_wait_checks(&mut h).await;
@@ -881,6 +882,131 @@ async fn plan_checks(h: &mut Harness, driver: DriverKind) {
     assert!(cost < tangul_assist::dialect::HEAVY_COST, "{cost}");
     assert!(ask(h, "SELECT * FROM tangul_no_such_table").await.is_err());
     h.run(tab, "DROP TABLE tangul_plan_test").await;
+}
+
+/// The performance boards (`tangul_assist::perf`) against the real server: the facts
+/// query sees what the server has (statement statistics on, as the dev databases
+/// are set up), and every tile of every board runs as a board's read. A table with a
+/// unique index, an unused one, a duplicate of it and (Postgres) a foreign key
+/// without an index: each shows where it belongs, the unique one never as unused.
+async fn perf_board_checks(h: &mut Harness, driver: DriverKind) {
+    use tangul_assist::perf::{Facts, Kind, Stats};
+    let d = tangul_assist::dialect::dialect_for(driver);
+    let tab = TabId(15);
+    h.set(false, None);
+    if driver == DriverKind::Postgres {
+        h.run(tab, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+            .await;
+    }
+    for sql in [
+        "DROP TABLE IF EXISTS tangul_perf_child",
+        "DROP TABLE IF EXISTS tangul_perf_parent",
+        "CREATE TABLE tangul_perf_parent (id INT PRIMARY KEY, code INT, note VARCHAR(20))",
+        "CREATE UNIQUE INDEX tangul_perf_code ON tangul_perf_parent (code)",
+        "CREATE INDEX tangul_perf_note ON tangul_perf_parent (note)",
+        "CREATE INDEX tangul_perf_note_again ON tangul_perf_parent (note)",
+        "CREATE TABLE tangul_perf_child (id INT PRIMARY KEY, parent_id INT, \
+         CONSTRAINT tangul_perf_fk FOREIGN KEY (parent_id) REFERENCES tangul_perf_parent (id))",
+        // Opened once, so usage statistics know its indexes.
+        "SELECT count(*) FROM tangul_perf_parent",
+    ] {
+        let out = h.run(tab, sql).await;
+        assert_eq!(out.error, None, "{sql}");
+    }
+
+    let board_read = QueryOptions::new(Caller::Board);
+    h.next_query += 1;
+    let out = h
+        .engine
+        .query(
+            QueryId(h.next_query),
+            h.conn,
+            d.perf_facts_sql().unwrap(),
+            board_read.clone(),
+        )
+        .await
+        .unwrap();
+    let row = &out.results[0];
+    let cells: Vec<(&str, Option<&str>)> = (row.columns().iter().enumerate())
+        .map(|(c, col)| (col.name.as_str(), row.cell(0, c)))
+        .collect();
+    let facts = Facts::read(&cells);
+    assert!(facts.version.0 >= 8, "{facts:?}");
+    assert_eq!(facts.statements, Stats::Yes, "{facts:?}");
+
+    let offers = d.perf_boards(&facts);
+    assert!(offers.iter().all(|o| o.unavailable.is_none()), "{offers:?}");
+    let tiles: Vec<(Kind, &tangul_assist::perf::Tile)> = offers
+        .iter()
+        .flat_map(|o| o.board.tiles.iter().map(move |t| (o.board.kind, t)))
+        .collect();
+    h.next_query += 1;
+    let results = h
+        .engine
+        .query_batch(
+            QueryId(h.next_query),
+            h.conn,
+            tiles.iter().map(|(_, t)| t.sql.clone()).collect(),
+            board_read,
+        )
+        .await
+        .unwrap();
+    let mut by_title = std::collections::HashMap::new();
+    for ((kind, tile), result) in tiles.iter().zip(&results) {
+        let out = result
+            .as_ref()
+            .unwrap_or_else(|e| panic!("{driver:?} {kind:?} \"{}\": {e}", tile.title));
+        by_title.insert(tile.title.as_str(), out.results[0].clone());
+    }
+    // The values of `column` in the tile titled `title`.
+    let column = |title: &str, column: &str| -> Vec<String> {
+        let result = by_title
+            .get(title)
+            .unwrap_or_else(|| panic!("no tile {title}"));
+        let c = (result.columns().iter())
+            .position(|col| col.name == column)
+            .unwrap_or_else(|| panic!("{title} has no column {column}"));
+        (0..result.row_count())
+            .filter_map(|r| result.cell(r, c).map(str::to_string))
+            .collect()
+    };
+    let unused = match driver {
+        DriverKind::Postgres => "Unused indexes, largest first",
+        _ => "Unused indexes, on the largest tables first",
+    };
+    let unused = column(unused, "index");
+    assert!(unused.iter().any(|i| i == "tangul_perf_note"), "{unused:?}");
+    assert!(
+        !unused.iter().any(|i| i == "tangul_perf_code"),
+        "unique: {unused:?}"
+    );
+    let duplicates = column("Duplicate and redundant indexes", "index");
+    let covered_by = column("Duplicate and redundant indexes", "covered_by");
+    let pair = duplicates
+        .iter()
+        .zip(&covered_by)
+        .find(|(i, _)| *i == "tangul_perf_note_again");
+    assert_eq!(
+        pair.map(|(_, by)| by.as_str()),
+        Some("tangul_perf_note"),
+        "{duplicates:?} {covered_by:?}"
+    );
+    assert!(
+        !duplicates.iter().any(|i| i == "tangul_perf_note"),
+        "one of the pair"
+    );
+    if driver == DriverKind::Postgres {
+        let keys = column("Foreign keys without an index", "foreign_key");
+        assert!(keys.iter().any(|k| k == "tangul_perf_fk"), "{keys:?}");
+    }
+    let tables = column("Tables without a primary key", "table");
+    assert!(
+        !tables.iter().any(|t| t.starts_with("tangul_perf")),
+        "{tables:?}"
+    );
+
+    h.run(tab, "DROP TABLE tangul_perf_child").await;
+    h.run(tab, "DROP TABLE tangul_perf_parent").await;
 }
 
 /// A read that runs for others (here a board's) waits only so long for a lock: a
@@ -961,6 +1087,7 @@ async fn mysql() {
     .await;
     board_checks(&mut h, "SELECT tangul_ai_sneak()").await;
     plan_checks(&mut h, DriverKind::Mysql).await;
+    perf_board_checks(&mut h, DriverKind::Mysql).await;
     editor_checks(&mut h, DriverKind::Mysql, "SELECT tangul_ai_sneak()").await;
     h.run(TabId(1), "DROP FUNCTION tangul_ai_sneak").await;
 }

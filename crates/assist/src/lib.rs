@@ -21,6 +21,7 @@ pub mod json;
 pub mod lexer;
 pub mod mark;
 pub mod nl;
+pub mod perf;
 pub mod profile;
 pub mod redact;
 pub mod refine;
