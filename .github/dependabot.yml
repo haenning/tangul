@@ -1,0 +1,14 @@
+# The workflows' actions are pinned to commits (a moved tag can't change what runs
+# with the release secrets); Dependabot proposes the newer ones, into dev.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
