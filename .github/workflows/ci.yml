@@ -1,11 +1,13 @@
 name: CI
 
 # Every crate's tests in one run, coverage measured in that same run, on Linux (the
-# app's UI tests run headless there too). Two jobs side by side:
+# app's UI tests run headless there too), plus the updater on macOS. Jobs side by side:
 # - checks: format, clippy, dependencies, and that docs/TESTING.md names real tests
 # - tests: all tests with cargo-nextest under cargo-llvm-cov, the live ones against
 #   Postgres, MySQL and the SSH bastion (docker-compose.yml); the report goes to the
 #   run page and, on main, to the `badges` branch (badges, tests.json, summary.md)
+# - update-macos: the updater's tests where its install runs, every update that must
+#   never be installed among them
 # Releases call this workflow before they build (release.yml).
 #
 # Caches: only pushes to dev and main save them (pull requests restore their base
@@ -68,6 +70,23 @@ jobs:
         run: cargo machete
       - name: docs/TESTING.md names tests that exist
         run: python3 scripts/check-testing-doc.py docs/TESTING.md
+
+  # The updater on macOS: real signatures, a test keychain and real DMGs, every update
+  # that must never be installed (crates/update/src/install/attacks.rs).
+  update-macos:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: update-macos
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
+      - name: tangul-update's tests
+        run: cargo test -p tangul-update
 
   tests:
     runs-on: ubuntu-latest

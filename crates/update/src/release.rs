@@ -41,14 +41,22 @@ pub fn newer(release: &serde_json::Value, current: Version) -> Option<Release> {
     }
     let name = dmg_name(version);
     let asset = (release["assets"].as_array()?.iter()).find(|a| a["name"] == name.as_str())?;
+    // Only this repository's download of exactly that file.
+    let dmg = asset["browser_download_url"].as_str()?;
+    if dmg != format!("{DOWNLOADS}v{version}/{name}") {
+        return None;
+    }
     Some(Release {
         version,
         notes: release["body"].as_str().unwrap_or_default().to_string(),
         page: release["html_url"].as_str()?.to_string(),
-        dmg: asset["browser_download_url"].as_str()?.to_string(),
+        dmg: dmg.to_string(),
         dmg_size: asset["size"].as_u64()?,
     })
 }
+
+/// Where the releases' files are downloaded from.
+const DOWNLOADS: &str = "https://github.com/haenning/tangul/releases/download/";
 
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -122,7 +130,10 @@ mod tests {
                 { "name": "notes.txt", "browser_download_url": "https://x/notes.txt", "size": 3 },
                 {
                     "name": format!("tangul-{}-universal.dmg", tag.trim_start_matches('v')),
-                    "browser_download_url": "https://x/tangul.dmg",
+                    "browser_download_url": format!(
+                        "https://github.com/haenning/tangul/releases/download/{tag}/tangul-{}-universal.dmg",
+                        tag.trim_start_matches('v')
+                    ),
                     "size": 34233856
                 }
             ]
@@ -137,7 +148,14 @@ mod tests {
             .await
             .unwrap()
             .expect("a release newer than 0.1.0");
-        assert!(release.dmg.ends_with(&dmg_name(release.version)), "{release:?}");
+        assert_eq!(
+            release.dmg,
+            format!(
+                "{DOWNLOADS}v{}/{}",
+                release.version,
+                dmg_name(release.version)
+            )
+        );
         assert!(release.dmg_size > 1_000_000, "{release:?}");
     }
 
@@ -150,7 +168,8 @@ mod tests {
                 version: Version::parse("0.2.4").unwrap(),
                 notes: "## What's Changed\n* copy formats".into(),
                 page: "https://github.com/haenning/tangul/releases/tag/v0.2.4".into(),
-                dmg: "https://x/tangul.dmg".into(),
+                dmg: "https://github.com/haenning/tangul/releases/download/v0.2.4/tangul-0.2.4-universal.dmg"
+                    .into(),
                 dmg_size: 34233856,
             })
         );
@@ -179,6 +198,19 @@ mod tests {
         let mut r = release("v0.3.0");
         r["assets"][1]["name"] = json!("tangul-0.2.9-universal.dmg");
         assert_eq!(newer(&r, current), None);
+        // Only this repository's download of that very file.
+        for url in [
+            "https://x/tangul-0.3.0-universal.dmg",
+            "http://github.com/haenning/tangul/releases/download/v0.3.0/tangul-0.3.0-universal.dmg",
+            "https://github.com/someone/tangul/releases/download/v0.3.0/tangul-0.3.0-universal.dmg",
+            "https://github.com/haenning/tangul/releases/download/v0.2.1/tangul-0.3.0-universal.dmg",
+            "https://github.com/haenning/tangul/releases/download/v0.3.0/../x/tangul-0.3.0-universal.dmg",
+            "https://github.com.evil.example/haenning/tangul/releases/download/v0.3.0/tangul-0.3.0-universal.dmg",
+        ] {
+            let mut r = release("v0.3.0");
+            r["assets"][1]["browser_download_url"] = json!(url);
+            assert_eq!(newer(&r, current), None, "{url}");
+        }
         // No notes are fine.
         let mut r = release("v0.3.0");
         r["body"] = json!(null);

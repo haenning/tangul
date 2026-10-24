@@ -87,16 +87,17 @@ pub fn installable(app: &Path) -> Result<Requirement, Blocked> {
     designated(&text).ok_or(Blocked::AdHoc)
 }
 
-/// The designated requirement in `codesign --display --requirements -`'s output;
-/// `None` for an ad-hoc signature (its requirement is only the code's hash, which
-/// no other build meets).
+/// The designated requirement in `codesign --display --requirements -`'s output,
+/// when it pins a certificate (`certificate leaf = H"…"`, `anchor apple generic …`);
+/// `None` for an ad-hoc signature (its requirement is only the code's hash) and for
+/// one that names only the bundle id, which anyone can sign an app with.
 fn designated(text: &str) -> Option<Requirement> {
     let requirement = text
         .lines()
         .find_map(|line| line.trim().strip_prefix("designated => "))?
         .trim();
-    (!requirement.is_empty() && !requirement.starts_with("cdhash"))
-        .then(|| Requirement(requirement.to_string()))
+    let pinned = requirement.contains("certificate ") || requirement.contains("anchor ");
+    (pinned && !requirement.starts_with("cdhash")).then(|| Requirement(requirement.to_string()))
 }
 
 /// Whether a file can be created in `dir` (and removed again).
@@ -118,13 +119,12 @@ pub fn install(
     let name = app.file_name().ok_or("the app has no name")?;
     let mount = Mount::attach(dmg)?;
     let new = mount.dir.join(name);
-    verify(&new, requirement)?;
-    let found = bundle_version(&new)?;
-    if found != version {
-        return Err(format!(
-            "The update is version {found}, not {version}: not installed"
-        ));
+    // The app itself, not a link to one somewhere else.
+    let real = std::fs::symlink_metadata(&new).is_ok_and(|m| m.is_dir() && !m.is_symlink());
+    if !real {
+        return Err("The update holds no app: not installed".into());
     }
+    accept(&new, requirement, version)?;
     let staged = sibling(app, "new")?;
     remove(&staged)?;
     run(
@@ -132,7 +132,24 @@ pub fn install(
         "copy the update",
     )?;
     drop(mount);
+    // What gets installed is the copy: checked again.
+    if let Err(e) = accept(&staged, requirement, version) {
+        let _ = remove(&staged);
+        return Err(e);
+    }
     replace(app, &staged)
+}
+
+/// `new` meets the requirement and is `version`.
+fn accept(new: &Path, requirement: &Requirement, version: Version) -> Result<(), String> {
+    verify(new, requirement)?;
+    let found = bundle_version(new)?;
+    if found != version {
+        return Err(format!(
+            "The update is version {found}, not {version}: not installed"
+        ));
+    }
+    Ok(())
 }
 
 /// The new app must meet the running one's requirement: same bundle id, same
@@ -280,25 +297,29 @@ impl Drop for Mount {
     }
 }
 
+/// Updates that must never be installed (macOS: real signatures, real DMGs).
+#[cfg(all(test, target_os = "macos"))]
+mod attacks;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
+    pub(super) fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tangul-update-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn app(dir: &Path, version: &str) -> PathBuf {
+    pub(super) fn app(dir: &Path, version: &str) -> PathBuf {
         let app = dir.join("tangul.app");
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         std::fs::write(app.join("Contents/version"), version).unwrap();
         app
     }
 
-    fn version_of(app: &Path) -> String {
+    pub(super) fn version_of(app: &Path) -> String {
         std::fs::read_to_string(app.join("Contents/version")).unwrap()
     }
 
@@ -328,6 +349,17 @@ mod tests {
         );
         let ad_hoc = "Executable=/x\n# designated => cdhash H\"0f1e\"\n";
         assert_eq!(designated(ad_hoc), None);
+        // A bundle id alone pins nothing: anyone can sign an app with it.
+        assert_eq!(
+            designated("designated => identifier \"io.github.haenning.tangul\""),
+            None
+        );
+        assert!(
+            designated(
+                "designated => anchor apple generic and certificate leaf[subject.OU] = \"TEAM\""
+            )
+            .is_some()
+        );
         assert_eq!(designated("code object is not signed at all"), None);
         assert_eq!(designated("designated => "), None);
     }
@@ -367,75 +399,6 @@ mod tests {
         remove_old(&running);
         assert!(!dir.join(".tangul.app.old").exists());
         assert_eq!(version_of(&running), "0.2.4");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A signed app bundle of `version` with bundle id `id`, in a DMG of its own.
-    #[cfg(target_os = "macos")]
-    fn signed_dmg(dir: &Path, id: &str, version: &str) -> PathBuf {
-        let staging = dir.join(format!("dmg-{version}"));
-        let app = staging.join("tangul.app");
-        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
-        std::fs::copy("/usr/bin/true", app.join("Contents/MacOS/tangul")).unwrap();
-        std::fs::write(
-            app.join("Contents/Info.plist"),
-            format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
-                 <key>CFBundleIdentifier</key><string>{id}</string>\
-                 <key>CFBundleExecutable</key><string>tangul</string>\
-                 <key>CFBundleShortVersionString</key><string>{version}</string>\
-                 </dict></plist>\n"
-            ),
-        )
-        .unwrap();
-        // Ad hoc, but with the bundle id: enough for an `identifier` requirement.
-        run(
-            Command::new("codesign")
-                .args(["--force", "--sign", "-", "--identifier", id])
-                .arg(&app),
-            "sign",
-        )
-        .unwrap();
-        let dmg = dir.join(format!("tangul-{version}.dmg"));
-        run(
-            Command::new("hdiutil")
-                .args(["create", "-quiet", "-format", "UDZO", "-srcfolder"])
-                .arg(&staging)
-                .arg(&dmg),
-            "create the dmg",
-        )
-        .unwrap();
-        dmg
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn installs_only_an_app_signed_as_required_and_of_the_version() {
-        let dir = temp("install");
-        let running = app(&dir.join("Applications"), "0.2.3");
-        let dmg = signed_dmg(&dir, "io.test.tangul", "0.2.4");
-        let ours = Requirement("identifier \"io.test.tangul\"".into());
-        let v = |text| Version::parse(text).unwrap();
-
-        // Another signature or another version than expected: nothing changes.
-        let other = Requirement("identifier \"io.test.someone-else\"".into());
-        let err = install(&dmg, &running, &other, v("0.2.4")).unwrap_err();
-        assert!(err.contains("verify the update's signature"), "{err}");
-        let err = install(&dmg, &running, &ours, v("0.2.5")).unwrap_err();
-        assert!(err.contains("version 0.2.4, not 0.2.5"), "{err}");
-        assert_eq!(version_of(&running), "0.2.3");
-
-        install(&dmg, &running, &ours, v("0.2.4")).unwrap();
-        assert_eq!(bundle_version(&running).unwrap(), v("0.2.4"));
-        verify(&running, &ours).unwrap();
-        // The replaced app is kept until the new one runs; the DMG is detached.
-        assert_eq!(
-            version_of(&dir.join("Applications/.tangul.app.old")),
-            "0.2.3"
-        );
-        assert!(!dmg.with_extension("mount").exists());
-        remove_old(&running);
-        assert!(!dir.join("Applications/.tangul.app.old").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

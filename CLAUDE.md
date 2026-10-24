@@ -38,11 +38,14 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   per API (`anthropic.rs`, `openai.rs` for every OpenAI-compatible service, `gemini.rs`,
   `ollama.rs`). The caller passes key, messages and tools (`ToolDef`)
 - `crates/update`: tangul updating itself from its GitHub releases, no UI: the check
-  (`releases/latest`, nothing sent but the request), the DMG, and the install: only an
-  app meeting the running app's designated requirement (bundle id and certificate,
-  `codesign -R`) and of the announced version replaces it, by renaming; any failure
+  (`releases/latest`, nothing sent but the request), the DMG (only from this repo's
+  release downloads), and the install: only a real app (no link) meeting the running
+  app's designated requirement, which must pin a certificate (bundle id and
+  certificate, `codesign --verify --deep --strict -R`, checked again on the copy that
+  is installed) and of the announced version replaces it, by renaming; any failure
   leaves the running app as it was. Ad-hoc, translocated or read-only apps only get
-  the notice (`workspace/update.rs`, `updates.check`)
+  the notice (`workspace/update.rs`, `updates.check`). Every update that must never be
+  installed has a test (`install/attacks.rs`, run by CI's macOS job)
 - `crates/ai`: the assistant's tools (`Tool`, `Registry`), each written once; MCP and
   provider adapters map the registry generically. `Ctx` is the one security layer
   for every caller: only exposed connections and their opt-ins; SQL only through the
