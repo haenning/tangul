@@ -281,7 +281,8 @@ explicit OK, and keep them covered by tests.
 - Issues close when their commit reaches `main`, so put `Closes #N` in the commit
   message. In a pull request into `dev` it has no effect.
 - Commit messages in lower case (the subject and the text; names as they are spelled).
-- CI (`.github/workflows/ci.yml`) runs on pushes to `dev` and `main` and on pull
-  requests into them: every
-  crate's tests once, on Linux, with coverage; releases run it first.
+- CI (`.github/workflows/ci.yml`) tests on pull requests into `dev` and `main` (their
+  merge into the target): every crate's tests once, on Linux, with coverage, and the
+  updater on macOS. Merging and releasing test nothing again; a push to `main` only
+  builds for the cache. The `dev` → `main` pull request publishes the badges.
   UI tests press `secondary-…` keys (cmd on macOS, ctrl elsewhere), never `cmd-…`.
