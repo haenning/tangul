@@ -118,10 +118,10 @@ impl Workspace {
                 })
             };
             let installed = match download.await.map_err(|e| e.to_string()).flatten() {
-                Ok(dmg) => {
+                Ok(downloaded) => {
                     let app = app.clone();
                     cx.background_spawn(async move {
-                        tangul_update::install(&dmg, &app, &requirement, version)
+                        tangul_update::install(&downloaded, &app, &requirement, version)
                     })
                     .await
                 }

@@ -8,5 +8,5 @@ mod release;
 mod version;
 
 pub use install::{Blocked, Requirement, install, installable, relaunch, remove_old, running_app};
-pub use release::{LATEST, Release, check, dmg_name, download, newer};
+pub use release::{Download, Downloaded, LATEST, Release, check, dmg_name, download, newer};
 pub use version::Version;

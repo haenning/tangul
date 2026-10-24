@@ -16,7 +16,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::Version;
+use crate::{Downloaded, Version};
 
 /// Why the running app can't update itself; it shows the notice with a link to
 /// the release instead.
@@ -119,24 +119,28 @@ fn writable(dir: &Path) -> bool {
     ok
 }
 
-/// Installs the app in `dmg` over `app`: only when it meets `requirement` and is
-/// `version`. `app` is untouched when anything fails.
+/// Installs the app in the downloaded DMG over `app`: only when the DMG is signed
+/// like the app (its detached signature, else one inside) and the app in it meets
+/// `requirement` and is `version`. `app` is untouched when anything fails.
 pub fn install(
-    dmg: &Path,
+    download: &Downloaded,
     app: &Path,
     requirement: &Requirement,
     version: Version,
 ) -> Result<(), String> {
     let name = app.file_name().ok_or("the app has no name")?;
+    let dmg = &download.dmg;
     // Nothing reads the image before its own signature is checked.
     let signed_like = requirement
         .for_dmg()
         .ok_or("The app's signature names no bundle id: not installed")?;
+    let mut check = Command::new("codesign");
+    check.args(["--verify", "--strict"]);
+    if let Some(signature) = &download.signature {
+        check.arg("--detached").arg(signature);
+    }
     run(
-        Command::new("codesign")
-            .args(["--verify", "--strict"])
-            .arg(format!("-R={}", signed_like.0))
-            .arg(dmg),
+        check.arg(format!("-R={}", signed_like.0)).arg(dmg),
         "verify the download's signature",
     )
     .map_err(|e| format!("{e}: not installed"))?;

@@ -73,12 +73,13 @@ local Postgres or MySQL.
 
 All code goes through `dev`: branch off `dev` and open pull requests into `dev`. Only
 `dev` → `main` goes into `main`, plus the version bump of a release. CI
-(`.github/workflows/ci.yml`) runs on every push to `dev` and `main` and on pull
-requests into them, on
-Linux: format, clippy and dependency checks in one job; every crate's tests (live
-database and headless UI tests included) once, with coverage, in the other. On `main`
-it publishes the report and badges to the `badges` branch; see
-[docs/TESTING.md](docs/TESTING.md). Releases run it before they build. Pull requests
+(`.github/workflows/ci.yml`) tests every pull request into `dev` and `main` as it
+would be merged, once, on Linux: format, clippy and dependency checks in one job;
+every crate's tests (live database and headless UI tests included), with coverage, in
+the other; the updater on macOS in a third. A passing `dev` → `main` pull request
+publishes the report and badges to the `badges` branch; see
+[docs/TESTING.md](docs/TESTING.md). Merging and releasing don't test again (a push to
+`main` only builds, for the cache). Pull requests
 into `main` and releases run `make license-check` (`.github/workflows/licenses.yml`).
 
 ## Releases

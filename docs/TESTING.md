@@ -7,7 +7,8 @@
 How tangul is tested, what the numbers mean, and which tests back each promise the
 [README](../README.md) makes. The badges and the
 [full report](https://github.com/haenning/tangul/blob/badges/summary.md) (tests and
-coverage per crate and file) come from the latest CI run on `main`.
+coverage per crate and file) come from the latest passing `dev` → `main` pull request:
+what `main` became.
 
 ## The layers
 
@@ -29,11 +30,13 @@ make test-live          # plus the live tests (Docker: docker-compose.yml)
 make test-live-native   # the same without Docker (Debian/Ubuntu, installs via apt)
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of it once per push to `main` and per
-pull request, on Linux: every crate's tests, including the live and the UI tests, in
-one `cargo nextest` run that also measures coverage (`cargo llvm-cov`). Format,
-clippy and the dependency checks run beside it. Releases run the same before they
-build. Nothing runs twice; a run takes about 5 to 10 minutes with a warm cache.
+CI (`.github/workflows/ci.yml`) runs all of it once per pull request into `dev` or
+`main`, on what the merge would make, on Linux: every crate's tests, including the
+live and the UI tests, in one `cargo nextest` run that also measures coverage (`cargo
+llvm-cov`). Format, clippy and the dependency checks run beside it, the updater's
+tests on macOS. Into `dev` that is each change on its own, `dev` → `main` all of them
+together. Merging and releasing run nothing again (a push to `main` only builds, to
+keep the cache warm); a run takes about 5 to 10 minutes with a warm cache.
 
 ## Coverage
 

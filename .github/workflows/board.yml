@@ -1,0 +1,36 @@
+name: Board
+
+# Issues the commits pushed to dev name (#N) go into review on the project board: onto
+# it, into the current iteration, status "In review" (unless "Done"); see
+# scripts/board-in-review.py. The board is the user's, which the workflow's own token
+# can't change: PROJECT_TOKEN is a classic token with only the `project` scope.
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: board
+  cancel-in-progress: false
+
+jobs:
+  in-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Issues named in the pushed commits → In review
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          BOARD_OWNER: haenning
+          BOARD_NUMBER: 1
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::PROJECT_TOKEN is not set: the board isn't updated"
+            exit 0
+          fi
+          python3 scripts/board-in-review.py "$BEFORE" "$AFTER"

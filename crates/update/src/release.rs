@@ -18,9 +18,18 @@ pub struct Release {
     pub notes: String,
     /// Its page on GitHub.
     pub page: String,
-    /// The universal DMG's download address and size in bytes.
-    pub dmg: String,
-    pub dmg_size: u64,
+    /// The universal DMG.
+    pub dmg: Download,
+    /// The DMG's detached signature (`<dmg>.sig`, from v0.2.5 on); without one the
+    /// DMG must be signed inside.
+    pub signature: Option<Download>,
+}
+
+/// A file of a release: where it is downloaded from and its size in bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Download {
+    pub url: String,
+    pub size: u64,
 }
 
 /// The DMG a release ships, as `make app` and the release workflow name it.
@@ -39,20 +48,31 @@ pub fn newer(release: &serde_json::Value, current: Version) -> Option<Release> {
     if version <= current {
         return None;
     }
-    let name = dmg_name(version);
-    let asset = (release["assets"].as_array()?.iter()).find(|a| a["name"] == name.as_str())?;
+    let assets = release["assets"].as_array()?;
     // Only this repository's download of exactly that file.
-    let dmg = asset["browser_download_url"].as_str()?;
-    if dmg != format!("{DOWNLOADS}v{version}/{name}") {
-        return None;
-    }
+    let file = |name: &str| -> Option<Download> {
+        let asset = assets.iter().find(|a| a["name"] == name)?;
+        let url = asset["browser_download_url"].as_str()?;
+        (url == format!("{DOWNLOADS}v{version}/{name}")).then(|| Download {
+            url: url.to_string(),
+            size: asset["size"].as_u64().unwrap_or_default(),
+        })
+    };
+    let name = dmg_name(version);
     Some(Release {
         version,
         notes: release["body"].as_str().unwrap_or_default().to_string(),
         page: release["html_url"].as_str()?.to_string(),
-        dmg: dmg.to_string(),
-        dmg_size: asset["size"].as_u64()?,
+        dmg: file(&name).filter(|d| d.size > 0)?,
+        signature: file(&format!("{name}.sig")),
     })
+}
+
+/// The downloaded DMG and its detached signature, if the release has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Downloaded {
+    pub dmg: PathBuf,
+    pub signature: Option<PathBuf>,
 }
 
 /// Where the releases' files are downloaded from.
@@ -85,18 +105,31 @@ pub async fn check(current: Version) -> Result<Option<Release>, String> {
     Ok(newer(&release, current))
 }
 
-/// Downloads the release's DMG into `dir`; its size has to be the one GitHub
-/// named.
-pub async fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
+/// Downloads the release's DMG (and its detached signature) into `dir`; each has to
+/// be the size GitHub named.
+pub async fn download(release: &Release, dir: &Path) -> Result<Downloaded, String> {
+    let dmg = dir.join(dmg_name(release.version));
+    fetch(&release.dmg, &dmg).await?;
+    let signature = match &release.signature {
+        Some(sig) => {
+            let path = dir.join(format!("{}.sig", dmg_name(release.version)));
+            fetch(sig, &path).await?;
+            Some(path)
+        }
+        None => None,
+    };
+    Ok(Downloaded { dmg, signature })
+}
+
+async fn fetch(download: &Download, path: &Path) -> Result<(), String> {
     let fail = |e: &dyn std::fmt::Display| format!("Could not download the update: {e}");
-    let path = dir.join(dmg_name(release.version));
     let answer = client()?
-        .get(&release.dmg)
+        .get(&download.url)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|e| fail(&e))?;
-    let mut file = tokio::fs::File::create(&path).await.map_err(|e| fail(&e))?;
+    let mut file = tokio::fs::File::create(path).await.map_err(|e| fail(&e))?;
     let mut bytes = answer.bytes_stream();
     let mut size = 0u64;
     while let Some(chunk) = bytes.next().await {
@@ -105,13 +138,13 @@ pub async fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> 
         file.write_all(&chunk).await.map_err(|e| fail(&e))?;
     }
     file.flush().await.map_err(|e| fail(&e))?;
-    if size != release.dmg_size {
+    if size != download.size {
         return Err(fail(&format!(
             "got {size} bytes instead of {}",
-            release.dmg_size
+            download.size
         )));
     }
-    Ok(path)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -149,14 +182,14 @@ mod tests {
             .unwrap()
             .expect("a release newer than 0.1.0");
         assert_eq!(
-            release.dmg,
+            release.dmg.url,
             format!(
                 "{DOWNLOADS}v{}/{}",
                 release.version,
                 dmg_name(release.version)
             )
         );
-        assert!(release.dmg_size > 1_000_000, "{release:?}");
+        assert!(release.dmg.size > 1_000_000, "{release:?}");
     }
 
     #[test]
@@ -168,11 +201,33 @@ mod tests {
                 version: Version::parse("0.2.4").unwrap(),
                 notes: "## What's Changed\n* copy formats".into(),
                 page: "https://github.com/haenning/tangul/releases/tag/v0.2.4".into(),
-                dmg: "https://github.com/haenning/tangul/releases/download/v0.2.4/tangul-0.2.4-universal.dmg"
-                    .into(),
-                dmg_size: 34233856,
+                dmg: Download {
+                    url: "https://github.com/haenning/tangul/releases/download/v0.2.4/tangul-0.2.4-universal.dmg"
+                        .into(),
+                    size: 34233856,
+                },
+                signature: None,
             })
         );
+        // With its detached signature (v0.2.5 on), from the same place.
+        let mut with_sig = release("v0.2.5");
+        with_sig["assets"].as_array_mut().unwrap().push(json!({
+            "name": "tangul-0.2.5-universal.dmg.sig",
+            "browser_download_url":
+                "https://github.com/haenning/tangul/releases/download/v0.2.5/tangul-0.2.5-universal.dmg.sig",
+            "size": 376
+        }));
+        assert_eq!(
+            newer(&with_sig, current).unwrap().signature,
+            Some(Download {
+                url: "https://github.com/haenning/tangul/releases/download/v0.2.5/tangul-0.2.5-universal.dmg.sig"
+                    .into(),
+                size: 376,
+            })
+        );
+        // A signature from elsewhere is none (and the DMG then needs one inside).
+        with_sig["assets"][2]["browser_download_url"] = json!("https://evil.example/x.sig");
+        assert_eq!(newer(&with_sig, current).unwrap().signature, None);
         // The same or an older one: nothing to do.
         assert_eq!(newer(&release("v0.2.3"), current), None);
         assert_eq!(newer(&release("v0.2.2"), current), None);
