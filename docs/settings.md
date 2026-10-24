@@ -95,9 +95,15 @@ means unset (the app's own value) or no limit.
 
 ## `themes/<name>.json`
 
-Color themes (the built-in ones can be overridden by a file with the same name). Every
-color is required except the optional `grid` section, which sets how the result grid's
-mark looks; a key left out is derived from `selection` and `accent`.
+Color themes (the built-in ones can be overridden by a file with the same name). A theme
+needs only what it changes: every color that is missing or isn't one (`"#rrggbb"` or
+`"#rrggbbaa"`), an empty `charts` and an unknown key are replaced by the rainbow theme
+of its `mode` (Tangul Dark Rainbow or Tangul Light Rainbow); a file without a `mode`
+takes the mode it is chosen for, `theme.dark` or `theme.light`. Its tab underlines each
+replacement in yellow; only a file that isn't a JSON object doesn't load.
+
+The optional `grid` section sets how the result grid's mark looks; a key left out is
+derived from `selection` and `accent`.
 
 ```json
 "grid": {

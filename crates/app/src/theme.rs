@@ -79,17 +79,19 @@ pub fn current(cx: &App) -> &ThemeFile {
     &cx.global::<Themes>().current
 }
 
-/// The theme the settings choose for `mode`: by name, of that mode; else the
-/// built-in one (and the reason is kept in [`Themes::problems`]).
+/// The theme the settings choose for `mode`: by name, of that mode (one whose file
+/// names no mode takes it, with that mode's defaults); else the built-in one (and
+/// the reason is kept in [`Themes::problems`]).
 fn chosen(mode: FileMode, cx: &App) -> (ThemeFile, Option<String>) {
     let set = &settings::current(cx).theme;
     let name = match mode {
         FileMode::Dark => &set.dark,
         FileMode::Light => &set.light,
     };
-    match list(cx).iter().find(|t| t.name == *name) {
-        Some(t) if t.mode == mode => (t.clone(), None),
-        Some(_) => (
+    let found = list(cx).iter().find(|t| t.name == *name);
+    match found.map(|t| t.for_mode(mode)) {
+        Some(Some(t)) => (t, None),
+        Some(None) => (
             themes::default_for(mode),
             Some(format!("{name} is not a {} theme", mode_key(mode))),
         ),
