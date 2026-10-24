@@ -62,7 +62,8 @@ the editor, so you look before you save.
     "questions_in_editor": true,
     "access": "data"
   },
-  "export": { "line_endings": "lf", "bom": false }
+  "export": { "line_endings": "lf", "bom": false },
+  "updates": { "check": true }
 }
 ```
 
@@ -90,6 +91,7 @@ means unset (the app's own value) or no limit.
 | `ai.questions_in_editor` | A question run in the editor goes to the assistant |
 | `export.line_endings` | How lines end in files saved from a result: `"lf"` or `"crlf"` (Windows); values keep their own line breaks |
 | `export.bom` | CSV and TSV files start with a byte order mark, so Excel reads them as UTF-8 |
+| `updates.check` | Look for a newer release at start and once a day (one request to GitHub, nothing else sent); nothing installs without a click |
 
 ## `themes/<name>.json`
 

@@ -4313,3 +4313,45 @@ fn shift_on_a_row_handle_keeps_the_marked_columns(cx: &mut TestAppContext) {
         assert_eq!(marked(&tab, 5, cx), (vec![0, 1, 2, 3], vec![1, 2, 3]));
     });
 }
+
+#[gpui_kit::test]
+fn a_newer_release_is_offered_in_the_title_bar(cx: &mut TestAppContext) {
+    use tangul_update::{Blocked, Release, Version};
+    let (handle, workspace) = open(cx);
+    let release = Release {
+        version: Version::parse("9.0.0").unwrap(),
+        notes: String::new(),
+        page: "https://github.com/haenning/tangul/releases/tag/v9.0.0".into(),
+        dmg: "https://example.invalid/tangul.dmg".into(),
+        dmg_size: 1,
+    };
+    // Nothing known: no notice.
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("update-notice").is_none());
+    });
+    // A build that can't install it itself (not signed for updates): the notice,
+    // and its menu says why instead of offering the install.
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.show_update(release.clone(), Err(Blocked::AdHoc), false, cx)
+        })
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("update-notice").visible());
+        window.click("update-notice", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find("menu-alert").visible());
+        window.press("escape", cx);
+    });
+    // While it installs: progress instead of the button.
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.show_update(release.clone(), Err(Blocked::AdHoc), true, cx)
+        })
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("update-notice").is_none());
+        assert!(window.find("update-installing").visible());
+    });
+}

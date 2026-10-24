@@ -20,6 +20,7 @@ tangul-core = { path = "../core" }
 tangul-data = { path = "../data" }
 tangul-engine = { path = "../engine" }
 tangul-service = { path = "../service" }
+tangul-update = { path = "../update" }
 # Only for the demo: its frames as PNG.
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 

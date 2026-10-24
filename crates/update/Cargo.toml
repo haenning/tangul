@@ -1,0 +1,18 @@
+[package]
+name = "tangul-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "stream", "http2"] }
+serde_json = "1.0.151"
+tokio = { workspace = true, features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

@@ -8261,6 +8261,7 @@ dependencies = [
  "tangul-data",
  "tangul-engine",
  "tangul-service",
+ "tangul-update",
 ]
 
 [[package]]
@@ -8384,6 +8385,16 @@ dependencies = [
  "anyhow",
  "russh",
  "tangul-core",
+ "tokio",
+]
+
+[[package]]
+name = "tangul-update"
+version = "0.2.3"
+dependencies = [
+ "futures",
+ "reqwest",
+ "serde_json",
  "tokio",
 ]
 

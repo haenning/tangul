@@ -114,7 +114,8 @@ out of your way.
   is on the roadmap.
 - **Local and private.** No account, no telemetry. Profiles, history and bookmarks stay
   on your Mac. AI is opt-in, and it only sends what you ask about to the model you
-  choose.
+  choose. The update check asks GitHub for the latest release and sends nothing else
+  (off with `updates.check`).
 
 ## Light and fast
 
