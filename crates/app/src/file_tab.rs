@@ -53,7 +53,7 @@ impl FileKind {
     fn problem(self, text: &str) -> Option<String> {
         match self {
             FileKind::Settings => settings::problem(text),
-            FileKind::Theme => tangul_data::themes::Theme::parse(text).err(),
+            FileKind::Theme => tangul_data::themes::Theme::read(text, None, "theme").err(),
             FileKind::Database => tangul_data::database_settings::parse(text).err(),
         }
     }
@@ -64,7 +64,7 @@ impl FileKind {
             FileKind::Settings => json::check(text, &settings::defaults(), &|v| {
                 settings::value_problem(v).map_or(Ok(()), Err)
             }),
-            FileKind::Theme => json::parse(text).err().into_iter().collect(),
+            FileKind::Theme => theme_problems(text),
             FileKind::Database => {
                 use tangul_data::database_settings as db;
                 let mut problems = json::check(text, &db::defaults(), &|v| {
@@ -130,6 +130,53 @@ pub struct DatabaseFile {
     pub id: String,
     pub knowledge: Knowledge,
     pub namespace: Namespace,
+}
+
+/// A theme file's notes as warnings (it applies, with defaults instead), each at the
+/// value it is about, an unknown key at the key, something missing at the nearest
+/// key that is there; only a file that isn't a JSON object is an error.
+fn theme_problems(text: &str) -> Vec<Problem> {
+    let root = match json::parse(text) {
+        Ok(root) => root,
+        Err(problem) => return vec![problem],
+    };
+    let start = root.range.start;
+    let notes = match tangul_data::themes::Theme::read(text, None, "theme") {
+        Ok((_, notes)) => notes,
+        Err(e) => return vec![Problem::error(start..start + 1, e)],
+    };
+    notes
+        .iter()
+        .map(|note| {
+            let mut node = &root;
+            let mut key = None;
+            let mut whole = true;
+            for k in &note.path {
+                let next = match k.parse::<usize>() {
+                    Ok(i) => node.items().get(i).map(|n| (n, None)),
+                    Err(_) => node
+                        .member(k)
+                        .map(|m| (&m.value, Some(m.key_range.clone()))),
+                };
+                match next {
+                    Some((n, range)) => {
+                        node = n;
+                        key = range.or(key);
+                    }
+                    None => {
+                        whole = false;
+                        break;
+                    }
+                }
+            }
+            let range = match (whole && !note.at_key, key) {
+                (true, _) => node.range.clone(),
+                (false, Some(key)) => key,
+                (false, None) => start..start + 1,
+            };
+            Problem::warning(range, note.message.clone())
+        })
+        .collect()
 }
 
 impl DatabaseFile {
@@ -630,6 +677,26 @@ mod tests {
         assert!(m[1].1.contains("unknown field `hdie`"), "{m:?}");
 
         assert_eq!(marked(FileKind::Theme, "{").len(), 1);
+    }
+
+    #[test]
+    fn a_theme_marks_what_is_replaced_and_still_applies() {
+        let text = r##"{ "name": "Paper", "mode": "light",
+            "colors": { "accent": "blue", "glow": "#fff" }, "charts": ["#123456"] }"##;
+        let m = marked(FileKind::Theme, text);
+        let at: Vec<&str> = m.iter().map(|(t, _)| t.as_str()).collect();
+        // The missing colors at "colors", the one that isn't a color at its value,
+        // the unknown key at the key; the syntax colors missing at the file.
+        assert!(at.contains(&"\"blue\""), "{m:?}");
+        assert!(at.contains(&"\"glow\""), "{m:?}");
+        assert!(at.contains(&"\"colors\""), "{m:?}");
+        assert!(
+            m.iter()
+                .any(|(_, msg)| msg.contains("Tangul Light Rainbow's is used"))
+        );
+        assert_eq!(FileKind::Theme.problem(text), None, "it applies");
+        // Only what isn't a JSON object can't be applied.
+        assert!(FileKind::Theme.problem("[1]").is_some());
     }
 
     #[test]
