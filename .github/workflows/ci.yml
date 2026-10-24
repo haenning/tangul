@@ -5,21 +5,24 @@ name: CI
 # - checks: format, clippy, dependencies, and that docs/TESTING.md names real tests
 # - tests: all tests with cargo-nextest under cargo-llvm-cov, the live ones against
 #   Postgres, MySQL and the SSH bastion (docker-compose.yml); the report goes to the
-#   run page and, on main, to the `badges` branch (badges, tests.json, summary.md)
+#   run page and, from a dev → main pull request that passes, to the `badges` branch
+#   (badges, tests.json, summary.md)
 # - update-macos: the updater's tests where its install runs, every update that must
 #   never be installed among them
-# Releases call this workflow before they build (release.yml).
 #
-# Caches: only pushes to dev and main save them (pull requests restore their base
-# branch's), so the repo's 10 GB hold dev's and main's and none get evicted for a
-# pull request's copy. The system libraries are cached too.
+# Tested once per step, before it is taken: a pull request's run tests its merge
+# into the target (what the target becomes). Into dev: each change; dev → main: all
+# of them together. Merging tests nothing again, nor does a release (release.yml).
+#
+# Caches: GitHub saves them only from pushes (a pull request's own is for it alone).
+# A push to main builds what checks and tests build, runs nothing, and saves that
+# (WARM); pull requests restore it. The system libraries are cached too.
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
-  workflow_call:
 
 permissions:
   contents: read
@@ -29,6 +32,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # A push to main: only build and save the caches (its code was tested as the
+  # pull request into main).
+  WARM: ${{ github.event_name == 'push' }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   # No debug info: coverage doesn't need it, and it makes linking and the cache
@@ -58,33 +64,36 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.event_name == 'push' }}
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        if: env.WARM != 'true'
         with:
           tool: cargo-deny,cargo-machete
       - name: Format
+        if: env.WARM != 'true'
         run: cargo fmt --all --check
+      # WARM: the build for the cache.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Dependencies (advisories, licenses, sources)
+        if: env.WARM != 'true'
         run: cargo deny check
       - name: Unused dependencies
+        if: env.WARM != 'true'
         run: cargo machete
       - name: docs/TESTING.md names tests that exist
+        if: env.WARM != 'true'
         run: python3 scripts/check-testing-doc.py docs/TESTING.md
 
   # The updater on macOS: real signatures, a test keychain and real DMGs, every update
   # that must never be installed (crates/update/src/install/attacks.rs).
   update-macos:
+    # Pull requests only: one crate, quick to build without a cache.
+    if: github.event_name != 'push'
     runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: update-macos
-          cache-on-failure: true
-          save-if: ${{ github.event_name == 'push' }}
       - name: tangul-update's tests
         run: cargo test -p tangul-update
 
@@ -93,12 +102,13 @@ jobs:
     # A build without cache (the first run, a changed Cargo.lock) takes most of it.
     timeout-minutes: 50
     permissions:
-      contents: write # the badges branch, on main
+      contents: write # the badges branch, from a dev → main pull request
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Pulled and started in the background, so they boot while the rest is set
       # up; the "ready" step below waits for them before the tests.
       - name: Databases and SSH bastion (start)
+        if: env.WARM != 'true'
         run: (docker compose up -d > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.status") &
       - name: System libraries
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
@@ -117,20 +127,26 @@ jobs:
           # Keep the build even when a test fails, so the next run starts warm.
           cache-on-failure: true
           save-if: ${{ github.event_name == 'push' }}
+      # WARM: the same build as the tests, none run.
+      - name: Build for the cache
+        if: env.WARM == 'true'
+        run: cargo llvm-cov nextest --workspace --profile ci --no-report -E 'none()' --no-tests=pass
       - name: Databases and SSH bastion (ready)
+        if: env.WARM != 'true'
         run: |
           while [ ! -f "$RUNNER_TEMP/compose.status" ]; do sleep 1; done
           cat "$RUNNER_TEMP/compose.log"
           [ "$(cat "$RUNNER_TEMP/compose.status")" = 0 ]
           docker compose up -d --wait
       - name: Tests with coverage (incl. live and UI tests)
+        if: env.WARM != 'true'
         env:
           TANGUL_TEST_PG: postgres:@127.0.0.1:55432/postgres
           TANGUL_TEST_MYSQL: root:@127.0.0.1:53306/app
           TANGUL_TEST_SSH: tangul:tangul@127.0.0.1:52222
         run: cargo llvm-cov nextest --workspace --profile ci --no-report
       - name: Report
-        if: always()
+        if: always() && env.WARM != 'true'
         run: |
           cargo llvm-cov report --json --summary-only --output-path coverage.json || true
           cargo llvm-cov report --html --output-dir coverage-html || true
@@ -138,22 +154,28 @@ jobs:
           python3 scripts/test-report.py coverage.json "${junit:-none}" docker-compose.yml report
           cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
+        if: always() && env.WARM != 'true'
         with:
           name: test-report
           path: |
             report
             coverage-html/html
-      - name: Publish report (main only)
-        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      # What main becomes: the passing dev → main pull request of this repository.
+      - name: Publish report (dev → main)
+        if: >-
+          success() && github.event_name == 'pull_request'
+          && github.base_ref == 'main' && github.head_ref == 'dev'
+          && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           cd report
           git init -q -b badges
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -qm "Test report for ${GITHUB_SHA::7}"
+          git commit -qm "Test report for dev ${HEAD_SHA::7}"
           git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" badges
       - name: Stop databases
-        if: always()
+        if: always() && env.WARM != 'true'
         run: docker compose down -v

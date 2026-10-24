@@ -19,12 +19,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Every test first (the same run as on main); nothing is built if one fails.
-  ci:
-    uses: ./.github/workflows/ci.yml
-
+  # No tests here: the tagged code is main's, tested as the pull request into main
+  # (the release commit only bumps the version; ci.yml). This job checks what is its
+  # own: tag and version, licenses, signatures.
   dmg:
-    needs: ci
     # macOS 26 image: Xcode 26's actool compiles the Icon Composer icon (light/dark).
     # bundle-macos.sh falls back to the PNG icon if it isn't available.
     runs-on: macos-26
