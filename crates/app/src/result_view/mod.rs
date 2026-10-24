@@ -5,15 +5,17 @@
 
 mod filter;
 mod grid;
+mod xlsx;
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{PopupMenu, PopupMenuItem},
+    notification::Notification,
     table::{DataTable, TableEvent, TableState},
     v_flex,
 };
@@ -166,6 +168,18 @@ pub struct RowsSource {
     pub dialect: &'static dyn Dialect,
 }
 
+/// A file "Save as" writes: the name the save dialog suggests, and what goes in.
+struct SaveFile {
+    name: String,
+    contents: Contents,
+}
+
+enum Contents {
+    Bytes(Vec<u8>),
+    /// Made into a workbook off the UI thread.
+    Excel(xlsx::Sheet),
+}
+
 enum Status {
     Idle,
     Running,
@@ -249,6 +263,41 @@ impl ResultView {
             dialect: None,
             _table_events: table_events,
         }
+    }
+
+    /// Asks where to save `file` (starting in Downloads) and writes it there, off
+    /// the UI thread; a failure is a notification.
+    fn save(&mut self, file: SaveFile, window: &mut Window, cx: &mut Context<Self>) {
+        let path = cx.prompt_for_new_path(&tangul_data::config::save_dir(), Some(&file.name));
+        cx.spawn_in(window, async move |_, cx| {
+            let path = match path.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(e)) => {
+                    let message = format!("Could not open the save dialog: {e}");
+                    let _ = cx.update(|window, cx| {
+                        window.push_notification(Notification::error(message), cx)
+                    });
+                    return;
+                }
+            };
+            let written = cx
+                .background_spawn(async move {
+                    let bytes = match file.contents {
+                        Contents::Bytes(bytes) => bytes,
+                        Contents::Excel(sheet) => xlsx::xlsx(&sheet)?,
+                    };
+                    std::fs::write(&path, bytes)
+                        .map_err(|e| format!("Could not save {}: {e}", path.display()))
+                })
+                .await;
+            if let Err(message) = written {
+                let _ = cx.update(|window, cx| {
+                    window.push_notification(Notification::error(message), cx)
+                });
+            }
+        })
+        .detach();
     }
 
     fn on_table_event(

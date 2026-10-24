@@ -7,25 +7,28 @@
 
 use crate::dialect::{Dialect, literal};
 
-/// CSV (RFC 4180) with a header line: fields with commas, quotes or line breaks
-/// quoted (quotes doubled), NULL empty. Lines end in `\n`.
+/// CSV (RFC 4180), with a header line when `names` are given: fields with commas,
+/// quotes or line breaks quoted (quotes doubled), NULL empty. Lines end in `\n`.
 pub fn csv<'a>(
     rows: &[usize],
     cols: &[usize],
     cell: impl Fn(usize, usize) -> Option<&'a str>,
-    names: &[String],
+    names: Option<&[String]>,
 ) -> String {
     let field = |v: Option<&str>| match v {
         Some(v) if v.contains([',', '"', '\n', '\r']) => format!("\"{}\"", v.replace('"', "\"\"")),
         Some(v) => v.to_string(),
         None => String::new(),
     };
-    let mut lines = vec![
-        cols.iter()
-            .map(|&c| field(names.get(c).map(String::as_str)))
-            .collect::<Vec<_>>()
-            .join(","),
-    ];
+    let mut lines: Vec<String> = names
+        .map(|names| {
+            cols.iter()
+                .map(|&c| field(names.get(c).map(String::as_str)))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .into_iter()
+        .collect();
     for &r in rows {
         lines.push(
             cols.iter()
@@ -163,15 +166,21 @@ mod tests {
     #[test]
     fn csv_quotes_what_needs_it() {
         assert_eq!(
-            csv(&[0, 1, 2], &[0, 1, 2], cell, &names()),
+            csv(&[0, 1, 2], &[0, 1, 2], cell, Some(&names())),
             "id,note,extra\n\
              1,plain,\n\
              2,\"a,b \"\"q\"\"\",\"line\nbreak\"\n\
              3,pipe | ü,"
         );
         // Columns in the order given; no rows: the header alone.
-        assert_eq!(csv(&[0], &[1, 0], cell, &names()), "note,id\nplain,1");
-        assert_eq!(csv(&[], &[0], cell, &names()), "id");
+        assert_eq!(csv(&[0], &[1, 0], cell, Some(&names())), "note,id\nplain,1");
+        assert_eq!(csv(&[], &[0], cell, Some(&names())), "id");
+        // Without names: the values alone.
+        assert_eq!(
+            csv(&[0, 1], &[0, 1], cell, None),
+            "1,plain\n2,\"a,b \"\"q\"\"\""
+        );
+        assert_eq!(csv(&[], &[0], cell, None), "");
     }
 
     #[test]

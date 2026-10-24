@@ -18,6 +18,13 @@ pub fn config_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Where a save dialog starts: the Downloads folder, else the home folder.
+pub fn save_dir() -> PathBuf {
+    dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_default()
+}
+
 /// Moves the config directory of the old name to `dir`, if there is one and `dir`
 /// doesn't exist yet.
 fn adopt_legacy_dir(legacy: &Path, dir: &Path) {

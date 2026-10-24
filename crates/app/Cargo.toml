@@ -11,6 +11,8 @@ chrono = { version = "0.4", default-features = false }
 async-channel.workspace = true
 gpui-kit = { version = "=0.6.6", features = ["tree-sitter-sql"] }
 lsp-types = { version = "0.97.0", features = ["proposed"] }
+# "Save as" Excel (.xlsx).
+rust_xlsxwriter = "0.101.0"
 serde_json = "1.0.151"
 tangul-ai = { path = "../ai" }
 tangul-assist = { path = "../assist" }
