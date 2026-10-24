@@ -34,12 +34,12 @@ jobs:
     env:
       SIGNED: ${{ vars.UNSIGNED_RELEASE != 'true' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Metal toolchain (GPUI compiles its shaders at build time)
         run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Tag matches Cargo.toml version
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
@@ -47,7 +47,7 @@ jobs:
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1
           fi
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-deny,cargo-about
       - name: Licenses (the app ships THIRD_PARTY_LICENSES.md)
@@ -79,6 +79,9 @@ jobs:
           # The designated requirement (Team ID, or the certificate's hash): what
           # keeps the Keychain's "Always Allow" across releases.
           codesign -d -r- "$app"
+          # The DMG, signed like the app: the updater checks it before mounting.
+          codesign --verify --strict --verbose=2 "$dmg"
+          codesign -d -r- "$dmg"
           if [ "$NOTARIZE" = true ]; then
             spctl -a -t exec -vv "$app"
             spctl -a -t open --context context:primary-signature -vv "$dmg"

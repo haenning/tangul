@@ -29,7 +29,9 @@
 //!     "max_tool_rounds": 12,
 //!     "questions_in_editor": true,
 //!     "access": "data"
-//!   }
+//!   },
+//!   "export": { "line_endings": "lf", "bom": false },
+//!   "updates": { "check": true }
 //! }
 //! ```
 
@@ -67,6 +69,42 @@ pub struct Settings {
     pub theme: ThemeSettings,
     pub mcp: McpSettings,
     pub ai: AiSettings,
+    pub export: ExportSettings,
+    pub updates: UpdateSettings,
+}
+
+/// New releases from GitHub.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Look for a newer release at start and once a day: one request to GitHub's
+    /// releases API, nothing sent but the request. Nothing installs without a click.
+    pub check: bool,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self { check: true }
+    }
+}
+
+/// Files a result is saved to ("Save as" in the grid's menu).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExportSettings {
+    /// How lines end in text files; values keep their own line breaks.
+    pub line_endings: LineEndings,
+    /// CSV and TSV files start with a byte order mark, so Excel reads them as UTF-8.
+    pub bom: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LineEndings {
+    #[default]
+    Lf,
+    /// Windows.
+    Crlf,
 }
 
 /// The color themes (see [`crate::themes`]): one for dark, one for light, and

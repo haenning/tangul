@@ -11,6 +11,7 @@ use crate::ui::{
 impl Workspace {
     /// Zed-style title bar content: database switcher, then user switcher.
     pub(super) fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let update = self.render_update_notice(cx);
         let theme = cx.theme();
         let weak = cx.entity().downgrade();
         let db = self.active_database();
@@ -187,6 +188,7 @@ impl Workspace {
         });
 
         h_flex()
+            .w_full()
             .gap_1()
             .items_center()
             .child(db_menu)
@@ -256,6 +258,10 @@ impl Workspace {
                             render_details(sections, cx)
                         }),
                 )
+            })
+            // A newer release: on the right.
+            .when_some(update, |this, update| {
+                this.child(div().flex_1()).child(div().pr_2().child(update))
             })
     }
 

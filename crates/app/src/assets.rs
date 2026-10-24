@@ -21,6 +21,7 @@ gpui_kit::assets::icon_assets!(
         ChartColumn,
         ChartColumnStacked,
         ChartLine,
+        CircleArrowDown,
         CircleDashed,
         Clock,
         CornerDownRight,
