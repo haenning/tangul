@@ -8,10 +8,34 @@ use super::*;
 
 const ID: &str = "io.test.tangul";
 
-/// A keychain file with code signing identities, never on the search list.
+/// A keychain file with code signing identities. On the user's search list while it
+/// exists (codesign finds identities only there on some Macs, CI's among them), the
+/// list put back as it was afterwards.
 struct Keychain {
     path: PathBuf,
     password: String,
+    /// The search list before.
+    searched: Vec<String>,
+}
+
+/// The user's keychain search list.
+fn search_list() -> Vec<String> {
+    let out = Command::new("security")
+        .args(["list-keychains", "-d", "user"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|line| line.trim().trim_matches('"').to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn set_search_list(keychains: &[String]) {
+    let _ = Command::new("security")
+        .args(["list-keychains", "-d", "user", "-s"])
+        .args(keychains)
+        .status();
 }
 
 impl Keychain {
@@ -19,6 +43,7 @@ impl Keychain {
         let keychain = Keychain {
             path: dir.join("test.keychain-db"),
             password: format!("tangul-test-{}", std::process::id()),
+            searched: search_list(),
         };
         let security = |args: &[&str]| {
             let mut command = Command::new("security");
@@ -27,6 +52,9 @@ impl Keychain {
         };
         security(&["create-keychain", "-p", &keychain.password]);
         security(&["unlock-keychain", "-p", &keychain.password]);
+        let mut searched = vec![keychain.path.to_string_lossy().into_owned()];
+        searched.extend(keychain.searched.iter().cloned());
+        set_search_list(&searched);
         keychain
     }
 
@@ -113,6 +141,7 @@ impl Keychain {
 
 impl Drop for Keychain {
     fn drop(&mut self) {
+        set_search_list(&self.searched);
         let _ = Command::new("security")
             .arg("delete-keychain")
             .arg(&self.path)
