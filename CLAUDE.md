@@ -285,4 +285,7 @@ explicit OK, and keep them covered by tests.
   merge into the target): every crate's tests once, on Linux, with coverage, and the
   updater on macOS. Merging and releasing test nothing again; a push to `main` only
   builds for the cache. The `dev` → `main` pull request publishes the badges.
+  CodeQL (`.github/workflows/codeql.yml`, not GitHub's default setup): workflows and
+  scripts on every pull request, Rust only on pull requests into `main`, on `main` and
+  weekly; the ruleset requires its results for `main` only.
   UI tests press `secondary-…` keys (cmd on macOS, ctrl elsewhere), never `cmd-…`.
