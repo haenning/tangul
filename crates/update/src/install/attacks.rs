@@ -95,16 +95,17 @@ impl Keychain {
         .unwrap();
     }
 
-    /// Signs `app` as `id` with the identity `name` from this keychain.
-    fn sign(&self, app: &Path, name: &str, id: &str) {
+    /// Signs `path` (an app or a DMG) as `id` with the identity `name` from this
+    /// keychain.
+    fn sign(&self, path: &Path, name: &str, id: &str) {
         run(
             Command::new("codesign")
                 .args(["--force", "--timestamp=none", "--identifier", id])
                 .arg("--keychain")
                 .arg(&self.path)
                 .args(["--sign", name])
-                .arg(app),
-            "sign the app",
+                .arg(path),
+            "sign",
         )
         .unwrap();
     }
@@ -184,24 +185,77 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
         "{requirement:?}"
     );
 
-    // Each attack as the DMG it would arrive in.
-    let attack = |name: &str, make: &dyn Fn(&Path)| -> PathBuf {
+    // Each attack as the DMG it would arrive in, the DMG signed like a release's
+    // (certificate A, the bundle id with `.dmg`) unless the DMG is what's attacked.
+    let dmg_id = format!("{ID}.dmg");
+    let image = |name: &str, make: &dyn Fn(&Path), signer: Option<(&str, &str)>| -> PathBuf {
         let staging = dir.join(name);
         make(&staging);
-        dmg(&dir, &staging)
+        let dmg = dmg(&dir, &staging);
+        if let Some((identity, id)) = signer {
+            keychain.sign(&dmg, identity, id);
+        }
+        dmg
+    };
+    let attack = |name: &str, make: &dyn Fn(&Path)| -> PathBuf {
+        image(name, make, Some(("tangul test A", &dmg_id)))
     };
     let signed_a = |staging: &Path| {
         let app = bundle(staging, ID, "0.2.4");
         keychain.sign(&app, "tangul test A", ID);
         app
     };
+    let good_app = |s: &Path| {
+        signed_a(s);
+    };
+    const DOWNLOAD: &str = "Could not verify the download's signature";
+    const APP: &str = "Could not verify the update's signature";
+    let changed_after_signing = {
+        let dmg = attack("changed-dmg", &good_app);
+        let mut bytes = std::fs::read(&dmg).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        std::fs::write(&dmg, bytes).unwrap();
+        dmg
+    };
     let refused = [
+        // The DMG itself: checked before anything reads it.
+        (
+            "an unsigned DMG",
+            image("dmg-unsigned", &good_app, None),
+            v("0.2.4"),
+            DOWNLOAD,
+        ),
+        (
+            "a DMG signed with another certificate",
+            image(
+                "dmg-other-cert",
+                &good_app,
+                Some(("tangul test B", &dmg_id)),
+            ),
+            v("0.2.4"),
+            DOWNLOAD,
+        ),
+        (
+            "a DMG signed as something else",
+            image("dmg-other-id", &good_app, Some(("tangul test A", ID))),
+            v("0.2.4"),
+            DOWNLOAD,
+        ),
+        (
+            "a DMG changed after signing",
+            changed_after_signing,
+            v("0.2.4"),
+            DOWNLOAD,
+        ),
+        // The app in a DMG signed like a release's.
         (
             "unsigned",
             attack("unsigned", &|s| {
                 bundle(s, ID, "0.2.4");
             }),
             v("0.2.4"),
+            APP,
         ),
         (
             "ad-hoc signed as the app",
@@ -216,6 +270,7 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
                 .unwrap();
             }),
             v("0.2.4"),
+            APP,
         ),
         (
             "another certificate, the same bundle id",
@@ -224,6 +279,7 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
                 keychain.sign(&app, "tangul test B", ID);
             }),
             v("0.2.4"),
+            APP,
         ),
         (
             "the certificate, another bundle id",
@@ -232,6 +288,7 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
                 keychain.sign(&app, "tangul test A", "io.test.other");
             }),
             v("0.2.4"),
+            APP,
         ),
         (
             "a resource changed after signing",
@@ -240,6 +297,7 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
                 std::fs::write(app.join("Contents/Resources/data.txt"), "evil").unwrap();
             }),
             v("0.2.4"),
+            APP,
         ),
         (
             "a file added after signing",
@@ -248,6 +306,7 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
                 std::fs::copy("/bin/sh", app.join("Contents/MacOS/helper")).unwrap();
             }),
             v("0.2.4"),
+            APP,
         ),
         (
             "the executable changed after signing",
@@ -256,6 +315,7 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
                 std::fs::copy("/bin/sh", app.join("Contents/MacOS/tangul")).unwrap();
             }),
             v("0.2.4"),
+            APP,
         ),
         (
             "a link to a valid app elsewhere",
@@ -265,6 +325,7 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
                 std::os::unix::fs::symlink(&target, s.join("tangul.app")).unwrap();
             }),
             v("0.2.4"),
+            "The update holds no app",
         ),
         (
             "a valid app of another version than announced",
@@ -272,20 +333,14 @@ fn only_an_app_signed_with_the_same_certificate_as_the_same_app_is_installed() {
                 signed_a(s);
             }),
             v("9.0.0"),
+            "The update is version 0.2.4, not 9.0.0",
         ),
     ];
-    for (what, dmg, version) in &refused {
+    for (what, dmg, version, reason) in &refused {
         let err = install(dmg, &running, &requirement, *version)
             .err()
             .unwrap_or_else(|| panic!("{what}: installed"));
         // Refused for the reason that matters, not by accident (a failed mount).
-        let reason = if what.starts_with("a link") {
-            "The update holds no app"
-        } else if what.contains("version") {
-            "The update is version 0.2.4, not 9.0.0"
-        } else {
-            "Could not verify the update's signature"
-        };
         assert!(err.starts_with(reason), "{what}: {err}");
         assert_eq!(version_of(&running), "0.2.3", "{what}");
         for left in [".tangul.app.new", ".tangul.app.old"] {

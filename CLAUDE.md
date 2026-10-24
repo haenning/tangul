@@ -39,7 +39,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   `ollama.rs`). The caller passes key, messages and tools (`ToolDef`)
 - `crates/update`: tangul updating itself from its GitHub releases, no UI: the check
   (`releases/latest`, nothing sent but the request), the DMG (only from this repo's
-  release downloads), and the install: only a real app (no link) meeting the running
+  release downloads, signed with the app's certificate as `<bundle id>.dmg`, checked
+  before it is mounted), and the install: only a real app (no link) meeting the running
   app's designated requirement, which must pin a certificate (bundle id and
   certificate, `codesign --verify --deep --strict -R`, checked again on the copy that
   is installed) and of the announced version replaces it, by renaming; any failure

@@ -91,8 +91,10 @@ run `make release`. It
    `vX.Y.Z` and pushes both,
 4. merges `main` into `dev` and pushes it, so `dev` has the new version too.
 
-The tag starts the Release workflow: it runs CI, builds the universal DMG, signs it
-with the Developer ID certificate (hardened runtime), notarizes and staples it,
+The tag starts the Release workflow: it runs CI, builds the universal DMG (with
+tangul's volume icon), signs the app and the DMG with the release certificate (the
+updater checks both; a Developer ID also gets the hardened runtime), notarizes and
+staples it when that is a Developer ID,
 verifies all of that and publishes it as a GitHub release with generated notes. It
 checks that the tag matches the `Cargo.toml` version.
 

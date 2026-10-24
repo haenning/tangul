@@ -79,6 +79,9 @@ jobs:
           # The designated requirement (Team ID, or the certificate's hash): what
           # keeps the Keychain's "Always Allow" across releases.
           codesign -d -r- "$app"
+          # The DMG, signed like the app: the updater checks it before mounting.
+          codesign --verify --strict --verbose=2 "$dmg"
+          codesign -d -r- "$dmg"
           if [ "$NOTARIZE" = true ]; then
             spctl -a -t exec -vv "$app"
             spctl -a -t open --context context:primary-signature -vv "$dmg"

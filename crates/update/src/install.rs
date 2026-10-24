@@ -52,6 +52,17 @@ impl fmt::Display for Blocked {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement(String);
 
+impl Requirement {
+    /// What the release's DMG is signed like: the same certificate, under the app's
+    /// bundle id with `.dmg` (as `scripts/bundle-macos.sh` signs it). `None` when the
+    /// requirement doesn't start with the bundle id.
+    fn for_dmg(&self) -> Option<Requirement> {
+        let rest = self.0.strip_prefix("identifier \"")?;
+        let (id, rest) = rest.split_once('"')?;
+        Some(Requirement(format!("identifier \"{id}.dmg\"{rest}")))
+    }
+}
+
 /// The running app bundle.
 pub fn running_app() -> Option<PathBuf> {
     app_of(&std::env::current_exe().ok()?)
@@ -117,6 +128,18 @@ pub fn install(
     version: Version,
 ) -> Result<(), String> {
     let name = app.file_name().ok_or("the app has no name")?;
+    // Nothing reads the image before its own signature is checked.
+    let signed_like = requirement
+        .for_dmg()
+        .ok_or("The app's signature names no bundle id: not installed")?;
+    run(
+        Command::new("codesign")
+            .args(["--verify", "--strict"])
+            .arg(format!("-R={}", signed_like.0))
+            .arg(dmg),
+        "verify the download's signature",
+    )
+    .map_err(|e| format!("{e}: not installed"))?;
     let mount = Mount::attach(dmg)?;
     let new = mount.dir.join(name);
     // The app itself, not a link to one somewhere else.
@@ -359,6 +382,18 @@ mod tests {
                 "designated => anchor apple generic and certificate leaf[subject.OU] = \"TEAM\""
             )
             .is_some()
+        );
+        // The DMG: the same certificate, the bundle id with `.dmg`.
+        assert_eq!(
+            designated(signed).unwrap().for_dmg(),
+            Some(Requirement(
+                "identifier \"io.github.haenning.tangul.dmg\" and certificate leaf = H\"ab12\""
+                    .into()
+            ))
+        );
+        assert_eq!(
+            Requirement("anchor apple generic and certificate leaf = H\"ab12\"".into()).for_dmg(),
+            None
         );
         assert_eq!(designated("code object is not signed at all"), None);
         assert_eq!(designated("designated => "), None);

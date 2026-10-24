@@ -24,9 +24,9 @@ tangul runs on macOS (Apple Silicon and Intel).
 From then on tangul updates itself. At start and once a day it asks GitHub for the
 latest release (one request, nothing sent but the request); a newer one shows as
 **Update to x.y.z** in the title bar. **Install and restart** downloads it, checks that
-it is signed with the same certificate as the running app and is the version
-announced, swaps the two and starts the new one; anything else leaves your app as it
-is. An update installed this way needs no extra step in Privacy & Security.
+the download and the app in it are signed with the same certificate as the running
+app and that it is the version announced, swaps the two and starts the new one;
+anything else leaves your app as it is. An update installed this way needs no extra step in Privacy & Security.
 
 It can't update itself when started from the DMG or Downloads (move it to
 Applications), when its folder isn't writable, or for a self-built app: then the menu
