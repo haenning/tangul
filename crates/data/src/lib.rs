@@ -10,6 +10,7 @@ pub mod local;
 pub mod metrics;
 pub mod migrations;
 pub mod profiles;
+mod secrets;
 pub mod settings;
 pub mod themes;
 pub mod upgrade;

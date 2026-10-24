@@ -1,17 +1,21 @@
 //! Saved databases (each with its users) as TOML in the config dir
 //! (`~/Library/Application Support/tangul/profiles.toml` on macOS, overridable with
 //! `TANGUL_CONFIG_DIR`, used by `make run-dev`).
-//! Passwords go to the Keychain (one entry per user), never into the file.
+//! Secrets go to the Keychain ([`crate::secrets`]: one item for all), never into the
+//! file.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
+use tangul_core::llm::ProviderKind;
 use tangul_core::{Database, DbUser, DriverKind, SshAuth, SshConfig, SshTarget, TlsMode};
 
-use crate::config::{LEGACY_NAME, config_dir};
+use crate::config::config_dir;
+use crate::secrets::Secrets;
 
-const KEYCHAIN_SERVICE: &str = "tangul";
+/// Keychain account of the MCP server's token.
+pub const MCP_TOKEN_ACCOUNT: &str = "mcp-token";
 
 #[derive(Default, Serialize, Deserialize)]
 struct ProfilesFile {
@@ -77,11 +81,10 @@ fn migrate(profiles: Vec<LegacyProfile>, databases: &mut Vec<Database>) {
 pub struct Profiles {
     path: Option<PathBuf>,
     pub databases: Vec<Database>,
-    /// Session cache so the Keychain is hit once per profile, and so passwords work
-    /// on platforms where only the mock keyring store is available.
-    passwords: HashMap<String, String>,
-    /// [`Self::in_memory`]: never saved, and secrets stay in the session cache, so
-    /// tests never read or overwrite the real Keychain.
+    /// [`Self::in_memory`]: kept only for the session, so tests never read or
+    /// overwrite the real Keychain.
+    secrets: Secrets,
+    /// [`Self::in_memory`]: never saved.
     in_memory: bool,
 }
 
@@ -105,7 +108,7 @@ impl Profiles {
         let store = Self {
             path,
             databases,
-            passwords: HashMap::new(),
+            secrets: Secrets::keychain(),
             in_memory: false,
         };
         if migrated && let Err(e) = store.save() {
@@ -132,7 +135,7 @@ impl Profiles {
         Self {
             path: None,
             databases,
-            passwords: HashMap::new(),
+            secrets: Secrets::in_memory(),
             in_memory: true,
         }
     }
@@ -198,8 +201,8 @@ impl Profiles {
         self.save()
     }
 
-    /// Removes a database with its users and their secrets (the SSH one too, and
-    /// copies left under the old name). Unknown ids are fine.
+    /// Removes a database with its users and their secrets (the SSH one too).
+    /// Unknown ids are fine.
     pub fn remove_database(&mut self, id: &str) -> Result<()> {
         let Some(at) = self.databases.iter().position(|d| d.id == id) else {
             return Ok(());
@@ -209,11 +212,6 @@ impl Profiles {
         let accounts = db.users.iter().map(|u| u.id.clone());
         for account in accounts.chain([SshConfig::secret_account(id)]) {
             self.forget_secret(&account);
-            if !self.in_memory
-                && let Ok(entry) = keyring::Entry::new(LEGACY_NAME, &account)
-            {
-                let _ = entry.delete_credential();
-            }
         }
         Ok(())
     }
@@ -245,52 +243,31 @@ impl Profiles {
 
     /// Removes a secret of the app's own (e.g. an AI provider's API key).
     pub fn forget_secret(&mut self, account: &str) {
-        self.passwords.remove(account);
-        if !self.in_memory
-            && let Err(e) = keychain(account).and_then(|k| Ok(k.delete_credential()?))
-        {
-            eprintln!("keychain delete failed: {e:#}");
-        }
+        self.secrets.forget(account, || accounts(&self.databases));
     }
 
     /// A secret by Keychain account (user id, or [`SshConfig::secret_account`]).
     pub fn password(&mut self, account: &str) -> Option<String> {
-        if let Some(pw) = self.passwords.get(account) {
-            return Some(pw.clone());
-        }
-        if self.in_memory {
-            return None;
-        }
-        let pw = match keychain(account).ok()?.get_password() {
-            Ok(pw) => pw,
-            // Saved under the old name: copy it over (the old entry stays).
-            Err(_) => {
-                let pw = keyring::Entry::new(LEGACY_NAME, account)
-                    .ok()?
-                    .get_password()
-                    .ok()?;
-                self.store_secret(account, pw.clone());
-                pw
-            }
-        };
-        self.passwords.insert(account.to_string(), pw.clone());
-        Some(pw)
+        self.secrets.get(account, || accounts(&self.databases))
     }
-}
 
-fn keychain(account: &str) -> Result<keyring::Entry> {
-    Ok(keyring::Entry::new(KEYCHAIN_SERVICE, account)?)
-}
-
-impl Profiles {
     fn store_secret(&mut self, account: &str, secret: String) {
-        if !self.in_memory
-            && let Err(e) = keychain(account).and_then(|k| Ok(k.set_password(&secret)?))
-        {
-            eprintln!("keychain write failed: {e:#}");
-        }
-        self.passwords.insert(account.to_string(), secret);
+        (self.secrets).set(account, secret, || accounts(&self.databases));
     }
+}
+
+/// Every account a secret may be kept under: the users', the SSH ones, the API keys
+/// and the MCP server's token.
+fn accounts(databases: &[Database]) -> Vec<String> {
+    let users = databases
+        .iter()
+        .flat_map(|db| &db.users)
+        .map(|u| u.id.clone());
+    let ssh = databases.iter().map(|db| SshConfig::secret_account(&db.id));
+    let keys = ProviderKind::ALL.into_iter().map(ProviderKind::key_account);
+    (users.chain(ssh).chain(keys))
+        .chain([MCP_TOKEN_ACCOUNT.to_string()])
+        .collect()
 }
 
 /// Unique enough id for a new database or user without pulling in a uuid crate.
@@ -332,6 +309,24 @@ mod tests {
         assert_eq!(p.password("ai-key:anthropic").as_deref(), Some("sk"));
         p.forget_secret("ai-key:anthropic");
         assert_eq!(p.password("ai-key:anthropic"), None);
+    }
+
+    #[test]
+    fn every_account_a_secret_may_have_is_known() {
+        let mut db = Profiles::in_memory(Vec::new());
+        let mut d: Database = toml::from_str(
+            "id = \"d\"\nname = \"n\"\ndriver = \"postgres\"\nhost = \"h\"\nport = 5432\n",
+        )
+        .unwrap();
+        d.users = vec![DbUser {
+            id: "u".into(),
+            user: "app".into(),
+        }];
+        db.databases.push(d);
+        let all = accounts(&db.databases);
+        for account in ["u", "ssh:d", "ai-key:anthropic", MCP_TOKEN_ACCOUNT] {
+            assert!(all.iter().any(|a| a == account), "{account}");
+        }
     }
 
     #[test]
