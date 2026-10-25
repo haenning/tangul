@@ -70,7 +70,7 @@ every test named here exists (`scripts/check-testing-doc.py`).
 | Read-only mode switches itself back on | `crates/data/src/settings.rs::relock_after` |
 | A time limit for every query, set on the server | `crates/engine/tests/live.rs::time_limit_checks` |
 | Statements for selected rows are keyed by primary key, or say why not | `crates/assist/src/edit.rs::by_primary_key`, `crates/assist/src/edit.rs::falls_back_to_all_columns_with_a_warning` |
-| Secrets stay in the Keychain | `crates/data/src/profiles.rs::secrets_of_the_app_are_kept_and_forgotten` |
+| Secrets stay in the Keychain | `crates/data/src/profiles.rs::secrets_of_the_app_are_kept_and_forgotten`, `crates/data/src/secrets.rs::old_items_move_into_one_and_are_deleted`, `crates/data/src/secrets.rs::an_unreadable_item_is_never_overwritten` |
 | Passwords in SQL never reach history, bookmarks, chats or the audit log | `crates/assist/src/redact.rs::hides_passwords` |
 | SSH: unknown host keys ask first | `crates/engine/tests/live.rs::ssh_tunnel`, `crates/tunnel/src/lib.rs::host_key_messages` |
 | Schedules, boards and the editor only read | `crates/engine/src/gate.rs::schedules_boards_and_the_editor_only_read`, `crates/engine/tests/live.rs::board_checks`, `crates/engine/tests/live.rs::editor_checks` |

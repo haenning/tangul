@@ -5,6 +5,8 @@
 services:
   postgres:
     image: postgres:16
+    # Statement statistics for the Queries performance board.
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
     environment:
       POSTGRES_HOST_AUTH_METHOD: trust
     ports: ["127.0.0.1:55432:5432"]

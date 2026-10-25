@@ -13,9 +13,12 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   Its gate (`gate.rs`) is the only safety gate; see **Safety rules** below.
 - `crates/assist`: SQL logic without UI or I/O (lexer, dialects, analysis, completion,
   filters; settings files read with positions and checked value by value: `json`;
-  editing content-blocking rules: `ai_rules`); put testable logic here
+  editing content-blocking rules: `ai_rules`; the performance boards' templates:
+  `perf`, their SQL per database in `dialect/<db>/perf.rs`, offered by what the server
+  has); put testable logic here
 - `crates/tunnel`: SSH tunnels
-- `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
+- `crates/data`: everything stored on disk, no UI (profiles; their secrets in one
+  Keychain item, `secrets.rs`, so an update asks once; `local.db`
   incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
   the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
   `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there;
@@ -139,7 +142,7 @@ dialect (`assist::dialect::Dialect`) or driver and never matches on `DriverKind`
   time limit, cancel, catalog queries, error positions
 - `crates/assist/src/dialect/<db>.rs` + `dialect_for`: the SQL text: quoting, literals,
   `LIMIT`, text matching, date arithmetic, keywords, functions, extra syntax, functions
-  with side effects
+  with side effects, performance boards (`dialect/<db>/perf.rs`)
 - `crates/app/src/connection_form.rs`: which databases are offered
 
 Adding one: a `DriverKind` variant, a driver (with its Cargo feature) and a dialect,
@@ -285,4 +288,7 @@ explicit OK, and keep them covered by tests.
   merge into the target): every crate's tests once, on Linux, with coverage, and the
   updater on macOS. Merging and releasing test nothing again; a push to `main` only
   builds for the cache. The `dev` → `main` pull request publishes the badges.
+  CodeQL (`.github/workflows/codeql.yml`, not GitHub's default setup): workflows and
+  scripts on every pull request, Rust only on pull requests into `main`, on `main` and
+  weekly; the ruleset requires its results for `main` only.
   UI tests press `secondary-…` keys (cmd on macOS, ctrl elsewhere), never `cmd-…`.

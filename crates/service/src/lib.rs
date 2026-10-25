@@ -15,5 +15,6 @@
 pub mod boards;
 pub mod connections;
 pub mod knowledge;
+pub mod perf;
 pub mod schedule;
 pub mod values;

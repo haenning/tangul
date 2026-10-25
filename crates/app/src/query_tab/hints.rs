@@ -41,6 +41,10 @@ const HINTS: &[Hint] = &[
         text: "Right-click a result and pick Save as: the mark, or everything loaded, as a file.",
     },
     Hint {
+        title: "Performance boards",
+        text: "Boards panel, +, Performance boards: indexes, queries and storage, worst first.",
+    },
+    Hint {
         title: "Command palette",
         text: "⌘⇧P searches commands, bookmarks and history.",
     },
