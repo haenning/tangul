@@ -154,6 +154,18 @@ pub trait Dialect: Sync {
     fn plan_cost(&self, _plan: &str) -> Option<f64> {
         None
     }
+
+    /// One read answering with one row of what the performance boards depend on, in
+    /// the columns [`crate::perf::Facts::read`] reads. `None`: no such boards.
+    fn perf_facts_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The performance boards for a server with `facts`: each ready to create, or
+    /// why not now.
+    fn perf_boards(&self, _facts: &crate::perf::Facts) -> Vec<crate::perf::Offer> {
+        Vec::new()
+    }
 }
 
 /// Above this estimated cost a query an AI writes waits for the user: about a full

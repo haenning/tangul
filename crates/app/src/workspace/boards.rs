@@ -80,7 +80,7 @@ impl Workspace {
 
     /// The connection a board of `db_id` runs on: the hidden one of the user the
     /// database's tabs use, so a board never takes a tab's session.
-    fn board_conn(&mut self, db_id: &str) -> Result<ConnId, SharedString> {
+    pub(super) fn board_conn(&mut self, db_id: &str) -> Result<ConnId, SharedString> {
         let user = self
             .board_user(db_id)
             .ok_or("No database user to run the board with")?;
@@ -877,6 +877,9 @@ impl Workspace {
     }
 
     pub(super) fn render_boards_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.check_perf(cx);
+        let perf = self.perf_menu();
+        let weak = cx.entity().downgrade();
         let muted = cx.theme().muted_foreground;
         let all: Vec<Board> = match self.active_db.as_deref() {
             Some(db) => self
@@ -932,9 +935,15 @@ impl Workspace {
                                 .ghost()
                                 .xsmall()
                                 .tooltip("New board")
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.new_board(window, cx)),
-                                ),
+                                .dropdown_menu(move |menu, window, cx| {
+                                    perf_boards::new_board_menu(
+                                        menu,
+                                        perf.clone(),
+                                        weak.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                }),
                         )
                     }),
             )

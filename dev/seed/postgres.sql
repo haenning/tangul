@@ -1,5 +1,8 @@
 -- Sample data for local development (runs once on first container start).
 
+-- For the Queries performance board (preloaded by docker-compose.yml).
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
 CREATE SCHEMA app;
 
 CREATE TABLE app.users (

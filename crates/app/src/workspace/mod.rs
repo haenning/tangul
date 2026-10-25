@@ -20,6 +20,7 @@ pub mod demo;
 mod empty_state;
 mod history;
 mod mcp;
+mod perf_boards;
 mod quick_values;
 mod remove_database;
 pub use quick_values::LookRequest;
@@ -188,6 +189,8 @@ pub struct Workspace {
     shown_tab: Option<EntityId>,
     /// The editor's quick looks at column values.
     quick_looks: quick_values::QuickLooks,
+    /// What each database's server has for the performance boards.
+    perf_checks: perf_boards::PerfChecks,
     /// The other databases' tabs, and saving the pinned ones.
     db_tabs: database_tabs::DatabaseTabs,
     /// A tab's title being edited in the tab bar.
@@ -321,6 +324,7 @@ impl Workspace {
             board_asked: None,
             shown_tab: None,
             quick_looks: quick_values::QuickLooks::start(cx),
+            perf_checks: perf_boards::PerfChecks::default(),
             db_tabs: database_tabs::DatabaseTabs::default(),
             renaming: None,
             focus_handle: cx.focus_handle(),

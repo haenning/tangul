@@ -292,6 +292,40 @@ pub fn delete(boards: &mut Boards, id: &str) -> Result<(), String> {
     boards.delete(id)
 }
 
+/// A new board for `database_id` from a ready-made one (a performance board,
+/// [`tangul_assist::perf`]): a copy of its tiles, named `name`, refreshed when
+/// opened. Each tile only reads (checked like a tile an AI writes).
+pub fn create_from(
+    boards: &mut Boards,
+    database_id: &str,
+    name: &str,
+    template: &tangul_assist::perf::Board,
+    lexing: Lexing,
+) -> Result<Board, String> {
+    let tiles = template
+        .tiles
+        .iter()
+        .map(|t| {
+            check_read(&t.sql, lexing)?;
+            Ok(Tile {
+                id: new_id(),
+                description: t.description.clone(),
+                width: t.width,
+                ..tile(&t.title, &t.sql, None)
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let board = Board {
+        id: new_id(),
+        name: name_of(name)?,
+        description: template.description.clone(),
+        database_id: database_id.into(),
+        tiles,
+        ..Board::default()
+    };
+    store(boards, board, None, true)
+}
+
 /// A tile for a query from a tab or a bookmark: a copy of its SQL, full width.
 pub fn tile(title: &str, sql: &str, view: Option<ChartView>) -> Tile {
     Tile {
@@ -507,6 +541,48 @@ mod tests {
         );
         delete(&mut boards, id).unwrap();
         assert!(boards.get(id).is_none());
+    }
+
+    #[test]
+    fn a_performance_board_is_a_copy_of_its_template() {
+        use tangul_assist::dialect::dialect_for;
+        use tangul_assist::perf::{Facts, Kind, Stats};
+        let mut boards = Boards::open(None);
+        let pg = dialect_for(tangul_core::DriverKind::Postgres);
+        let facts = Facts {
+            version: (16, 0),
+            mariadb: false,
+            statements: Stats::Yes,
+        };
+        let template = pg
+            .perf_boards(&facts)
+            .into_iter()
+            .find(|o| o.board.kind == Kind::Indexes)
+            .unwrap()
+            .board;
+        let board = create_from(&mut boards, "db", "Indexes", &template, pg.lexing()).unwrap();
+        assert_eq!(board.name, "Indexes");
+        assert_eq!(board.description, template.description);
+        assert_eq!(board.refresh, Refresh::OnOpen);
+        let copied: Vec<(&str, &str, Width)> = (board.tiles.iter())
+            .map(|t| (t.title.as_str(), t.sql.as_str(), t.width))
+            .collect();
+        let wanted: Vec<(&str, &str, Width)> = (template.tiles.iter())
+            .map(|t| (t.title.as_str(), t.sql.as_str(), t.width))
+            .collect();
+        assert_eq!(copied, wanted);
+        assert!(
+            board
+                .tiles
+                .iter()
+                .all(|t| !t.id.is_empty() && t.ai.is_none())
+        );
+        assert_eq!(boards.get(&board.id), Some(&board));
+        // A template's tiles only read.
+        let mut writes = template.clone();
+        writes.tiles[0].sql = "DELETE FROM t".into();
+        let e = create_from(&mut boards, "db", "x", &writes, pg.lexing()).unwrap_err();
+        assert!(e.contains("only reads"), "{e}");
     }
 
     #[test]
