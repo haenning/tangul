@@ -15,7 +15,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
   filters; settings files read with positions and checked value by value: `json`;
   editing content-blocking rules: `ai_rules`); put testable logic here
 - `crates/tunnel`: SSH tunnels
-- `crates/data`: everything stored on disk, no UI (profiles and Keychain, `local.db`
+- `crates/data`: everything stored on disk, no UI (profiles; their secrets in one
+  Keychain item, `secrets.rs`, so an update asks once; `local.db`
   incl. the assistant's chats, `metrics.db`, `settings.json`, color themes: `themes.rs`,
   the built-in ones in `crates/data/themes/`, the user's in the `themes` folder next to
   `settings.json`; boards: `boards.rs`, one JSON file each in the `boards` folder there;

@@ -6,12 +6,10 @@
 use std::sync::atomic::AtomicU64;
 
 use tangul_ai::mcp::{McpServer, new_token};
+use tangul_data::profiles::MCP_TOKEN_ACCOUNT;
 
 use super::*;
 use crate::ai_settings::{McpState, Page};
-
-/// Keychain account of the server's token.
-const TOKEN_ACCOUNT: &str = "mcp-token";
 
 /// Fields drop in order: the event task goes before the server, so the server
 /// closing its end never wakes the task from the server's thread.
@@ -81,17 +79,21 @@ impl Workspace {
 
     /// The server's token; made (and saved) the first time.
     fn mcp_token(&mut self) -> String {
-        if let Some(token) = self.data.profiles.password(TOKEN_ACCOUNT) {
+        if let Some(token) = self.data.profiles.password(MCP_TOKEN_ACCOUNT) {
             return token;
         }
         let token = new_token();
-        self.data.profiles.set_secret(TOKEN_ACCOUNT, token.clone());
+        self.data
+            .profiles
+            .set_secret(MCP_TOKEN_ACCOUNT, token.clone());
         token
     }
 
     /// A new token: clients set up with the old one are locked out.
     pub(super) fn new_mcp_token(&mut self, cx: &mut Context<Self>) {
-        self.data.profiles.set_secret(TOKEN_ACCOUNT, new_token());
+        self.data
+            .profiles
+            .set_secret(MCP_TOKEN_ACCOUNT, new_token());
         if let Some(port) = self.mcp.server.as_ref().map(|s| s.addr().port()) {
             self.stop_mcp();
             self.start_mcp(port, cx);
