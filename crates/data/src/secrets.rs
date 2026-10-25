@@ -193,7 +193,7 @@ impl Secrets {
                         self.known.insert(account.clone(), secret);
                         moved.push(account);
                     }
-                    Err(e) => eprintln!("keychain: {account} can't be read: {e}"),
+                    Err(e) => eprintln!("keychain: an old item can't be read: {e}"),
                 }
                 break;
             }

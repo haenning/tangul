@@ -892,8 +892,7 @@ fn the_mcp_server_offers_the_connected_databases(cx: &mut TestAppContext) {
             assert!(
                 command.starts_with(&format!(
                     "claude mcp add --scope user --transport http tangul {url} --header \"Authorization: Bearer "
-                )),
-                "{command}"
+                ))
             );
             let desktop: serde_json::Value =
                 serde_json::from_str(&ws.mcp_desktop_config().unwrap()).unwrap();

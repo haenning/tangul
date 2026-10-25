@@ -325,7 +325,7 @@ mod tests {
         db.databases.push(d);
         let all = accounts(&db.databases);
         for account in ["u", "ssh:d", "ai-key:anthropic", MCP_TOKEN_ACCOUNT] {
-            assert!(all.iter().any(|a| a == account), "{account}");
+            assert!(all.iter().any(|a| a == account));
         }
     }
 
