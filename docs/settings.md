@@ -102,8 +102,8 @@ of its `mode` (Tangul Dark Rainbow or Tangul Light Rainbow); a file without a `m
 takes the mode it is chosen for, `theme.dark` or `theme.light`. Its tab underlines each
 replacement in yellow; only a file that isn't a JSON object doesn't load.
 
-The optional `grid` section sets how the result grid's mark looks; a key left out is
-derived from `selection` and `accent`.
+The optional `grid` section sets how the result grid's mark, the inspected (A) and
+compared (B) cells and `NULL` look; a key left out is derived from the theme's colors.
 
 ```json
 "grid": {
@@ -112,7 +112,12 @@ derived from `selection` and `accent`.
   "mark_border": "#e5484d",
   "mark_border_width": 2,
   "mark_radius": 4,
-  "header_mark": "#e5484d33"
+  "header_mark": "#e5484d33",
+  "inspected": "#22d3ee",
+  "inspected_foreground": "#0a0a0a",
+  "compared": "#facc15",
+  "compared_foreground": "#0a0a0a",
+  "null": "#a3a3a3"
 }
 ```
 
@@ -124,6 +129,11 @@ derived from `selection` and `accent`.
 | `mark_border_width` | Outline width in pixels, 0 to 8; 0 draws none (default: 2) |
 | `mark_radius` | Radius of the mark's outer corners in pixels, 0 to 8; 0 is square (default: 4) |
 | `header_mark` | Fill of a marked column's header cell (default: `selection`) |
+| `inspected` | Fill of the inspected cell (A) and the viewer's A label (default: `info` at 12%) |
+| `inspected_foreground` | Text on it (default: `foreground`) |
+| `compared` | Fill of the compared cell (B) and the viewer's B label (default: `warning` at 12%) |
+| `compared_foreground` | Text on it (default: `foreground`) |
+| `null` | The `NULL` in cells (default: `muted`) |
 
 ## `databases/<id>.json`
 

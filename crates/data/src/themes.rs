@@ -169,6 +169,21 @@ pub struct GridColors {
     /// Fill of a marked column's header cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_mark: Option<Rgb>,
+    /// Fill of the inspected cell (A), and of the A label in the value viewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspected: Option<Rgb>,
+    /// Text on that fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspected_foreground: Option<Rgb>,
+    /// Fill of the compared cell (B), and of the B label in the value viewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compared: Option<Rgb>,
+    /// Text on that fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compared_foreground: Option<Rgb>,
+    /// The `NULL` shown in cells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub null: Option<Rgb>,
 }
 
 /// The grid's mark with every value known.
@@ -180,6 +195,11 @@ pub struct Grid {
     pub mark_border_width: f32,
     pub mark_radius: f32,
     pub header_mark: Rgb,
+    pub inspected: Rgb,
+    pub inspected_foreground: Rgb,
+    pub compared: Rgb,
+    pub compared_foreground: Rgb,
+    pub null: Rgb,
 }
 
 impl GridColors {
@@ -190,9 +210,11 @@ impl GridColors {
 
     /// The values to draw: the set ones, the rest from `colors`. Rows are the
     /// selection at 35% of its alpha, the mark and its header the selection, the
-    /// outline the accent, 2 px wide, its corners rounded by 4 px.
+    /// outline the accent, 2 px wide, its corners rounded by 4 px. A and B are a
+    /// faint `info` and `warning` (12%) under the usual text, `NULL` is `muted`.
     pub fn resolve(&self, colors: &ThemeColors) -> Grid {
         let selection = colors.selection;
+        let faint = |c: Rgb| Rgb { a: 31, ..c };
         Grid {
             row: self.row.unwrap_or(Rgb {
                 a: (f32::from(selection.a) * 0.35).round() as u8,
@@ -203,6 +225,11 @@ impl GridColors {
             mark_border_width: self.mark_border_width.unwrap_or(2.),
             mark_radius: self.mark_radius.unwrap_or(4.),
             header_mark: self.header_mark.unwrap_or(selection),
+            inspected: self.inspected.unwrap_or(faint(colors.info)),
+            inspected_foreground: self.inspected_foreground.unwrap_or(colors.foreground),
+            compared: self.compared.unwrap_or(faint(colors.warning)),
+            compared_foreground: self.compared_foreground.unwrap_or(colors.foreground),
+            null: self.null.unwrap_or(colors.muted),
         }
     }
 }
@@ -379,7 +406,15 @@ impl Theme {
                     let size = match key.as_str() {
                         "mark_border_width" => Some(MAX_MARK_BORDER),
                         "mark_radius" => Some(MAX_MARK_RADIUS),
-                        "row" | "mark" | "mark_border" | "header_mark" => None,
+                        "row"
+                        | "mark"
+                        | "mark_border"
+                        | "header_mark"
+                        | "inspected"
+                        | "inspected_foreground"
+                        | "compared"
+                        | "compared_foreground"
+                        | "null" => None,
                         _ => {
                             notes.unknown(&["grid", key]);
                             continue;
@@ -838,9 +873,80 @@ mod tests {
                 mark_border_width: 2.,
                 mark_radius: 4.,
                 header_mark: rgb("#e5484d40"),
+                // Today's A and B: a faint info and warning under the usual text.
+                inspected: rgb("#22d3ee1f"),
+                inspected_foreground: theme.colors.foreground,
+                compared: rgb("#facc151f"),
+                compared_foreground: theme.colors.foreground,
+                null: theme.colors.muted,
             }
         );
         assert!(!theme.to_json().contains("grid"));
+    }
+
+    /// WCAG's contrast ratio of `fg` on `bg` (opaque).
+    fn contrast(fg: Rgb, bg: Rgb) -> f32 {
+        let lum = |c: Rgb| {
+            let ch = |v: u8| {
+                let v = f32::from(v) / 255.;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)
+        };
+        let (a, b) = (lum(fg), lum(bg));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn built_in_themes_fill_a_and_b_with_readable_text() {
+        for theme in built_in() {
+            let g = &theme.grid;
+            let (a, af) = (g.inspected.unwrap(), g.inspected_foreground.unwrap());
+            let (b, bf) = (g.compared.unwrap(), g.compared_foreground.unwrap());
+            let null = g.null.unwrap();
+            // Solid fills, so A and B stand out from the mark and the stripes.
+            assert_eq!((a.a, b.a), (255, 255), "{}", theme.name);
+            assert!(
+                contrast(af, a) >= 4.5,
+                "{}: A {}",
+                theme.name,
+                contrast(af, a)
+            );
+            assert!(
+                contrast(bf, b) >= 4.5,
+                "{}: B {}",
+                theme.name,
+                contrast(bf, b)
+            );
+            let bg = theme.colors.background;
+            assert!(contrast(null, bg) >= 4.5, "{}: NULL", theme.name);
+            // Each fill stands out from the background, and A from B.
+            assert!(contrast(a, bg) >= 3., "{}: A on the background", theme.name);
+            assert!(contrast(b, bg) >= 3., "{}: B on the background", theme.name);
+            assert_ne!(a, b, "{}", theme.name);
+        }
+    }
+
+    #[test]
+    fn a_partial_set_of_a_b_and_null_fills_the_rest() {
+        let text = strip_grid(BUILT_IN[0]).replace(
+            "\"syntax\"",
+            "\"grid\": { \"inspected\": \"#ffff00\", \"null\": \"#ff00ff\" }, \"syntax\"",
+        );
+        let theme = Theme::parse(&text).unwrap();
+        let g = theme.grid.resolve(&theme.colors);
+        assert_eq!(g.inspected.to_hex(), "#ffff00");
+        assert_eq!(g.null.to_hex(), "#ff00ff");
+        assert_eq!(g.inspected_foreground, theme.colors.foreground);
+        assert_eq!(g.compared.to_hex(), "#facc151f");
+        // A user's theme: the lenient reader takes the new keys too.
+        let (read, notes) = Theme::read(&text, None, "x").unwrap();
+        assert_eq!(read.grid.inspected, theme.grid.inspected);
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     #[test]

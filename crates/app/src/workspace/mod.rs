@@ -28,11 +28,13 @@ mod safety;
 mod scheduled;
 mod schema;
 mod sidebar;
+mod tab_values;
 mod tabs;
 #[cfg(test)]
 mod ui_tests;
 mod update;
 mod value_panel;
+mod value_window;
 
 use sidebar::{HistoryList, Panel, Panels, SchemaTree, Side, Sidebar, SidebarRow};
 use value_panel::{Picked, ValueEvent, ValuePanel};
@@ -149,6 +151,12 @@ pub struct Workspace {
     /// the right one the last of `right_split` (inside it).
     left_split: Entity<ResizableState>,
     right_split: Entity<ResizableState>,
+    /// Each query tab's value viewer (made when first needed).
+    values: HashMap<TabId, tab_values::TabValues>,
+    /// The viewer's width, the same in every tab.
+    value_split: tab_values::ValueSplit,
+    /// The viewer popped out into its own window, if it is.
+    value_window: Option<value_window::ValueWindow>,
     /// The tabs' connections by user id; tabs point to the same entities.
     conns: HashMap<String, Entity<Connection>>,
     /// Every open connection and what it is for (tabs, scheduled runs, files).
@@ -267,8 +275,6 @@ impl Workspace {
             RIGHT_SIDEBAR_WIDTH_SETTING,
             &data.local,
         );
-        let value = cx.new(|cx| ValuePanel::new(window, cx));
-        let value_sub = cx.subscribe_in(&value, window, Self::on_value_event);
         let settings_sub = cx.observe_global::<settings::Current>(|this: &mut Self, cx| {
             this.sync_ai_access(cx);
             this.sync_mcp(cx);
@@ -284,6 +290,15 @@ impl Workspace {
         let bounds_sub = cx.observe_window_bounds(window, |_, _, cx| cx.notify());
         let assistant = cx.new(|cx| crate::assistant::ChatPanel::new(window, cx));
         let assistant_sub = cx.subscribe_in(&assistant, window, Self::on_chat_event);
+        // The popped-out viewer goes with the workspace.
+        let release_sub = cx.on_release(|this: &mut Self, cx| {
+            if let Some(popped) = this.value_window.take() {
+                let _ = popped
+                    .handle
+                    .update(cx, |_, window, _| window.remove_window());
+            }
+        });
+        let value_split = tab_values::ValueSplit::new(&data.local, cx);
         let mut this = Self {
             engine,
             data,
@@ -291,9 +306,7 @@ impl Workspace {
             left,
             right,
             panels: Panels {
-                value,
                 assistant,
-                value_focus: cx.focus_handle(),
                 schema: SchemaTree::new(schema_search),
                 bookmark_search,
                 history: HistoryList {
@@ -305,6 +318,9 @@ impl Workspace {
             },
             left_split: cx.new(|_| ResizableState::default()),
             right_split: cx.new(|_| ResizableState::default()),
+            values: HashMap::new(),
+            value_split,
+            value_window: None,
             conns: HashMap::new(),
             connections: Connections::default(),
             active_db: None,
@@ -332,11 +348,11 @@ impl Workspace {
                 search_sub,
                 bookmark_sub,
                 schema_sub,
-                value_sub,
                 settings_sub,
                 appearance_sub,
                 bounds_sub,
                 assistant_sub,
+                release_sub,
             ],
             _pump: pump,
         };
@@ -468,6 +484,17 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.tabs.active().map(TabItem::view);
         let shown = active.as_ref().map(AnyView::entity_id);
+        // The popped-out viewer shows the active tab's.
+        let active_query = self.tabs.active_query().map(|t| t.read(cx).id);
+        if self
+            .value_window
+            .as_ref()
+            .is_some_and(|v| v.tab != active_query)
+        {
+            cx.defer_in(window, |this, window, cx| {
+                this.follow_active_tab(window, cx)
+            });
+        }
         if shown != self.shown_tab {
             self.shown_tab = shown;
             if let Some(board) = self.tabs.active().and_then(TabItem::board).cloned() {
@@ -511,7 +538,10 @@ impl Render for Workspace {
                         this.child(self.render_tabs(cx))
                     })
                     .child(match active {
-                        Some(tab) => div().flex_1().min_h_0().child(tab).into_any_element(),
+                        Some(tab) => {
+                            let tab = self.render_tab_with_values(tab.into_any_element(), cx);
+                            div().flex_1().min_h_0().child(tab).into_any_element()
+                        }
                         None => self.render_empty_state(cx),
                     });
                 let body = self.render_sidebars(content.into_any_element(), cx);

@@ -215,7 +215,8 @@ pub fn engraving(cx: &App) -> Engraving {
     }
 }
 
-/// How the result grid draws its mark.
+/// How the result grid draws its mark, A, B and `NULL`.
+#[derive(Clone, Copy)]
 pub struct GridTheme {
     /// The rows the mark covers.
     pub row: Hsla,
@@ -229,6 +230,21 @@ pub struct GridTheme {
     pub mark_radius: Pixels,
     /// A marked column's header cell.
     pub header_mark: Hsla,
+    /// The inspected cell (A): its fill, its frame (the fill, opaque) and its text.
+    pub inspected: CellMark,
+    /// The compared cell (B).
+    pub compared: CellMark,
+    /// `NULL` in cells.
+    pub null: Hsla,
+}
+
+/// How the inspected or compared cell is drawn, in the grid and on the viewer's
+/// label.
+#[derive(Clone, Copy)]
+pub struct CellMark {
+    pub fill: Hsla,
+    pub frame: Hsla,
+    pub foreground: Hsla,
 }
 
 /// The grid's mark in the current theme: its own `grid` colors, else derived from
@@ -243,6 +259,23 @@ pub fn grid(cx: &App) -> GridTheme {
         mark_border_width: px(g.mark_border_width),
         mark_radius: px(g.mark_radius),
         header_mark: color(g.header_mark),
+        inspected: CellMark {
+            fill: color(g.inspected),
+            frame: Hsla {
+                a: 1.,
+                ..color(g.inspected)
+            },
+            foreground: color(g.inspected_foreground),
+        },
+        compared: CellMark {
+            fill: color(g.compared),
+            frame: Hsla {
+                a: 1.,
+                ..color(g.compared)
+            },
+            foreground: color(g.compared_foreground),
+        },
+        null: color(g.null),
     }
 }
 
@@ -517,11 +550,22 @@ mod tests {
             assert_eq!(g.mark_border, color(theme.colors.accent));
             assert_eq!(g.mark_border_width, px(2.));
             assert!(g.row.a < g.mark.a);
-            // Without its own colors the theme's selection and accent apply.
+            // A and B solid, each with its own text; NULL in its own color.
+            assert_eq!(g.inspected.fill, color(theme.grid.inspected.unwrap()));
+            assert_eq!(g.inspected.frame, g.inspected.fill);
+            let fg = theme.grid.compared_foreground.unwrap();
+            assert_eq!(g.compared.foreground, color(fg));
+            assert_eq!(g.null, color(theme.grid.null.unwrap()));
+            // Without its own colors the theme's selection and accent apply, and A
+            // and B are a faint info and warning framed in the full color.
             cx.update_global::<Themes, _>(|t, _| t.current.grid = Default::default());
             let g = grid(cx);
             assert_eq!(g.mark, color(theme.colors.selection));
             assert_eq!(g.header_mark, color(theme.colors.selection));
+            assert_eq!(g.inspected.frame, color(theme.colors.info));
+            assert!(g.inspected.fill.a < 0.2);
+            assert_eq!(g.compared.foreground, color(theme.colors.foreground));
+            assert_eq!(g.null, color(theme.colors.muted));
         });
     }
 

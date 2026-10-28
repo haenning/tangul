@@ -38,6 +38,11 @@
     "mark_border": "#e5484d",
     "mark_border_width": 2,
     "mark_radius": 4,
-    "header_mark": "#e5484d33"
+    "header_mark": "#e5484d33",
+    "inspected": "#22d3ee",
+    "inspected_foreground": "#0a0a0a",
+    "compared": "#facc15",
+    "compared_foreground": "#0a0a0a",
+    "null": "#a3a3a3"
   }
 }

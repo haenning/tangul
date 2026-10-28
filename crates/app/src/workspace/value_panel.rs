@@ -1,4 +1,4 @@
-//! The value viewer (right sidebar): the inspected cell (A) in full and, with a
+//! The value viewer (one per query tab): the inspected cell (A) in full and, with a
 //! second cell (B), how the two differ. It keeps copies of the values, so they stay
 //! after the result changes. Knows nothing about sidebars or tabs; the workspace
 //! feeds it cells and acts on its [`ValueEvent`]s.
@@ -97,7 +97,36 @@ impl Viewer {
     }
 }
 
+/// What a viewer shows and how: handed between a tab's viewer and the pop-out
+/// window (each has its own editors, made in its own window).
+#[derive(Clone)]
+pub struct ValueState {
+    a: Option<Picked>,
+    b: Option<Picked>,
+    layout: Layout,
+    a_first: bool,
+    normalize: bool,
+    granularity: Granularity,
+}
+
+/// A viewer with nothing picked yet: side by side, A first, JSON normalized, by line.
+impl Default for ValueState {
+    fn default() -> Self {
+        Self {
+            a: None,
+            b: None,
+            layout: Layout::SideBySide,
+            a_first: true,
+            normalize: true,
+            granularity: Granularity::Line,
+        }
+    }
+}
+
 pub struct ValuePanel {
+    /// Set without a window (see [`ValuePanel::set_state`]): the editors take the
+    /// values on the next render.
+    stale: bool,
     a: Option<Picked>,
     b: Option<Picked>,
     layout: Layout,
@@ -119,6 +148,7 @@ impl EventEmitter<ValueEvent> for ValuePanel {}
 impl ValuePanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
+            stale: false,
             a: None,
             b: None,
             layout: Layout::SideBySide,
@@ -154,6 +184,43 @@ impl ValuePanel {
         let old = self.b.replace(picked).map(|p| p.tab);
         self.refresh(window, cx);
         old.filter(|&t| Some(t) != self.b.as_ref().map(|p| p.tab))
+    }
+
+    /// What it shows and how, to hand over to another viewer.
+    pub fn state(&self) -> ValueState {
+        ValueState {
+            a: self.a.clone(),
+            b: self.b.clone(),
+            layout: self.layout,
+            a_first: self.a_first,
+            normalize: self.normalize,
+            granularity: self.granularity,
+        }
+    }
+
+    /// Shows `state` (from another viewer, or empty); the editors follow when it is
+    /// drawn next, so this needs no window.
+    pub fn set_state(&mut self, state: ValueState, cx: &mut Context<Self>) {
+        let ValueState {
+            a,
+            b,
+            layout,
+            a_first,
+            normalize,
+            granularity,
+        } = state;
+        (self.a, self.b, self.layout) = (a, b, layout);
+        (self.a_first, self.normalize, self.granularity) = (a_first, normalize, granularity);
+        self.stale = true;
+        cx.notify();
+    }
+
+    /// Where A (else B) is from, e.g. "Query 3 · email · row 12".
+    pub fn source(&self) -> Option<SharedString> {
+        self.a
+            .as_ref()
+            .or(self.b.as_ref())
+            .map(|p| p.source.clone())
     }
 
     #[cfg(test)]
@@ -295,12 +362,14 @@ impl ValuePanel {
         picked: &Picked,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
-        let color = if label == "A" {
-            theme.info
+        // The same colors as the cell in the grid.
+        let grid = crate::theme::grid(cx);
+        let mark = if label == "A" {
+            grid.inspected
         } else {
-            theme.warning
+            grid.compared
         };
+        let theme = cx.theme();
         let value = picked.cell.value.clone();
         let kind = ValueKind::of(value.as_deref());
         let size = value
@@ -325,9 +394,9 @@ impl ValuePanel {
                     .px_1p5()
                     .rounded(theme.radius)
                     .border_1()
-                    .border_color(color)
-                    .bg(color.opacity(0.15))
-                    .text_color(color)
+                    .border_color(mark.frame)
+                    .bg(mark.fill)
+                    .text_color(mark.foreground)
                     .child(label),
             )
             .child(
@@ -364,6 +433,7 @@ impl ValuePanel {
 
     /// Where B goes before there is one: a faint "B" and how to pick it.
     fn render_b_hint(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let frame = crate::theme::grid(cx).compared.frame;
         let theme = cx.theme();
         h_flex()
             .id("value-b-hint")
@@ -381,8 +451,8 @@ impl ValuePanel {
                     .px_1p5()
                     .rounded(theme.radius)
                     .border_1()
-                    .border_color(theme.warning.opacity(0.35))
-                    .text_color(theme.warning.opacity(0.5))
+                    .border_color(frame.opacity(0.35))
+                    .text_color(frame.opacity(0.5))
                     .child("B"),
             )
             .child("⌥ + click another cell to compare it with A")
@@ -573,7 +643,10 @@ impl ValuePanel {
 }
 
 impl Render for ValuePanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.stale) {
+            self.refresh(window, cx);
+        }
         let (Some(first), second) = (self.a.clone().or(self.b.clone()), self.b.clone()) else {
             return self.render_empty(cx);
         };
