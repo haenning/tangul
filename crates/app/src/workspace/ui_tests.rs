@@ -598,7 +598,9 @@ fn the_value_viewer_pops_out_follows_the_tabs_and_comes_back(cx: &mut TestAppCon
     step(handle, cx, |_, _| {});
     assert_eq!(shown(cx), (some("one"), some("two")));
     // The status bar button raises the window: no viewer opens in the tab.
-    step(handle, cx, |window, cx| window.click("value-viewer-button", cx));
+    step(handle, cx, |window, cx| {
+        window.click("value-viewer-button", cx)
+    });
     step(handle, cx, |window, cx| {
         assert!(window.try_find(VIEWER).is_none());
         assert!(popped(&workspace, cx).is_some());
