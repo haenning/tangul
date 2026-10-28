@@ -1,4 +1,4 @@
-//! The value viewer (right sidebar): the inspected cell (A) in full and, with a
+//! The value viewer (one per query tab): the inspected cell (A) in full and, with a
 //! second cell (B), how the two differ. It keeps copies of the values, so they stay
 //! after the result changes. Knows nothing about sidebars or tabs; the workspace
 //! feeds it cells and acts on its [`ValueEvent`]s.

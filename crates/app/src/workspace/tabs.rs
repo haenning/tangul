@@ -207,6 +207,10 @@ impl Workspace {
         if let Some(board) = tab.board() {
             board.update(cx, |b, _| b.cancel());
         }
+        if let Some(tab) = tab.query() {
+            // Its value viewer goes with it.
+            self.values.remove(&tab.read(cx).id);
+        }
         if let Some(tab) = tab.query().map(|t| t.read(cx))
             && let Some(conn) = tab.conn_id(cx)
         {
@@ -382,31 +386,30 @@ impl Workspace {
             }
             TabEvent::Inspect { cell, open } => {
                 let picked = self.picked(tab, cell, cx);
-                let old = self
-                    .panels
-                    .value
-                    .update(cx, |p, cx| p.set_a(picked, window, cx));
+                let id = picked.tab;
+                let panel = self.tab_values(id, window, cx).panel.clone();
+                let old = panel.update(cx, |p, cx| p.set_a(picked, window, cx));
                 self.clear_value_mark(old, false, cx);
                 if *open {
-                    self.show_panel(Panel::Value, cx);
+                    self.open_value_viewer(id, window, cx);
                 }
             }
             TabEvent::ToggleViewer => {
-                if self.host(Panel::Value).shows(Panel::Value) {
+                let id = tab.read(cx).id;
+                if self.values.get(&id).is_some_and(|v| v.open) {
                     self.close_value_viewer(&CloseValueViewer, window, cx);
                 } else if !tab.update(cx, |t, cx| t.inspect_selected(cx)) {
-                    self.show_panel(Panel::Value, cx);
+                    self.open_value_viewer(id, window, cx);
                 }
             }
             TabEvent::Ask(question) => self.ask_assistant(question.clone(), true, window, cx),
             TabEvent::Compare(cell) => {
                 let picked = self.picked(tab, cell, cx);
-                let old = self
-                    .panels
-                    .value
-                    .update(cx, |p, cx| p.set_b(picked, window, cx));
+                let id = picked.tab;
+                let panel = self.tab_values(id, window, cx).panel.clone();
+                let old = panel.update(cx, |p, cx| p.set_b(picked, window, cx));
                 self.clear_value_mark(old, true, cx);
-                self.show_panel(Panel::Value, cx);
+                self.open_value_viewer(id, window, cx);
             }
             TabEvent::OpenSql { title, sql } => {
                 let conn = tab.read(cx).conn.clone();

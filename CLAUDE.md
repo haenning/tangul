@@ -67,8 +67,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
 - `crates/app`: the GPUI app
   - `workspace/`: layout and wiring; `sidebar.rs`: the sidebars left and right of the
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
-    `value_panel.rs`: the value viewer (right sidebar): the inspected cell (A), the
-    compared one (B) and their diff; logic in `assist::value`; `tabs.rs`: the kinds of tab (`TabItem`: query,
+    `value_panel.rs`: the value viewer: the inspected cell (A), the compared one (B)
+    and their diff; logic in `assist::value`; `tab_values.rs`: each query tab's own
+    viewer (below the tab bar, beside the tab), kept while the tab is open; `tabs.rs`: the kinds of tab (`TabItem`: query,
     file, AI settings, board) and the open ones; `database_tabs.rs`: tabs belong to
     their database (switching shows its tabs, the others wait), pinned query and
     board tabs kept per database in `local.db` and restored when it is first shown; `remove_database.rs`: removing a
