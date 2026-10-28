@@ -295,12 +295,14 @@ impl ValuePanel {
         picked: &Picked,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
-        let color = if label == "A" {
-            theme.info
+        // The same colors as the cell in the grid.
+        let grid = crate::theme::grid(cx);
+        let mark = if label == "A" {
+            grid.inspected
         } else {
-            theme.warning
+            grid.compared
         };
+        let theme = cx.theme();
         let value = picked.cell.value.clone();
         let kind = ValueKind::of(value.as_deref());
         let size = value
@@ -325,9 +327,9 @@ impl ValuePanel {
                     .px_1p5()
                     .rounded(theme.radius)
                     .border_1()
-                    .border_color(color)
-                    .bg(color.opacity(0.15))
-                    .text_color(color)
+                    .border_color(mark.frame)
+                    .bg(mark.fill)
+                    .text_color(mark.foreground)
                     .child(label),
             )
             .child(
@@ -364,6 +366,7 @@ impl ValuePanel {
 
     /// Where B goes before there is one: a faint "B" and how to pick it.
     fn render_b_hint(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let frame = crate::theme::grid(cx).compared.frame;
         let theme = cx.theme();
         h_flex()
             .id("value-b-hint")
@@ -381,8 +384,8 @@ impl ValuePanel {
                     .px_1p5()
                     .rounded(theme.radius)
                     .border_1()
-                    .border_color(theme.warning.opacity(0.35))
-                    .text_color(theme.warning.opacity(0.5))
+                    .border_color(frame.opacity(0.35))
+                    .text_color(frame.opacity(0.5))
                     .child("B"),
             )
             .child("⌥ + click another cell to compare it with A")

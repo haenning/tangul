@@ -545,6 +545,44 @@ fn space_in_a_column_filter_is_text(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_and_b_keep_their_fill_inside_the_mark(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let rows = [[Some("1"), Some("one")], [Some("2"), None]];
+    tab_with_rows(handle, &workspace, &rows, cx);
+    let (alt, shift) = (
+        Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+        Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| click_cell(window, 1, 1, alt, cx));
+    // Both inside one mark.
+    step(handle, cx, |window, cx| {
+        click_cell(window, 0, 1, Modifiers::default(), cx)
+    });
+    step(handle, cx, |window, cx| click_cell(window, 1, 1, shift, cx));
+    step(handle, cx, |window, cx| {
+        let row = |r: usize, window: &mut Window| {
+            let row = window.within(("row", r));
+            (
+                row.try_find(("mark-fill", 1usize)).is_some(),
+                row.try_find(("inspected-fill", 1usize)).is_some(),
+                row.try_find(("compared-fill", 1usize)).is_some(),
+            )
+        };
+        assert_eq!(row(0, window), (true, true, false));
+        // B is a NULL: filled too.
+        assert_eq!(row(1, window), (true, false, true));
+        assert_eq!(value_b(&workspace, cx), Some(None));
+    });
+}
+
+#[gpui_kit::test]
 fn alt_click_compares_and_the_x_stops_it(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
     let rows = [

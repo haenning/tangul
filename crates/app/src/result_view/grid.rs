@@ -1865,18 +1865,27 @@ impl TableDelegate for ResultsDelegate {
             .table_font_size()
             .map_or_else(|| rems(0.75).to_pixels(window.rem_size()), px);
         let loaded = self.result.row_count();
+        let style = crate::theme::grid(cx);
+        let null = style.null;
         let marked = self.mark.contains(row_ix, col_ix).then(|| {
             let (top, right, bottom, left) = self.mark.edges(row_ix, col_ix, loaded);
-            (crate::theme::grid(cx), top, right, bottom, left)
+            (style, top, right, bottom, left)
         });
-        let theme = cx.theme();
+        // A and B: filled, with the value again on top in their own text color.
         let mark = if self.inspected == Some((row_ix, col_ix)) {
-            Some(theme.info)
+            Some(("inspected-fill", style.inspected))
         } else if self.compared == Some((row_ix, col_ix)) {
-            Some(theme.warning)
+            Some(("compared-fill", style.compared))
         } else {
             None
-        };
+        }
+        .map(|(id, m)| {
+            let text: SharedString = match self.result.cell(row_ix, col_ix) {
+                None => "NULL".into(),
+                Some(v) => display_value(v),
+            };
+            (id, m, text)
+        });
         let cell = div()
             .id(("cell", col_ix))
             .test_support()
@@ -1906,12 +1915,24 @@ impl TableDelegate for ResultsDelegate {
                     LAYER_MARK,
                 ))
             })
-            .when_some(mark, |d, color| {
+            .when_some(mark, |d, (id, m, text)| {
+                let p = Size::XSmall.table_cell_padding();
+                let border = px(1.);
                 d.child(over_row_line(
-                    over_cell(div())
+                    over_cell(div().id((id, col_ix)).test_support())
                         .border_1()
-                        .border_color(color)
-                        .bg(color.opacity(0.12)),
+                        .border_color(m.frame)
+                        .bg(m.fill)
+                        .pt(p.top - border)
+                        .pl(p.left - border)
+                        .pr(p.right - border)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .font_family(family.clone())
+                        .text_xs()
+                        .when_some(s.table_font_size(), |d, size| d.text_size(px(size)))
+                        .text_color(m.foreground)
+                        .child(text),
                     LAYER_INSPECTED,
                 ))
             })
@@ -1988,7 +2009,7 @@ impl TableDelegate for ResultsDelegate {
         // The value, clipped to the cell (the marks above reach over its padding).
         let value = div().size_full().overflow_hidden().whitespace_nowrap();
         cell.child(match self.result.cell(row_ix, col_ix) {
-            None => value.text_color(theme.muted_foreground).child("NULL"),
+            None => value.text_color(null).child("NULL"),
             // Nothing more to show for an empty string.
             Some("") => value,
             Some(text) => {
