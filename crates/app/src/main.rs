@@ -80,7 +80,18 @@ fn main() {
     {
         let (engine, events) = (engine.clone(), events.clone());
         app.on_reopen(move |cx| {
-            if cx.windows().is_empty() {
+            // The value viewer's own window isn't the main one.
+            let main_open = cx.windows().iter().any(|w| {
+                w.downcast::<Root>()
+                    .and_then(|root| root.read(cx).ok())
+                    .is_some_and(|root| {
+                        root.view()
+                            .clone()
+                            .downcast::<workspace::Workspace>()
+                            .is_ok()
+                    })
+            });
+            if !main_open {
                 open_main_window(engine.clone(), events.clone(), cx);
             }
         });

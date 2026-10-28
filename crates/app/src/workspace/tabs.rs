@@ -208,8 +208,12 @@ impl Workspace {
             board.update(cx, |b, _| b.cancel());
         }
         if let Some(tab) = tab.query() {
-            // Its value viewer goes with it.
-            self.values.remove(&tab.read(cx).id);
+            // Its value viewer goes with it (also out of the pop-out).
+            let id = tab.read(cx).id;
+            self.values.remove(&id);
+            if let Some(popped) = self.value_window.as_mut().filter(|v| v.tab == Some(id)) {
+                popped.tab = None;
+            }
         }
         if let Some(tab) = tab.query().map(|t| t.read(cx))
             && let Some(conn) = tab.conn_id(cx)
@@ -387,8 +391,7 @@ impl Workspace {
             TabEvent::Inspect { cell, open } => {
                 let picked = self.picked(tab, cell, cx);
                 let id = picked.tab;
-                let panel = self.tab_values(id, window, cx).panel.clone();
-                let old = panel.update(cx, |p, cx| p.set_a(picked, window, cx));
+                let old = self.pick_value(id, picked, false, window, cx);
                 self.clear_value_mark(old, false, cx);
                 if *open {
                     self.open_value_viewer(id, window, cx);
@@ -396,7 +399,12 @@ impl Workspace {
             }
             TabEvent::ToggleViewer => {
                 let id = tab.read(cx).id;
-                if self.values.get(&id).is_some_and(|v| v.open) {
+                if self.value_window.is_some() {
+                    // Popped out: Space picks the selected cell there, else raises it.
+                    if !tab.update(cx, |t, cx| t.inspect_selected(cx)) {
+                        self.raise_value_window(cx);
+                    }
+                } else if self.values.get(&id).is_some_and(|v| v.open) {
                     self.close_value_viewer(&CloseValueViewer, window, cx);
                 } else if !tab.update(cx, |t, cx| t.inspect_selected(cx)) {
                     self.open_value_viewer(id, window, cx);
@@ -406,8 +414,7 @@ impl Workspace {
             TabEvent::Compare(cell) => {
                 let picked = self.picked(tab, cell, cx);
                 let id = picked.tab;
-                let panel = self.tab_values(id, window, cx).panel.clone();
-                let old = panel.update(cx, |p, cx| p.set_b(picked, window, cx));
+                let old = self.pick_value(id, picked, true, window, cx);
                 self.clear_value_mark(old, true, cx);
                 self.open_value_viewer(id, window, cx);
             }

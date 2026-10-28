@@ -65,9 +65,9 @@ impl Workspace {
         self.values.get(&tab.read(cx).id)
     }
 
-    /// Whether the active tab shows its viewer.
+    /// Whether the active tab shows its viewer (popped out, every tab does).
     pub(super) fn value_viewer_open(&self, cx: &App) -> bool {
-        self.active_values(cx).is_some_and(|v| v.open)
+        self.value_window.is_some() || self.active_values(cx).is_some_and(|v| v.open)
     }
 
     /// Opens tab `id`'s viewer.
@@ -83,6 +83,10 @@ impl Workspace {
 
     /// The status bar button: opens or closes the active query tab's viewer.
     pub(super) fn toggle_value_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Popped out: to the front, never a dead click.
+        if self.raise_value_window(cx) {
+            return;
+        }
         let Some(id) = self.tabs.active_query().map(|t| t.read(cx).id) else {
             return;
         };
@@ -105,6 +109,11 @@ impl Workspace {
             cx.propagate();
             return;
         };
+        // Popped out, the grid's own Esc runs; the window closes with its own.
+        if self.value_window.is_some() {
+            cx.propagate();
+            return;
+        }
         match self.values.get_mut(&id).filter(|v| v.open) {
             Some(values) => values.open = false,
             None => {
@@ -138,7 +147,8 @@ impl Workspace {
         tab: AnyElement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(values) = self.active_values(cx).filter(|v| v.open) else {
+        let inline = self.value_window.is_none();
+        let Some(values) = self.active_values(cx).filter(|v| inline && v.open) else {
             return tab;
         };
         let viewer = self.render_value_viewer(values, cx);
@@ -196,14 +206,27 @@ impl Workspace {
                     })
                     .child("VALUE")
                     .child(
-                        Button::new("close-value-viewer")
-                            .icon(IconName::Close)
-                            .xsmall()
-                            .ghost()
-                            .tooltip("Close (Esc)")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.close_value_viewer(&CloseValueViewer, window, cx)
-                            })),
+                        h_flex()
+                            .child(
+                                Button::new("pop-out-value-viewer")
+                                    .icon(Icon::new(Lucide::ExternalLink))
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Open in a window")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pop_out_value_viewer(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("close-value-viewer")
+                                    .icon(IconName::Close)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Close (Esc)")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_value_viewer(&CloseValueViewer, window, cx)
+                                    })),
+                            ),
                     ),
             )
             .child(div().flex_1().min_h_0().child(values.panel.clone()))

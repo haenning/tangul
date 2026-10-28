@@ -287,7 +287,7 @@ impl Workspace {
             .ghost()
             .xsmall()
             .selected(self.value_viewer_open(cx))
-            .disabled(self.tabs.active_query().is_none())
+            .disabled(self.tabs.active_query().is_none() && self.value_window.is_none())
             .tooltip("Value viewer")
             .on_click(cx.listener(|this, _, window, cx| this.toggle_value_viewer(window, cx)));
         let mcp = self.render_mcp_button(cx).into_any_element();

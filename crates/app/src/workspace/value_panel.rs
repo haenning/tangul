@@ -97,7 +97,36 @@ impl Viewer {
     }
 }
 
+/// What a viewer shows and how: handed between a tab's viewer and the pop-out
+/// window (each has its own editors, made in its own window).
+#[derive(Clone)]
+pub struct ValueState {
+    a: Option<Picked>,
+    b: Option<Picked>,
+    layout: Layout,
+    a_first: bool,
+    normalize: bool,
+    granularity: Granularity,
+}
+
+/// A viewer with nothing picked yet: side by side, A first, JSON normalized, by line.
+impl Default for ValueState {
+    fn default() -> Self {
+        Self {
+            a: None,
+            b: None,
+            layout: Layout::SideBySide,
+            a_first: true,
+            normalize: true,
+            granularity: Granularity::Line,
+        }
+    }
+}
+
 pub struct ValuePanel {
+    /// Set without a window (see [`ValuePanel::set_state`]): the editors take the
+    /// values on the next render.
+    stale: bool,
     a: Option<Picked>,
     b: Option<Picked>,
     layout: Layout,
@@ -119,6 +148,7 @@ impl EventEmitter<ValueEvent> for ValuePanel {}
 impl ValuePanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
+            stale: false,
             a: None,
             b: None,
             layout: Layout::SideBySide,
@@ -154,6 +184,43 @@ impl ValuePanel {
         let old = self.b.replace(picked).map(|p| p.tab);
         self.refresh(window, cx);
         old.filter(|&t| Some(t) != self.b.as_ref().map(|p| p.tab))
+    }
+
+    /// What it shows and how, to hand over to another viewer.
+    pub fn state(&self) -> ValueState {
+        ValueState {
+            a: self.a.clone(),
+            b: self.b.clone(),
+            layout: self.layout,
+            a_first: self.a_first,
+            normalize: self.normalize,
+            granularity: self.granularity,
+        }
+    }
+
+    /// Shows `state` (from another viewer, or empty); the editors follow when it is
+    /// drawn next, so this needs no window.
+    pub fn set_state(&mut self, state: ValueState, cx: &mut Context<Self>) {
+        let ValueState {
+            a,
+            b,
+            layout,
+            a_first,
+            normalize,
+            granularity,
+        } = state;
+        (self.a, self.b, self.layout) = (a, b, layout);
+        (self.a_first, self.normalize, self.granularity) = (a_first, normalize, granularity);
+        self.stale = true;
+        cx.notify();
+    }
+
+    /// Where A (else B) is from, e.g. "Query 3 · email · row 12".
+    pub fn source(&self) -> Option<SharedString> {
+        self.a
+            .as_ref()
+            .or(self.b.as_ref())
+            .map(|p| p.source.clone())
     }
 
     #[cfg(test)]
@@ -576,7 +643,10 @@ impl ValuePanel {
 }
 
 impl Render for ValuePanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.stale) {
+            self.refresh(window, cx);
+        }
         let (Some(first), second) = (self.a.clone().or(self.b.clone()), self.b.clone()) else {
             return self.render_empty(cx);
         };

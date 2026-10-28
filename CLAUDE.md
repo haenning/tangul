@@ -69,7 +69,9 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     content (one `Sidebar` each, hosting a list of `Panel`s) and the panels' state;
     `value_panel.rs`: the value viewer: the inspected cell (A), the compared one (B)
     and their diff; logic in `assist::value`; `tab_values.rs`: each query tab's own
-    viewer (below the tab bar, beside the tab), kept while the tab is open; `tabs.rs`: the kinds of tab (`TabItem`: query,
+    viewer (below the tab bar, beside the tab), kept while the tab is open;
+    `value_window.rs`: the viewer popped out into its own window (one at a time; it
+    shows the active tab's viewer, Minify or closing it hands it back); `tabs.rs`: the kinds of tab (`TabItem`: query,
     file, AI settings, board) and the open ones; `database_tabs.rs`: tabs belong to
     their database (switching shows its tabs, the others wait), pinned query and
     board tabs kept per database in `local.db` and restored when it is first shown; `remove_database.rs`: removing a

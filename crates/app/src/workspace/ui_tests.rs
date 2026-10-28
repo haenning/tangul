@@ -13,8 +13,8 @@ use std::time::Duration;
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{
-    App, AppContext as _, ElementId, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    TestAppContext, Window, WindowHandle, px, size,
+    AnyWindowHandle, App, AppContext as _, ElementId, Entity, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, TestAppContext, Window, WindowHandle, px, size,
 };
 use tangul_core::{ColumnInfo, QueryId, RowBatch};
 use tangul_data::Data;
@@ -541,6 +541,80 @@ fn space_in_a_column_filter_is_text(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| type_keys(window, "a b", cx));
     step(handle, cx, |_, cx| {
         assert_eq!(editor.read(cx).sql(cx), "a b")
+    });
+}
+
+/// The popped-out viewer's window, and what it shows: A and B.
+type Shown = (Option<Option<String>>, Option<Option<String>>);
+
+fn popped(workspace: &Entity<Workspace>, cx: &App) -> Option<(AnyWindowHandle, Shown)> {
+    let popped = workspace.read(cx).value_window.as_ref()?;
+    let panel = popped.panel.read(cx);
+    let value = |p: Option<&super::Picked>| p.map(|p| p.cell.value.clone());
+    Some((popped.handle.into(), (value(panel.a()), value(panel.b()))))
+}
+
+#[gpui_kit::test]
+fn the_value_viewer_pops_out_follows_the_tabs_and_comes_back(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let rows = [[Some("1"), Some("one")], [Some("2"), Some("two")]];
+    let a = tab_with_rows(handle, &workspace, &rows, cx);
+    let alt = Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    let some = |v: &str| Some(Some(v.to_string()));
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        window.click("pop-out-value-viewer", cx)
+    });
+    let window_of = |cx: &mut TestAppContext| cx.update(|cx| popped(&workspace, cx).unwrap().0);
+    let shown = |cx: &mut TestAppContext| cx.update(|cx| popped(&workspace, cx).unwrap().1);
+    // A moved into the window; no tab shows the viewer inline meanwhile.
+    assert_eq!(shown(cx), (some("one"), None));
+    step(handle, cx, |window, _| {
+        assert!(window.try_find(VIEWER).is_none())
+    });
+    let popout = window_of(cx);
+    cx.update_window(popout, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("value-window-header").visible());
+        assert!(window.find("minify-value-window").visible());
+    })
+    .unwrap();
+    // It follows the grid: B lands in the window.
+    step(handle, cx, |window, cx| click_cell(window, 1, 1, alt, cx));
+    assert_eq!(shown(cx), (some("one"), some("two")));
+    // And the tabs: a new tab has nothing to show, tab A has its values back.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab("", window, cx));
+    });
+    step(handle, cx, |_, _| {});
+    assert_eq!(shown(cx), (None, None));
+    step(handle, cx, |_, cx| {
+        let ix = workspace.read(cx).tab_index(a.read(cx).id, cx).unwrap();
+        workspace.update(cx, |ws, _| ws.tabs.set_active(ix));
+    });
+    step(handle, cx, |_, _| {});
+    assert_eq!(shown(cx), (some("one"), some("two")));
+    // The status bar button raises the window: no viewer opens in the tab.
+    step(handle, cx, |window, cx| window.click("value-viewer-button", cx));
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find(VIEWER).is_none());
+        assert!(popped(&workspace, cx).is_some());
+    });
+    // Minify closes the window and hands the viewer back to the tab, as it was.
+    cx.update_window(popout, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("minify-value-window", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    step(handle, cx, |window, cx| {
+        assert!(popped(&workspace, cx).is_none());
+        assert!(window.find(VIEWER).visible());
+        assert_eq!(value_a(&workspace, cx), some("one"));
+        assert_eq!(value_b(&workspace, cx), some("two"));
     });
 }
 
