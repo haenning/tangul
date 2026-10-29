@@ -276,16 +276,20 @@ impl Workspace {
                 .xsmall()
                 .selected(shown)
                 .tooltip(panel.label())
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if panel == Panel::Value {
-                        this.release_viewer_focus(window, cx);
-                    }
-                    this.toggle_panel(panel, cx)
-                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(panel, cx)))
         };
         let left: Vec<_> = self.left.panels.iter().map(|&p| button(p, cx)).collect();
         // Right: the AI (the assistant, the MCP server), then the value viewer.
-        let (assistant, value) = (button(Panel::Assistant, cx), button(Panel::Value, cx));
+        let assistant = button(Panel::Assistant, cx);
+        // The active query tab's own viewer.
+        let value = Button::new("value-viewer-button")
+            .icon(Icon::new(Lucide::Braces))
+            .ghost()
+            .xsmall()
+            .selected(self.value_viewer_open(cx))
+            .disabled(self.tabs.active_query().is_none() && self.value_window.is_none())
+            .tooltip("Value viewer")
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_value_viewer(window, cx)));
         let mcp = self.render_mcp_button(cx).into_any_element();
         let theme = cx.theme();
         // File tabs (settings) have no results to time or chart.

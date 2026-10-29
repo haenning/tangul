@@ -13,14 +13,14 @@ use std::time::Duration;
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{
-    App, AppContext as _, ElementId, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    TestAppContext, Window, WindowHandle, px, size,
+    AnyWindowHandle, App, AppContext as _, ElementId, Entity, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, TestAppContext, Window, WindowHandle, px, size,
 };
 use tangul_core::{ColumnInfo, QueryId, RowBatch};
 use tangul_data::Data;
 use tangul_engine::{ExecEvent, QueryEvent};
 
-use super::{Panel, Workspace};
+use super::{Panel, ValuePanel, Workspace};
 use crate::query_tab::QueryTab;
 
 /// Opens the workspace with the app's theme and key bindings.
@@ -202,36 +202,103 @@ fn click_cell(window: &mut Window, row: usize, col: usize, modifiers: Modifiers,
     window.render_frame(cx);
 }
 
+/// The active tab's value viewer.
+fn values<'a>(workspace: &Entity<Workspace>, cx: &'a App) -> Option<&'a ValuePanel> {
+    let values = workspace.read(cx).active_values(cx)?;
+    Some(values.panel.read(cx))
+}
+
 fn value_a(workspace: &Entity<Workspace>, cx: &App) -> Option<Option<String>> {
-    let panel = workspace.read(cx).panels.value.read(cx);
-    panel.a().map(|p| p.cell.value.clone())
+    values(workspace, cx)?.a().map(|p| p.cell.value.clone())
 }
 
 fn changes(workspace: &Entity<Workspace>, cx: &App) -> usize {
-    workspace.read(cx).panels.value.read(cx).changes()
+    values(workspace, cx).map_or(0, ValuePanel::changes)
 }
 
 fn value_b(workspace: &Entity<Workspace>, cx: &App) -> Option<Option<String>> {
-    let panel = workspace.read(cx).panels.value.read(cx);
-    panel.b().map(|p| p.cell.value.clone())
+    values(workspace, cx)?.b().map(|p| p.cell.value.clone())
+}
+
+/// The active tab's viewer has the focus.
+fn viewer_focused(workspace: &Entity<Workspace>, window: &Window, cx: &App) -> bool {
+    let values = workspace.read(cx).active_values(cx);
+    values.is_some_and(|v| v.focus.contains_focused(window, cx))
 }
 
 #[gpui_kit::test]
-fn the_right_sidebar_opens_on_an_empty_value_viewer(cx: &mut TestAppContext) {
+fn the_value_viewer_button_opens_the_tabs_empty_viewer(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
-    cx.update_window(handle.into(), |_, window, cx| {
-        window.render_frame(cx);
-        assert!(window.try_find(RIGHT).is_none());
-        window.press("alt-secondary-b", cx);
-        assert!(window.find(RIGHT).visible());
+    // Without a query tab there is nothing to show.
+    step(handle, cx, |window, cx| {
+        window.click("value-viewer-button", cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find(VIEWER).is_none())
+    });
+    let tab = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab("", window, cx))
+    });
+    let id = cx.update(|cx| tab.read(cx).id.0 as usize);
+    step(handle, cx, |window, cx| {
+        window.click("value-viewer-button", cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find(VIEWER).visible());
         assert!(window.find("value-empty").visible());
-        assert!(shows(&workspace, Panel::Value, cx));
-        // Its status bar button hides it again; the left one stays.
-        window.click(button(Panel::Value), cx);
+        // Below the tab bar, beside the tab: no sidebar opens for it.
+        let title = window.find(("tab-menu", id)).bounds();
+        assert!(window.find(VIEWER).bounds().top() >= title.bottom());
         assert!(window.try_find(RIGHT).is_none());
+        assert!(viewer_open(&workspace, cx));
+        // The button hides it again.
+        window.click("value-viewer-button", cx);
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find(VIEWER).is_none());
         assert!(window.find(LEFT).visible());
-    })
-    .unwrap();
+    });
+}
+
+#[gpui_kit::test]
+fn each_tab_keeps_its_own_value_viewer(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let rows = [[Some("1"), Some("one")], [Some("2"), Some("two")]];
+    let a = tab_with_rows(handle, &workspace, &rows, cx);
+    let alt = Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    // Tab A compares two values.
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| click_cell(window, 1, 1, alt, cx));
+    step(handle, cx, |window, _| {
+        assert!(window.find(VIEWER).visible())
+    });
+    // A new tab B shows no viewer …
+    let b = step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab("", window, cx))
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find(VIEWER).is_none());
+        assert!(!viewer_open(&workspace, cx));
+        assert_eq!(value_a(&workspace, cx), None);
+        // … and A is back with tab A, exactly as it was.
+        let ix = workspace.read(cx).tab_index(a.read(cx).id, cx).unwrap();
+        workspace.update(cx, |ws, _| ws.tabs.set_active(ix));
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.find(VIEWER).visible());
+        assert_eq!(value_a(&workspace, cx), Some(Some("one".into())));
+        assert_eq!(value_b(&workspace, cx), Some(Some("two".into())));
+    });
+    // Closing a tab drops its viewer.
+    step(handle, cx, |window, cx| {
+        let id = a.read(cx).id;
+        workspace.update(cx, |ws, cx| ws.close_tab_by_id(id, window, cx));
+        assert!(!workspace.read(cx).values.contains_key(&id));
+        let _ = b;
+    });
 }
 
 /// Runs `step` in the window, then lets the effects it queued (events between
@@ -259,8 +326,11 @@ fn double_click_cell(window: &mut Window, row: usize, col: usize, cx: &mut App) 
 }
 
 fn viewer_open(workspace: &Entity<Workspace>, cx: &App) -> bool {
-    shows(workspace, Panel::Value, cx)
+    workspace.read(cx).value_viewer_open(cx)
 }
+
+/// The value viewer, below the tab bar.
+const VIEWER: &str = "value-viewer";
 
 #[gpui_kit::test]
 fn a_click_selects_and_a_double_click_inspects(cx: &mut TestAppContext) {
@@ -321,12 +391,14 @@ fn space_opens_and_closes_the_viewer(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| {
         // A click neither picks A nor opens the viewer …
         assert_eq!(value_a(&workspace, cx), None);
-        assert!(window.try_find(RIGHT).is_none());
+        assert!(window.try_find(VIEWER).is_none());
         // … Space does both.
         window.press("space", cx);
     });
     step(handle, cx, |window, cx| {
-        assert!(window.find(RIGHT).visible());
+        assert!(window.find(VIEWER).visible());
+        // In the tab, not a sidebar.
+        assert!(window.try_find(RIGHT).is_none());
         assert!(window.find("value-panel").visible());
         assert!(window.find("value-viewer-header").visible());
         assert_eq!(value_a(&workspace, cx), Some(Some(doc.to_string())));
@@ -345,13 +417,7 @@ fn space_opens_and_closes_the_viewer(cx: &mut TestAppContext) {
         window.click("value-panel", cx);
     });
     step(handle, cx, |window, cx| {
-        assert!(
-            workspace
-                .read(cx)
-                .panels
-                .value_focus
-                .contains_focused(window, cx)
-        );
+        assert!(viewer_focused(&workspace, window, cx));
         window.press("space", cx);
     });
     step(handle, cx, |window, cx| {
@@ -390,13 +456,7 @@ fn the_x_and_esc_close_the_viewer(cx: &mut TestAppContext) {
         window.click("value-viewer-header", cx);
     });
     step(handle, cx, |window, cx| {
-        assert!(
-            workspace
-                .read(cx)
-                .panels
-                .value_focus
-                .contains_focused(window, cx)
-        );
+        assert!(viewer_focused(&workspace, window, cx));
         window.press("escape", cx);
     });
     step(handle, cx, |window, cx| {
@@ -484,6 +544,120 @@ fn space_in_a_column_filter_is_text(cx: &mut TestAppContext) {
     });
 }
 
+/// The popped-out viewer's window, and what it shows: A and B.
+type Shown = (Option<Option<String>>, Option<Option<String>>);
+
+fn popped(workspace: &Entity<Workspace>, cx: &App) -> Option<(AnyWindowHandle, Shown)> {
+    let popped = workspace.read(cx).value_window.as_ref()?;
+    let panel = popped.panel.read(cx);
+    let value = |p: Option<&super::Picked>| p.map(|p| p.cell.value.clone());
+    Some((popped.handle.into(), (value(panel.a()), value(panel.b()))))
+}
+
+#[gpui_kit::test]
+fn the_value_viewer_pops_out_follows_the_tabs_and_comes_back(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let rows = [[Some("1"), Some("one")], [Some("2"), Some("two")]];
+    let a = tab_with_rows(handle, &workspace, &rows, cx);
+    let alt = Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    let some = |v: &str| Some(Some(v.to_string()));
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        window.click("pop-out-value-viewer", cx)
+    });
+    let window_of = |cx: &mut TestAppContext| cx.update(|cx| popped(&workspace, cx).unwrap().0);
+    let shown = |cx: &mut TestAppContext| cx.update(|cx| popped(&workspace, cx).unwrap().1);
+    // A moved into the window; no tab shows the viewer inline meanwhile.
+    assert_eq!(shown(cx), (some("one"), None));
+    step(handle, cx, |window, _| {
+        assert!(window.try_find(VIEWER).is_none())
+    });
+    let popout = window_of(cx);
+    cx.update_window(popout, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("value-window-header").visible());
+        assert!(window.find("minify-value-window").visible());
+    })
+    .unwrap();
+    // It follows the grid: B lands in the window.
+    step(handle, cx, |window, cx| click_cell(window, 1, 1, alt, cx));
+    assert_eq!(shown(cx), (some("one"), some("two")));
+    // And the tabs: a new tab has nothing to show, tab A has its values back.
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.add_tab("", window, cx));
+    });
+    step(handle, cx, |_, _| {});
+    assert_eq!(shown(cx), (None, None));
+    step(handle, cx, |_, cx| {
+        let ix = workspace.read(cx).tab_index(a.read(cx).id, cx).unwrap();
+        workspace.update(cx, |ws, _| ws.tabs.set_active(ix));
+    });
+    step(handle, cx, |_, _| {});
+    assert_eq!(shown(cx), (some("one"), some("two")));
+    // The status bar button raises the window: no viewer opens in the tab.
+    step(handle, cx, |window, cx| {
+        window.click("value-viewer-button", cx)
+    });
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find(VIEWER).is_none());
+        assert!(popped(&workspace, cx).is_some());
+    });
+    // Minify closes the window and hands the viewer back to the tab, as it was.
+    cx.update_window(popout, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("minify-value-window", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    step(handle, cx, |window, cx| {
+        assert!(popped(&workspace, cx).is_none());
+        assert!(window.find(VIEWER).visible());
+        assert_eq!(value_a(&workspace, cx), some("one"));
+        assert_eq!(value_b(&workspace, cx), some("two"));
+    });
+}
+
+#[gpui_kit::test]
+fn a_and_b_keep_their_fill_inside_the_mark(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let rows = [[Some("1"), Some("one")], [Some("2"), None]];
+    tab_with_rows(handle, &workspace, &rows, cx);
+    let (alt, shift) = (
+        Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+        Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| click_cell(window, 1, 1, alt, cx));
+    // Both inside one mark.
+    step(handle, cx, |window, cx| {
+        click_cell(window, 0, 1, Modifiers::default(), cx)
+    });
+    step(handle, cx, |window, cx| click_cell(window, 1, 1, shift, cx));
+    step(handle, cx, |window, cx| {
+        let row = |r: usize, window: &mut Window| {
+            let row = window.within(("row", r));
+            (
+                row.try_find(("mark-fill", 1usize)).is_some(),
+                row.try_find(("inspected-fill", 1usize)).is_some(),
+                row.try_find(("compared-fill", 1usize)).is_some(),
+            )
+        };
+        assert_eq!(row(0, window), (true, true, false));
+        // B is a NULL: filled too.
+        assert_eq!(row(1, window), (true, false, true));
+        assert_eq!(value_b(&workspace, cx), Some(None));
+    });
+}
+
 #[gpui_kit::test]
 fn alt_click_compares_and_the_x_stops_it(cx: &mut TestAppContext) {
     let (handle, workspace) = open(cx);
@@ -508,7 +682,7 @@ fn alt_click_compares_and_the_x_stops_it(cx: &mut TestAppContext) {
             value_a(&workspace, cx),
             Some(rows[0][1].map(str::to_string))
         );
-        assert!(window.find(RIGHT).visible());
+        assert!(window.find(VIEWER).visible());
         assert!(window.find("compare-changes").visible());
         assert!(window.try_find("compare-columns-warning").is_none());
         assert!(window.try_find("value-b-hint").is_none());
@@ -2107,7 +2281,7 @@ fn the_status_bar_ends_with_the_ai_then_the_value_viewer(cx: &mut TestAppContext
         let x = |id: ElementId| window.find(id).bounds().origin.x;
         let assistant = x(button(Panel::Assistant).into());
         let mcp = x("mcp".into());
-        let value = x(button(Panel::Value).into());
+        let value = x("value-viewer-button".into());
         assert!(
             assistant < mcp && mcp < value,
             "{assistant:?} {mcp:?} {value:?}"
