@@ -1,6 +1,6 @@
-//! The app's own SQLite data (bookmark metrics), always read-only: the file is opened
-//! read-only and `query_only` is on, so no statement can change it. `database` in the
-//! config is the file's path. SQLite is synchronous; statements run on a blocking
+//! SQLite files (the user's and the app's own bookmark metrics), always read-only: the
+//! file is opened read-only and `query_only` is on, so no statement can change it, and
+//! an attached file is opened the same way. `database` in the config is the file's path. SQLite is synchronous; statements run on a blocking
 //! thread and their events come back over a channel, so a time limit can interrupt.
 
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,8 @@ use crate::{BATCH_ROWS, CancelHandle, Driver, ExecEvent, Session, Sink, SqlError
 
 /// The only schema of a single SQLite file.
 const SCHEMA: &str = "main";
+/// What a statement that would change the file gets.
+const READ_ONLY: &str = "The file is open read-only: statements that change it don't run";
 /// Wait this long for the app's own writes to finish.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -41,6 +43,10 @@ fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, flags).map_err(|e| anyhow!("{path}: {e}"))?;
     conn.pragma_update(None, "query_only", true)?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
+    // SQLite reads the header only when it first needs it: any other file fails here,
+    // not at its first query.
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+        .map_err(|e| anyhow!("{path}: {e}"))?;
     Ok(conn)
 }
 
@@ -61,8 +67,12 @@ impl SqliteSession {
 }
 
 fn sql_error(e: rusqlite::Error) -> anyhow::Error {
+    let message = match e.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::ReadOnly) => READ_ONLY.to_string(),
+        _ => e.to_string(),
+    };
     SqlError {
-        message: e.to_string(),
+        message,
         position: None,
     }
     .into()
@@ -612,11 +622,14 @@ mod tests {
             "DROP TABLE runs",
             "PRAGMA query_only = OFF; DELETE FROM runs",
         ] {
-            assert!(
-                session.execute(write, 10, &mut sink).await.is_err(),
-                "{write}"
-            );
+            let error = session.execute(write, 10, &mut sink).await.unwrap_err();
+            assert!(error.to_string().contains("read-only"), "{write}: {error}");
         }
+        // An attached file is opened read-only too: a new one isn't created.
+        let other = dir.join("other.db");
+        let attach = format!("ATTACH '{}' AS other", other.display());
+        assert!(session.execute(&attach, 10, &mut sink).await.is_err());
+        assert!(!other.exists());
         let count: i64 = db
             .query_row("SELECT count(*) FROM runs", [], |r| r.get(0))
             .unwrap();
@@ -627,6 +640,20 @@ mod tests {
         let columns = session.list_columns().await.unwrap();
         assert_eq!(columns.len(), 3);
         assert!(columns[0].primary_key);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_opens_sqlite_files_that_exist() {
+        let dir = std::env::temp_dir().join(format!("tangul-sqlite-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.db");
+        assert!(SqliteDriver.connect(&config(&missing)).await.is_err());
+        assert!(!missing.exists());
+        let text = dir.join("notes.txt");
+        std::fs::write(&text, "not a database, just some text that is long enough").unwrap();
+        let error = SqliteDriver.connect(&config(&text)).await.err().unwrap();
+        assert!(error.to_string().contains("notes.txt"), "{error}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

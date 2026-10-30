@@ -1311,6 +1311,76 @@ fn the_database_form_offers_every_database_and_saves_the_choices(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn a_file_is_added_with_its_path_and_nothing_to_sign_in(cx: &mut TestAppContext) {
+    use crate::connection_form::{FormMode, OFFERED};
+    use tangul_core::DriverKind;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_form(FormMode::NewDatabase, None, None, window, cx)
+        })
+    });
+    let file = OFFERED.iter().position(|d| d.is_file()).unwrap();
+    step(handle, cx, |window, cx| window.click(("driver", file), cx));
+    step(handle, cx, |window, _| {
+        // No host, user or tunnel for a file.
+        assert!(window.try_find("form-user").is_none());
+        assert!(window.try_find("use-ssh").is_none());
+        assert!(window.find("choose-file").visible());
+    });
+    step(handle, cx, |window, cx| window.click("save", cx));
+    step(handle, cx, |window, cx| {
+        // The path is required: the form stays open.
+        assert!(workspace.read(cx).data.profiles.databases.is_empty());
+        assert!(window.find("form-path").visible());
+    });
+    step(handle, cx, |window, cx| window.click("form-path", cx));
+    step(handle, cx, |window, cx| window.input("/data/shop.db", cx));
+    step(handle, cx, |window, cx| window.click("save", cx));
+    step(handle, cx, |window, cx| {
+        let ws = workspace.read(cx);
+        let db = ws.data.profiles.databases.last().expect("saved");
+        assert_eq!(db.driver, DriverKind::Sqlite);
+        assert_eq!(db.database, "/data/shop.db");
+        assert_eq!(db.display_name(), "shop.db");
+        assert!(db.host.is_empty() && db.ssh.is_none() && db.assistant_user.is_none());
+        // Its one user, without a name or password.
+        assert_eq!(db.users.len(), 1);
+        assert_eq!(db.users[0].user, "");
+        assert_eq!(ws.active_user.as_deref(), Some(db.users[0].id.as_str()));
+        // Always read-only, for you and the AI: no user or mode to choose.
+        assert!(window.try_find("user-switcher").is_none());
+        assert!(window.try_find("read-only").is_none());
+        assert!(window.find("ai-user-switcher").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn a_dropped_file_opens_as_a_database_once(cx: &mut TestAppContext) {
+    use gpui_kit::ExternalPaths;
+    let (handle, workspace) = open(cx);
+    let dropped = || ExternalPaths(vec!["/data/shop.db".into(), "/data/other.db".into()].into());
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.open_dropped(&dropped(), window, cx))
+    });
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            // Shown in between: dropping it again comes back to it.
+            ws.active_db = None;
+            ws.open_dropped(&dropped(), window, cx)
+        })
+    });
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        // Only the first file; the second drop selected the saved one.
+        assert_eq!(ws.data.profiles.databases.len(), 1);
+        let db = &ws.data.profiles.databases[0];
+        assert_eq!(db.database, "/data/shop.db");
+        assert_eq!(ws.active_db.as_deref(), Some(db.id.as_str()));
+    });
+}
+
+#[gpui_kit::test]
 fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
     use tangul_core::{Database, DbUser, DriverKind, TlsMode};
     let (handle, workspace) = open(cx);

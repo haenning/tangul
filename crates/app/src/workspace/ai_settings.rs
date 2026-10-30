@@ -87,6 +87,7 @@ impl Workspace {
                         .map(|u| (u.id.clone(), u.user.clone()))
                         .collect(),
                     ai_user: db.assistant_user.clone(),
+                    chooses_user: !db.driver.is_file(),
                     values: db.ai_values,
                     access: db.ai_access,
                     ai_tools: db.ai_tools,

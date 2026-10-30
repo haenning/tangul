@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum DriverKind {
     Postgres,
     Mysql,
-    /// Only the app's own data (bookmark metrics), read-only; not for profiles.
+    /// A local file, opened read-only: the user's own and the app's (bookmark metrics).
     Sqlite,
 }
 
@@ -26,6 +26,12 @@ impl DriverKind {
             DriverKind::Mysql => "MySQL",
             DriverKind::Sqlite => "SQLite",
         }
+    }
+
+    /// A file on this computer rather than a server: no host, users, TLS or SSH, and
+    /// always opened read-only (`Database::database` is its path).
+    pub fn is_file(self) -> bool {
+        matches!(self, DriverKind::Sqlite)
     }
 }
 
@@ -136,10 +142,16 @@ impl std::fmt::Debug for SshTarget {
 }
 
 impl Database {
-    /// The given name, or `host/database` when none was set.
+    /// The given name, or `host/database` (a file's name) when none was set.
     pub fn display_name(&self) -> String {
         if !self.name.is_empty() {
             return self.name.clone();
+        }
+        if self.driver.is_file() {
+            let path = std::path::Path::new(&self.database);
+            return path
+                .file_name()
+                .map_or_else(|| self.database.clone(), |n| n.to_string_lossy().into());
         }
         if self.database.is_empty() {
             self.host.clone()
@@ -332,5 +344,34 @@ mod tests {
             );
         }
         assert_ne!(access[0], access[1]);
+    }
+
+    #[test]
+    fn a_file_is_named_after_itself() {
+        let db = |driver, name: &str, host: &str, database: &str| Database {
+            id: "d".into(),
+            name: name.into(),
+            driver,
+            host: host.into(),
+            port: 0,
+            database: database.into(),
+            tls: TlsMode::Disable,
+            users: Vec::new(),
+            ssh: None,
+            assistant_user: None,
+            ai_values: ValueAccess::default(),
+            ai_access: AiAccess::default(),
+            ai_tools: true,
+            editor_values: true,
+        };
+        let file = DriverKind::Sqlite;
+        assert_eq!(db(file, "", "", "/data/shop.db").display_name(), "shop.db");
+        assert_eq!(db(file, "Shop", "", "/data/shop.db").display_name(), "Shop");
+        assert_eq!(
+            db(DriverKind::Postgres, "", "h", "app").display_name(),
+            "h/app"
+        );
+        assert_eq!(db(DriverKind::Postgres, "", "h", "").display_name(), "h");
+        assert!(file.is_file() && !DriverKind::Postgres.is_file() && !DriverKind::Mysql.is_file());
     }
 }

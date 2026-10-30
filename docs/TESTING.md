@@ -67,6 +67,7 @@ every test named here exists (`scripts/check-testing-doc.py`).
 |---|---|
 | Read-only mode: the server session refuses writes | `crates/engine/tests/live.rs::read_only_checks`, `crates/engine/src/gate.rs::the_gate_enforces_for_users`, `crates/assist/src/guard.rs::switching_off_read_only_counts_as_a_write` |
 | A write never runs past read-only mode; `UPDATE`/`DELETE` without `WHERE` asks first | `crates/assist/src/guard.rs::writes_are_found`, `crates/assist/src/guard.rs::missing_where_is_found`, `crates/assist/src/guard.rs::every_statement_of_a_script_is_checked`, `crates/engine/src/gate.rs::users_write_in_write_mode` |
+| SQLite files are never changed, whatever runs | `crates/drivers/src/sqlite.rs::reads_but_never_writes`, `crates/engine/tests/local.rs::tabs_pass_the_gate` |
 | Read-only mode switches itself back on | `crates/data/src/settings.rs::relock_after` |
 | A time limit for every query, set on the server | `crates/engine/tests/live.rs::time_limit_checks` |
 | Statements for selected rows are keyed by primary key, or say why not | `crates/assist/src/edit.rs::by_primary_key`, `crates/assist/src/edit.rs::falls_back_to_all_columns_with_a_warning` |

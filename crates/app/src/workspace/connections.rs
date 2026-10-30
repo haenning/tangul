@@ -377,6 +377,31 @@ impl Workspace {
         });
     }
 
+    /// Files dropped on the window: the first one opens as a database, added unless
+    /// it is already.
+    pub(super) fn open_dropped(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = paths.paths().first() else {
+            return;
+        };
+        let path = path.to_string_lossy().to_string();
+        let saved = self
+            .data
+            .profiles
+            .databases
+            .iter()
+            .find(|d| d.driver.is_file() && d.database == path)
+            .map(|d| d.id.clone());
+        match saved {
+            Some(db_id) => self.select_database(db_id, window, cx),
+            None => self.save_form(file_database(&path), window, cx),
+        }
+    }
+
     pub(super) fn save_form(
         &mut self,
         output: FormOutput,
@@ -757,10 +782,12 @@ impl Workspace {
     /// A user's connection name (`user@database`) and driver.
     fn conn_name(&self, user_id: &str) -> Option<(SharedString, DriverKind)> {
         let (db, user) = self.find_user(user_id)?;
-        Some((
-            format!("{}@{}", user.user, db.display_name()).into(),
-            db.driver,
-        ))
+        // A file's one user has no name.
+        let name = match user.user.as_str() {
+            "" => db.display_name(),
+            user => format!("{user}@{}", db.display_name()),
+        };
+        Some((name.into(), db.driver))
     }
 
     /// Renamed database or users: the open connections show the new names.
