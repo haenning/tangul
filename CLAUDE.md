@@ -116,6 +116,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     isn't obvious: propose a hint for it
   - `result_view/`: a result as grid or chart, with filters, sort and paging; knows
     nothing about tabs, so boards and the assistant can reuse it
+  - `menu.rs`: the macOS menu bar (tangul, File, Edit), each item an action with
+    its key binding (`main.rs`)
   - `query_router.rs`: engine answers to the tab waiting for them;
     `connection.rs`: open connections shared by tabs
 

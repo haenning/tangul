@@ -1381,6 +1381,39 @@ fn a_dropped_file_opens_as_a_database_once(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_file_menu_opens_a_sqlite_file_and_the_database_form(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    // Open SQLite File… (⌘O): the system's dialog, then the file as a database.
+    step(handle, cx, |window, cx| window.press("secondary-o", cx));
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.files && !options.directories && !options.multiple);
+        Some(vec!["/data/shop.db".into()])
+    });
+    cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.data.profiles.databases.len(), 1);
+        assert_eq!(ws.data.profiles.databases[0].database, "/data/shop.db");
+    });
+    // Cancelled: nothing changes.
+    step(handle, cx, |window, cx| window.press("secondary-o", cx));
+    cx.simulate_path_prompt_response(|_| None);
+    cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        assert_eq!(workspace.read(cx).data.profiles.databases.len(), 1)
+    });
+    // New Database…: the form.
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("connection-form").is_none());
+        window.dispatch_action(Box::new(crate::NewDatabase), cx);
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("connection-form").visible())
+    });
+}
+
+#[gpui_kit::test]
 fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
     use tangul_core::{Database, DbUser, DriverKind, TlsMode};
     let (handle, workspace) = open(cx);

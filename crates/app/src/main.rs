@@ -8,6 +8,7 @@ mod completion;
 mod connection;
 mod connection_form;
 mod file_tab;
+mod menu;
 mod monitor;
 mod palette;
 mod query_router;
@@ -48,6 +49,11 @@ actions!(
         OpenSettings,
         NextSidebarPanel,
         PrevSidebarPanel,
+        NewDatabase,
+        OpenSqliteFile,
+        HideApp,
+        HideOthers,
+        ShowAll,
         Quit
     ]
 );
@@ -104,6 +110,10 @@ fn main() {
 
         bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &HideApp, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+        cx.set_menus(menu::menus());
 
         open_main_window(engine, events, cx);
         cx.activate(true);
@@ -151,6 +161,13 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", NextSidebarPanel, Some("Palette")),
         KeyBinding::new("shift-tab", PrevSidebarPanel, Some("Palette")),
         KeyBinding::new("secondary-q", Quit, None),
+        KeyBinding::new("secondary-o", OpenSqliteFile, Some("Workspace")),
+    ]);
+    // The macOS app menu's usual keys (elsewhere ctrl-h is no shortcut).
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("cmd-h", HideApp, None),
+        KeyBinding::new("alt-cmd-h", HideOthers, None),
     ]);
 }
 
