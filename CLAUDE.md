@@ -100,7 +100,8 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     views use `cx.theme()` or `crate::theme`
   - `ui.rs`: small pieces every view uses. Warnings and errors are always an
     `alert_card` (border and icon in the color, background a tenth of it, the reason
-    below). Menu options (`menu_choice`) are a short, self-explanatory title; at best
+    below); an error message from a database is an `ErrorText` (select part of it,
+    a click or Copy copies all of it). Menu options (`menu_choice`) are a short, self-explanatory title; at best
     it says enough and needs nothing more. Only where the title alone doesn't make the
     option clear, a few words below it in the muted color, e.g. "Schema only" /
     "Table contents stay hidden from the AI" (not "Your user" / "Uses your user").

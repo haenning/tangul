@@ -4340,6 +4340,127 @@ fn the_row_handle_stays_left_and_leaves_the_cell_clickable(cx: &mut TestAppConte
     });
 }
 
+/// What the server said about `select * from nope`, caret line and all.
+const NO_RELATION: &str =
+    "ERROR: relation \"nope\" does not exist\nLINE 1: select * from nope\n                      ^";
+
+/// Opens a query tab whose run failed with `error`.
+fn tab_with_error(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    error: &str,
+    cx: &mut TestAppContext,
+) -> Entity<QueryTab> {
+    step(handle, cx, |window, cx| {
+        let tab = workspace.update(cx, |ws, cx| ws.add_tab("select * from nope", window, cx));
+        tab.update(cx, |t, cx| {
+            t.started(QueryId(1), "select * from nope", cx);
+            t.on_query_event(
+                QueryEvent::Finished {
+                    elapsed: Default::default(),
+                    error: Some(error.into()),
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+                cx,
+            );
+        });
+        tab
+    })
+}
+
+#[gpui_kit::test]
+fn a_click_on_an_error_copies_all_of_it(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_error(handle, &workspace, NO_RELATION, cx);
+    step(handle, cx, |window, cx| {
+        assert!(window.find("error-message").visible());
+        window.click("error-message", cx);
+    });
+    step(handle, cx, |_, cx| {
+        // Exactly as the server sent it, the caret's indent included.
+        assert_eq!(clipboard(cx).as_deref(), Some(NO_RELATION));
+    });
+    // The button too, and it says so.
+    step(handle, cx, |window, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into()));
+        window.click("copy-error", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(clipboard(cx).as_deref(), Some(NO_RELATION));
+        assert_eq!(window.find("copy-error").label(), Some("Copied"));
+    });
+}
+
+#[gpui_kit::test]
+fn part_of_an_error_is_selected_and_copied_by_itself(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_error(handle, &workspace, NO_RELATION, cx);
+    step(handle, cx, |window, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into()));
+        let b = window.find("error-message").bounds();
+        let y = b.origin.y + px(8.);
+        window.drag(
+            gpui_kit::point(b.origin.x + px(4.), y),
+            gpui_kit::point(b.origin.x + px(120.), y),
+            cx,
+        );
+    });
+    let selected = step(handle, cx, |_, cx| {
+        let results = tab.read(cx).results().read(cx);
+        let selected = results.error_selection(cx);
+        // A drag selects; it doesn't copy.
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        selected
+    });
+    assert!(
+        !selected.is_empty() && NO_RELATION.starts_with(&selected),
+        "{selected}"
+    );
+    step(handle, cx, |window, cx| window.press("secondary-c", cx));
+    step(handle, cx, |_, cx| {
+        assert_eq!(clipboard(cx), Some(selected.clone()));
+    });
+}
+
+#[gpui_kit::test]
+fn a_page_that_failed_to_load_shows_its_error_to_copy(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_result(handle, &workspace, &[[Some("1"), Some("a")]], true, cx);
+    step(handle, cx, |_, cx| {
+        tab.read(cx).results().clone().update(cx, |r, cx| {
+            r.started_derived(QueryId(2), true, cx);
+            r.on_query_event(
+                QueryEvent::Finished {
+                    elapsed: Default::default(),
+                    error: Some("canceling statement due to statement timeout".into()),
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+                cx,
+            );
+        });
+    });
+    step(handle, cx, |window, cx| {
+        // The rows stay; the status bar points at the message below them.
+        assert_eq!(tab.read(cx).results().read(cx).row_count(cx), Some(1));
+        assert!(
+            tab.read(cx)
+                .status_text(cx)
+                .ends_with("loading more failed")
+        );
+        window.click("error-message", cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("canceling statement due to statement timeout")
+        );
+    });
+}
+
 fn clipboard(cx: &App) -> Option<String> {
     cx.read_from_clipboard().and_then(|c| c.text())
 }
