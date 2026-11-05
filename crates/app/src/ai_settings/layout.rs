@@ -258,11 +258,11 @@ impl AiSettingsTab {
                                     .child("AI access")
                                     .child(access_menu)
                                     // Schema only: no AI user, no values.
+                                    .when(access.is_data() && db.chooses_user, |this| {
+                                        this.child("Connects as").child(user_menu)
+                                    })
                                     .when(access.is_data(), |this| {
-                                        this.child("Connects as")
-                                            .child(user_menu)
-                                            .child("Column values")
-                                            .child(values_menu)
+                                        this.child("Column values").child(values_menu)
                                     }),
                             )
                         })

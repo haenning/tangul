@@ -59,7 +59,7 @@ Issues #15–#42 exist already.
 | 36 | Short term | editor | EXPLAIN plan visualization | |
 | 37 | Northstar | ai | ACP agent panel | #30 |
 | 38 | Northstar | graph | 3D database graph | #24 |
-| 39 | Northstar | drivers | More databases: SQLite, SQL Server, ClickHouse | |
+| 39 | Northstar | drivers | More databases: SQL Server, ClickHouse (SQLite files: read-only) | |
 | 40 | Northstar | distribution | Signed and notarized releases | |
 | 41 | Backlog | observability | Log exploration | |
 | 42 | Backlog | observability | Observability dashboard | |

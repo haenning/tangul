@@ -1311,6 +1311,109 @@ fn the_database_form_offers_every_database_and_saves_the_choices(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn a_file_is_added_with_its_path_and_nothing_to_sign_in(cx: &mut TestAppContext) {
+    use crate::connection_form::{FormMode, OFFERED};
+    use tangul_core::DriverKind;
+    let (handle, workspace) = open(cx);
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_form(FormMode::NewDatabase, None, None, window, cx)
+        })
+    });
+    let file = OFFERED.iter().position(|d| d.is_file()).unwrap();
+    step(handle, cx, |window, cx| window.click(("driver", file), cx));
+    step(handle, cx, |window, _| {
+        // No host, user or tunnel for a file.
+        assert!(window.try_find("form-user").is_none());
+        assert!(window.try_find("use-ssh").is_none());
+        assert!(window.find("choose-file").visible());
+    });
+    step(handle, cx, |window, cx| window.click("save", cx));
+    step(handle, cx, |window, cx| {
+        // The path is required: the form stays open.
+        assert!(workspace.read(cx).data.profiles.databases.is_empty());
+        assert!(window.find("form-path").visible());
+    });
+    step(handle, cx, |window, cx| window.click("form-path", cx));
+    step(handle, cx, |window, cx| window.input("/data/shop.db", cx));
+    step(handle, cx, |window, cx| window.click("save", cx));
+    step(handle, cx, |window, cx| {
+        let ws = workspace.read(cx);
+        let db = ws.data.profiles.databases.last().expect("saved");
+        assert_eq!(db.driver, DriverKind::Sqlite);
+        assert_eq!(db.database, "/data/shop.db");
+        assert_eq!(db.display_name(), "shop.db");
+        assert!(db.host.is_empty() && db.ssh.is_none() && db.assistant_user.is_none());
+        // Its one user, without a name or password.
+        assert_eq!(db.users.len(), 1);
+        assert_eq!(db.users[0].user, "");
+        assert_eq!(ws.active_user.as_deref(), Some(db.users[0].id.as_str()));
+        // Always read-only, for you and the AI: no user or mode to choose.
+        assert!(window.try_find("user-switcher").is_none());
+        assert!(window.try_find("read-only").is_none());
+        assert!(window.find("ai-user-switcher").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn a_dropped_file_opens_as_a_database_once(cx: &mut TestAppContext) {
+    use gpui_kit::ExternalPaths;
+    let (handle, workspace) = open(cx);
+    let dropped = || ExternalPaths(vec!["/data/shop.db".into(), "/data/other.db".into()].into());
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| ws.open_dropped(&dropped(), window, cx))
+    });
+    step(handle, cx, |window, cx| {
+        workspace.update(cx, |ws, cx| {
+            // Shown in between: dropping it again comes back to it.
+            ws.active_db = None;
+            ws.open_dropped(&dropped(), window, cx)
+        })
+    });
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        // Only the first file; the second drop selected the saved one.
+        assert_eq!(ws.data.profiles.databases.len(), 1);
+        let db = &ws.data.profiles.databases[0];
+        assert_eq!(db.database, "/data/shop.db");
+        assert_eq!(ws.active_db.as_deref(), Some(db.id.as_str()));
+    });
+}
+
+#[gpui_kit::test]
+fn the_file_menu_opens_a_sqlite_file_and_the_database_form(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    // Open SQLite File… (⌘O): the system's dialog, then the file as a database.
+    step(handle, cx, |window, cx| window.press("secondary-o", cx));
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.files && !options.directories && !options.multiple);
+        Some(vec!["/data/shop.db".into()])
+    });
+    cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.data.profiles.databases.len(), 1);
+        assert_eq!(ws.data.profiles.databases[0].database, "/data/shop.db");
+    });
+    // Cancelled: nothing changes.
+    step(handle, cx, |window, cx| window.press("secondary-o", cx));
+    cx.simulate_path_prompt_response(|_| None);
+    cx.run_until_parked();
+    step(handle, cx, |_, cx| {
+        assert_eq!(workspace.read(cx).data.profiles.databases.len(), 1)
+    });
+    // New Database…: the form.
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("connection-form").is_none());
+        window.dispatch_action(Box::new(crate::NewDatabase), cx);
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("connection-form").visible())
+    });
+}
+
+#[gpui_kit::test]
 fn comments_are_shown_as_the_tabs_database_reads_them(cx: &mut TestAppContext) {
     use tangul_core::{Database, DbUser, DriverKind, TlsMode};
     let (handle, workspace) = open(cx);
@@ -4267,6 +4370,127 @@ fn the_row_handle_stays_left_and_leaves_the_cell_clickable(cx: &mut TestAppConte
     step(handle, cx, |_, cx| {
         assert_eq!(marked(&tab, 5, cx).0, vec![1]);
         assert_eq!(marked(&tab, 5, cx).1.len(), 20);
+    });
+}
+
+/// What the server said about `select * from nope`, caret line and all.
+const NO_RELATION: &str =
+    "ERROR: relation \"nope\" does not exist\nLINE 1: select * from nope\n                      ^";
+
+/// Opens a query tab whose run failed with `error`.
+fn tab_with_error(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    error: &str,
+    cx: &mut TestAppContext,
+) -> Entity<QueryTab> {
+    step(handle, cx, |window, cx| {
+        let tab = workspace.update(cx, |ws, cx| ws.add_tab("select * from nope", window, cx));
+        tab.update(cx, |t, cx| {
+            t.started(QueryId(1), "select * from nope", cx);
+            t.on_query_event(
+                QueryEvent::Finished {
+                    elapsed: Default::default(),
+                    error: Some(error.into()),
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+                cx,
+            );
+        });
+        tab
+    })
+}
+
+#[gpui_kit::test]
+fn a_click_on_an_error_copies_all_of_it(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_error(handle, &workspace, NO_RELATION, cx);
+    step(handle, cx, |window, cx| {
+        assert!(window.find("error-message").visible());
+        window.click("error-message", cx);
+    });
+    step(handle, cx, |_, cx| {
+        // Exactly as the server sent it, the caret's indent included.
+        assert_eq!(clipboard(cx).as_deref(), Some(NO_RELATION));
+    });
+    // The button too, and it says so.
+    step(handle, cx, |window, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into()));
+        window.click("copy-error", cx);
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(clipboard(cx).as_deref(), Some(NO_RELATION));
+        assert_eq!(window.find("copy-error").label(), Some("Copied"));
+    });
+}
+
+#[gpui_kit::test]
+fn part_of_an_error_is_selected_and_copied_by_itself(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_error(handle, &workspace, NO_RELATION, cx);
+    step(handle, cx, |window, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into()));
+        let b = window.find("error-message").bounds();
+        let y = b.origin.y + px(8.);
+        window.drag(
+            gpui_kit::point(b.origin.x + px(4.), y),
+            gpui_kit::point(b.origin.x + px(120.), y),
+            cx,
+        );
+    });
+    let selected = step(handle, cx, |_, cx| {
+        let results = tab.read(cx).results().read(cx);
+        let selected = results.error_selection(cx);
+        // A drag selects; it doesn't copy.
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        selected
+    });
+    assert!(
+        !selected.is_empty() && NO_RELATION.starts_with(&selected),
+        "{selected}"
+    );
+    step(handle, cx, |window, cx| window.press("secondary-c", cx));
+    step(handle, cx, |_, cx| {
+        assert_eq!(clipboard(cx), Some(selected.clone()));
+    });
+}
+
+#[gpui_kit::test]
+fn a_page_that_failed_to_load_shows_its_error_to_copy(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = tab_with_result(handle, &workspace, &[[Some("1"), Some("a")]], true, cx);
+    step(handle, cx, |_, cx| {
+        tab.read(cx).results().clone().update(cx, |r, cx| {
+            r.started_derived(QueryId(2), true, cx);
+            r.on_query_event(
+                QueryEvent::Finished {
+                    elapsed: Default::default(),
+                    error: Some("canceling statement due to statement timeout".into()),
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+                cx,
+            );
+        });
+    });
+    step(handle, cx, |window, cx| {
+        // The rows stay; the status bar points at the message below them.
+        assert_eq!(tab.read(cx).results().read(cx).row_count(cx), Some(1));
+        assert!(
+            tab.read(cx)
+                .status_text(cx)
+                .ends_with("loading more failed")
+        );
+        window.click("error-message", cx);
+    });
+    step(handle, cx, |_, cx| {
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("canceling statement due to statement timeout")
+        );
     });
 }
 

@@ -94,13 +94,13 @@ use tangul_service::knowledge::Knowledge;
 use tangul_service::schedule;
 
 use crate::{
-    CloseTab, CloseValueViewer, FormatQuery, NewTab, NextSidebarPanel, OpenPalette, OpenSettings,
-    PrevSidebarPanel, RunAll, ToggleRightSidebar, ToggleSidebar,
+    CloseTab, CloseValueViewer, FormatQuery, NewDatabase, NewTab, NextSidebarPanel, OpenPalette,
+    OpenSettings, OpenSqliteFile, PrevSidebarPanel, RunAll, ToggleRightSidebar, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{Snippets, SqlCompletion},
     connection::{ConnStatus, Connection},
-    connection_form::{ConnectionForm, FormMode, FormOutput},
+    connection_form::{ConnectionForm, FormMode, FormOutput, file_database},
     file_tab::{FileKind, FileTab},
     monitor::{self, Monitor},
     palette::{self, PaletteAction, PaletteKind},
@@ -510,6 +510,12 @@ impl Render for Workspace {
             .on_mouse_move(cx.listener(|this, _, _, _| this.monitor.touch()))
             .on_scroll_wheel(cx.listener(|this, _, _, _| this.monitor.touch()))
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(|this, _: &NewDatabase, window, cx| {
+                this.open_form(FormMode::NewDatabase, None, None, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &OpenSqliteFile, window, cx| this.choose_file(window, cx)),
+            )
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_right_sidebar))
@@ -518,6 +524,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.open_dropped(paths, window, cx)
+            }))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

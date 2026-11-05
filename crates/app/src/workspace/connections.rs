@@ -377,6 +377,55 @@ impl Workspace {
         });
     }
 
+    /// Files dropped on the window: the first one opens as a database.
+    pub(super) fn open_dropped(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = paths.paths().first() {
+            self.open_database_file(&path.to_string_lossy(), window, cx);
+        }
+    }
+
+    /// Asks for a database file in the system's dialog and opens it.
+    pub(super) fn choose_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.open_database_file(&path.to_string_lossy(), window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Opens a database file: the saved one with this path, else it is added.
+    fn open_database_file(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = self
+            .data
+            .profiles
+            .databases
+            .iter()
+            .find(|d| d.driver.is_file() && d.database == path)
+            .map(|d| d.id.clone());
+        match saved {
+            Some(db_id) => self.select_database(db_id, window, cx),
+            None => self.save_form(file_database(path), window, cx),
+        }
+    }
+
     pub(super) fn save_form(
         &mut self,
         output: FormOutput,
@@ -757,10 +806,12 @@ impl Workspace {
     /// A user's connection name (`user@database`) and driver.
     fn conn_name(&self, user_id: &str) -> Option<(SharedString, DriverKind)> {
         let (db, user) = self.find_user(user_id)?;
-        Some((
-            format!("{}@{}", user.user, db.display_name()).into(),
-            db.driver,
-        ))
+        // A file's one user has no name.
+        let name = match user.user.as_str() {
+            "" => db.display_name(),
+            user => format!("{user}@{}", db.display_name()),
+        };
+        Some((name.into(), db.driver))
     }
 
     /// Renamed database or users: the open connections show the new names.

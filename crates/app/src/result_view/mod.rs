@@ -32,6 +32,7 @@ use tangul_engine::{ExecEvent, QueryEvent, QueryOutput};
 use crate::assets::{Lucide, style_icon};
 use crate::chart::{self, ResultChart};
 use crate::settings;
+use crate::ui::ErrorText;
 use crate::{
     ClearMark, CopyMark, ExtendMarkDown, ExtendMarkLeft, ExtendMarkRight, ExtendMarkUp,
     InspectValue, MarkAll,
@@ -220,6 +221,8 @@ pub struct ResultView {
     derived: Option<bool>,
     /// Loading a further page failed (the loaded rows stay).
     page_error: Option<SharedString>,
+    /// The run's or the page's error, to select and copy (only one at a time).
+    error_text: Entity<ErrorText>,
     /// SQL of the connection the results come from, for filtering, sorting, paging.
     dialect: Option<&'static dyn Dialect>,
     _table_events: Subscription,
@@ -260,6 +263,7 @@ impl ResultView {
             base_sql: None,
             derived: None,
             page_error: None,
+            error_text: cx.new(|cx| ErrorText::new(window, cx)),
             dialect: None,
             _table_events: table_events,
         }
@@ -840,6 +844,12 @@ impl ResultView {
         }
     }
 
+    /// The part of the error message the user selected (tests).
+    #[cfg(test)]
+    pub fn error_selection(&self, cx: &App) -> String {
+        self.error_text.read(cx).selected(cx).to_string()
+    }
+
     /// Whether queries around the result may sort, filter and page it (tests).
     #[cfg(test)]
     pub fn is_refinable(&self) -> bool {
@@ -871,8 +881,9 @@ impl ResultView {
                 if *cancelled {
                     s.push_str(" · cancelled");
                 }
-                if let Some(e) = &self.page_error {
-                    s.push_str(&format!(" · loading more failed: {e}"));
+                // The message itself is below the rows, to select and copy.
+                if self.page_error.is_some() {
+                    s.push_str(" · loading more failed");
                 } else if more {
                     s.push_str(" · scroll for more");
                 } else if self.truncated {
@@ -1117,15 +1128,10 @@ impl ResultView {
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         match &self.status {
-            Status::Done {
-                error: Some(err), ..
-            } => div()
+            Status::Done { error: Some(_), .. } => div()
                 .size_full()
                 .p_3()
-                .font_family(theme.mono_font_family.clone())
-                .text_sm()
-                .text_color(theme.danger)
-                .child(err.clone())
+                .child(self.error_text.clone())
                 .into_any_element(),
             Status::Done { .. } if !self.has_result_set => div()
                 .size_full()
@@ -1159,9 +1165,18 @@ impl ResultView {
 impl Render for ResultView {
     /// The result, with the active filters and sort above it.
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let error = match &self.status {
+            Status::Done { error: Some(e), .. } => Some(e.clone()),
+            _ => None,
+        };
+        let page_failed = error.is_none() && self.page_error.is_some();
+        if let Some(text) = error.or(self.page_error.clone()) {
+            self.error_text.update(cx, |e, cx| e.set_text(text, cx));
+        }
         let chips = self.render_refine_bar(cx);
         let drag_chip = self.render_drag_chip(cx);
         let body = self.render_body(cx);
+        let theme = cx.theme();
         v_flex()
             .size_full()
             .on_action(cx.listener(Self::inspect_action))
@@ -1174,6 +1189,17 @@ impl Render for ResultView {
             .on_action(cx.listener(|this, _: &ExtendMarkRight, _, cx| this.extend_mark(0, 1, cx)))
             .children(chips)
             .child(div().flex_1().min_h_0().child(body))
+            // A page that failed to load: the rows above stay.
+            .when(page_failed, |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_1p5()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(self.error_text.clone()),
+                )
+            })
             .children(drag_chip)
     }
 }

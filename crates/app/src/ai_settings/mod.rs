@@ -63,6 +63,8 @@ pub struct DatabaseAi {
     pub users: Vec<(String, String)>,
     /// The user the AI connects as; `None`: the user selected in the app.
     pub ai_user: Option<String>,
+    /// The AI's user can be chosen: not on a file, which everyone opens read-only.
+    pub chooses_user: bool,
     pub values: ValueAccess,
     /// Its own level (the settings' ceiling, `ai.access`, may limit it further).
     pub access: AiAccess,

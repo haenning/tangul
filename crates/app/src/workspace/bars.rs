@@ -83,7 +83,9 @@ impl Workspace {
             // One piece of advice: red when the AI's user may write, none when it
             // is read-only on the server, and on your own user, until that is
             // known, what it means.
-            let note = (ai_user.is_none() && checked.is_none() && !schema_only)
+            // A file is opened read-only for the AI too: no user to warn about.
+            let file = db.driver.is_file();
+            let note = (ai_user.is_none() && checked.is_none() && !schema_only && !file)
                 .then(|| SAME_USER_NOTE.to_string());
             // The menu's cards: each problem on its own.
             let alerts: Vec<(Severity, String)> = if schema_only {
@@ -102,6 +104,7 @@ impl Workspace {
                     theme.muted_foreground,
                     AiAccess::Schema.description().into(),
                 ),
+                (None, None) if file => (theme.muted_foreground, FILE_NOTE.into()),
                 (None, None) => (
                     theme.muted_foreground,
                     "The database user the AI connects as".into(),
@@ -109,6 +112,8 @@ impl Workspace {
             };
             let label = if schema_only {
                 "Schema only".to_string()
+            } else if file {
+                "Read-only".to_string()
             } else {
                 label
             };
@@ -126,7 +131,7 @@ impl Workspace {
                     ai_menu(
                         menu,
                         &db_id,
-                        &users,
+                        (!file).then_some(users.as_slice()),
                         ai_user.as_deref(),
                         values,
                         access,
@@ -156,7 +161,9 @@ impl Workspace {
             }
         });
 
-        let user_menu = db.map(|db| {
+        // A file has one user and is always read-only: nothing to choose.
+        let server = db.filter(|db| !db.driver.is_file());
+        let user_menu = server.map(|db| {
             let users: Vec<(String, String)> = db
                 .users
                 .iter()
@@ -180,7 +187,7 @@ impl Workspace {
                 })
         });
 
-        let read_only = self.active_user_read_only(cx);
+        let read_only = server.and_then(|_| self.active_user_read_only(cx));
         let dot = self.active_conn(cx).map(|c| match c.status {
             ConnStatus::Connected => theme.success,
             ConnStatus::Connecting => theme.warning,
@@ -569,13 +576,13 @@ impl Access {
 }
 
 /// What the AI sees of the database, its database user (the tab's user when none is
-/// set) and the column values it may profile. `alerts`: what is wrong, as cards on
-/// top.
+/// set; `users` is `None` where there is none to choose) and the column values it may
+/// profile. `alerts`: what is wrong, as cards on top.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ai_menu(
     mut menu: PopupMenu,
     db_id: &str,
-    users: &[(String, String)],
+    users: Option<&[(String, String)]>,
     current: Option<&str>,
     values: ValueAccess,
     access: Access,
@@ -614,15 +621,19 @@ pub(super) fn ai_menu(
     if !access.data() {
         return menu.separator().item(settings);
     }
-    menu = menu
-        .separator()
-        .item(menu_section("AI connects as", Some(USER_INFO)));
-    let choices = std::iter::once((None, "Your user".to_string(), Some(YOUR_USER))).chain(
-        users
-            .iter()
-            .map(|(id, name)| (Some(id.clone()), name.clone(), None)),
-    );
-    for (id, name, description) in choices {
+    let choices = users.map(|users| {
+        std::iter::once((None, "Your user".to_string(), Some(YOUR_USER))).chain(
+            users
+                .iter()
+                .map(|(id, name)| (Some(id.clone()), name.clone(), None)),
+        )
+    });
+    if choices.is_some() {
+        menu = menu
+            .separator()
+            .item(menu_section("AI connects as", Some(USER_INFO)));
+    }
+    for (id, name, description) in choices.into_iter().flatten() {
         let (ws, db_id, chosen) = (workspace.clone(), db_id.to_string(), id.clone());
         menu = menu.item(
             menu_choice(name, description)
@@ -662,6 +673,9 @@ fn menu_note(text: &'static str) -> PopupMenuItem {
     })
     .disabled(true)
 }
+
+/// What the title bar says about the AI on a file.
+const FILE_NOTE: &str = "The AI opens the file read-only, as you do";
 
 /// What the title bar says while the AI connects as your own user.
 const SAME_USER_NOTE: &str = "The AI uses your user: it can read what you can, and what \

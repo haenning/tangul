@@ -102,7 +102,7 @@ fmt: ## Format code
 
 tools: ## Install the lint and license tools (cargo-deny, cargo-machete, cargo-about)
 	cargo install --locked cargo-deny cargo-machete
-	cargo install --locked cargo-about --features cli
+	cargo install --locked cargo-about --version 0.9.3 --features cli
 
 lint: ## Format check, clippy (warnings are errors), cargo-deny, unused deps
 	cargo fmt --all --check
