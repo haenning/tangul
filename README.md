@@ -147,6 +147,7 @@ to point at production.
 |---|---|
 | `⌘↵` | Run the selection, or the whole editor |
 | `⌘T` / `⌘W` | New tab / close tab |
+| `⌘O` | Open a SQLite file (read-only) |
 | `⌘D` | Bookmark the query |
 | `⌘B` | Show or hide the sidebar |
 | `⌘⇧P` | Command palette |

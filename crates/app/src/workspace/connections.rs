@@ -377,18 +377,42 @@ impl Workspace {
         });
     }
 
-    /// Files dropped on the window: the first one opens as a database, added unless
-    /// it is already.
+    /// Files dropped on the window: the first one opens as a database.
     pub(super) fn open_dropped(
         &mut self,
         paths: &ExternalPaths,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = paths.paths().first() else {
-            return;
-        };
-        let path = path.to_string_lossy().to_string();
+        if let Some(path) = paths.paths().first() {
+            self.open_database_file(&path.to_string_lossy(), window, cx);
+        }
+    }
+
+    /// Asks for a database file in the system's dialog and opens it.
+    pub(super) fn choose_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.open_database_file(&path.to_string_lossy(), window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Opens a database file: the saved one with this path, else it is added.
+    fn open_database_file(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         let saved = self
             .data
             .profiles
@@ -398,7 +422,7 @@ impl Workspace {
             .map(|d| d.id.clone());
         match saved {
             Some(db_id) => self.select_database(db_id, window, cx),
-            None => self.save_form(file_database(&path), window, cx),
+            None => self.save_form(file_database(path), window, cx),
         }
     }
 

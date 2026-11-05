@@ -94,8 +94,8 @@ use tangul_service::knowledge::Knowledge;
 use tangul_service::schedule;
 
 use crate::{
-    CloseTab, CloseValueViewer, FormatQuery, NewTab, NextSidebarPanel, OpenPalette, OpenSettings,
-    PrevSidebarPanel, RunAll, ToggleRightSidebar, ToggleSidebar,
+    CloseTab, CloseValueViewer, FormatQuery, NewDatabase, NewTab, NextSidebarPanel, OpenPalette,
+    OpenSettings, OpenSqliteFile, PrevSidebarPanel, RunAll, ToggleRightSidebar, ToggleSidebar,
     assets::Lucide,
     bookmark_form::BookmarkForm,
     completion::{Snippets, SqlCompletion},
@@ -510,6 +510,12 @@ impl Render for Workspace {
             .on_mouse_move(cx.listener(|this, _, _, _| this.monitor.touch()))
             .on_scroll_wheel(cx.listener(|this, _, _, _| this.monitor.touch()))
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(|this, _: &NewDatabase, window, cx| {
+                this.open_form(FormMode::NewDatabase, None, None, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &OpenSqliteFile, window, cx| this.choose_file(window, cx)),
+            )
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_right_sidebar))
