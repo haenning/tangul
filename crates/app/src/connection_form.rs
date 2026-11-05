@@ -3,7 +3,8 @@
 //! One layout throughout (`ui::form_section`, `form_row`, `form_note`): sections
 //! with a muted heading, a label column, and choices as segmented controls. The
 //! databases offered come from [`OFFERED`]; nothing below names one, so adding a
-//! database adds no code here.
+//! database adds no code here. A file ([`DriverKind::is_file`]) has a path instead of
+//! host, TLS, SSH and users: it gets one user of its own, without a password.
 
 use gpui_kit::component::{
     Sizable as _,
@@ -25,9 +26,9 @@ use crate::ui::{
 use tangul_assist::dialect::dialect_for;
 use tangul_data::profiles::{new_id, new_password};
 
-/// The databases a connection can be set up for (SQLite only holds the app's own
-/// data).
-pub(crate) const OFFERED: [DriverKind; 2] = [DriverKind::Postgres, DriverKind::Mysql];
+/// The databases a connection can be set up for.
+pub(crate) const OFFERED: [DriverKind; 3] =
+    [DriverKind::Postgres, DriverKind::Mysql, DriverKind::Sqlite];
 
 const TLS: [(TlsMode, &str); 3] = [
     (TlsMode::Disable, "Off"),
@@ -86,6 +87,43 @@ pub struct FormOutput {
     pub ai_account: Option<(DbUser, String)>,
 }
 
+/// A file's one user: no name, no password.
+fn file_user() -> DbUser {
+    DbUser {
+        id: new_id(),
+        user: String::new(),
+    }
+}
+
+/// A file dropped on the window, as if added in the form: named after the file, with
+/// its one user.
+pub fn file_database(path: &str) -> FormOutput {
+    FormOutput {
+        database: Database {
+            id: new_id(),
+            name: String::new(),
+            driver: OFFERED
+                .into_iter()
+                .find(|d| d.is_file())
+                .expect("a file database is offered"),
+            host: String::new(),
+            port: 0,
+            database: path.to_string(),
+            tls: TlsMode::Disable,
+            users: Vec::new(),
+            ssh: None,
+            assistant_user: None,
+            ai_values: ValueAccess::default(),
+            ai_access: AiAccess::default(),
+            ai_tools: true,
+            editor_values: true,
+        },
+        user: Some((file_user(), None)),
+        ssh_secret: None,
+        ai_account: None,
+    }
+}
+
 /// Name of the read-only user tangul sets up for the AI.
 const AI_ACCOUNT: &str = "tangul_ai";
 
@@ -102,6 +140,8 @@ pub struct ConnectionForm {
     user: Entity<InputState>,
     password: Entity<InputState>,
     database: Entity<InputState>,
+    /// A file's path ([`DriverKind::is_file`]).
+    path: Entity<InputState>,
     ssh: bool,
     ssh_auth: SshAuth,
     ssh_host: Entity<InputState>,
@@ -186,8 +226,18 @@ impl ConnectionForm {
                     })
             }),
             database: input(
-                db.map(|p| p.database.clone()).unwrap_or_default(),
+                db.filter(|p| !p.driver.is_file())
+                    .map(|p| p.database.clone())
+                    .unwrap_or_default(),
                 "optional",
+                window,
+                cx,
+            ),
+            path: input(
+                db.filter(|p| p.driver.is_file())
+                    .map(|p| p.database.clone())
+                    .unwrap_or_default(),
+                "/path/to/file.db",
                 window,
                 cx,
             ),
@@ -249,6 +299,42 @@ impl ConnectionForm {
         cx.notify();
     }
 
+    /// Asks for the file in the system's dialog.
+    fn choose_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.path.update(cx, |s, cx| {
+                    s.set_value(path.to_string_lossy().to_string(), window, cx)
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// The databases to choose from: an existing database stays a file or a server
+    /// (its users belong to one or the other).
+    fn offered(&self) -> Vec<DriverKind> {
+        OFFERED
+            .into_iter()
+            .filter(|d| match self.mode {
+                FormMode::EditDatabase => d.is_file() == self.driver.is_file(),
+                _ => true,
+            })
+            .collect()
+    }
+
     /// Adds a new user for the AI (a free name, a random password) and makes it the
     /// AI's; it is created on the server by the statements opened after saving.
     fn set_up_ai_account(&mut self, cx: &mut Context<Self>) {
@@ -273,6 +359,27 @@ impl ConnectionForm {
         cx.notify();
     }
 
+    /// What files and servers share: the database's id, name and users, and what the
+    /// AI and the editor may do. The rest is filled in by the caller.
+    fn database_fields(&self, base: Option<&Database>, cx: &App) -> Database {
+        Database {
+            id: base.map_or_else(new_id, |b| b.id.clone()),
+            name: self.name.read(cx).value().trim().to_string(),
+            driver: self.driver,
+            host: String::new(),
+            port: 0,
+            database: String::new(),
+            tls: TlsMode::Disable,
+            users: base.map(|b| b.users.clone()).unwrap_or_default(),
+            ssh: None,
+            assistant_user: None,
+            ai_values: self.ai_values,
+            ai_access: self.ai_access,
+            ai_tools: self.ai_tools,
+            editor_values: self.editor_values,
+        }
+    }
+
     /// Validates the form. On error the message is shown inline and `None` returned.
     pub fn submit(&mut self, cx: &mut Context<Self>) -> Option<FormOutput> {
         let value = |s: &Entity<InputState>| s.read(cx).value().trim().to_string();
@@ -280,9 +387,15 @@ impl ConnectionForm {
         let user = value(&self.user);
         let port = value(&self.port).parse::<u16>();
         let (db_fields, user_fields) = (self.mode.has_db_fields(), self.mode.has_user_fields());
-        let ssh = db_fields && self.ssh;
+        let file = self.driver.is_file();
+        let path = value(&self.path);
+        let ssh = db_fields && self.ssh && !file;
         let ssh_port = value(&self.ssh_port).parse::<u16>();
-        let error = if db_fields && host.is_empty() {
+        let error = if db_fields && file && path.is_empty() {
+            Some("File is required")
+        } else if file {
+            None
+        } else if db_fields && host.is_empty() {
             Some("Host is required")
         } else if user_fields && user.is_empty() {
             Some("User is required")
@@ -306,20 +419,22 @@ impl ConnectionForm {
         }
         let database = match (&self.base, db_fields) {
             (Some(base), false) => base.clone(),
+            (base, _) if file => Database {
+                host: String::new(),
+                port: 0,
+                database: path,
+                tls: TlsMode::Disable,
+                ssh: None,
+                // Opened read-only for everyone: there is no user to choose.
+                assistant_user: None,
+                ..self.database_fields(base.as_ref(), cx)
+            },
             (base, _) => Database {
-                id: base.as_ref().map_or_else(new_id, |b| b.id.clone()),
-                name: value(&self.name),
-                driver: self.driver,
                 host,
                 port: port.unwrap_or_default(),
                 database: value(&self.database),
                 tls: self.tls,
-                users: base.as_ref().map(|b| b.users.clone()).unwrap_or_default(),
                 assistant_user: self.assistant_user.clone(),
-                ai_values: self.ai_values,
-                ai_access: self.ai_access,
-                ai_tools: self.ai_tools,
-                editor_values: self.editor_values,
                 ssh: ssh.then(|| SshConfig {
                     host: value(&self.ssh_host),
                     port: ssh_port.clone().unwrap_or(22),
@@ -330,19 +445,25 @@ impl ConnectionForm {
                         _ => String::new(),
                     },
                 }),
+                ..self.database_fields(base.as_ref(), cx)
             },
         };
         let secret = self.ssh_secret.read(cx).value().to_string();
         let ssh_secret =
             (ssh && self.ssh_auth != SshAuth::Agent && !secret.is_empty()).then_some(secret);
         let password = self.password.read(cx).value().to_string();
-        let user = user_fields.then(|| {
-            let id = self.user_id.clone().unwrap_or_else(new_id);
-            (
-                DbUser { id, user },
-                (!password.is_empty()).then_some(password),
-            )
-        });
+        // A new file gets its one user; an edited one keeps it.
+        let user = if file {
+            (self.mode == FormMode::NewDatabase).then(|| (file_user(), None))
+        } else {
+            user_fields.then(|| {
+                let id = self.user_id.clone().unwrap_or_else(new_id);
+                (
+                    DbUser { id, user },
+                    (!password.is_empty()).then_some(password),
+                )
+            })
+        };
         Some(FormOutput {
             database,
             user,
@@ -354,13 +475,13 @@ impl ConnectionForm {
 
 impl ConnectionForm {
     fn render_connection(&self, cx: &mut Context<Self>) -> Div {
-        form_section("Connection", None, cx)
+        let section = form_section("Connection", None, cx)
             .child(form_row(
                 "Database",
                 None,
                 segmented(
                     "driver",
-                    OFFERED.map(|d| (d, d.label().into())),
+                    self.offered().into_iter().map(|d| (d, d.label().into())),
                     self.driver,
                     cx.listener(|this, driver: &DriverKind, window, cx| {
                         this.set_driver(*driver, window, cx)
@@ -369,7 +490,36 @@ impl ConnectionForm {
                 ),
                 cx,
             ))
-            .child(form_row("Name", None, Input::new(&self.name), cx))
+            .child(form_row("Name", None, Input::new(&self.name), cx));
+        if self.driver.is_file() {
+            return section
+                .child(form_row(
+                    "File",
+                    None,
+                    h_flex()
+                        .flex_1()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("form-path")
+                                .test_support()
+                                .flex_1()
+                                .child(Input::new(&self.path)),
+                        )
+                        .child(
+                            Button::new("choose-file")
+                                .label("Choose…")
+                                .small()
+                                .outline()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.choose_file(window, cx)),
+                                ),
+                        ),
+                    cx,
+                ))
+                .child(form_note("Opened read-only.", cx));
+        }
+        section
             .child(form_row(
                 "Host",
                 None,
@@ -523,9 +673,11 @@ impl ConnectionForm {
         if !self.ai_access.is_data() {
             return section;
         }
+        // A file has no users to choose from: the AI opens it read-only too.
         let users = self
             .base
             .as_ref()
+            .filter(|_| !self.driver.is_file())
             .map(|b| b.users.clone())
             .unwrap_or_default();
         let can_set_up = self.mode == FormMode::EditDatabase
@@ -644,18 +796,18 @@ fn form_note_flush(text: &'static str, cx: &App) -> Div {
 impl Render for ConnectionForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let db = self.mode.has_db_fields();
+        let file = self.driver.is_file();
         v_flex()
             .id("connection-form")
             .test_support()
             .gap_5()
             .when(db, |this| this.child(self.render_connection(cx)))
-            .when(self.mode.has_user_fields(), |this| {
+            .when(self.mode.has_user_fields() && !file, |this| {
                 this.child(self.render_user(cx))
             })
+            .when(db && !file, |this| this.child(self.render_ssh(cx)))
             .when(db, |this| {
-                this.child(self.render_ssh(cx))
-                    .child(self.render_ai(cx))
-                    .child(self.render_editor(cx))
+                this.child(self.render_ai(cx)).child(self.render_editor(cx))
             })
             .children(
                 self.error

@@ -100,7 +100,7 @@ use crate::{
     bookmark_form::BookmarkForm,
     completion::{Snippets, SqlCompletion},
     connection::{ConnStatus, Connection},
-    connection_form::{ConnectionForm, FormMode, FormOutput},
+    connection_form::{ConnectionForm, FormMode, FormOutput, file_database},
     file_tab::{FileKind, FileTab},
     monitor::{self, Monitor},
     palette::{self, PaletteAction, PaletteKind},
@@ -518,6 +518,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.open_dropped(paths, window, cx)
+            }))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

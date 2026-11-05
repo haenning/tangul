@@ -106,7 +106,35 @@ async fn tabs_pass_the_gate() {
     assert!(refused.unwrap().contains("WHERE"));
     // Confirmed, it reaches the file, which is read-only.
     let error = run(&engine, &events, 3, "DELETE FROM t", Approval::Confirmed).await;
-    assert!(error.unwrap().contains("readonly"));
+    assert!(error.unwrap().contains("read-only"));
+    // Any write, in write mode too: the file is the user's, never changed.
+    let error = run(
+        &engine,
+        &events,
+        5,
+        "UPDATE t SET x = 0 WHERE x = 1",
+        Approval::None,
+    )
+    .await;
+    assert!(error.unwrap().contains("read-only"));
+    // Turning SQLite's own guard off leaves the file read-only.
+    run(
+        &engine,
+        &events,
+        6,
+        "PRAGMA query_only = OFF",
+        Approval::None,
+    )
+    .await;
+    let error = run(
+        &engine,
+        &events,
+        7,
+        "INSERT INTO t VALUES (4)",
+        Approval::None,
+    )
+    .await;
+    assert!(error.unwrap().contains("read-only"));
     let error = run(&engine, &events, 4, FOREVER, Approval::None)
         .await
         .unwrap();

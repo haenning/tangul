@@ -5,8 +5,8 @@
 Look at your data, understand it and find answers, on your own or with an AI that
 can't break anything. Safe to point at production.
 
-tangul is a native macOS app for PostgreSQL and MySQL. It starts instantly and stays
-out of your way.
+tangul is a native macOS app for PostgreSQL, MySQL and SQLite files. It starts instantly
+and stays out of your way.
 
 ![tangul: run a query, inspect a value, show it as a chart, add it to a board](docs/demo.webp)
 
@@ -155,7 +155,7 @@ to point at production.
 ## Status
 
 tangul is young and under active development. It runs on macOS (Apple Silicon and
-Intel) and supports PostgreSQL and MySQL, with an AI assistant and an MCP server. Plans and
+Intel) and supports PostgreSQL, MySQL and SQLite files (read-only), with an AI assistant and an MCP server. Plans and
 ideas are in the [roadmap](ROADMAP.md); requests are welcome as
 [issues](https://github.com/haenning/tangul/issues).
 

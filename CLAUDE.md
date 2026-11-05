@@ -1,6 +1,6 @@
 # tangul
 
-A light, fast database viewer (Postgres, MySQL) in Rust with GPUI (`gpui-kit`).
+A light, fast database viewer (Postgres, MySQL, SQLite files read-only) in Rust with GPUI (`gpui-kit`).
 Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PLAN.md),
 [ROADMAP.md](ROADMAP.md). No schema editing, no editing cells in the grid.
 
