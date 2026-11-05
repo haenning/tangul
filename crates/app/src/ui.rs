@@ -1,11 +1,12 @@
 //! Small UI pieces shared by views: text in tooltips and cards that wraps instead
-//! of running across the window, warnings and errors as cards, and menu rows with
-//! a title and a short description.
+//! of running across the window, warnings and errors as cards, error messages to
+//! select and copy, and menu rows with a title and a short description.
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{Textarea, TextareaState},
     menu::PopupMenuItem,
     switch::Switch,
     tooltip::Tooltip,
@@ -110,6 +111,118 @@ impl Render for TextCard {
                         })),
                 )
             })
+    }
+}
+
+/// How long "Copied" shows after an [`ErrorText`] was copied.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// An error message as the server sent it, to select and copy: drag to select part
+/// of it (double click a word, triple click a line, ⌘/Ctrl+C), a click without a
+/// drag or the Copy button copies all of it. The one way error messages are shown
+/// where the user may want to pass them on.
+pub struct ErrorText {
+    /// The message; shown in `state`, which only takes it while drawing (it needs
+    /// the window).
+    text: SharedString,
+    state: Entity<TextareaState>,
+    /// "Copied" shows until this runs out.
+    copied: Option<Task<()>>,
+}
+
+impl ErrorText {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let state = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx).auto_grow(1, 12);
+            state.set_readonly(true, cx);
+            state
+        });
+        Self {
+            text: SharedString::default(),
+            state,
+            copied: None,
+        }
+    }
+
+    /// Shows `text` (from the next frame on).
+    pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let text = text.into();
+        if text != self.text {
+            self.text = text;
+            self.copied = None;
+            cx.notify();
+        }
+    }
+
+    /// The part the user selected; empty when nothing is.
+    pub fn selected(&self, cx: &App) -> SharedString {
+        self.state.read(cx).selected_value()
+    }
+
+    /// Puts the whole message on the clipboard and says so for a moment.
+    pub fn copy(&mut self, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(self.text.to_string()));
+        self.copied = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_FOR).await;
+            let _ = this.update(cx, |this, cx| {
+                this.copied = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+}
+
+impl Render for ErrorText {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.state.read(cx).value() != self.text {
+            let text = self.text.clone();
+            self.state.update(cx, |s, cx| s.set_value(text, window, cx));
+        }
+        let theme = cx.theme();
+        let copied = self.copied.is_some();
+        h_flex()
+            .id("error-text")
+            .test_support()
+            .w_full()
+            .items_start()
+            .gap_2()
+            .child(
+                div()
+                    .id("error-message")
+                    .test_support()
+                    .flex_1()
+                    .min_w_0()
+                    // A click copies everything; a drag selects instead (the
+                    // selection is there when the button comes up).
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            if this.selected(cx).is_empty() {
+                                this.copy(cx);
+                            }
+                        }),
+                    )
+                    .child(
+                        Textarea::new(&self.state)
+                            .appearance(false)
+                            .font_family(theme.mono_font_family.clone())
+                            .text_sm()
+                            .text_color(theme.danger),
+                    ),
+            )
+            .child(
+                Button::new("copy-error")
+                    .icon(if copied {
+                        IconName::Check
+                    } else {
+                        IconName::Copy
+                    })
+                    .label(if copied { "Copied" } else { "Copy" })
+                    .xsmall()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
+            )
     }
 }
 
