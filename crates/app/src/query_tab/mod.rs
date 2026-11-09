@@ -611,14 +611,8 @@ impl QueryTab {
     }
 
     /// See [`ResultView::request_chart`].
-    pub fn request_chart(
-        &mut self,
-        style: ChartStyle,
-        column: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.results
-            .update(cx, |r, cx| r.request_chart(style, column, cx));
+    pub fn request_chart(&mut self, style: ChartStyle, cx: &mut Context<Self>) {
+        self.results.update(cx, |r, cx| r.request_chart(style, cx));
     }
 
     /// Timing and row count of the last run, shown in the workspace status bar.

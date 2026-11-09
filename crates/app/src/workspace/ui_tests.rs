@@ -1606,7 +1606,6 @@ fn a_proposal_opens_unrun_on_your_connection(cx: &mut TestAppContext) {
         title: Some("Sales".into()),
         chart: Some(tangul_ai::ChartRequest {
             style: tangul_core::chart::ChartStyle::Bars,
-            column: None,
         }),
     });
     cx.run_until_parked();
@@ -1705,18 +1704,18 @@ fn a_shown_result_opens_with_its_chart_and_isnt_run_again(cx: &mut TestAppContex
             ws.ai_shows(cx)
         })
     });
-    let sql = "SELECT day, orders, revenue FROM daily";
+    let sql = "SELECT day, revenue FROM daily";
     let col = |n: &str| ColumnInfo { name: n.into() };
-    let mut result = tangul_core::ResultSet::new(vec![col("day"), col("orders"), col("revenue")]);
-    let mut batch = RowBatch::with_capacity(6);
-    for row in [["2024-01-01", "3", "10"], ["2024-01-02", "4", "12"]] {
+    let mut result = tangul_core::ResultSet::new(vec![col("day"), col("revenue")]);
+    let mut batch = RowBatch::with_capacity(4);
+    for row in [["2024-01-01", "10"], ["2024-01-02", "12"]] {
         for cell in row {
             batch.push_cell(Some(cell));
         }
         batch.finish_row();
     }
     result.append(batch);
-    // A chart of one column, by name; and the grid, untitled.
+    // A chart; and the grid, untitled.
     sink(tangul_ai::ShownResult {
         connection: "shop".into(),
         user: "app".into(),
@@ -1725,7 +1724,6 @@ fn a_shown_result_opens_with_its_chart_and_isnt_run_again(cx: &mut TestAppContex
         note: Some("last two days".into()),
         chart: Some(tangul_ai::ChartRequest {
             style: tangul_core::chart::ChartStyle::Bars,
-            column: Some("revenue".into()),
         }),
         result,
         truncated: false,
@@ -1767,14 +1765,13 @@ fn a_shown_result_opens_with_its_chart_and_isnt_run_again(cx: &mut TestAppContex
         );
         // The result is there, not running: nothing was sent to the database.
         assert!(!tab.is_running(cx));
-        assert_eq!(tab.result_columns(cx), ["day", "orders", "revenue"]);
+        assert_eq!(tab.result_columns(cx), ["day", "revenue"]);
         assert_eq!(tab.row_count(cx), Some(2));
         assert_eq!(
             tab.chart_view(cx),
-            Some(tangul_core::chart::ChartView {
-                style: tangul_core::chart::ChartStyle::Bars,
-                series: Some(1),
-            })
+            Some(tangul_core::chart::ChartView::new(
+                tangul_core::chart::ChartStyle::Bars
+            ))
         );
         let conn = tab.conn.as_ref().expect("on a connection");
         assert_eq!(conn.entity_id(), ws.tab_conn("app").unwrap().entity_id());
@@ -2068,10 +2065,9 @@ fn a_large_result_gets_a_chart_that_says_it_is_cut(cx: &mut TestAppContext) {
         assert!(tab.read(cx).chart(cx).is_ok());
         tab.update(cx, |t, cx| {
             t.set_chart_view(
-                Some(tangul_core::chart::ChartView {
-                    style: tangul_core::chart::ChartStyle::Bars,
-                    series: Some(0),
-                }),
+                Some(tangul_core::chart::ChartView::new(
+                    tangul_core::chart::ChartStyle::Bars,
+                )),
                 cx,
             )
         });
@@ -2753,10 +2749,7 @@ fn a_tile_is_shown_as_the_chart_chosen_in_edit_mode(cx: &mut TestAppContext) {
     });
     let tab = cx.update(|cx| board_tab(&workspace, cx));
     // Not the default (bars for categories), so the pick has to come through.
-    let areas = Some(ChartView {
-        style: ChartStyle::Area,
-        series: None,
-    });
+    let areas = Some(ChartView::new(ChartStyle::Area));
     step(handle, cx, |_, cx| {
         tab.update(cx, |t, cx| t.set_tile_view("t1", areas, cx))
     });
@@ -2772,20 +2765,11 @@ fn a_tile_is_shown_as_the_chart_chosen_in_edit_mode(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| {
         let result = tab.read(cx).tile_result("t1").unwrap();
         let shown = result.read(cx).chart_shown();
-        assert_eq!(
-            shown,
-            Some(ChartView {
-                style: ChartStyle::Area,
-                series: Some(0)
-            })
-        );
+        assert_eq!(shown, Some(ChartView::new(ChartStyle::Area)));
         assert!(window.try_find(("tile-unfit", 0usize)).is_none());
     });
     // Stacked bars of one column: bars.
-    let stacked = Some(ChartView {
-        style: ChartStyle::StackedBars,
-        series: None,
-    });
+    let stacked = Some(ChartView::new(ChartStyle::StackedBars));
     step(handle, cx, |_, cx| {
         tab.update(cx, |t, cx| t.set_tile_view("t1", stacked, cx))
     });
@@ -3357,10 +3341,7 @@ fn pinned_tabs_are_kept_per_database(cx: &mut TestAppContext) {
                 .id
         })
     });
-    let bars = Some(ChartView {
-        style: ChartStyle::Bars,
-        series: None,
-    });
+    let bars = Some(ChartView::new(ChartStyle::Bars));
     let pin = |workspace: &Entity<Workspace>, cx: &mut App| {
         workspace.update(cx, |ws, cx| {
             let id = ws.tabs.active().unwrap().id(cx);
@@ -4806,8 +4787,8 @@ fn a_performance_board_is_created_from_what_the_server_has(cx: &mut TestAppConte
     });
 }
 
-/// A tab showing `series` number columns over 2 rows as `style`: series `s` is
-/// `s + 1` in both rows.
+/// A tab showing `series` series over 2 x labels as `style`: series `s` is
+/// `s + 1` at both, its label sorts in that order.
 fn chart_tab(
     handle: WindowHandle<Root>,
     workspace: &Entity<Workspace>,
@@ -4815,23 +4796,22 @@ fn chart_tab(
     style: tangul_core::chart::ChartStyle,
     cx: &mut TestAppContext,
 ) -> Entity<QueryTab> {
+    let sql = "select x, s, n from t order by 1, 2";
     let tab = cx
         .update_window(handle.into(), |_, window, cx| {
-            let tab = workspace.update(cx, |ws, cx| ws.add_tab("select x, …", window, cx));
+            let tab = workspace.update(cx, |ws, cx| ws.add_tab(sql, window, cx));
             tab.update(cx, |t, cx| {
-                t.started(QueryId(1), "select x, …", cx);
-                let mut cols = vec![ColumnInfo { name: "x".into() }];
-                cols.extend((0..series).map(|s| ColumnInfo {
-                    name: format!("s{s}"),
-                }));
-                t.on_query_event(QueryEvent::Exec(ExecEvent::ResultStart(cols)), cx);
+                t.started(QueryId(1), sql, cx);
+                let cols = ["x", "s", "n"].map(|name| ColumnInfo { name: name.into() });
+                t.on_query_event(QueryEvent::Exec(ExecEvent::ResultStart(cols.into())), cx);
                 let mut batch = RowBatch::default();
                 for x in ["a", "b"] {
-                    batch.push_cell(Some(x));
                     for s in 0..series {
+                        batch.push_cell(Some(x));
+                        batch.push_cell(Some(&format!("s{s:02}")));
                         batch.push_cell(Some(&(s + 1).to_string()));
+                        batch.finish_row();
                     }
-                    batch.finish_row();
                 }
                 t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
                 t.on_query_event(
@@ -4844,13 +4824,7 @@ fn chart_tab(
                     },
                     cx,
                 );
-                t.set_chart_view(
-                    Some(tangul_core::chart::ChartView {
-                        style,
-                        series: None,
-                    }),
-                    cx,
-                );
+                t.set_chart_view(Some(tangul_core::chart::ChartView::new(style)), cx);
             });
             tab
         })
@@ -4979,5 +4953,85 @@ fn every_value_of_many_series_is_reachable(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| window.press("escape", cx));
     step(handle, cx, |window, _| {
         assert!(window.try_find("chart-pinned").is_none())
+    });
+}
+
+#[gpui_kit::test]
+fn a_chart_from_the_old_layout_says_how_to_recreate_it(cx: &mut TestAppContext) {
+    use tangul_core::chart::{ChartStyle, ChartView};
+    let (handle, workspace) = open(cx);
+    // Stored before charts took one value column, over such a result.
+    let sql = "select day, revenue, cost from daily";
+    let tab = cx
+        .update_window(handle.into(), |_, window, cx| {
+            let tab = workspace.update(cx, |ws, cx| ws.add_tab(sql, window, cx));
+            tab.update(cx, |t, cx| {
+                t.set_chart_view(ChartView::from_key("bars"), cx);
+                t.started(QueryId(1), sql, cx);
+                let cols = ["day", "revenue", "cost"].map(|name| ColumnInfo { name: name.into() });
+                t.on_query_event(QueryEvent::Exec(ExecEvent::ResultStart(cols.into())), cx);
+                let mut batch = RowBatch::default();
+                for row in [["2024-01-01", "5", "7"], ["2024-01-02", "3", "2"]] {
+                    for cell in row {
+                        batch.push_cell(Some(cell));
+                    }
+                    batch.finish_row();
+                }
+                t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+                t.on_query_event(
+                    QueryEvent::Finished {
+                        elapsed: Default::default(),
+                        error: None,
+                        error_position: None,
+                        in_transaction: false,
+                        cancelled: false,
+                    },
+                    cx,
+                );
+            });
+            tab
+        })
+        .unwrap();
+    // Not drawn (revenue would be read as series labels): the rules instead.
+    step(handle, cx, |window, _| {
+        assert!(window.find("chart-old-layout").visible());
+        assert!(window.try_find("chart-area").is_none());
+    });
+    step(handle, cx, |window, cx| window.click("chart-old-copy", cx));
+    step(handle, cx, |_, cx| {
+        let copied = clipboard(cx).unwrap();
+        assert!(
+            copied.starts_with("tangul has changed how charts work"),
+            "{copied}"
+        );
+        assert!(copied.contains(tangul_assist::chart::RULES));
+        assert!(copied.ends_with(&format!("The query:\n{sql}")), "{copied}");
+    });
+    // A chart picked again is of the current layout: drawn as it reads now.
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| {
+            t.set_chart_view(Some(ChartView::new(ChartStyle::Bars)), cx)
+        })
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("chart-old-layout").is_none());
+        assert!(window.find("chart-area").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn beyond_the_cap_a_stack_adds_the_rest_up_as_other(cx: &mut TestAppContext) {
+    use tangul_core::chart::ChartStyle;
+    let (handle, workspace) = open(cx);
+    // 14 series, 12 in color (the default): s00 and s01 (1 + 2) are "Other", on top.
+    let tab = chart_tab(handle, &workspace, 14, ChartStyle::StackedBars, cx);
+    // s02..s13 add up to 102; Other is 102..105.
+    step(handle, cx, |window, cx| {
+        point_chart_at(&tab, 0, 103.5, 0., window, cx)
+    });
+    step(handle, cx, |window, _| {
+        let (order, hovered) = listed(window, "chart-tip", 13);
+        assert_eq!(hovered, Some(12), "Other, under the pointer");
+        assert_eq!(order[0], 12, "on top of the stack");
     });
 }

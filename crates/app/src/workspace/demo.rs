@@ -29,16 +29,11 @@ const HEIGHT: f32 = 800.;
 /// One frame of pointer movement or typing, in ms.
 const FRAME: u32 = 40;
 /// Typed several characters a frame: the query is long, the point is what it shows.
-const QUERY: &str = "select date_trunc('month', ordered)::date as month, \
-count(*) filter (where country = 'US') as \"US\", \
-count(*) filter (where country = 'DE') as \"DE\", \
-count(*) filter (where country = 'GB') as \"GB\", \
-count(*) filter (where country = 'FR') as \"FR\", \
-count(*) filter (where country = 'JP') as \"JP\" \
-from demo.orders group by 1 order by 1";
-/// The "Stacked areas" item in the chart menu: Table, a separator, the "All
-/// columns" label, Lines, Areas, then it.
-const STACKED_AREAS: usize = 5;
+const QUERY: &str = "select date_trunc('month', ordered)::date as month, country, count(*) \
+from demo.orders group by 1, 2 order by 1";
+/// The "Stacked areas" item in the chart menu: Table, a separator, Lines, Areas,
+/// then it.
+const STACKED_AREAS: usize = 4;
 
 /// Records the demo's frames into `out` (emptied first) and writes `frames.txt`:
 /// one line per frame, its duration in ms and its file.
@@ -141,23 +136,19 @@ impl Demo {
         self.in_window(|window, cx| window.press("escape", cx));
         self.shot(400);
 
-        // Show it as a chart: the status bar's chart menu, all countries stacked.
+        // Show it as a chart: the status bar's chart menu, every country stacked.
         let button = self.bounds("chart");
         self.move_to(button.center(), 700);
         self.click_here();
         self.shot(700);
-        // Scoped by the chart button's popover: its submenus are popup menus too.
+        // Scoped by the chart button's popover.
         let item = self.bounds_within("popover:dropdown-menu:Name(\"chart\")", STACKED_AREAS);
         self.move_to(item.center(), 450);
         self.hover_here();
         self.shot(350);
         self.click_here();
         self.wait_until("chart", move |_, cx| {
-            tab.read(cx).chart_view(cx)
-                == Some(ChartView {
-                    style: ChartStyle::StackedArea,
-                    series: None,
-                })
+            tab.read(cx).chart_view(cx) == Some(ChartView::new(ChartStyle::StackedArea))
         });
         self.shot(2000);
 

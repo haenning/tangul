@@ -596,7 +596,7 @@ impl ResultChart {
                     .child(
                         div()
                             .when(!highlighted, |this| this.text_color(theme.muted_foreground))
-                            .child(series.name.clone()),
+                            .child(series_label(series)),
                     ),
             )
             .child(value)
@@ -633,6 +633,14 @@ impl ResultChart {
 
     pub fn style(&self) -> ChartStyle {
         self.style
+    }
+}
+
+/// A series' name; "Other" says how many it adds up.
+pub fn series_label(series: &tangul_assist::chart::Series) -> SharedString {
+    match series.other {
+        Some(n) => format!("Other ({n} series)").into(),
+        None => series.name.clone().into(),
     }
 }
 

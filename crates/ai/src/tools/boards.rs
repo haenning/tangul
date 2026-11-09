@@ -74,8 +74,8 @@ struct TileInput {
     description: Option<String>,
     /// One statement that reads (SELECT or WITH … SELECT), no `;`.
     sql: String,
-    /// `table` (the default), or a chart style (see tangul_features), optionally
-    /// with `:n` for the n-th number column only (from 0), e.g. `bars:1`.
+    /// `table` (the default), or a chart style (see tangul_features): label
+    /// columns first, one number column last.
     view: Option<String>,
     width: Option<WidthInput>,
 }
@@ -159,6 +159,10 @@ struct ShownTile {
     description: String,
     sql: String,
     view: String,
+    /// A chart from tangul's old layout (several number columns): the board shows
+    /// a note instead until the query is recreated (tangul_features has the rules).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    old_chart_layout: bool,
     width: &'static str,
     /// Who of the AIs set it up, if one did.
     by_ai: Option<&'static str>,
@@ -368,7 +372,8 @@ fn shown(exposed: &Exposed, board: &Board, done: Option<&str>) -> ToolOutput {
                 } else {
                     t.sql.clone()
                 },
-                view: t.view.map_or_else(|| "table".into(), ChartView::to_key),
+                view: t.view.map_or("table", |v| v.style.key()).into(),
+                old_chart_layout: t.view.is_some_and(|v| v.old_layout),
                 width: match t.width {
                     Width::Full => "full",
                     Width::Half => "half",
@@ -400,6 +405,12 @@ fn shown(exposed: &Exposed, board: &Board, done: Option<&str>) -> ToolOutput {
             "\n\nTile {} \"{}\" ({}, {} width)",
             t.id, t.title, t.view, t.width
         ));
+        if t.old_chart_layout {
+            text.push_str(
+                ", a chart from tangul's old layout: if its query has several number \
+                 columns, recreate it in the current one (tangul_features)",
+            );
+        }
         if let Some(by) = t.by_ai {
             text.push_str(&format!(", by {by}"));
         }
@@ -463,12 +474,11 @@ fn width_of(width: WidthInput) -> Width {
 fn view_of(view: Option<String>) -> Result<Option<ChartView>, ToolError> {
     match view.as_deref().map(str::trim) {
         None | Some("" | "table") => Ok(None),
-        Some(key) => ChartView::from_key(key).map(Some).ok_or_else(|| {
-            let styles: Vec<&str> = ChartStyle::ALL.iter().map(|s| s.key()).collect();
-            ToolError::BadInput(format!(
-                "view {key}: table or one of {} (with :n for one column)",
-                styles.join(", ")
-            ))
-        }),
+        Some(key) => ChartStyle::from_key(key)
+            .map(|style| Some(ChartView::new(style)))
+            .ok_or_else(|| {
+                let styles: Vec<&str> = ChartStyle::ALL.iter().map(|s| s.key()).collect();
+                ToolError::BadInput(format!("view {key}: table or one of {}", styles.join(", ")))
+            }),
     }
 }
