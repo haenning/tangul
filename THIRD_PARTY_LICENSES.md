@@ -9190,7 +9190,7 @@ Used by:
 - [ref-cast-impl 1.0.27](https://github.com/dtolnay/ref-cast)
 - [ref-cast 1.0.27](https://github.com/dtolnay/ref-cast)
 - [resvg 0.46.0](https://github.com/linebender/resvg)
-- [rmcp 3.4.1](https://github.com/modelcontextprotocol/rust-sdk/)
+- [rmcp 3.9.0](https://github.com/modelcontextprotocol/rust-sdk/)
 - [russh-cryptovec 0.62.0](https://github.com/warp-tech/russh)
 - [russh-util 0.52.0](https://github.com/warp-tech/russh)
 - [russh 0.65.1](https://github.com/warp-tech/russh)
@@ -11452,8 +11452,8 @@ THE SOFTWARE.
 
 Used by:
 
-- [libsqlite3-sys 0.38.2](https://github.com/rusqlite/rusqlite)
-- [rusqlite 0.40.2](https://github.com/rusqlite/rusqlite)
+- [libsqlite3-sys 0.39.1](https://github.com/rusqlite/rusqlite)
+- [rusqlite 0.41.1](https://github.com/rusqlite/rusqlite)
 
 ```
 Copyright (c) 2014 The rusqlite developers
