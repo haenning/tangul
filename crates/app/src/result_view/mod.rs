@@ -7,11 +7,13 @@ mod filter;
 mod grid;
 mod xlsx;
 
-use std::rc::Rc;
+use std::cell::Cell;
+use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
+    WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{PopupMenu, PopupMenuItem},
@@ -30,7 +32,7 @@ use tangul_core::QueryId;
 use tangul_engine::{ExecEvent, QueryEvent, QueryOutput};
 
 use crate::assets::{Lucide, style_icon};
-use crate::chart::{self, ResultChart};
+use crate::chart::{self, Pin, ResultChart};
 use crate::settings;
 use crate::ui::ErrorText;
 use crate::{
@@ -214,6 +216,15 @@ pub struct ResultView {
     chart_request: Option<(ChartStyle, Option<String>)>,
     /// Curved instead of straight lines; starts straight, which is exact.
     smooth_lines: bool,
+    /// The chart row a click pinned: its values listed to scroll and copy, until
+    /// Esc or another click.
+    chart_pin: Option<ChartPin>,
+    /// Where the chart was drawn last (clicks are mapped to its rows).
+    chart_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Takes Esc while a row is pinned.
+    pin_focus: FocusHandle,
+    /// The pointer is on the legend's "+N more": every series is listed.
+    legend_more: bool,
     /// The last run's statement, when its result can be filtered, sorted and paged.
     base_sql: Option<String>,
     /// While a derived query runs (see [`ResultEvent::Refine`]): whether it appends
@@ -229,6 +240,13 @@ pub struct ResultView {
 }
 
 impl EventEmitter<ResultEvent> for ResultView {}
+
+/// A pinned chart row, for the chart it was pinned on only.
+struct ChartPin {
+    pin: Pin,
+    view: ChartView,
+    source: Weak<ChartData>,
+}
 
 impl ResultView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -260,6 +278,10 @@ impl ResultView {
             chart_view: None,
             chart_request: None,
             smooth_lines: false,
+            chart_pin: None,
+            chart_bounds: Rc::default(),
+            pin_focus: cx.focus_handle(),
+            legend_more: false,
             base_sql: None,
             derived: None,
             page_error: None,
@@ -786,6 +808,15 @@ impl ResultView {
         self.chart_view.map(|v| data.view_or_default(Some(v)))
     }
 
+    /// The chart as shown, at the default label size, and where it was drawn.
+    #[cfg(test)]
+    pub fn chart_for_test(&self) -> Option<(ResultChart, Bounds<Pixels>)> {
+        let view = self.chart_shown()?;
+        let data = Rc::new(self.chart.as_ref().ok()?.for_view(view));
+        let chart = ResultChart::new("t", data, view.style, Vec::new(), false, chart::LABEL_SIZE);
+        Some((chart, self.chart_bounds.get()))
+    }
+
     /// The view it is set to, with or without a result yet.
     pub fn chart_view(&self) -> Option<ChartView> {
         self.chart_view
@@ -894,6 +925,228 @@ impl ResultView {
         }
     }
 
+    /// The legend: the first few series in the order the tooltip lists them (the
+    /// top of a stack first); the pointer on "+N more" lists them all. Capped, as
+    /// many columns would push the chart off the view.
+    fn render_legend(
+        &self,
+        data: &ChartData,
+        style: ChartStyle,
+        colors: &[Hsla],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let order = data.legend_order(style);
+        let hidden = order.len().saturating_sub(chart::MAX_LISTED);
+        let entry = |s: usize| {
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .size_2()
+                        .flex_none()
+                        .rounded_sm()
+                        .bg(colors[s % colors.len()]),
+                )
+                .child(data.series[s].name.clone())
+        };
+        let all = (hidden > 0 && self.legend_more).then(|| {
+            let theme = cx.theme();
+            // Wrapped into columns when there are many.
+            let per_column = 16;
+            div().absolute().top_full().left_0().child(
+                deferred(
+                    anchored().snap_to_window_with_margin(px(8.)).child(
+                        h_flex()
+                            .id("chart-legend-all")
+                            .test_support()
+                            .items_start()
+                            .gap_4()
+                            .p_2()
+                            .rounded(theme.radius)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.popover)
+                            .text_color(theme.popover_foreground)
+                            .shadow_md()
+                            .children(order.chunks(per_column).map(|chunk| {
+                                v_flex().gap_0p5().children(chunk.iter().map(|&s| entry(s)))
+                            })),
+                    ),
+                )
+                .with_priority(1),
+            )
+        });
+        h_flex()
+            .gap_3()
+            .flex_wrap()
+            .children(order.iter().take(chart::MAX_LISTED).map(|&s| entry(s)))
+            .when(hidden > 0, |this| {
+                this.child(
+                    div()
+                        .id("chart-legend-more")
+                        .test_support()
+                        .relative()
+                        .cursor_default()
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            this.legend_more = *hovered;
+                            cx.notify();
+                        }))
+                        .child(format!("+{hidden} more"))
+                        .children(all),
+                )
+            })
+    }
+
+    /// The chart, and the pinned row's values over it. A click pins the row under
+    /// the pointer; another click or Esc releases it.
+    fn render_chart_area(
+        &self,
+        chart: ResultChart,
+        view: ChartView,
+        source: Option<Weak<ChartData>>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let bounds = self.chart_bounds.get();
+        let pin = chart.pin();
+        let pinned = pin.map(|pin| self.render_pinned(&chart, pin, bounds, cx));
+        // The same chart for mapping a click to its row.
+        let hit = chart.for_hits();
+        let chart_bounds = self.chart_bounds.clone();
+        div()
+            .id("chart-area")
+            .test_support()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                if pin.is_some() {
+                    this.chart_pin = None;
+                    cx.notify();
+                    return;
+                }
+                let bounds = chart_bounds.get();
+                let Some(source) = source.clone() else {
+                    return;
+                };
+                if let Some((row, series)) = hit.hit(bounds, e.position() - bounds.origin) {
+                    this.chart_pin = Some(ChartPin {
+                        pin: Pin { row, series },
+                        view,
+                        source,
+                    });
+                    window.focus(&this.pin_focus.clone(), cx);
+                    cx.notify();
+                }
+            }))
+            .child(chart)
+            .children(pinned)
+    }
+
+    /// A pinned row's values: every series, in the tooltip's order, scrollable;
+    /// Copy copies them as tab-separated lines.
+    fn render_pinned(
+        &self,
+        chart: &ResultChart,
+        pin: Pin,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let data = chart.data();
+        let row = pin.row;
+        let order = data.row_order(chart.style(), row);
+        let x = chart.row_x(bounds, row);
+        let width = bounds.size.width.as_f32();
+        let mut text = format!("{}\t{}\n", data.x_name, data.x[row]);
+        for &s in &order {
+            let series = &data.series[s];
+            let value = series.values[row].map_or("NULL".into(), |v| v.to_string());
+            text.push_str(&format!("{}\t{value}\n", series.name));
+        }
+        let total = chart.style().is_stacked().then(|| data.row_total(row));
+        if let Some(total) = total {
+            text.push_str(&format!("Total\t{total}\n"));
+        }
+        let theme = cx.theme();
+        let rows: Vec<AnyElement> = order
+            .iter()
+            .map(|&s| chart.value_row(s, row, pin.series == Some(s), cx))
+            .collect();
+        v_flex()
+            .id("chart-pinned")
+            .test_support()
+            .track_focus(&self.pin_focus)
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" {
+                    this.chart_pin = None;
+                    cx.notify();
+                }
+            }))
+            // Clicks in here are the list's, not the chart's.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .occlude()
+            .absolute()
+            .top(px(8.))
+            .map(|this| {
+                if x < width / 2. {
+                    this.left(px(x + 12.))
+                } else {
+                    this.right(px(width - x + 12.))
+                }
+            })
+            .max_h(px((bounds.size.height.as_f32() - 16.).max(80.)))
+            .min_w(px(180.))
+            .p_2()
+            .gap_1()
+            .text_xs()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .shadow_md()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_between()
+                    .child(div().font_semibold().child(data.x[row].clone()))
+                    .child(
+                        h_flex()
+                            .child(
+                                Button::new("chart-pinned-copy")
+                                    .label("Copy")
+                                    .xsmall()
+                                    .ghost()
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.clone(),
+                                        ))
+                                    }),
+                            )
+                            .child(
+                                Button::new("chart-pinned-close")
+                                    .icon(IconName::Close)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Release (Esc)")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.chart_pin = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("chart-pinned-rows")
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .children(total.map(|total| chart::total_row(total, cx)))
+    }
+
     /// All series in one chart, with a legend when there are several.
     fn render_chart(
         &self,
@@ -928,26 +1181,14 @@ impl ResultView {
                 .child(option("straight-lines", "Straight", false))
                 .child(option("smooth-lines", "Smooth", true))
         });
+        let source = self.chart.as_ref().ok().map(Rc::downgrade);
+        let pin = self
+            .chart_pin
+            .as_ref()
+            .filter(|p| p.view == view && source.as_ref().is_some_and(|s| s.ptr_eq(&p.source)))
+            .map(|p| p.pin);
+        let legend = (data.series.len() > 1).then(|| self.render_legend(&data, style, &colors, cx));
         let theme = cx.theme();
-        // Capped: many columns would push the chart off the view (one column at a
-        // time is in the status bar's chart menu).
-        let legend =
-            (data.series.len() > 1).then(|| {
-                let hidden = data.series.len().saturating_sub(chart::MAX_LISTED);
-                h_flex()
-                    .gap_3()
-                    .flex_wrap()
-                    .children(data.series.iter().take(chart::MAX_LISTED).enumerate().map(
-                        |(i, s)| {
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(div().size_2().rounded_sm().bg(colors[i % colors.len()]))
-                                .child(s.name.clone())
-                        },
-                    ))
-                    .when(hidden > 0, |this| this.child(format!("+{hidden} more")))
-            });
         let settings = settings::current(cx);
         let label_size = settings.chart_font_size();
         v_flex()
@@ -984,14 +1225,23 @@ impl ResultView {
                     data.x_name
                 ))
             })
-            .child(div().flex_1().min_h_0().child(ResultChart::new(
-                "result-chart",
-                data,
-                style,
-                colors,
-                self.smooth_lines,
-                label_size.unwrap_or(chart::LABEL_SIZE),
-            )))
+            .child(
+                self.render_chart_area(
+                    ResultChart::new(
+                        "result-chart",
+                        data,
+                        style,
+                        colors,
+                        self.smooth_lines,
+                        label_size.unwrap_or(chart::LABEL_SIZE),
+                    )
+                    .pinned(pin)
+                    .bounds_out(self.chart_bounds.clone()),
+                    view,
+                    source,
+                    cx,
+                ),
+            )
             .into_any_element()
     }
 

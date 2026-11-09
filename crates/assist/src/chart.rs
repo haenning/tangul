@@ -209,6 +209,86 @@ impl ChartData {
             .collect()
     }
 
+    /// The series of a row as they are listed (tooltip), top to bottom. Stacked
+    /// styles follow the stack as drawn: the top segment first, i.e. the positive
+    /// values (NULL as 0) from the last series down, then the negative ones from
+    /// 0 downwards. Other styles have no vertical order: series order.
+    pub fn row_order(&self, style: ChartStyle, row: usize) -> Vec<usize> {
+        let all = 0..self.series.len();
+        if !style.is_stacked() {
+            return all.collect();
+        }
+        let negative = |s: &usize| self.series[*s].values[row].is_some_and(|v| v < 0.0);
+        let mut order: Vec<usize> = all.clone().rev().filter(|s| !negative(s)).collect();
+        order.extend(all.filter(negative));
+        order
+    }
+
+    /// The series as the legend lists them: stacked styles top of the stack first
+    /// (the last series), like the tooltip; others in series order.
+    pub fn legend_order(&self, style: ChartStyle) -> Vec<usize> {
+        let all = 0..self.series.len();
+        if style.is_stacked() {
+            all.rev().collect()
+        } else {
+            all.collect()
+        }
+    }
+
+    /// At most `max` of `order` to list at `row`, still in that order: the largest
+    /// values by size (NULL smallest; ties keep the earlier), always including
+    /// `keep` (the series under the pointer) in place of the smallest. Also how
+    /// many are left out.
+    pub fn pick_listed(
+        &self,
+        order: &[usize],
+        row: usize,
+        max: usize,
+        keep: Option<usize>,
+    ) -> (Vec<usize>, usize) {
+        if order.len() <= max {
+            return (order.to_vec(), 0);
+        }
+        let size = |s: usize| self.series[s].values[row].map_or(-1.0, f64::abs);
+        let mut by_size: Vec<usize> = order.to_vec();
+        by_size.sort_by(|&a, &b| size(b).total_cmp(&size(a)));
+        by_size.truncate(max);
+        if let Some(keep) = keep.filter(|k| order.contains(k) && !by_size.contains(k))
+            && max > 0
+        {
+            by_size.pop();
+            by_size.push(keep);
+        }
+        let listed: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|s| by_size.contains(s))
+            .collect();
+        let hidden = order.len() - listed.len();
+        (listed, hidden)
+    }
+
+    /// The sum of a row's values (NULL left out), as stacked styles show it.
+    pub fn row_total(&self, row: usize) -> f64 {
+        self.series.iter().filter_map(|s| s.values[row]).sum()
+    }
+
+    /// The series whose stacked segment at `row` holds `value` (a value on the
+    /// axis), or `None` above or below the stack. Where segments meet, the one
+    /// with height wins; a zero-height segment only where no other is.
+    pub fn stack_at(&self, row: usize, value: f64) -> Option<usize> {
+        let stacks = self.stacks();
+        let holds = |s: usize| {
+            let (from, to) = stacks[s][row];
+            value >= from.min(to) && value <= from.max(to)
+        };
+        let sized = (0..self.series.len()).find(|&s| {
+            let (from, to) = stacks[s][row];
+            from != to && holds(s)
+        });
+        sized.or_else(|| (0..self.series.len()).find(|&s| holds(s)))
+    }
+
     /// Lowest and highest value the chart has to show, including 0 (bars and areas
     /// start there).
     pub fn value_range(&self, style: ChartStyle) -> (f64, f64) {
@@ -580,6 +660,81 @@ mod tests {
         // Few points stay as they are.
         let few = [(0., 1.), (0.5, 3.), (1., 2.)];
         assert_eq!(min_max_per_pixel(&few, 100.), few);
+    }
+
+    fn three_series() -> ChartData {
+        let r = result(
+            &["x", "a", "b", "c"],
+            &[
+                &[Some("p"), Some("2"), Some("3"), Some("1")],
+                &[Some("q"), Some("-1"), None, Some("4")],
+                &[Some("r"), Some("0"), Some("-2"), Some("-3")],
+            ],
+        );
+        chart_data("", &r, false).unwrap()
+    }
+
+    #[test]
+    fn rows_are_listed_like_the_stack() {
+        let c = three_series();
+        // Stacked: the top segment first.
+        for style in [ChartStyle::StackedBars, ChartStyle::StackedArea] {
+            assert_eq!(c.row_order(style, 0), [2, 1, 0]);
+            // Negative ones below 0, from 0 down; NULL sits with the positive ones.
+            assert_eq!(c.row_order(style, 1), [2, 1, 0]);
+            assert_eq!(c.row_order(style, 2), [0, 1, 2]);
+            assert_eq!(c.legend_order(style), [2, 1, 0]);
+        }
+        // No vertical order: series order.
+        for style in [ChartStyle::Line, ChartStyle::Area, ChartStyle::Bars] {
+            assert_eq!(c.row_order(style, 1), [0, 1, 2]);
+            assert_eq!(c.legend_order(style), [0, 1, 2]);
+        }
+        assert_eq!(c.row_total(0), 6.0);
+        assert_eq!(c.row_total(1), 3.0, "NULL left out");
+    }
+
+    #[test]
+    fn the_largest_are_listed_and_the_hovered_one_always() {
+        let c = three_series();
+        let order = [2, 1, 0];
+        // All fit.
+        assert_eq!(c.pick_listed(&order, 0, 3, None), (vec![2, 1, 0], 0));
+        // The two largest, in the given order.
+        assert_eq!(c.pick_listed(&order, 0, 2, None), (vec![1, 0], 1));
+        // The hovered one replaces the smallest.
+        assert_eq!(c.pick_listed(&order, 0, 2, Some(2)), (vec![2, 1], 1));
+        // By size: -3 is larger than 0; NULL is the smallest.
+        assert_eq!(c.pick_listed(&[0, 1, 2], 2, 2, None), (vec![1, 2], 1));
+        assert_eq!(c.pick_listed(&[0, 1, 2], 1, 2, None), (vec![0, 2], 1));
+        // A hovered one already listed changes nothing.
+        assert_eq!(c.pick_listed(&order, 0, 2, Some(1)), (vec![1, 0], 1));
+        assert_eq!(c.pick_listed(&order, 0, 0, Some(1)), (vec![], 3));
+    }
+
+    #[test]
+    fn the_segment_under_a_value() {
+        let c = three_series();
+        // Row 0: a 0..2, b 2..5, c 5..6.
+        assert_eq!(c.stack_at(0, 1.0), Some(0));
+        assert_eq!(c.stack_at(0, 3.0), Some(1));
+        assert_eq!(c.stack_at(0, 5.5), Some(2));
+        assert_eq!(c.stack_at(0, 6.5), None, "above the stack");
+        assert_eq!(c.stack_at(0, -0.5), None);
+        // Row 1: a 0..-1 below, b NULL (0..0), c 0..4.
+        assert_eq!(c.stack_at(1, -0.5), Some(0));
+        assert_eq!(c.stack_at(1, 0.0), Some(0), "a segment with height first");
+        assert_eq!(c.stack_at(1, 2.0), Some(2));
+        // Row 2: a 0 (0..0), b 0..-2, c -2..-5.
+        assert_eq!(c.stack_at(2, -4.0), Some(2));
+        assert_eq!(c.stack_at(2, 0.5), None);
+        // Only a zero-height segment there.
+        let r = result(
+            &["x", "a"],
+            &[&[Some("p"), Some("0")], &[Some("q"), Some("1")]],
+        );
+        let zero = chart_data("", &r, false).unwrap();
+        assert_eq!(zero.stack_at(0, 0.0), Some(0));
     }
 
     #[test]

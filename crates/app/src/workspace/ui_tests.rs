@@ -4805,3 +4805,179 @@ fn a_performance_board_is_created_from_what_the_server_has(cx: &mut TestAppConte
         assert_eq!(board.tiles[0].title, offers[0].board.tiles[0].title);
     });
 }
+
+/// A tab showing `series` number columns over 2 rows as `style`: series `s` is
+/// `s + 1` in both rows.
+fn chart_tab(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    series: usize,
+    style: tangul_core::chart::ChartStyle,
+    cx: &mut TestAppContext,
+) -> Entity<QueryTab> {
+    let tab = cx
+        .update_window(handle.into(), |_, window, cx| {
+            let tab = workspace.update(cx, |ws, cx| ws.add_tab("select x, …", window, cx));
+            tab.update(cx, |t, cx| {
+                t.started(QueryId(1), "select x, …", cx);
+                let mut cols = vec![ColumnInfo { name: "x".into() }];
+                cols.extend((0..series).map(|s| ColumnInfo {
+                    name: format!("s{s}"),
+                }));
+                t.on_query_event(QueryEvent::Exec(ExecEvent::ResultStart(cols)), cx);
+                let mut batch = RowBatch::default();
+                for x in ["a", "b"] {
+                    batch.push_cell(Some(x));
+                    for s in 0..series {
+                        batch.push_cell(Some(&(s + 1).to_string()));
+                    }
+                    batch.finish_row();
+                }
+                t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+                t.on_query_event(
+                    QueryEvent::Finished {
+                        elapsed: Default::default(),
+                        error: None,
+                        error_position: None,
+                        in_transaction: false,
+                        cancelled: false,
+                    },
+                    cx,
+                );
+                t.set_chart_view(
+                    Some(tangul_core::chart::ChartView {
+                        style,
+                        series: None,
+                    }),
+                    cx,
+                );
+            });
+            tab
+        })
+        .unwrap();
+    // Drawn once, so the chart knows its bounds.
+    step(handle, cx, |_, _| {});
+    tab
+}
+
+/// Moves the pointer onto `value` of `row` in the tab's chart, `dy` pixels lower.
+fn point_chart_at(
+    tab: &Entity<QueryTab>,
+    row: usize,
+    value: f64,
+    dy: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use gpui_kit::{MouseMoveEvent, PlatformInput, point};
+    let (chart, bounds) = tab
+        .read(cx)
+        .results()
+        .read(cx)
+        .chart_for_test()
+        .expect("a chart");
+    let position = chart.point_of(bounds, row, value) + point(px(0.), px(dy));
+    window.dispatch_event(
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position,
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        }),
+        cx,
+    );
+    window.render_frame(cx);
+    window.render_frame(cx);
+}
+
+/// The tooltip's lines top to bottom (series), and the highlighted one.
+fn listed(window: &mut Window, scope: &'static str, series: usize) -> (Vec<usize>, Option<usize>) {
+    let scoped = window.within(scope);
+    let mut rows: Vec<(f32, usize, bool)> = (0..series)
+        .filter_map(|s| {
+            if let Some(e) = scoped.try_find(("chart-row-hovered", s)) {
+                return Some((e.bounds().origin.y.as_f32(), s, true));
+            }
+            let e = scoped.try_find(("chart-row", s))?;
+            Some((e.bounds().origin.y.as_f32(), s, false))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let hovered = rows.iter().find(|r| r.2).map(|r| r.1);
+    (rows.into_iter().map(|r| r.1).collect(), hovered)
+}
+
+#[gpui_kit::test]
+fn a_stacked_chart_lists_its_top_segment_first_and_the_one_under_the_pointer(
+    cx: &mut TestAppContext,
+) {
+    use tangul_core::chart::ChartStyle;
+    let (handle, workspace) = open(cx);
+    // Row 0: s0 0..1, s1 1..3, s2 3..6.
+    let tab = chart_tab(handle, &workspace, 3, ChartStyle::StackedBars, cx);
+    step(handle, cx, |window, cx| {
+        point_chart_at(&tab, 0, 2.0, 0., window, cx)
+    });
+    step(handle, cx, |window, _| {
+        assert_eq!(listed(window, "chart-tip", 3), (vec![2, 1, 0], Some(1)));
+    });
+    // Above the stack (the plot keeps some room there): nothing under the pointer.
+    step(handle, cx, |window, cx| {
+        point_chart_at(&tab, 0, 6.0, -4., window, cx)
+    });
+    step(handle, cx, |window, _| {
+        assert_eq!(listed(window, "chart-tip", 3), (vec![2, 1, 0], None));
+    });
+    // Grouped bars keep the series order.
+    let tab = chart_tab(handle, &workspace, 3, ChartStyle::Bars, cx);
+    step(handle, cx, |window, cx| {
+        point_chart_at(&tab, 0, 0.5, 0., window, cx)
+    });
+    step(handle, cx, |window, _| {
+        assert_eq!(listed(window, "chart-tip", 3).0, vec![0, 1, 2]);
+    });
+}
+
+#[gpui_kit::test]
+fn every_value_of_many_series_is_reachable(cx: &mut TestAppContext) {
+    use tangul_core::chart::ChartStyle;
+    let (handle, workspace) = open(cx);
+    let tab = chart_tab(handle, &workspace, 12, ChartStyle::StackedBars, cx);
+    let top_down: Vec<usize> = (0..12).rev().collect();
+    // The middle segment: s5 is 15..21.
+    step(handle, cx, |window, cx| {
+        point_chart_at(&tab, 0, 18.0, 0., window, cx)
+    });
+    step(handle, cx, |window, _| {
+        let (order, hovered) = listed(window, "chart-tip", 12);
+        assert_eq!(hovered, Some(5));
+        assert_eq!(order, top_down, "all listed, in columns");
+        assert!(window.try_find("chart-tip-more").is_none());
+    });
+    // The legend shows 8; the rest on "+4 more", in the same order.
+    step(handle, cx, |window, cx| {
+        window.hover("chart-legend-more", cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("chart-legend-all").visible())
+    });
+    // A click pins the row: every value listed, s5 marked; Esc releases it.
+    step(handle, cx, |window, cx| {
+        point_chart_at(&tab, 0, 18.0, 0., window, cx)
+    });
+    step(handle, cx, |window, cx| {
+        let (chart, bounds) = tab.read(cx).results().read(cx).chart_for_test().unwrap();
+        let at = chart.point_of(bounds, 0, 18.0);
+        let area = window.find("chart-area").bounds();
+        window.click_at("chart-area", at - area.origin, cx);
+    });
+    step(handle, cx, |window, _| {
+        assert_eq!(
+            listed(window, "chart-pinned", 12),
+            (top_down.clone(), Some(5))
+        );
+    });
+    step(handle, cx, |window, cx| window.press("escape", cx));
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("chart-pinned").is_none())
+    });
+}
