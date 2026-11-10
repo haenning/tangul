@@ -56,11 +56,10 @@ enum RowsQuery {
     Distinct,
 }
 
-/// A read-only editor, its highlights and its JSON's nesting guides.
+/// A read-only editor and its highlights.
 struct Viewer {
     state: Entity<EditorState>,
     marks: TextDecorationCollection,
-    guides: std::cell::RefCell<std::rc::Rc<Vec<tangul_assist::nesting::Pair>>>,
 }
 
 impl Viewer {
@@ -75,11 +74,7 @@ impl Viewer {
             editor
         });
         let marks = state.update(cx, |e, cx| e.create_decorations_collection(Vec::new(), cx));
-        Self {
-            state,
-            marks,
-            guides: Default::default(),
-        }
+        Self { state, marks }
     }
 
     fn show(
@@ -95,40 +90,10 @@ impl Viewer {
             e.set_value(text.to_string(), window, cx);
         });
         self.marks.set(marks, cx);
-        let guides = if json {
-            use tangul_assist::nesting::{guides, json_pairs};
-            guides(text, &json_pairs(text))
-        } else {
-            Vec::new()
-        };
-        *self.guides.borrow_mut() = std::rc::Rc::new(guides);
     }
 
-    fn render(&self, cx: &App) -> impl IntoElement {
-        let guides = if crate::settings::current(cx).editor.nesting_guides {
-            self.guides.borrow().clone()
-        } else {
-            Default::default()
-        };
-        let depths = guides.iter().map(|p| p.depth + 1).max().unwrap_or(1);
-        let overlay = crate::nesting::Overlay {
-            colors: crate::theme::chart_colors(depths, cx),
-            guides,
-            ..Default::default()
-        };
-        div()
-            .relative()
-            .size_full()
-            .child(Editor::new(&self.state).h_full().bordered(false))
-            .when(!overlay.is_empty(), |this| {
-                this.child(overlay.element(self.state.clone()))
-            })
-    }
-
-    /// The nesting guides' pairs (tests).
-    #[cfg(test)]
-    fn guides(&self) -> Vec<tangul_assist::nesting::Pair> {
-        self.guides.borrow().to_vec()
+    fn render(&self) -> impl IntoElement {
+        Editor::new(&self.state).h_full().bordered(false)
     }
 }
 
@@ -272,12 +237,6 @@ impl ValuePanel {
     #[cfg(test)]
     pub fn changes(&self) -> usize {
         self.changes
-    }
-
-    /// The nesting guides of the value shown alone (tests).
-    #[cfg(test)]
-    pub fn guides(&self) -> Vec<tangul_assist::nesting::Pair> {
-        self.left.guides()
     }
 
     fn clear_b(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -697,13 +656,13 @@ impl Render for ValuePanel {
             div()
                 .flex_1()
                 .min_h_0()
-                .child(self.left.render(cx))
+                .child(self.left.render())
                 .into_any_element()
         } else if self.layout == Layout::Inline {
             div()
                 .flex_1()
                 .min_h_0()
-                .child(self.inline.render(cx))
+                .child(self.inline.render())
                 .into_any_element()
         } else {
             let (l, r) = if self.a_first { ("A", "B") } else { ("B", "A") };
@@ -718,7 +677,7 @@ impl Render for ValuePanel {
                             .text_color(theme.muted_foreground)
                             .child(label),
                     )
-                    .child(div().flex_1().min_h_0().child(viewer.render(cx)))
+                    .child(div().flex_1().min_h_0().child(viewer.render()))
             };
             h_flex()
                 .flex_1()

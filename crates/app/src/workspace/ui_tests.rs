@@ -5185,27 +5185,3 @@ fn a_statement_says_when_it_last_ran_until_it_is_edited(cx: &mut TestAppContext)
         );
     });
 }
-
-#[gpui_kit::test]
-fn json_in_the_value_viewer_gets_nesting_guides(cx: &mut TestAppContext) {
-    let (handle, workspace) = open(cx);
-    tab_with_rows(
-        handle,
-        &workspace,
-        &[[Some("1"), Some(r#"{"a": [1, {"b": 2}], "c": "x"}"#)]],
-        cx,
-    );
-    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
-    step(handle, cx, |window, cx| {
-        // Shown pretty-printed: the object, the array and the inner object each
-        // span lines.
-        let depths: Vec<_> = values(&workspace, cx)
-            .unwrap()
-            .guides()
-            .iter()
-            .map(|p| p.depth)
-            .collect();
-        assert_eq!(depths, [0, 1, 2]);
-        assert!(window.find("editor-overlay").visible());
-    });
-}

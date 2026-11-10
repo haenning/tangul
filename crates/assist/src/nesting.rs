@@ -1,7 +1,7 @@
 //! Bracket pairs, for the editors' nesting guides: a line from each opening bracket
 //! to its closing one, colored by depth. SQL pairs parentheses (subqueries, CTE
 //! bodies, function arguments) by the database's lexical rules, so brackets in
-//! strings, quoted names and comments don't count; JSON pairs objects and arrays.
+//! strings, quoted names and comments don't count.
 //! Unbalanced input (while typing) never fails: a bracket without its partner gets
 //! no pair.
 
@@ -27,34 +27,6 @@ pub fn sql_pairs(sql: &str, lexing: Lexing) -> Vec<Pair> {
             _ => None,
         });
     pair_up(brackets.map(|(at, open)| (at, open, ')')))
-}
-
-/// The objects and arrays of a JSON text, in the order they open. Brackets in
-/// strings don't count.
-pub fn json_pairs(text: &str) -> Vec<Pair> {
-    let mut brackets = Vec::new();
-    let mut in_string = false;
-    let mut escaped = false;
-    for (at, c) in text.char_indices() {
-        if in_string {
-            match c {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match c {
-            '"' => in_string = true,
-            '{' => brackets.push((at, Some('{'), '}')),
-            '[' => brackets.push((at, Some('['), ']')),
-            '}' => brackets.push((at, None, '}')),
-            ']' => brackets.push((at, None, ']')),
-            _ => {}
-        }
-    }
-    pair_up(brackets.into_iter())
 }
 
 /// Pairs brackets given as (offset, the opening one or `None` for a closing one,
@@ -144,25 +116,6 @@ mod tests {
             [("(t)".to_string(), 0)]
         );
         assert!(sql_pairs("", Lexing::default()).is_empty());
-    }
-
-    #[test]
-    fn json_objects_and_arrays() {
-        let json = r#"{"a": [1, {"b": "}]["}], "c\"{": {}}"#;
-        let pairs = json_pairs(json);
-        assert_eq!(
-            spans(json, &pairs),
-            [
-                (json.to_string(), 0),
-                (r#"[1, {"b": "}]["}]"#.to_string(), 1),
-                (r#"{"b": "}]["}"#.to_string(), 2),
-                ("{}".to_string(), 1),
-            ]
-        );
-        // A closing bracket of the wrong kind closes nothing.
-        let broken = "[{]";
-        assert!(json_pairs(broken).is_empty());
-        assert!(json_pairs("").is_empty());
     }
 
     #[test]
