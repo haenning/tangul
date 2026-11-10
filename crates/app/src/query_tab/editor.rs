@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::input::{
-    Diagnostic, DiagnosticSeverity, HighlightStyleResolver as _, TextDecoration,
-    TextDecorationCollection,
+    Diagnostic, DiagnosticSeverity, GutterDecoration, GutterDecorationCollection,
+    HighlightStyleResolver as _, TextDecoration, TextDecorationCollection,
 };
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{CompletionProvider, EditorState, InputEvent, RopeExt as _};
@@ -17,7 +17,8 @@ use tangul_assist::analyze::statements;
 use tangul_assist::dialect::Dialect;
 use tangul_assist::format::{FormatRules, format_sql, map_offset};
 use tangul_assist::lexer::{Lexing, TokenKind, tokenize, tokenize_with};
-use tangul_assist::statement::statement_at;
+use tangul_assist::nesting::{Pair, guides, sql_pairs};
+use tangul_assist::statement::{Statement, split_with, statement_at, statement_at_with};
 use tangul_engine::Problem;
 
 use super::hints::Hint;
@@ -83,7 +84,24 @@ pub struct SqlEditor {
     /// What an empty editor tells about the app; none under a board tile's own
     /// placeholder.
     hints: Vec<&'static Hint>,
+    /// A bar in the gutter along each statement, stronger on the one ⌘↵ takes;
+    /// only with several statements.
+    statement_marks: GutterDecorationCollection,
+    /// What the marks show now (statement, whether it is the current one).
+    marked: Vec<(Range<usize>, bool)>,
+    /// The text version and cursor the marks are for: the editor notifies often
+    /// (the cursor blinks), the statements only change with these.
+    marked_for: Option<(u64, usize)>,
+    /// Bumped on every edit.
+    text_version: u64,
+    statement_count: usize,
+    /// Bracket pairs over several lines, for the nesting guides.
+    guides: Rc<Vec<Pair>>,
+    /// (end of a statement, when it last ran and what it got); set from the
+    /// history, cleared on edit.
+    last_runs: Rc<Vec<(usize, SharedString)>>,
     _changes: Subscription,
+    _cursor: Subscription,
 }
 
 impl EventEmitter<EditorEvent> for SqlEditor {}
@@ -102,10 +120,18 @@ impl SqlEditor {
                 this.place_snippet_cursor(cx);
                 cx.emit(EditorEvent::Edited);
                 this.color_comments(cx);
+                this.text_version += 1;
+                this.last_runs = Rc::default();
+                this.update_structure(cx);
                 this.revalidate(cx);
             }
         });
+        // The cursor moves without a change: the current statement may be another.
+        let cursor = cx.observe(&state, |this: &mut Self, _, cx| this.mark_statements(cx));
         let comments = state.update(cx, |e, cx| e.create_decorations_collection(Vec::new(), cx));
+        let statement_marks = state.update(cx, |e, cx| {
+            e.create_gutter_decorations_collection(Vec::new(), cx)
+        });
         let mut editor = Self {
             state,
             pending_origin: None,
@@ -122,9 +148,18 @@ impl SqlEditor {
             snippets: Snippets::default(),
             text_len: text.len(),
             hints: super::hints::for_new_tab(),
+            statement_marks,
+            marked: Vec::new(),
+            marked_for: None,
+            text_version: 0,
+            statement_count: 0,
+            guides: Rc::default(),
+            last_runs: Rc::default(),
             _changes: changes,
+            _cursor: cursor,
         };
         editor.color_comments(cx);
+        editor.update_structure(cx);
         editor
     }
 
@@ -151,7 +186,9 @@ impl SqlEditor {
         let lexing = dialect.lexing();
         if self.lexing != lexing {
             self.lexing = lexing;
+            self.text_version += 1;
             self.color_comments(cx);
+            self.update_structure(cx);
         }
     }
 
@@ -175,6 +212,95 @@ impl SqlEditor {
             .map(|range| TextDecoration::new(range, style))
             .collect();
         self.comments.set(decorations, cx);
+    }
+
+    /// How the connection's database reads the SQL.
+    pub fn lexing(&self) -> Lexing {
+        self.lexing
+    }
+
+    /// The statements, as ⌘↵ takes them.
+    pub fn statements(&self, cx: &App) -> Vec<Statement> {
+        split_with(&self.text(cx), self.lexing)
+    }
+
+    /// How many statements there are (kept up to date with the text).
+    pub fn statement_count(&self) -> usize {
+        self.statement_count
+    }
+
+    /// Bracket pairs over several lines (the nesting guides).
+    pub fn guides(&self) -> Rc<Vec<Pair>> {
+        self.guides.clone()
+    }
+
+    /// The notes after statements (when each last ran).
+    pub fn last_runs(&self) -> Rc<Vec<(usize, SharedString)>> {
+        self.last_runs.clone()
+    }
+
+    /// When each statement last ran: (end of the statement, the note), for the
+    /// text as it is now.
+    pub fn set_last_runs(&mut self, notes: Vec<(usize, SharedString)>, cx: &mut Context<Self>) {
+        self.last_runs = Rc::new(notes);
+        cx.notify();
+    }
+
+    /// The guides and the statement marks after an edit.
+    fn update_structure(&mut self, cx: &mut Context<Self>) {
+        let text = self.text(cx);
+        self.guides = Rc::new(guides(&text, &sql_pairs(&text, self.lexing)));
+        self.mark_statements(cx);
+    }
+
+    /// A gutter bar along each statement, stronger on the one under the cursor;
+    /// none with a single statement. Only set when they change (setting them
+    /// notifies the editor, which calls this again).
+    fn mark_statements(&mut self, cx: &mut Context<Self>) {
+        let (text, cursor) = {
+            let e = self.state.read(cx);
+            (e.value().to_string(), e.cursor())
+        };
+        if self.marked_for == Some((self.text_version, cursor)) {
+            return;
+        }
+        self.marked_for = Some((self.text_version, cursor));
+        let statements = split_with(&text, self.lexing);
+        self.statement_count = statements.len();
+        let marked: Vec<(Range<usize>, bool)> = if statements.len() < 2 {
+            Vec::new()
+        } else {
+            let current = statement_at_with(&text, cursor, self.lexing).map(|s| s.body);
+            statements
+                .into_iter()
+                .map(|s| {
+                    let here = current.as_ref() == Some(&s.body);
+                    (s.body, here)
+                })
+                .collect()
+        };
+        if marked == self.marked {
+            return;
+        }
+        let theme = cx.theme();
+        let decorations = marked
+            .iter()
+            .map(|(range, here)| {
+                GutterDecoration::new(range.clone()).with_color(if *here {
+                    theme.primary
+                } else {
+                    theme.border
+                })
+            })
+            .collect();
+        self.marked = marked;
+        self.statement_marks.set(decorations, cx);
+    }
+
+    /// The gutter marks: (statement, whether it is the current one) (tests).
+    #[cfg(test)]
+    pub fn statement_marks(&self) -> &[(Range<usize>, bool)] {
+        &self.marked
     }
 
     pub fn state(&self) -> &Entity<EditorState> {

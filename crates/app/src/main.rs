@@ -10,6 +10,7 @@ mod connection_form;
 mod file_tab;
 mod menu;
 mod monitor;
+mod nesting;
 mod palette;
 mod query_router;
 mod query_tab;

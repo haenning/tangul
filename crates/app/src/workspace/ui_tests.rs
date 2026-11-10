@@ -5057,3 +5057,149 @@ fn beyond_the_cap_a_stack_adds_the_rest_up_as_other(cx: &mut TestAppContext) {
         assert_eq!(order[0], 12, "on top of the stack");
     });
 }
+
+/// A tab with `sql` on the shop's connection.
+fn sql_tab(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    sql: &str,
+    cx: &mut TestAppContext,
+) -> Entity<QueryTab> {
+    cx.update_window(handle.into(), |_, window, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.add_tab(sql, window, cx)
+        })
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn several_statements_are_counted_and_marked(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let sql = "select 1;\nselect 2;";
+    let tab = sql_tab(handle, &workspace, sql, cx);
+    step(handle, cx, |window, cx| {
+        assert!(window.find("statement-count").visible());
+        // A bar along each; the one ⌘↵ takes (the cursor's) stands out.
+        let marks = tab.read(cx).statement_marks(cx);
+        let ranges: Vec<_> = marks.iter().map(|(r, _)| &sql[r.clone()]).collect();
+        assert_eq!(ranges, ["select 1", "select 2"]);
+        assert_eq!(marks.iter().filter(|(_, here)| *here).count(), 1);
+    });
+    // One statement: neither.
+    let one = sql_tab(handle, &workspace, "select 1", cx);
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("statement-count").is_none());
+        assert!(one.read(cx).statement_marks(cx).is_empty());
+    });
+}
+
+#[gpui_kit::test]
+fn nested_brackets_get_a_guide_per_level(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let sql = "select *\nfrom (\n  select max(x) from (\n    select 1 as x\n  ) a\n) b";
+    let tab = sql_tab(handle, &workspace, sql, cx);
+    step(handle, cx, |window, cx| {
+        // `max(x)` is on one line: no guide.
+        let depths: Vec<_> = tab.read(cx).guides(cx).iter().map(|p| p.depth).collect();
+        assert_eq!(depths, [0, 1]);
+        assert!(window.find("editor-overlay").visible());
+    });
+    // Off in the settings: not drawn.
+    step(handle, cx, |_, cx| {
+        let mut s = crate::settings::Settings::default();
+        s.editor.nesting_guides = false;
+        crate::settings::set_for_test(s, cx);
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("editor-overlay").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn a_statement_says_when_it_last_ran_until_it_is_edited(cx: &mut TestAppContext) {
+    use tangul_data::local::{HistoryEntry, NewHistory, Source};
+    let (handle, workspace) = open(cx);
+    let sql = "select * from orders where id = 5;\nupdate orders set paid = true;";
+    let tab = sql_tab(handle, &workspace, sql, cx);
+    let ran = |sql: &str, rows, ws: &mut Workspace| {
+        let fp = tangul_assist::lexer::fingerprint(sql);
+        ws.data
+            .local
+            .add_history(&NewHistory {
+                database_id: "db",
+                user_id: "app",
+                sql,
+                fingerprint: &fp,
+                entry: HistoryEntry {
+                    sql: sql.into(),
+                    source: Source::App,
+                    started_at: super::now_ms() - 5 * 3_600_000,
+                    duration_ms: 1,
+                    rows: Some(rows),
+                    error: None,
+                },
+            })
+            .unwrap();
+    };
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            // The same query, spaced differently; another id isn't it.
+            ran("SELECT *  FROM orders\nWHERE id = 5", 1, ws);
+            ran("select * from orders where id = 6", 9, ws);
+            ran("update orders set paid = true", 3, ws);
+            ws.refresh_last_runs(&tab, cx);
+        })
+    });
+    step(handle, cx, |window, cx| {
+        let notes: Vec<_> = tab
+            .read(cx)
+            .last_runs(cx)
+            .into_iter()
+            .map(|(at, note)| (sql[..at].lines().count(), note.to_string()))
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                (1, "5 h ago · 1 row".to_string()),
+                (2, "5 h ago · 3 rows changed".to_string())
+            ]
+        );
+        assert!(window.find("editor-overlay").visible());
+    });
+    // Typing: the old runs are of other SQL.
+    step(handle, cx, |window, cx| {
+        QueryTab::focus_editor(&tab, window, cx)
+    });
+    step(handle, cx, |window, cx| type_keys(window, "x", cx));
+    step(handle, cx, |_, cx| {
+        assert!(tab.read(cx).last_runs(cx).is_empty());
+    });
+}
+
+#[gpui_kit::test]
+fn json_in_the_value_viewer_gets_nesting_guides(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    tab_with_rows(
+        handle,
+        &workspace,
+        &[[Some("1"), Some(r#"{"a": [1, {"b": 2}], "c": "x"}"#)]],
+        cx,
+    );
+    step(handle, cx, |window, cx| double_click_cell(window, 0, 1, cx));
+    step(handle, cx, |window, cx| {
+        // Shown pretty-printed: the object, the array and the inner object each
+        // span lines.
+        let depths: Vec<_> = values(&workspace, cx)
+            .unwrap()
+            .guides()
+            .iter()
+            .map(|p| p.depth)
+            .collect();
+        assert_eq!(depths, [0, 1, 2]);
+        assert!(window.find("editor-overlay").visible());
+    });
+}

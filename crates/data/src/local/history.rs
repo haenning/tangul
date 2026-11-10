@@ -78,6 +78,45 @@ impl Local {
         })
     }
 
+    /// The user's latest run of a query with this fingerprint whose text `same`
+    /// accepts (the fingerprint finds candidates through its index; `same` tells
+    /// the exact query, values included). Only the user's own runs.
+    pub fn last_run(
+        &self,
+        db_id: &str,
+        fingerprint: &str,
+        same: impl Fn(&str) -> bool,
+    ) -> Option<HistoryEntry> {
+        const CANDIDATES: i64 = 50;
+        let result = self
+            .conn
+            .prepare_cached(
+                "SELECT sql, started_at, duration_ms, rows, error FROM history
+                 WHERE database_id = ?1 AND fingerprint = ?2 AND source = 'app'
+                 ORDER BY started_at DESC LIMIT ?3",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map(params![db_id, fingerprint, CANDIDATES], |r| {
+                    Ok(HistoryEntry {
+                        source: Source::App,
+                        sql: r.get(0)?,
+                        started_at: r.get(1)?,
+                        duration_ms: r.get(2)?,
+                        rows: r.get(3)?,
+                        error: r.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+            });
+        match result {
+            Ok(entries) => entries.into_iter().find(|e| same(&e.sql)),
+            Err(e) => {
+                eprintln!("history query failed: {e}");
+                None
+            }
+        }
+    }
+
     /// The user who last ran something on the database.
     pub fn last_user(&self, db_id: &str) -> Option<String> {
         self.conn
@@ -193,6 +232,39 @@ mod tests {
         assert_eq!(l.last_user("db").as_deref(), Some("u"));
         assert_eq!(l.last_user("other"), None);
         assert_eq!(l.history("db", "%", &[], 10).len(), 1);
+    }
+
+    #[test]
+    fn the_last_run_of_exactly_this_query() {
+        let l = Local::in_memory();
+        run(&l, "select * from t where id = 1", "t by id", 1, None);
+        run(&l, "select * from t where id = 2", "t by id", 2, None);
+        run(
+            &l,
+            "select * from t where id = 1",
+            "t by id",
+            3,
+            Some("boom"),
+        );
+        run_by(
+            &l,
+            Source::Ai,
+            "select * from t where id = 1",
+            "t by id",
+            4,
+            None,
+        );
+        // The latest of the same text, the user's own runs only.
+        let last = l
+            .last_run("db", "t by id", |sql| sql == "select * from t where id = 1")
+            .unwrap();
+        assert_eq!((last.started_at, last.error.as_deref()), (3, Some("boom")));
+        let last = l
+            .last_run("db", "t by id", |sql| sql.ends_with("= 2"))
+            .unwrap();
+        assert_eq!(last.started_at, 2);
+        assert!(l.last_run("db", "t by id", |_| false).is_none());
+        assert!(l.last_run("other", "t by id", |_| true).is_none());
     }
 
     #[test]

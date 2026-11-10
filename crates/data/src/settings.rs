@@ -3,7 +3,8 @@
 //!
 //! ```json
 //! {
-//!   "editor": { "font_size": 14, "font_family": "Menlo" },
+//!   "editor": { "font_size": 14, "font_family": "Menlo", "nesting_guides": true,
+//!               "last_run": true },
 //!   "table": { "font_size": 12, "font_family": "Menlo" },
 //!   "chart": { "primary_color": "#2563eb", "max_series": 12, "font_size": 10,
 //!              "font_family": null },
@@ -64,7 +65,7 @@ const MONITOR_INTERVAL_RANGE: (Duration, Duration) =
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub editor: FontSettings,
+    pub editor: EditorSettings,
     /// The result grid.
     pub table: FontSettings,
     /// Result charts.
@@ -378,6 +379,29 @@ impl Settings {
     }
 }
 
+/// The SQL editor: its font, and what it shows beside the SQL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorSettings {
+    #[serde(flatten)]
+    pub font: FontSettings,
+    /// A line from each bracket to its partner, colored by depth (also in the value
+    /// viewer's JSON).
+    pub nesting_guides: bool,
+    /// When a statement last ran and what it got, after its last line.
+    pub last_run: bool,
+}
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        Self {
+            font: FontSettings::default(),
+            nesting_guides: true,
+            last_run: true,
+        }
+    }
+}
+
 /// Font of one part of the app; unset values keep the default.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -529,11 +553,11 @@ impl Settings {
 
     /// The editor's font size; `None` when unset or not a usable number.
     pub fn font_size(&self) -> Option<f32> {
-        self.editor.size(FONT_SIZE_RANGE)
+        self.editor.font.size(FONT_SIZE_RANGE)
     }
 
     pub fn font_family(&self) -> Option<&str> {
-        self.editor.family()
+        self.editor.font.family()
     }
 
     /// The result grid's font size, if set.
@@ -588,10 +612,8 @@ pub fn create_if_missing(editor_font_size: f32, editor_font_family: &str) -> Opt
     let path = path()?;
     if !path.exists() {
         let mut defaults = defaults();
-        defaults["editor"] = serde_json::json!({
-            "font_size": editor_font_size,
-            "font_family": editor_font_family,
-        });
+        defaults["editor"]["font_size"] = serde_json::json!(editor_font_size);
+        defaults["editor"]["font_family"] = serde_json::json!(editor_font_family);
         let write = || -> std::io::Result<()> {
             std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
             std::fs::write(&path, crate::upgrade::pretty(&defaults))
@@ -746,7 +768,11 @@ mod tests {
         let on = with_read_only(text, "reporting", true).unwrap();
         let s = Settings::parse(&on).unwrap();
         assert!(s.is_read_only("reporting"));
-        assert_eq!(s.editor.font_size, Some(15.));
+        assert_eq!(s.editor.font.font_size, Some(15.));
+        assert!(
+            s.editor.nesting_guides && s.editor.last_run,
+            "on unless turned off"
+        );
         assert!(!s.safety.confirm_unfiltered_writes);
         // Twice is still once.
         let again = with_read_only(&on, "reporting", true).unwrap();
