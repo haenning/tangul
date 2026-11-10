@@ -336,6 +336,14 @@ pub fn tile(title: &str, sql: &str, view: Option<ChartView>) -> Tile {
     }
 }
 
+/// `view` as of the current chart layout (no longer marked old).
+fn current_layout(view: ChartView) -> ChartView {
+    ChartView {
+        old_layout: false,
+        ..view
+    }
+}
+
 fn edit_board(board: &mut Board, edit: Edit) -> Result<(), String> {
     match edit {
         Edit::Rename(name) => board.name = name_of(&name)?,
@@ -373,9 +381,10 @@ fn edit_board(board: &mut Board, edit: Edit) -> Result<(), String> {
             }
             let tile = tile_mut(board, &tile)?;
             tile.sql = sql.trim().into();
-            tile.view = view;
+            // A new query, or a view picked again, is of the current chart layout.
+            tile.view = view.map(current_layout);
         }
-        Edit::SetView { tile, view } => tile_mut(board, &tile)?.view = view,
+        Edit::SetView { tile, view } => tile_mut(board, &tile)?.view = view.map(current_layout),
         Edit::SetWidth { tile, width } => tile_mut(board, &tile)?.width = width,
         Edit::MoveTile { tile, to } => {
             let from = position(board, &tile)?;
@@ -495,6 +504,7 @@ pub fn next_in(refresh: Refresh, last: Option<Instant>, now: Instant) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tangul_core::chart::ChartStyle;
 
     fn ids(board: &Board) -> Vec<&str> {
         board.tiles.iter().map(|t| t.id.as_str()).collect()
@@ -676,6 +686,7 @@ mod tests {
         let b = apply(&mut boards, id, width("t1", Width::Half)).unwrap();
         assert_eq!(b.tiles[0].width, Width::Half);
 
+        // Stored before charts took one value column: picked again, it is current.
         let view = Some(ChartView::from_key("bars").unwrap());
         let b = apply(
             &mut boards,
@@ -686,7 +697,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(b.tiles[2].view, view);
+        assert_eq!(b.tiles[2].view, Some(ChartView::new(ChartStyle::Bars)));
         let b = apply(
             &mut boards,
             id,

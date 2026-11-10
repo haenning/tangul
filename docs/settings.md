@@ -34,7 +34,7 @@ the editor, so you look before you save.
   "version": "0.1.2",
   "editor": { "font_size": null, "font_family": null },
   "table": { "font_size": null, "font_family": null },
-  "chart": { "primary_color": null, "font_size": null, "font_family": null },
+  "chart": { "primary_color": null, "max_series": null, "font_size": null, "font_family": null },
   "safety": {
     "read_only_users": [],
     "confirm_unfiltered_writes": true,
@@ -74,6 +74,7 @@ means unset (the app's own value) or no limit.
 |---|---|
 | `editor`, `table`, `chart`: `font_size`, `font_family` | Fonts of the SQL editor, the result grid and chart labels (sizes are kept within 8–32, 8–18 and 6–16) |
 | `chart.primary_color` | First series' color, e.g. `"#2563eb"`; else the theme's |
+| `chart.max_series` | Most series a chart draws in color, the largest (1–100; unset: 12). Beyond them lines and areas are grey, stacked styles add the rest up into a grey "Other", side-by-side bars leave them out |
 | `safety.read_only_users` | Database users in read-only mode |
 | `safety.confirm_unfiltered_writes` | Ask before `UPDATE`/`DELETE` without `WHERE` |
 | `safety.relock_after` | Read-only mode back on this long after the last write |

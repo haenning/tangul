@@ -404,7 +404,7 @@ async fn proposals_open_for_the_user_and_never_run() {
             &ctx,
             "propose_sql",
             json!({"sql": "SELECT status, count(*) FROM orders GROUP BY 1",
-                   "chart": "bars", "column": " count(*) "})
+                   "chart": "bars"})
         )
         .await
         .unwrap(),
@@ -415,7 +415,6 @@ async fn proposals_open_for_the_user_and_never_run() {
         proposed.lock().unwrap()[1].chart,
         Some(ChartRequest {
             style: ChartStyle::Bars,
-            column: Some("count(*)".into()),
         })
     );
     assert_eq!(
@@ -424,15 +423,16 @@ async fn proposals_open_for_the_user_and_never_run() {
             "only a query's result can be a chart".into()
         ))
     );
-    assert_eq!(
+    // A value column isn't picked any more: one number column last.
+    assert!(matches!(
         call(
             &ctx,
             "propose_sql",
-            json!({"sql": "SELECT 1", "column": "a"})
+            json!({"sql": "SELECT 1", "chart": "bars", "column": "a"})
         )
         .await,
-        Err(ToolError::BadInput("column needs a chart".into()))
-    );
+        Err(ToolError::BadInput(_))
+    ));
     // What it showed before is gone.
     for gone in [
         json!({"sql": sql, "view": {"chart": "line"}}),
@@ -499,8 +499,7 @@ async fn a_read_is_shown_to_the_user_whole() {
         .await
         .unwrap(),
         "status\tn\ncancelled\t1\n(1 row, more not shown)\n\
-         Opened in tangul in a new tab on shop, as a bars chart (the grid if the result \
-         doesn't fit the chart)."
+         Opened in tangul in a new tab on shop, as a bars chart."
     );
     {
         let s = shown.lock().unwrap();
@@ -513,39 +512,38 @@ async fn a_read_is_shown_to_the_user_whole() {
             s.chart,
             Some(ChartRequest {
                 style: ChartStyle::Bars,
-                column: None
             })
         );
         assert_eq!(s.result.row_count(), 3);
         assert_eq!(s.result.cell(2, 0), Some("paid"));
         assert!(!s.truncated);
     }
-    // The grid, and one column of a chart.
+    // The grid, and a result that can't be a chart: the grid, and why.
     assert!(
         call(&ctx, "run_readonly", json!({"sql": by_status, "show": {}}))
             .await
             .unwrap()
-            .ends_with(
-                "Opened in tangul in a new tab on shop, in the grid (the grid if the \
-                        result doesn't fit the chart)."
-            )
+            .ends_with("Opened in tangul in a new tab on shop, in the grid.")
     );
     assert!(
         call(
             &ctx,
             "run_readonly",
-            json!({"sql": by_status, "show": {"chart": "line", "column": " n "}})
+            json!({"sql": "SELECT count(*) AS n, status FROM orders GROUP BY 2",
+                   "show": {"chart": "line"}})
         )
         .await
         .unwrap()
-        .contains("as a line chart of n")
+        .ends_with(
+            "in the grid: it can't be a chart (The last column is the value and must be \
+             a number; status has “cancelled”)."
+        )
     );
     {
         let s = shown.lock().unwrap();
         assert_eq!((s[1].chart.clone(), s[1].title.clone()), (None, None));
-        assert_eq!(s[2].chart.as_ref().unwrap().column.as_deref(), Some("n"));
     }
-    // Every style can be asked for; a column needs a chart.
+    // Every style can be asked for; a value column isn't picked any more.
     for style in ChartStyle::ALL {
         let show = json!({"chart": style.key()});
         assert!(
@@ -561,15 +559,15 @@ async fn a_read_is_shown_to_the_user_whole() {
         );
     }
     let before = shown.lock().unwrap().len();
-    assert_eq!(
+    assert!(matches!(
         call(
             &ctx,
             "run_readonly",
-            json!({"sql": by_status, "show": {"column": "n"}})
+            json!({"sql": by_status, "show": {"chart": "line", "column": "n"}})
         )
         .await,
-        Err(ToolError::BadInput("column needs a chart".into()))
-    );
+        Err(ToolError::BadInput(_))
+    ));
     assert!(matches!(
         call(
             &ctx,

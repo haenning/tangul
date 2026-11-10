@@ -7,11 +7,13 @@ mod filter;
 mod grid;
 mod xlsx;
 
-use std::rc::Rc;
+use std::cell::Cell;
+use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
+    WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{PopupMenu, PopupMenuItem},
@@ -21,7 +23,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_assist::chart::{ChartData, ChartStyle, ChartView, chart_data};
+use tangul_assist::chart::{
+    ChartData, ChartStyle, ChartView, chart_data, old_layout, old_layout_message,
+};
 use tangul_assist::columns::ColumnFacts;
 use tangul_assist::dialect::Dialect;
 use tangul_assist::refine::{ColumnFilter, ColumnKind, Refine, Sort, refinable, refined_sql};
@@ -30,9 +34,9 @@ use tangul_core::QueryId;
 use tangul_engine::{ExecEvent, QueryEvent, QueryOutput};
 
 use crate::assets::{Lucide, style_icon};
-use crate::chart::{self, ResultChart};
+use crate::chart::{self, Pin, ResultChart};
 use crate::settings;
-use crate::ui::ErrorText;
+use crate::ui::{ErrorText, Severity, alert_card};
 use crate::{
     ClearMark, CopyMark, ExtendMarkDown, ExtendMarkLeft, ExtendMarkRight, ExtendMarkUp,
     InspectValue, MarkAll,
@@ -43,79 +47,27 @@ use grid::ResultsDelegate;
 /// Shows a result as the view picked (`None`: the table).
 pub type SetView = Rc<dyn Fn(Option<ChartView>, &mut App)>;
 
-/// The table and every chart `data` fits, `shown` checked: all value columns in
-/// one style, and one column at a time. `set` applies the pick. The one menu of
-/// views, for the status bar and board tiles alike.
+/// The table and every chart style `data` fits, `shown` checked. `set` applies
+/// the pick. The one menu of views, for the status bar and board tiles alike.
 pub fn chart_menu(
     mut menu: PopupMenu,
     data: &ChartData,
     shown: Option<ChartView>,
     set: SetView,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
+    _: &mut Window,
+    _: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    let item = |label: String, view: Option<ChartView>, icon: bool| {
+    let item = |label: String, view: Option<ChartView>| {
         let set = set.clone();
         PopupMenuItem::new(label)
-            .when(icon, |item| {
-                item.icon(Icon::new(style_icon(view.map(|v| v.style))))
-            })
-            .checked(shown == view)
+            .icon(Icon::new(style_icon(view.map(|v| v.style))))
+            .checked(shown.map(|v| v.style) == view.map(|v| v.style))
             .on_click(move |_, _, cx| set(view, cx))
     };
-    menu = menu.item(item("Table".into(), None, true));
-    let multi = data.multi_styles();
-    if !multi.is_empty() {
-        menu = menu.separator().label("All columns");
-        for style in multi {
-            let view = ChartView {
-                style,
-                series: None,
-            };
-            menu = menu.item(item(style.label().into(), Some(view), true));
-        }
-    }
-    menu = menu.separator().label("Single column");
-    for style in data.single_styles() {
-        let label = style.single_label();
-        if data.series.len() < 2 {
-            let view = ChartView {
-                style,
-                series: Some(0),
-            };
-            menu = menu.item(item(label.into(), Some(view), true));
-            continue;
-        }
-        // Several value columns: pick which one.
-        let columns: Vec<(String, ChartView)> = data
-            .series
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let view = ChartView {
-                    style,
-                    series: Some(i),
-                };
-                (s.name.clone(), view)
-            })
-            .collect();
-        let set = set.clone();
-        menu = menu.submenu_with_icon(
-            Some(Icon::new(style_icon(Some(style)))),
-            label,
-            window,
-            cx,
-            move |menu, _, _| {
-                columns.iter().fold(menu, |menu, (name, view)| {
-                    let (set, view) = (set.clone(), *view);
-                    menu.item(
-                        PopupMenuItem::new(name.clone())
-                            .checked(shown == Some(view))
-                            .on_click(move |_, _, cx| set(Some(view), cx)),
-                    )
-                })
-            },
-        );
+    menu = menu.item(item("Table".into(), None)).separator();
+    for style in data.styles() {
+        let view = ChartView::new(style);
+        menu = menu.item(item(data.view_label(view), Some(view)));
     }
     menu
 }
@@ -208,12 +160,24 @@ pub struct ResultView {
     /// The chart picked in the status bar, shown instead of the grid when the result
     /// can be charted; `None` shows the grid. Kept across runs.
     chart_view: Option<ChartView>,
-    /// A chart asked for by style and column name before the result is known (a
-    /// proposal from the assistant): resolved against the next result, then
-    /// dropped (see `ChartData::view_for`).
-    chart_request: Option<(ChartStyle, Option<String>)>,
+    /// A chart asked for before the result is known (a proposal from the
+    /// assistant): resolved against the next result (the grid when it doesn't
+    /// fit), then dropped.
+    chart_request: Option<ChartStyle>,
+    /// The last result has the old chart layout (a label column and several
+    /// number columns): a stored chart from then shows why it isn't drawn.
+    old_result: bool,
     /// Curved instead of straight lines; starts straight, which is exact.
     smooth_lines: bool,
+    /// The chart row a click pinned: its values listed to scroll and copy, until
+    /// Esc or another click.
+    chart_pin: Option<ChartPin>,
+    /// Where the chart was drawn last (clicks are mapped to its rows).
+    chart_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Takes Esc while a row is pinned.
+    pin_focus: FocusHandle,
+    /// The pointer is on the legend's "+N more": every series is listed.
+    legend_more: bool,
     /// The last run's statement, when its result can be filtered, sorted and paged.
     base_sql: Option<String>,
     /// While a derived query runs (see [`ResultEvent::Refine`]): whether it appends
@@ -229,6 +193,13 @@ pub struct ResultView {
 }
 
 impl EventEmitter<ResultEvent> for ResultView {}
+
+/// A pinned chart row, for the chart it was pinned on only.
+struct ChartPin {
+    pin: Pin,
+    view: ChartView,
+    source: Weak<ChartData>,
+}
 
 impl ResultView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -259,7 +230,12 @@ impl ResultView {
             chart: Err(NO_RESULT.into()),
             chart_view: None,
             chart_request: None,
+            old_result: false,
             smooth_lines: false,
+            chart_pin: None,
+            chart_bounds: Rc::default(),
+            pin_focus: cx.focus_handle(),
+            legend_more: false,
             base_sql: None,
             derived: None,
             page_error: None,
@@ -634,13 +610,14 @@ impl ResultView {
                     self.chart = chart_data(&self.sql, result, self.truncated)
                         .map(Rc::new)
                         .map_err(Into::into);
-                    if let Some((style, column)) = self.chart_request.take() {
+                    self.old_result = old_layout(result);
+                    if let Some(style) = self.chart_request.take() {
                         // A result that can't be a chart shows the grid.
                         self.chart_view = self
                             .chart
                             .as_ref()
                             .ok()
-                            .map(|data| data.view_for(style, column.as_deref()));
+                            .map(|data| data.view_or_default(Some(ChartView::new(style))));
                     }
                 }
                 self.status = Status::Done {
@@ -786,6 +763,15 @@ impl ResultView {
         self.chart_view.map(|v| data.view_or_default(Some(v)))
     }
 
+    /// The chart as shown, at the default label size, and where it was drawn.
+    #[cfg(test)]
+    pub fn chart_for_test(&self) -> Option<(ResultChart, Bounds<Pixels>)> {
+        let view = self.chart_shown()?;
+        let data = self.chart.as_ref().ok()?.clone();
+        let chart = ResultChart::new("t", data, view.style, Vec::new(), false, chart::LABEL_SIZE);
+        Some((chart, self.chart_bounds.get()))
+    }
+
     /// The view it is set to, with or without a result yet.
     pub fn chart_view(&self) -> Option<ChartView> {
         self.chart_view
@@ -798,21 +784,18 @@ impl ResultView {
         cx.notify();
     }
 
-    /// Shows the next result as `style`, of one value column by name or all of
-    /// them; the default view when the result doesn't fit.
-    pub fn request_chart(
-        &mut self,
-        style: ChartStyle,
-        column: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Shows the next result as `style` (the nearest one that fits, or the grid).
+    pub fn request_chart(&mut self, style: ChartStyle, cx: &mut Context<Self>) {
         // Set already, so the status bar says a chart is coming.
-        self.chart_view = Some(ChartView {
-            style,
-            series: None,
-        });
-        self.chart_request = Some((style, column));
+        self.chart_view = Some(ChartView::new(style));
+        self.chart_request = Some(style);
         cx.notify();
+    }
+
+    /// A stored chart from before charts took one value column, over a result of
+    /// that layout: it isn't drawn, the reason is shown instead.
+    pub fn old_chart(&self) -> bool {
+        self.old_result && self.chart_view.is_some_and(|v| v.old_layout)
     }
 
     /// What the column filter's value and upper end hold (tests).
@@ -894,6 +877,278 @@ impl ResultView {
         }
     }
 
+    /// The legend: the first few series in the order the tooltip lists them (the
+    /// top of a stack first); the pointer on "+N more" lists them all. Capped, as
+    /// many columns would push the chart off the view.
+    fn render_legend(
+        &self,
+        data: &ChartData,
+        style: ChartStyle,
+        colors: &[Hsla],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        // The colored series first, then the grey ones.
+        let (mut order, grey): (Vec<usize>, Vec<usize>) = data
+            .legend_order(style)
+            .into_iter()
+            .partition(|&s| !data.series[s].grey);
+        order.extend(grey);
+        let hidden = order.len().saturating_sub(chart::MAX_LISTED);
+        let left_out = data.left_out;
+        let entry = |s: usize| {
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .size_2()
+                        .flex_none()
+                        .rounded_sm()
+                        .bg(colors[s % colors.len()]),
+                )
+                .child(chart::series_label(&data.series[s]))
+        };
+        let all = (hidden > 0 && self.legend_more).then(|| {
+            let theme = cx.theme();
+            // Wrapped into columns when there are many.
+            let per_column = 16;
+            div().absolute().top_full().left_0().child(
+                deferred(
+                    anchored().snap_to_window_with_margin(px(8.)).child(
+                        h_flex()
+                            .id("chart-legend-all")
+                            .test_support()
+                            .items_start()
+                            .gap_4()
+                            .p_2()
+                            .rounded(theme.radius)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.popover)
+                            .text_color(theme.popover_foreground)
+                            .shadow_md()
+                            .children(order.chunks(per_column).map(|chunk| {
+                                v_flex().gap_0p5().children(chunk.iter().map(|&s| entry(s)))
+                            })),
+                    ),
+                )
+                .with_priority(1),
+            )
+        });
+        h_flex()
+            .gap_3()
+            .flex_wrap()
+            .children(order.iter().take(chart::MAX_LISTED).map(|&s| entry(s)))
+            .when(hidden > 0, |this| {
+                this.child(
+                    div()
+                        .id("chart-legend-more")
+                        .test_support()
+                        .relative()
+                        .cursor_default()
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            this.legend_more = *hovered;
+                            cx.notify();
+                        }))
+                        .child(format!("+{hidden} more"))
+                        .children(all),
+                )
+            })
+            // Side-by-side bars beyond `chart.max_series`.
+            .when(left_out > 0, |this| {
+                this.child(
+                    div()
+                        .id("chart-left-out")
+                        .test_support()
+                        .child(format!("{left_out} smaller not shown")),
+                )
+            })
+    }
+
+    /// The chart, and the pinned row's values over it. A click pins the row under
+    /// the pointer; another click or Esc releases it.
+    fn render_chart_area(
+        &self,
+        chart: ResultChart,
+        view: ChartView,
+        source: Option<Weak<ChartData>>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let bounds = self.chart_bounds.get();
+        let pin = chart.pin();
+        let pinned = pin.map(|pin| self.render_pinned(&chart, pin, bounds, cx));
+        // The same chart for mapping a click to its row.
+        let hit = chart.for_hits();
+        let chart_bounds = self.chart_bounds.clone();
+        div()
+            .id("chart-area")
+            .test_support()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                if pin.is_some() {
+                    this.chart_pin = None;
+                    cx.notify();
+                    return;
+                }
+                let bounds = chart_bounds.get();
+                let Some(source) = source.clone() else {
+                    return;
+                };
+                if let Some((row, series)) = hit.hit(bounds, e.position() - bounds.origin) {
+                    this.chart_pin = Some(ChartPin {
+                        pin: Pin { row, series },
+                        view,
+                        source,
+                    });
+                    window.focus(&this.pin_focus.clone(), cx);
+                    cx.notify();
+                }
+            }))
+            .child(chart)
+            .children(pinned)
+    }
+
+    /// A pinned row's values: every series, in the tooltip's order, scrollable;
+    /// Copy copies them as tab-separated lines.
+    fn render_pinned(
+        &self,
+        chart: &ResultChart,
+        pin: Pin,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let data = chart.data();
+        let row = pin.row;
+        let order = data.row_order(chart.style(), row);
+        let x = chart.row_x(bounds, row);
+        let width = bounds.size.width.as_f32();
+        let mut text = format!("{}\t{}\n", data.x_name, data.x[row]);
+        for &s in &order {
+            let series = &data.series[s];
+            let value = series.values[row].map_or("NULL".into(), |v| v.to_string());
+            text.push_str(&format!("{}\t{value}\n", series.name));
+        }
+        let total = chart.style().is_stacked().then(|| data.row_total(row));
+        if let Some(total) = total {
+            text.push_str(&format!("Total\t{total}\n"));
+        }
+        let theme = cx.theme();
+        let rows: Vec<AnyElement> = order
+            .iter()
+            .map(|&s| chart.value_row(s, row, pin.series == Some(s), cx))
+            .collect();
+        v_flex()
+            .id("chart-pinned")
+            .test_support()
+            .track_focus(&self.pin_focus)
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" {
+                    this.chart_pin = None;
+                    cx.notify();
+                }
+            }))
+            // Clicks in here are the list's, not the chart's.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .occlude()
+            .absolute()
+            .top(px(8.))
+            .map(|this| {
+                if x < width / 2. {
+                    this.left(px(x + 12.))
+                } else {
+                    this.right(px(width - x + 12.))
+                }
+            })
+            .max_h(px((bounds.size.height.as_f32() - 16.).max(80.)))
+            .min_w(px(180.))
+            .p_2()
+            .gap_1()
+            .text_xs()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .shadow_md()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_between()
+                    .child(div().font_semibold().child(data.x[row].clone()))
+                    .child(
+                        h_flex()
+                            .child(
+                                Button::new("chart-pinned-copy")
+                                    .label("Copy")
+                                    .xsmall()
+                                    .ghost()
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.clone(),
+                                        ))
+                                    }),
+                            )
+                            .child(
+                                Button::new("chart-pinned-close")
+                                    .icon(IconName::Close)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Release (Esc)")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.chart_pin = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("chart-pinned-rows")
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .children(total.map(|total| chart::total_row(total, cx)))
+    }
+
+    /// Instead of a stored chart from before charts took one value column: why,
+    /// the rules, and the query to hand to an agent.
+    fn render_old_chart(&self, cx: &mut Context<Self>) -> AnyElement {
+        let message = old_layout_message();
+        let for_agent = format!("{message}\n\nThe query:\n{}", self.sql.trim());
+        v_flex()
+            .id("chart-old-layout")
+            .test_support()
+            .size_full()
+            .p_3()
+            .gap_2()
+            .overflow_y_scroll()
+            .child(alert_card(Severity::Warning, message, cx).max_w(px(560.)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("chart-old-copy")
+                            .label("Copy for agent")
+                            .xsmall()
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(for_agent.clone()))
+                            }),
+                    )
+                    .child(
+                        Button::new("chart-old-table")
+                            .label("Show table")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.set_chart_view(None, cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// All series in one chart, with a legend when there are several.
     fn render_chart(
         &self,
@@ -901,15 +1156,27 @@ impl ResultView {
         view: ChartView,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // One per series: the theme's chart colors, or shades of its one.
-        let mut colors = crate::theme::chart_colors(data.series.len(), cx);
-        // A single column keeps the color it has among all of them.
-        if let Some(i) = view.series {
-            let n = colors.len();
-            colors.rotate_left(i % n);
-        }
         let style = view.style;
-        let data = Rc::new(data.for_view(view));
+        // The largest series in color, the rest grey (`chart.max_series`).
+        let max_series = settings::current(cx).chart_max_series();
+        let data = Rc::new(data.drawn(style, max_series));
+        // One per colored series: the theme's chart colors, or shades of its one.
+        let colored = data.series.iter().filter(|s| !s.grey).count();
+        let palette = crate::theme::chart_colors(colored.max(1), cx);
+        let grey = cx.theme().muted_foreground.opacity(0.45);
+        let mut next = 0;
+        let colors: Vec<Hsla> = data
+            .series
+            .iter()
+            .map(|s| {
+                if s.grey {
+                    grey
+                } else {
+                    next += 1;
+                    palette[(next - 1) % palette.len()]
+                }
+            })
+            .collect();
         // Straight / smooth, for lines and areas only.
         let curve_switch = (!style.is_bars()).then(|| {
             let option = |id: &'static str, label: &'static str, smooth: bool| {
@@ -928,26 +1195,14 @@ impl ResultView {
                 .child(option("straight-lines", "Straight", false))
                 .child(option("smooth-lines", "Smooth", true))
         });
+        let source = self.chart.as_ref().ok().map(Rc::downgrade);
+        let pin = self
+            .chart_pin
+            .as_ref()
+            .filter(|p| p.view == view && source.as_ref().is_some_and(|s| s.ptr_eq(&p.source)))
+            .map(|p| p.pin);
+        let legend = (data.series.len() > 1).then(|| self.render_legend(&data, style, &colors, cx));
         let theme = cx.theme();
-        // Capped: many columns would push the chart off the view (one column at a
-        // time is in the status bar's chart menu).
-        let legend =
-            (data.series.len() > 1).then(|| {
-                let hidden = data.series.len().saturating_sub(chart::MAX_LISTED);
-                h_flex()
-                    .gap_3()
-                    .flex_wrap()
-                    .children(data.series.iter().take(chart::MAX_LISTED).enumerate().map(
-                        |(i, s)| {
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(div().size_2().rounded_sm().bg(colors[i % colors.len()]))
-                                .child(s.name.clone())
-                        },
-                    ))
-                    .when(hidden > 0, |this| this.child(format!("+{hidden} more")))
-            });
         let settings = settings::current(cx);
         let label_size = settings.chart_font_size();
         v_flex()
@@ -984,14 +1239,23 @@ impl ResultView {
                     data.x_name
                 ))
             })
-            .child(div().flex_1().min_h_0().child(ResultChart::new(
-                "result-chart",
-                data,
-                style,
-                colors,
-                self.smooth_lines,
-                label_size.unwrap_or(chart::LABEL_SIZE),
-            )))
+            .child(
+                self.render_chart_area(
+                    ResultChart::new(
+                        "result-chart",
+                        data,
+                        style,
+                        colors,
+                        self.smooth_lines,
+                        label_size.unwrap_or(chart::LABEL_SIZE),
+                    )
+                    .pinned(pin)
+                    .bounds_out(self.chart_bounds.clone()),
+                    view,
+                    source,
+                    cx,
+                ),
+            )
             .into_any_element()
     }
 
@@ -1149,6 +1413,7 @@ impl ResultView {
                 .text_color(theme.muted_foreground)
                 .child("Run a query to see results")
                 .into_any_element(),
+            Status::Done { .. } if self.old_chart() => self.render_old_chart(cx),
             Status::Done { .. }
                 if let (Some(view), Ok(data)) = (self.chart_shown(), &self.chart) =>
             {

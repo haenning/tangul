@@ -197,14 +197,8 @@ impl Workspace {
             t.title = format!("{} · runs", bookmark.name).into();
             let file = cx.new(|_| Connection::local_file(conn, "tangul metrics"));
             t.set_conn(file, cx);
-            // Duration over time; rows are one pick away in the chart menu.
-            t.set_chart_view(
-                Some(ChartView {
-                    style: ChartStyle::Line,
-                    series: Some(0),
-                }),
-                cx,
-            );
+            // Duration over time (the SQL names `rows` to swap in).
+            t.set_chart_view(Some(ChartView::new(ChartStyle::Line)), cx);
             cx.emit(TabEvent::Run(sql.clone()));
         });
     }

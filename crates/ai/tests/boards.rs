@@ -144,6 +144,20 @@ async fn an_ai_creates_reads_and_changes_a_board() {
     let read = call(&ctx, "get_board", json!({"board": id})).await.unwrap();
     assert_eq!(read, created.trim_start_matches("Created. "));
 
+    // A chart stored before charts took one number column: reported, so the AI can
+    // recreate the query.
+    {
+        let mut board = only(&store);
+        board.tiles[1].view = tangul_core::chart::ChartView::from_key("bars:1");
+        store.lock().unwrap().save(board).unwrap();
+    }
+    let read = call(&ctx, "get_board", json!({"board": id})).await.unwrap();
+    assert!(
+        read.contains("\"All\" (bars, full width), a chart from tangul's old layout: if its query"),
+        "{read}"
+    );
+    let revision = only(&store).revision;
+
     // An edit at the revision read; then that revision is stale.
     let edit = |revision: &str| {
         json!({
@@ -167,6 +181,10 @@ async fn an_ai_creates_reads_and_changes_a_board() {
         "-- Changed by MCP\nselect count(*) from orders"
     );
     assert_eq!(now.tiles[0].held(), None, "a new query, a new plan");
+    assert!(
+        !now.tiles[0].view.unwrap().old_layout,
+        "a new query: the current layout"
+    );
     let stale = call(&ctx, "edit_board", edit(&revision)).await.unwrap_err();
     assert_eq!(
         stale.to_string(),
@@ -199,7 +217,7 @@ async fn an_ai_only_writes_tiles_that_read_and_leaves_the_rest_to_the_user() {
     assert_eq!(
         error.to_string(),
         "invalid input: view pie: table or one of line, area, stacked_area, bars, \
-         stacked_bars (with :n for one column)"
+         stacked_bars"
     );
 
     call(&ctx, "create_board", json!({"name": "X", "tiles": []}))

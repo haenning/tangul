@@ -517,7 +517,7 @@ impl Workspace {
                 t.set_conn(conn, cx);
             }
             if let Some(chart) = proposal.chart {
-                t.request_chart(chart.style, chart.column, cx);
+                t.request_chart(chart.style, cx);
             }
         });
         cx.notify();
@@ -550,7 +550,7 @@ impl Workspace {
                 t.set_conn(conn, cx);
             }
             if let Some(chart) = shown.chart {
-                t.request_chart(chart.style, chart.column, cx);
+                t.request_chart(chart.style, cx);
             }
             t.show_result(
                 query,

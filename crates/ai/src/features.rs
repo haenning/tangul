@@ -2,7 +2,7 @@
 //! user. Built from what the app supports (chart styles and limits), so it can't
 //! promise more.
 
-use tangul_assist::chart::ChartStyle;
+use tangul_assist::chart::{ChartStyle, RULES};
 
 /// The text `tangul_features` gives.
 pub fn text() -> String {
@@ -22,11 +22,10 @@ chart. Use it to visualize data, draw a graph, or hand over a finished query.
 reviews them and runs them as themselves, and the result stays with them. Every \
 change goes this way (you never run one), only when the user asked for it; and \
 queries the user should run or edit themselves.
-- Charts: \"show\": {{\"chart\": style}} (propose_sql: \"chart\" for a query), plus \"column\" for one number column by name \
-(the others are left out). The first column is the x axis (dates or labels), then one \
-or more number columns, one series each. Styles: {styles}. Any number of rows; few \
-rows and columns read best (GROUP BY). If the result doesn't fit the chart, tangul \
-shows the grid.
+- Charts: \"show\": {{\"chart\": style}} (propose_sql: \"chart\" for a query). \
+Styles: {styles}. {RULES} The series come from the data, so a query needn't know \
+them (e.g. every automation, with its failure rate per day). If the result doesn't \
+fit, tangul shows the grid and why; run_readonly tells you.
 - Bookmarks: the user can save a query under a name, and schedule it to run now and \
 then; tangul then tracks its duration and row count over time. list_bookmarks lists \
 them; run_readonly with \"bookmark\" runs one (with \"show\", for the user too).
