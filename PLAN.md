@@ -78,7 +78,7 @@ Native macOS database viewer in Rust + GPUI (Zed's UI framework) via `gpui-kit`
   join conditions, keywords; ranked by match quality + usage.
 - AI assistance later, via ACP (Agent Client Protocol); placeholder buttons in the
   bottom bar.
-- Schema graph (planned, placeholder in the bottom bar): an Obsidian-style graph of
+- Schema graph (planned): an Obsidian-style graph of
   tables and their foreign keys from `SchemaInfo`, with the same structure exported in a
   compact form for AI agents to build queries from.
 

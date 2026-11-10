@@ -272,8 +272,9 @@ impl Workspace {
             })
     }
 
-    /// Zed-style bottom bar: sidebar panels, then (planned) AI and schema-graph
-    /// tools; the active query's timing on the right.
+    /// Zed-style bottom bar: the left sidebar's panels in groups (schema |
+    /// bookmarks, history | boards); the active query's timing, the AI and the value
+    /// viewer on the right.
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let button = |panel: Panel, cx: &mut Context<Self>| {
             let shown = self.left.shows(panel) || self.right.shows(panel);
@@ -285,7 +286,16 @@ impl Workspace {
                 .tooltip(panel.label())
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(panel, cx)))
         };
-        let left: Vec<_> = self.left.panels.iter().map(|&p| button(p, cx)).collect();
+        let border = cx.theme().border;
+        let separator = || div().w(px(1.)).h_3p5().mx_1().bg(border);
+        // Schema | bookmarks, history | boards.
+        let mut left = Vec::new();
+        for &panel in self.left.panels {
+            if matches!(panel, Panel::Bookmarks | Panel::Boards) && !left.is_empty() {
+                left.push(separator().into_any_element());
+            }
+            left.push(button(panel, cx).into_any_element());
+        }
         // Right: the AI (the assistant, the MCP server), then the value viewer.
         let assistant = button(Panel::Assistant, cx);
         // The active query tab's own viewer.
@@ -322,16 +332,6 @@ impl Workspace {
                 theme.muted_foreground,
             )
         });
-        let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
-
-        let planned = |id: &'static str, icon: Lucide, tooltip: &'static str| {
-            Button::new(id)
-                .icon(Icon::new(icon))
-                .ghost()
-                .xsmall()
-                .disabled(true)
-                .tooltip(tooltip)
-        };
         h_flex()
             .h_7()
             .px_1()
@@ -343,12 +343,6 @@ impl Workspace {
             .text_xs()
             .text_color(theme.muted_foreground)
             .children(left)
-            .child(separator())
-            .child(planned(
-                "schema-graph",
-                Lucide::Network,
-                "Schema graph (tables and their relations) — planned",
-            ))
             .child(div().flex_1())
             .when(running, |this| this.child(Spinner::new().xsmall()))
             .child(div().pr_1().child(query_text))
