@@ -5170,13 +5170,19 @@ fn a_statement_says_when_it_last_ran_until_it_is_edited(cx: &mut TestAppContext)
         );
         assert!(window.find("editor-overlay").visible());
     });
-    // Typing: the old runs are of other SQL.
+    // Typing in one statement: its run is of other SQL; the other one keeps its
+    // note, where it ends now, without waiting for the history.
     step(handle, cx, |window, cx| {
         QueryTab::focus_editor(&tab, window, cx)
     });
     step(handle, cx, |window, cx| type_keys(window, "x", cx));
     step(handle, cx, |_, cx| {
-        assert!(tab.read(cx).last_runs(cx).is_empty());
+        let text = tab.read(cx).sql(cx);
+        assert!(text.starts_with("xselect"));
+        assert_eq!(
+            tab.read(cx).last_runs(cx),
+            [(text.len() - 1, "5 h ago · 3 rows changed".into())]
+        );
     });
 }
 

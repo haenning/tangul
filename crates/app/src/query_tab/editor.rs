@@ -98,8 +98,10 @@ pub struct SqlEditor {
     /// Bracket pairs over several lines, for the nesting guides.
     guides: Rc<Vec<Pair>>,
     /// (end of a statement, when it last ran and what it got); set from the
-    /// history, cleared on edit.
+    /// history. An edit keeps those of the statements it left as they were.
     last_runs: Rc<Vec<(usize, SharedString)>>,
+    /// The text of the statement each of `last_runs` is for.
+    last_run_texts: Vec<String>,
     _changes: Subscription,
     _cursor: Subscription,
 }
@@ -121,7 +123,7 @@ impl SqlEditor {
                 cx.emit(EditorEvent::Edited);
                 this.color_comments(cx);
                 this.text_version += 1;
-                this.last_runs = Rc::default();
+                this.keep_last_runs(cx);
                 this.update_structure(cx);
                 this.revalidate(cx);
             }
@@ -155,6 +157,7 @@ impl SqlEditor {
             statement_count: 0,
             guides: Rc::default(),
             last_runs: Rc::default(),
+            last_run_texts: Vec::new(),
             _changes: changes,
             _cursor: cursor,
         };
@@ -242,8 +245,46 @@ impl SqlEditor {
     /// When each statement last ran: (end of the statement, the note), for the
     /// text as it is now.
     pub fn set_last_runs(&mut self, notes: Vec<(usize, SharedString)>, cx: &mut Context<Self>) {
+        let text = self.text(cx);
+        let statements = split_with(&text, self.lexing);
+        let (notes, texts) = notes
+            .into_iter()
+            .filter_map(|(end, note)| {
+                let statement = statements.iter().find(|s| s.body.end == end)?;
+                Some(((end, note), statement.text(&text).to_string()))
+            })
+            .unzip();
         self.last_runs = Rc::new(notes);
+        self.last_run_texts = texts;
         cx.notify();
+    }
+
+    /// After an edit: the notes of the statements still as they were, moved to
+    /// where they end now; the edited one's goes (the history is asked again
+    /// once typing pauses).
+    fn keep_last_runs(&mut self, cx: &mut Context<Self>) {
+        if self.last_runs.is_empty() {
+            return;
+        }
+        let text = self.text(cx);
+        let statements = split_with(&text, self.lexing);
+        // In order, so a repeated statement keeps its own note.
+        let mut from = 0;
+        let (notes, texts) = self
+            .last_runs
+            .iter()
+            .zip(std::mem::take(&mut self.last_run_texts))
+            .filter_map(|((_, note), was)| {
+                let found = statements[from..]
+                    .iter()
+                    .position(|s| s.text(&text) == was)?;
+                let now = &statements[from + found];
+                from += found + 1;
+                Some(((now.body.end, note.clone()), was))
+            })
+            .collect::<(Vec<_>, Vec<_>)>();
+        self.last_runs = Rc::new(notes);
+        self.last_run_texts = texts;
     }
 
     /// The guides and the statement marks after an edit.
