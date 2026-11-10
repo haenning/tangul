@@ -409,6 +409,8 @@ pub fn config(theme: &ThemeFile) -> ThemeConfig {
         ("chart.3", chart(2)),
         ("chart.4", chart(3)),
         ("chart.5", chart(4)),
+        // The chart draws its grid in the border color.
+        ("chart.grid", hex(c.border)),
         ("chart.bullish", hex(c.success)),
         ("chart.bearish", hex(c.danger)),
         ("base.red", hex(c.danger)),

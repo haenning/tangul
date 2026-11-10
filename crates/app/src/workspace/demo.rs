@@ -14,7 +14,7 @@ use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, HeadlessAppContext, Hsla, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point,
-    ScrollDelta, ScrollWheelEvent, TouchPhase, Window, point, px, size,
+    ScrollDelta, ScrollEvent, TouchPhase, Window, point, px, size,
 };
 use image::{Rgba, RgbaImage};
 use tangul_core::chart::{ChartStyle, ChartView};
@@ -215,11 +215,12 @@ impl Demo {
             done = to;
             self.in_window(move |window, cx| {
                 window.dispatch_event(
-                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    PlatformInput::Scroll(ScrollEvent {
                         position: at,
                         delta: ScrollDelta::Pixels(point(px(0.), -delta)),
                         modifiers: Modifiers::default(),
                         touch_phase: TouchPhase::Moved,
+                        ..Default::default()
                     }),
                     cx,
                 );

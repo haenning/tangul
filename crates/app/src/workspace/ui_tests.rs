@@ -488,13 +488,25 @@ fn esc_closes_a_filter_popover_before_the_viewer(cx: &mut TestAppContext) {
     });
 }
 
+/// The system the tests run on, for parsing keys typed at run time.
+fn os() -> gpui_kit::OperatingSystem {
+    if cfg!(target_os = "macos") {
+        gpui_kit::OperatingSystem::Mac
+    } else if cfg!(target_os = "windows") {
+        gpui_kit::OperatingSystem::Windows
+    } else {
+        gpui_kit::OperatingSystem::Linux
+    }
+}
+
 /// Types `text` as the keyboard sends it: a space is the key `space` with its text,
 /// so key bindings for Space see it.
 fn type_keys(window: &mut Window, text: &str, cx: &mut App) {
     for c in text.chars() {
         let text = c.to_string();
         let mut key =
-            gpui_kit::Keystroke::parse(if c == ' ' { "space" } else { &text }).expect("a key");
+            gpui_kit::Keystroke::parse_with_os(if c == ' ' { "space" } else { &text }, os())
+                .expect("a key");
         key.key_char = Some(text);
         window.dispatch_keystroke(key, cx);
         window.refresh();
@@ -3889,7 +3901,7 @@ fn clicks_mark_cells_rectangles_and_toggle_rows(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| {
         // The rectangle between the cells.
         assert_eq!(marked(&tab, 4, cx), (vec![1, 2, 3], vec![0, 1]));
-        click_cell(window, 2, 0, Modifiers::secondary_key(), cx);
+        click_cell(window, 2, 0, Modifiers::secondary_key(cx), cx);
     });
     step(handle, cx, |_, cx| {
         // ⌘-click takes the row out.
@@ -4022,13 +4034,23 @@ fn secondary_click_toggles_a_column(cx: &mut TestAppContext) {
         assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2, 3], vec![0, 1]));
     });
     step(handle, cx, |window, cx| {
-        click_with(window, ("th-name", 0usize), Modifiers::secondary_key(), cx)
+        click_with(
+            window,
+            ("th-name", 0usize),
+            Modifiers::secondary_key(cx),
+            cx,
+        )
     });
     step(handle, cx, |_, cx| {
         assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2, 3], vec![1]));
     });
     step(handle, cx, |window, cx| {
-        click_with(window, ("th-name", 1usize), Modifiers::secondary_key(), cx)
+        click_with(
+            window,
+            ("th-name", 1usize),
+            Modifiers::secondary_key(cx),
+            cx,
+        )
     });
     step(handle, cx, |_, cx| {
         assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
@@ -4291,7 +4313,7 @@ fn the_row_handle_marks_whole_rows(cx: &mut TestAppContext) {
         // ⇧: the rows from the first.
         assert_eq!(marked(&tab, 5, cx), (vec![1, 2, 3], all.clone()));
         let at = handle_center(window, 2);
-        click_at(window, at, Modifiers::secondary_key(), cx);
+        click_at(window, at, Modifiers::secondary_key(cx), cx);
     });
     step(handle, cx, |window, cx| {
         // ⌘: takes the row out.
@@ -4599,7 +4621,7 @@ fn copy_without_a_mark_copies_the_selected_cell(cx: &mut TestAppContext) {
     });
     // ⌘-click takes the only row out: no mark, the cell stays selected.
     step(handle, cx, |window, cx| {
-        click_cell(window, 1, 1, Modifiers::secondary_key(), cx)
+        click_cell(window, 1, 1, Modifiers::secondary_key(cx), cx)
     });
     step(handle, cx, |window, cx| {
         assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));

@@ -102,11 +102,10 @@ mod tests {
             .filter(|c| !c.is_empty())
             .collect();
         let theme = default_for(ThemeMode::Dark);
-        let style = HighlightTheme {
-            name: theme.name.clone(),
-            appearance: gpui_kit::component::ThemeMode::Dark,
-            style: crate::theme::config(&theme).highlight.unwrap(),
-        };
+        let mut style = (*HighlightTheme::default_dark()).clone();
+        style.name = theme.name.clone();
+        style.appearance = gpui_kit::component::ThemeMode::Dark;
+        style.style = crate::theme::config(&theme).highlight.unwrap();
         // `spell` marks text for spell checking, not a color.
         let uncolored: Vec<_> = captures
             .into_iter()
@@ -119,11 +118,10 @@ mod tests {
     fn sql_is_colored_by_the_theme() {
         init();
         let theme = default_for(ThemeMode::Dark);
-        let style = HighlightTheme {
-            name: theme.name.clone(),
-            appearance: gpui_kit::component::ThemeMode::Dark,
-            style: crate::theme::config(&theme).highlight.unwrap(),
-        };
+        let mut style = (*HighlightTheme::default_dark()).clone();
+        style.name = theme.name.clone();
+        style.appearance = gpui_kit::component::ThemeMode::Dark;
+        style.style = crate::theme::config(&theme).highlight.unwrap();
         let sql =
             "SELECT CASE WHEN o.total > 1.5 THEN 'big' END, count(*) FROM orders o WHERE o.id = 42";
         let mut highlighter = SyntaxHighlighter::new("sql");
