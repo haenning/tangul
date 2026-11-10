@@ -21,7 +21,6 @@ pub mod json;
 pub mod last_run;
 pub mod lexer;
 pub mod mark;
-pub mod nesting;
 pub mod nl;
 pub mod perf;
 pub mod profile;

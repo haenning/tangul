@@ -5098,28 +5098,6 @@ fn several_statements_are_counted_and_marked(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn nested_brackets_get_a_guide_per_level(cx: &mut TestAppContext) {
-    let (handle, workspace) = open(cx);
-    let sql = "select *\nfrom (\n  select max(x) from (\n    select 1 as x\n  ) a\n) b";
-    let tab = sql_tab(handle, &workspace, sql, cx);
-    step(handle, cx, |window, cx| {
-        // `max(x)` is on one line: no guide.
-        let depths: Vec<_> = tab.read(cx).guides(cx).iter().map(|p| p.depth).collect();
-        assert_eq!(depths, [0, 1]);
-        assert!(window.find("editor-overlay").visible());
-    });
-    // Off in the settings: not drawn.
-    step(handle, cx, |_, cx| {
-        let mut s = crate::settings::Settings::default();
-        s.editor.nesting_guides = false;
-        crate::settings::set_for_test(s, cx);
-    });
-    step(handle, cx, |window, _| {
-        assert!(window.try_find("editor-overlay").is_none());
-    });
-}
-
-#[gpui_kit::test]
 fn a_statement_says_when_it_last_ran_until_it_is_edited(cx: &mut TestAppContext) {
     use tangul_data::local::{HistoryEntry, NewHistory, Source};
     let (handle, workspace) = open(cx);

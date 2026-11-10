@@ -17,7 +17,6 @@ use tangul_assist::analyze::statements;
 use tangul_assist::dialect::Dialect;
 use tangul_assist::format::{FormatRules, format_sql, map_offset};
 use tangul_assist::lexer::{Lexing, TokenKind, tokenize, tokenize_with};
-use tangul_assist::nesting::{Pair, guides, sql_pairs};
 use tangul_assist::statement::{Statement, split_with, statement_at, statement_at_with};
 use tangul_engine::Problem;
 
@@ -26,6 +25,8 @@ use crate::completion::Snippets;
 
 /// Pause in typing after which the SQL is checked on the server.
 const VALIDATE_AFTER: Duration = Duration::from_secs(1);
+/// The gutter bars of the statements ⌘↵ doesn't take, against the current one's.
+const OTHER_STATEMENTS: f32 = 0.4;
 /// Limits per check; larger scripts are only checked in part.
 const MAX_VALIDATE_STATEMENTS: usize = 50;
 const MAX_VALIDATE_BYTES: usize = 100_000;
@@ -95,8 +96,6 @@ pub struct SqlEditor {
     /// Bumped on every edit.
     text_version: u64,
     statement_count: usize,
-    /// Bracket pairs over several lines, for the nesting guides.
-    guides: Rc<Vec<Pair>>,
     /// (end of a statement, when it last ran and what it got); set from the
     /// history. An edit keeps those of the statements it left as they were.
     last_runs: Rc<Vec<(usize, SharedString)>>,
@@ -124,7 +123,7 @@ impl SqlEditor {
                 this.color_comments(cx);
                 this.text_version += 1;
                 this.keep_last_runs(cx);
-                this.update_structure(cx);
+                this.mark_statements(cx);
                 this.revalidate(cx);
             }
         });
@@ -155,14 +154,13 @@ impl SqlEditor {
             marked_for: None,
             text_version: 0,
             statement_count: 0,
-            guides: Rc::default(),
             last_runs: Rc::default(),
             last_run_texts: Vec::new(),
             _changes: changes,
             _cursor: cursor,
         };
         editor.color_comments(cx);
-        editor.update_structure(cx);
+        editor.mark_statements(cx);
         editor
     }
 
@@ -191,7 +189,7 @@ impl SqlEditor {
             self.lexing = lexing;
             self.text_version += 1;
             self.color_comments(cx);
-            self.update_structure(cx);
+            self.mark_statements(cx);
         }
     }
 
@@ -230,11 +228,6 @@ impl SqlEditor {
     /// How many statements there are (kept up to date with the text).
     pub fn statement_count(&self) -> usize {
         self.statement_count
-    }
-
-    /// Bracket pairs over several lines (the nesting guides).
-    pub fn guides(&self) -> Rc<Vec<Pair>> {
-        self.guides.clone()
     }
 
     /// The notes after statements (when each last ran).
@@ -287,15 +280,8 @@ impl SqlEditor {
         self.last_run_texts = texts;
     }
 
-    /// The guides and the statement marks after an edit.
-    fn update_structure(&mut self, cx: &mut Context<Self>) {
-        let text = self.text(cx);
-        self.guides = Rc::new(guides(&text, &sql_pairs(&text, self.lexing)));
-        self.mark_statements(cx);
-    }
-
-    /// A gutter bar along each statement, stronger on the one under the cursor;
-    /// none with a single statement. Only set when they change (setting them
+    /// A gutter bar along each statement, in rainbow colors in turn (red, orange,
+    /// …), stronger on the one under the cursor; none with a single statement. Only set when they change (setting them
     /// notifies the editor, which calls this again).
     fn mark_statements(&mut self, cx: &mut Context<Self>) {
         let (text, cursor) = {
@@ -323,15 +309,17 @@ impl SqlEditor {
         if marked == self.marked {
             return;
         }
-        let theme = cx.theme();
+        let colors = crate::theme::statement_colors(cx);
         let decorations = marked
             .iter()
-            .map(|(range, here)| {
-                GutterDecoration::new(range.clone()).with_color(if *here {
-                    theme.primary
+            .zip(colors.iter().cycle())
+            .map(|((range, here), &color)| {
+                let color = if *here {
+                    color
                 } else {
-                    theme.border
-                })
+                    color.opacity(OTHER_STATEMENTS)
+                };
+                GutterDecoration::new(range.clone()).with_color(color)
             })
             .collect();
         self.marked = marked;

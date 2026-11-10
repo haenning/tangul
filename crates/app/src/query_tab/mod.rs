@@ -31,7 +31,7 @@ use crate::{
     assets::Lucide,
     completion::Snippets,
     connection::{ConnStatus, Connection},
-    nesting::Overlay,
+    notes::Overlay,
     result_view::{CellValue, ResultEvent, ResultView},
     settings,
 };
@@ -357,12 +357,6 @@ impl QueryTab {
     #[cfg(test)]
     pub fn statement_marks(&self, cx: &App) -> Vec<(std::ops::Range<usize>, bool)> {
         self.editor.read(cx).statement_marks().to_vec()
-    }
-
-    /// The nesting guides' pairs (tests).
-    #[cfg(test)]
-    pub fn guides(&self, cx: &App) -> Vec<tangul_assist::nesting::Pair> {
-        self.editor.read(cx).guides().to_vec()
     }
 
     pub fn set_conn(&mut self, conn: Entity<Connection>, cx: &mut Context<Self>) {
@@ -692,19 +686,11 @@ impl QueryTab {
         )
     }
 
-    /// Nesting guides and when each statement last ran, over the editor, as the
-    /// settings say.
+    /// When each statement last ran, over the editor, as the settings say.
     fn render_overlay(&self, cx: &App) -> Option<impl IntoElement + use<>> {
         let settings = &settings::current(cx).editor;
         let editor = self.editor.read(cx);
-        let guides = if settings.nesting_guides {
-            editor.guides()
-        } else {
-            Rc::default()
-        };
         let overlay = Overlay {
-            colors: crate::theme::chart_colors(depth_colors(&guides), cx),
-            guides,
             notes: if settings.last_run {
                 editor.last_runs()
             } else {
@@ -906,10 +892,4 @@ impl Focusable for QueryTab {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.editor.read(cx).state().read(cx).focus_handle(cx)
     }
-}
-
-/// Colors for the guides: one per depth they reach (shades of the theme's chart
-/// color when it has one).
-fn depth_colors(guides: &[tangul_assist::nesting::Pair]) -> usize {
-    guides.iter().map(|p| p.depth + 1).max().unwrap_or(1)
 }

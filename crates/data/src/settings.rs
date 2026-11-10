@@ -3,8 +3,7 @@
 //!
 //! ```json
 //! {
-//!   "editor": { "font_size": 14, "font_family": "Menlo", "nesting_guides": true,
-//!               "last_run": true },
+//!   "editor": { "font_size": 14, "font_family": "Menlo", "last_run": true },
 //!   "table": { "font_size": 12, "font_family": "Menlo" },
 //!   "chart": { "primary_color": "#2563eb", "max_series": 12, "font_size": 10,
 //!              "font_family": null },
@@ -385,9 +384,6 @@ impl Settings {
 pub struct EditorSettings {
     #[serde(flatten)]
     pub font: FontSettings,
-    /// A line from each bracket to its partner, colored by depth (also in the value
-    /// viewer's JSON).
-    pub nesting_guides: bool,
     /// When a statement last ran and what it got, after its last line.
     pub last_run: bool,
 }
@@ -396,7 +392,6 @@ impl Default for EditorSettings {
     fn default() -> Self {
         Self {
             font: FontSettings::default(),
-            nesting_guides: true,
             last_run: true,
         }
     }
@@ -769,10 +764,7 @@ mod tests {
         let s = Settings::parse(&on).unwrap();
         assert!(s.is_read_only("reporting"));
         assert_eq!(s.editor.font.font_size, Some(15.));
-        assert!(
-            s.editor.nesting_guides && s.editor.last_run,
-            "on unless turned off"
-        );
+        assert!(s.editor.last_run, "on unless turned off");
         assert!(!s.safety.confirm_unfiltered_writes);
         // Twice is still once.
         let again = with_read_only(&on, "reporting", true).unwrap();
