@@ -9,7 +9,7 @@ mod xlsx;
 
 use std::cell::Cell;
 use std::rc::{Rc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
@@ -135,7 +135,8 @@ enum Contents {
 
 enum Status {
     Idle,
-    Running,
+    /// Since then.
+    Running(Instant),
     Done {
         elapsed: Duration,
         error: Option<SharedString>,
@@ -189,6 +190,8 @@ pub struct ResultView {
     error_text: Entity<ErrorText>,
     /// SQL of the connection the results come from, for filtering, sorting, paging.
     dialect: Option<&'static dyn Dialect>,
+    /// Redraws the running time while it counts up.
+    _count_up: Task<()>,
     _table_events: Subscription,
 }
 
@@ -241,6 +244,7 @@ impl ResultView {
             page_error: None,
             error_text: cx.new(|cx| ErrorText::new(window, cx)),
             dialect: None,
+            _count_up: Task::ready(()),
             _table_events: table_events,
         }
     }
@@ -455,6 +459,12 @@ impl ResultView {
         self.running
     }
 
+    /// Whether a run is over and its result (or why it has none) is shown: not
+    /// before the first run, nor while one runs.
+    pub fn finished(&self) -> bool {
+        matches!(self.status, Status::Done { .. })
+    }
+
     /// The cell at `row`, `col` of the result shown (tests).
     #[cfg(test)]
     pub fn cell(&self, row: usize, col: usize, cx: &App) -> Option<String> {
@@ -503,7 +513,7 @@ impl ResultView {
     pub fn started(&mut self, query: QueryId, sql: &str, cx: &mut Context<Self>) {
         self.running = Some(query);
         self.sql = sql.to_string();
-        self.status = Status::Running;
+        self.set_running(cx);
         self.has_result_set = false;
         self.truncated = false;
         self.last_rows = None;
@@ -523,6 +533,12 @@ impl ResultView {
         cx.notify();
     }
 
+    /// Running from now: the status bar counts the time up.
+    fn set_running(&mut self, cx: &mut Context<Self>) {
+        self.status = Status::Running(Instant::now());
+        self._count_up = crate::ui::count_up(cx, |v| matches!(v.status, Status::Running(_)));
+    }
+
     /// The result can't be sorted, filtered or paged by queries around it.
     pub fn not_refinable(&mut self, cx: &mut Context<Self>) {
         self.base_sql = None;
@@ -540,7 +556,7 @@ impl ResultView {
         self.page_error = None;
         self.truncated = false;
         if !append {
-            self.status = Status::Running;
+            self.set_running(cx);
             self.table.update(cx, |t, cx| {
                 t.delegate_mut().clear_rows();
                 cx.notify();
@@ -849,11 +865,11 @@ impl ResultView {
         }
         match &self.status {
             Status::Idle => "".into(),
-            Status::Running => format!("Running… {rows} rows").into(),
+            Status::Running(since) => crate::ui::millis(since.elapsed()),
             Status::Done {
                 elapsed, cancelled, ..
             } => {
-                let mut s = format!("{} ms", elapsed.as_millis());
+                let mut s = crate::ui::millis(*elapsed).to_string();
                 if self.has_result_set {
                     let noun = if rows == 1 { "row" } else { "rows" };
                     s = format!("{rows} {noun} · {s}");

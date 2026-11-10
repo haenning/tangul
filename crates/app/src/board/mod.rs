@@ -103,6 +103,8 @@ pub struct BoardTab {
     /// … ago".
     _timer: Task<()>,
     _tick: Task<()>,
+    /// Redraws the refresh's time while it counts up.
+    _count_up: Task<()>,
     focus_handle: FocusHandle,
 }
 
@@ -152,6 +154,7 @@ impl BoardTab {
             _refresh: Task::ready(()),
             _timer: Task::ready(()),
             _tick: tick,
+            _count_up: Task::ready(()),
             focus_handle: cx.focus_handle(),
         };
         tab.sync(board, window, cx);
@@ -318,6 +321,16 @@ impl BoardTab {
         });
     }
 
+    /// For the status bar: how long the last refresh took, counting up while it
+    /// runs.
+    pub fn status_text(&self) -> SharedString {
+        match (self.last, self.running, self.updated) {
+            (Some(start), Some(_), _) => crate::ui::millis(start.elapsed()),
+            (Some(start), None, Some(end)) if end >= start => crate::ui::millis(end - start),
+            _ => SharedString::default(),
+        }
+    }
+
     /// Runs every tile's query now, in one batch (each statement once).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Ok(conn) = self.conn.clone() else {
@@ -337,6 +350,7 @@ impl BoardTab {
         }
         let query = QueryId(crate::next_id());
         self.running = Some(query);
+        self._count_up = crate::ui::count_up(cx, |this| this.running.is_some());
         let engine = self.engine.clone();
         self._refresh = cx.spawn(async move |this, cx| {
             let options = QueryOptions::new(Caller::Board);

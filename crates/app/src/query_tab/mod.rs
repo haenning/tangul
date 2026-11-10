@@ -313,6 +313,11 @@ impl QueryTab {
         self.results.read(cx).running().is_some()
     }
 
+    /// A run is over and its result is shown ([`ResultView::finished`]).
+    pub fn finished(&self, cx: &App) -> bool {
+        self.results.read(cx).finished()
+    }
+
     /// The engine's id of the tab's connection.
     pub fn conn_id(&self, cx: &App) -> Option<ConnId> {
         Some(self.conn.as_ref()?.read(cx).id)

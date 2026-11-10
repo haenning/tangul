@@ -5185,3 +5185,44 @@ fn a_statement_says_when_it_last_ran_until_it_is_edited(cx: &mut TestAppContext)
         );
     });
 }
+
+#[gpui_kit::test]
+fn the_bottom_bar_counts_a_run_up_in_its_middle(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = sql_tab(handle, &workspace, "select 1", cx);
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.started(QueryId(1), "select 1", cx));
+    });
+    step(handle, cx, |window, cx| {
+        // Running: only the time so far.
+        let text = tab.read(cx).status_text(cx);
+        assert!(text.ends_with(" ms") && !text.contains("row"), "{text}");
+        // No chart button before there is a result.
+        assert!(window.try_find("chart").is_none());
+        // As far from the left as from the right.
+        let middle = window.find("status-middle").bounds().center().x;
+        let width = window.viewport_size().width;
+        assert!(
+            (middle - width / 2.).abs() < px(1.),
+            "{middle:?} of {width:?}"
+        );
+    });
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| {
+            t.on_query_event(
+                QueryEvent::Finished {
+                    elapsed: Duration::from_millis(12),
+                    error: None,
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+                cx,
+            )
+        });
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(tab.read(cx).status_text(cx).as_ref(), "12 ms");
+        assert!(window.try_find("chart").is_some());
+    });
+}
