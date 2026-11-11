@@ -516,6 +516,29 @@ pub fn min_max_per_pixel(points: &[(f32, f32)], width: f32) -> Vec<(f32, f32)> {
     out
 }
 
+/// The rows to draw as bars when there are more rows than pixel columns: per
+/// column (`xs`, the rows' centers in pixels, ascending) the one reaching
+/// furthest (`extents`), as the others would be drawn over anyway. Bars cost the
+/// width then, not the row count. With room for each row: all of them.
+pub fn peak_per_pixel(xs: &[f32], extents: &[f64]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < xs.len() {
+        let column = xs[i].floor();
+        let mut best = i;
+        let mut j = i;
+        while j < xs.len() && xs[j].floor() == column {
+            if extents[j] > extents[best] {
+                best = j;
+            }
+            j += 1;
+        }
+        out.push(best);
+        i = j;
+    }
+    out
+}
+
 /// About `count` round axis values covering `min..=max` (steps of 1, 2 or 5 times a
 /// power of ten), from at or below `min` to at or above `max`.
 pub fn ticks(min: f64, max: f64, count: usize) -> Vec<f64> {
@@ -697,6 +720,21 @@ fn short(v: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn one_bar_per_pixel_column() {
+        // Room for each: all.
+        assert_eq!(
+            peak_per_pixel(&[0.5, 1.5, 2.5], &[1., 2., 3.]),
+            vec![0, 1, 2]
+        );
+        // Three rows in column 0, two in column 1: the furthest of each.
+        assert_eq!(
+            peak_per_pixel(&[0.1, 0.4, 0.8, 1.2, 1.6], &[1., 5., 2., 4., 3.]),
+            vec![1, 3]
+        );
+        assert!(peak_per_pixel(&[], &[]).is_empty());
+    }
+
     use super::*;
     use tangul_core::{ColumnInfo, RowBatch};
 

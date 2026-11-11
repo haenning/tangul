@@ -16,7 +16,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_assist::chart::{ChartData, ChartStyle, format_value, min_max_per_pixel, ticks};
+use tangul_assist::chart::{
+    ChartData, ChartStyle, format_value, min_max_per_pixel, peak_per_pixel, ticks,
+};
 
 /// Room left of the plot for the value labels, at the default label size.
 const VALUE_GUTTER: f32 = 44.;
@@ -37,6 +39,8 @@ const TIP_FRAME: f32 = 64.;
 const TIP_COLUMNS: usize = 4;
 /// Radius of the outer corners of a bar, or of a whole stack of them.
 const BAR_RADIUS: f32 = 3.;
+/// Below this (narrow bars) no rounding.
+const MIN_RADIUS: f32 = 1.5;
 /// Points along each rounded corner.
 const ARC_STEPS: usize = 6;
 /// How much of their color the other series keep while one is under the pointer
@@ -356,10 +360,22 @@ impl ResultChart {
             group / series as f32
         };
         let band = (width - 1.).max(1.);
+        // More rows than pixels: one bar per pixel column, the tallest.
+        let xs: Vec<f32> = (0..rows).map(|row| l.x(row)).collect();
+        let extents: Vec<f64> = match &stacks {
+            Some(_) => ends.iter().map(|(up, down)| up - down).collect(),
+            None => (0..rows)
+                .map(|row| {
+                    let values = self.data.series.iter().filter_map(|s| s.values[row]);
+                    values.map(f64::abs).fold(0., f64::max)
+                })
+                .collect(),
+        };
+        let drawn = peak_per_pixel(&xs, &extents);
         let background = cx.theme().background;
         for (s, values) in self.data.series.iter().enumerate() {
             let color = self.shown(s, self.color(s), background);
-            for row in 0..rows {
+            for &row in &drawn {
                 let slot = l.x(row) - group / 2.;
                 // (left edge, from, to, stack end) in values.
                 let (left, from, to, end) = match &stacks {
@@ -483,6 +499,10 @@ impl Plot for ResultChart {
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        // Scrolled out of view (a board's other tiles): nothing to paint.
+        if !window.content_mask().bounds.intersects(&bounds) {
+            return;
+        }
         let l = self.layout(bounds);
         self.paint_axes(&l, &bounds, window, cx);
         if let Some(pin) = self.pin.filter(|p| p.row < self.data.x.len()) {
@@ -695,12 +715,16 @@ fn rounded_segment(
     radius: f32,
 ) -> Option<Vec<(f32, f32)>> {
     let r = radius.min((x1 - x0) / 2.);
+    // Too thin to show a rounding: a rectangle, cheaper to draw.
+    if r < MIN_RADIUS {
+        return None;
+    }
     // Distances from the tip, nearer first; the segment lies on one side of it.
     let (near, far) = {
         let (a, b) = ((y0 - tip).abs(), (y1 - tip).abs());
         (a.min(b), a.max(b))
     };
-    if r <= 0. || near >= r {
+    if near >= r {
         return None;
     }
     let dir = if y0 + y1 >= 2. * tip { 1. } else { -1. };
@@ -764,8 +788,9 @@ mod tests {
         // Negative bars round at their bottom.
         let down = rounded_segment(0., 10., 50., 80., 80., 3.).unwrap();
         assert_eq!(down.first(), Some(&(3., 80.)));
-        // Narrow bars: never more than half their width.
-        let thin = rounded_segment(0., 2., 100., 40., 40., 3.).unwrap();
-        assert_eq!(thin.first(), Some(&(1., 40.)));
+        // Narrow bars: never more than half their width, none when too thin.
+        let thin = rounded_segment(0., 4., 100., 40., 40., 3.).unwrap();
+        assert_eq!(thin.first(), Some(&(2., 40.)));
+        assert_eq!(rounded_segment(0., 2., 100., 40., 40., 3.), None);
     }
 }
