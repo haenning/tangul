@@ -8,7 +8,7 @@ use std::rc::Rc;
 use gpui_kit::component::{
     ActiveTheme as _, StyledExt as _, h_flex,
     plot::{
-        AxisLabelSide, AxisText, Curve, Grid, IntoPlot, Plot, PlotAxis, axis_gutter,
+        AxisLabelSide, AxisText, Curve, Grid, IntoPlot, PathCaches, Plot, PlotAxis, axis_gutter,
         shape::{Area, Line},
         tooltip::{CrossLine, Dot, PlotHover, Tooltip, TooltipState},
     },
@@ -418,7 +418,17 @@ impl ResultChart {
         }
     }
 
-    fn paint_lines(&self, l: &Layout, bounds: &Bounds<Pixels>, window: &mut Window, cx: &App) {
+    /// Lines and areas, through `caches`: their tessellated shapes are reused
+    /// while the points stay the same (scrolling only moves them; the
+    /// highlight only changes colors).
+    fn paint_lines(
+        &self,
+        l: &Layout,
+        bounds: &Bounds<Pixels>,
+        caches: &mut PathCaches,
+        window: &mut Window,
+        cx: &App,
+    ) {
         let background = cx.theme().background;
         // Straight segments are exact; curves can swing past the values between points.
         let curve = if self.smooth {
@@ -434,6 +444,7 @@ impl ResultChart {
                 // its own line and the one below.
                 let stacks = self.data.stacks();
                 for s in (0..stacks.len()).rev() {
+                    let (fill_cache, line_cache) = caches.slot_pair(s);
                     let color = self.color(s);
                     let (fill, color) = (
                         self.shown(s, crate::theme::tint(color, background, 0.45), background),
@@ -451,10 +462,12 @@ impl ResultChart {
                         .fill(fill)
                         .stroke(color)
                         .curve(curve)
-                        .paint(bounds, window);
+                        .paint_cached(bounds, fill_cache, line_cache, window);
                 }
             }
             ChartStyle::Line | ChartStyle::Area => {
+                // Slots: lines at their series, areas' fill and outline after them.
+                let series_count = self.data.series.len();
                 for s in self.drawing_order() {
                     let series = &self.data.series[s];
                     let color = self.shown(s, self.color(s), background);
@@ -464,6 +477,7 @@ impl ResultChart {
                         .collect();
                     let points = l.line(points, bounds);
                     if self.style == ChartStyle::Area {
+                        let (fill_cache, line_cache) = caches.slot_pair(series_count + s);
                         Area::new()
                             .data(points.clone())
                             .x(|p: &(f32, f32)| Some(p.0))
@@ -472,7 +486,7 @@ impl ResultChart {
                             .fill(color.opacity(0.18))
                             .stroke(transparent_black())
                             .curve(curve)
-                            .paint(bounds, window);
+                            .paint_cached(bounds, fill_cache, line_cache, window);
                     }
                     Line::new()
                         .data(points)
@@ -481,7 +495,7 @@ impl ResultChart {
                         .stroke(color)
                         .stroke_width(2.)
                         .curve(curve)
-                        .paint(bounds, window);
+                        .paint_cached(bounds, caches.slot(s), window);
                 }
             }
             ChartStyle::Bars | ChartStyle::StackedBars => {}
@@ -499,6 +513,9 @@ impl Plot for ResultChart {
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        // Asked for on every paint, also out of view, so the shapes stay cached
+        // while a board scrolls a tile out and back in.
+        let caches = PathCaches::for_paint("chart-shapes", window, cx);
         // Scrolled out of view (a board's other tiles): nothing to paint.
         if !window.content_mask().bounds.intersects(&bounds) {
             return;
@@ -519,7 +536,15 @@ impl Plot for ResultChart {
         if self.style.is_bars() {
             self.paint_bars(&l, &bounds, window, cx);
         } else {
-            self.paint_lines(&l, &bounds, window, cx);
+            // Spike only: TANGUL_CHART_CACHE=0 builds every shape on every frame,
+            // to compare.
+            if cache_off() {
+                self.paint_lines(&l, &bounds, &mut PathCaches::default(), window, cx);
+            } else {
+                caches.update(cx, |caches, cx| {
+                    self.paint_lines(&l, &bounds, caches, window, cx)
+                });
+            }
         }
     }
 
@@ -743,6 +768,15 @@ fn rounded_segment(
     }
     points.extend(arc.iter().rev().map(|&t| (x1 - inset(t), tip + dir * t)));
     Some(points)
+}
+
+/// Spike only: shapes built on every frame (to compare), from
+/// `TANGUL_CHART_CACHE=0` or a test.
+pub static CACHE_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn cache_off() -> bool {
+    CACHE_OFF.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("TANGUL_CHART_CACHE").is_some_and(|v| v == "0")
 }
 
 /// A series' name; "Other" says how many it adds up.

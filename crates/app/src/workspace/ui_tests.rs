@@ -5224,3 +5224,65 @@ fn the_bottom_bar_counts_a_run_up_in_its_middle(cx: &mut TestAppContext) {
         assert!(window.try_find("chart").is_some());
     });
 }
+
+/// Spike: frame time of a large stacked area (1000 days × 10 series, like the
+/// query in the spike's notes), with and without the shape cache. Run with
+/// `cargo test --release -p tangul chart_frame_time -- --ignored --nocapture`.
+#[gpui_kit::test]
+#[ignore]
+fn chart_frame_time(cx: &mut TestAppContext) {
+    use tangul_core::chart::ChartStyle;
+    let (handle, workspace) = open(cx);
+    let sql = "select day, series, value from t order by 1, 2";
+    for style in [ChartStyle::StackedArea, ChartStyle::Area, ChartStyle::Line] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            let tab = workspace.update(cx, |ws, cx| ws.add_tab(sql, window, cx));
+            tab.update(cx, |t, cx| {
+                t.started(QueryId(1), sql, cx);
+                let cols = ["day", "series", "value"].map(|name| ColumnInfo { name: name.into() });
+                t.on_query_event(QueryEvent::Exec(ExecEvent::ResultStart(cols.into())), cx);
+                let mut batch = RowBatch::default();
+                for i in 0..1000 {
+                    for s in 1..=10 {
+                        let v = 50. + 40. * ((i as f64) / 20. + s as f64).sin();
+                        batch.push_cell(Some(&format!("d{i:04}")));
+                        batch.push_cell(Some(&format!("s{s:02}")));
+                        batch.push_cell(Some(&format!("{v:.1}")));
+                        batch.finish_row();
+                    }
+                }
+                t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
+                t.on_query_event(
+                    QueryEvent::Finished {
+                        elapsed: Default::default(),
+                        error: None,
+                        error_position: None,
+                        in_transaction: false,
+                        cancelled: false,
+                    },
+                    cx,
+                );
+                t.set_chart_view(Some(tangul_core::chart::ChartView::new(style)), cx);
+            });
+        })
+        .unwrap();
+        for cache in [true, false] {
+            crate::chart::CACHE_OFF.store(!cache, std::sync::atomic::Ordering::Relaxed);
+            step(handle, cx, |_, _| {});
+            let frames = 30;
+            let start = std::time::Instant::now();
+            for _ in 0..frames {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.refresh();
+                    window.render_frame(cx);
+                })
+                .unwrap();
+            }
+            eprintln!(
+                "{style:?} cache={cache}: {:?} per frame",
+                start.elapsed() / frames
+            );
+        }
+    }
+    crate::chart::CACHE_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
+}
