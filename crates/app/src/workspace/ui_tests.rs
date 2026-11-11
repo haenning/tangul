@@ -5225,7 +5225,7 @@ fn the_bottom_bar_counts_a_run_up_in_its_middle(cx: &mut TestAppContext) {
     });
 }
 
-/// Result rows of the spike's test query: `days` days × `series` series.
+/// Rows like those of a schema-free test query (`generate_series`): `days` days × `series` series.
 fn wave_rows(days: usize, series: usize) -> RowBatch {
     let mut batch = RowBatch::default();
     for i in 0..days {
@@ -5242,9 +5242,8 @@ fn wave_rows(days: usize, series: usize) -> RowBatch {
     batch
 }
 
-/// A board of six large stacked areas (the spike's query: 999 days × 10
-/// series) scrolled down and up twice, for each way charts can be drawn: the
-/// time of each frame, what `crate::perf` counted and where the time went.
+/// A board of six large stacked areas (999 days × 10 series, see
+/// `wave_rows`) scrolled down and up twice: the time of each frame, what `crate::perf` counted and where the time went.
 /// Prints it and appends a line per run to `perf/board_scroll.jsonl`, to
 /// compare over time (on the same machine). Run
 /// `cargo test --release -p tangul board_scroll_performance -- --ignored --nocapture`.
@@ -5287,8 +5286,7 @@ fn board_scroll_performance(cx: &mut TestAppContext) {
         .append(true)
         .open(&path)
         .unwrap();
-    for cache in [true, false] {
-        crate::chart::CACHE_OFF.store(!cache, std::sync::atomic::Ordering::Relaxed);
+    {
         crate::perf::record(true);
         // The results arrive: the first frame builds every shape.
         let mut result = ResultSet::new(
@@ -5354,7 +5352,6 @@ fn board_scroll_performance(cx: &mut TestAppContext) {
             "cpus": std::thread::available_parallelism().map_or(0, |n| n.get()),
             "release": !cfg!(debug_assertions),
             "scenario": "6 stacked areas, 999 x 10 noisy, scroll 60 steps",
-            "cache": cache,
             "first_frame_ms": ms(first),
             "frame_ms": { "p50": q(0.5), "p95": q(0.95), "max": q(1.) },
             "shapes": { "built": stats.shapes_built, "reused": stats.shapes_reused },
@@ -5363,7 +5360,6 @@ fn board_scroll_performance(cx: &mut TestAppContext) {
         eprintln!("{line}");
         writeln!(log, "{line}").unwrap();
     }
-    crate::chart::CACHE_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
     crate::perf::record(false);
     eprintln!("appended to {}", path.display());
 }

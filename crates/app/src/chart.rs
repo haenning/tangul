@@ -687,18 +687,10 @@ impl Plot for ResultChart {
             return;
         }
         let keys: Vec<(usize, u64)> = shapes.iter().map(|s| (s.slot, s.key)).collect();
-        // Spike only: TANGUL_CHART_CACHE=0 builds every shape on every frame,
-        // to compare.
-        let off = cache_off();
         crate::perf::span("chart.paint_shapes", || {
-            if off {
-                let fresh = &mut PathCaches::default();
-                self.paint_lines(&l, &shapes, &bounds, fresh, window, cx);
-            } else {
-                caches.update(cx, |caches, cx| {
-                    self.paint_lines(&l, &shapes, &bounds, caches, window, cx)
-                });
-            }
+            caches.update(cx, |caches, cx| {
+                self.paint_lines(&l, &shapes, &bounds, caches, window, cx)
+            })
         });
         let took = start.elapsed();
         if let Some(last) = last_keys {
@@ -707,7 +699,7 @@ impl Plot for ResultChart {
             let built = last.update(cx, |last, _| {
                 let built = keys
                     .iter()
-                    .filter(|(slot, key)| off || last.0.get(slot) != Some(key))
+                    .filter(|(slot, key)| last.0.get(slot) != Some(key))
                     .count();
                 last.0 = keys.iter().copied().collect();
                 built
@@ -956,15 +948,6 @@ fn shape_key(curve: Curve, base: f32, points: &[(f32, f32)]) -> u64 {
         key.f32(x).f32(y);
     }
     key.finish()
-}
-
-/// Spike only: shapes built on every frame (to compare), from
-/// `TANGUL_CHART_CACHE=0` or a test.
-pub static CACHE_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn cache_off() -> bool {
-    CACHE_OFF.load(std::sync::atomic::Ordering::Relaxed)
-        || std::env::var_os("TANGUL_CHART_CACHE").is_some_and(|v| v == "0")
 }
 
 /// A series' name; "Other" says how many it adds up.
