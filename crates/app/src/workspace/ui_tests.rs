@@ -4934,6 +4934,29 @@ fn a_stacked_chart_lists_its_top_segment_first_and_the_one_under_the_pointer(
 }
 
 #[gpui_kit::test]
+fn a_long_legend_keeps_to_one_line(cx: &mut TestAppContext) {
+    use tangul_core::chart::ChartStyle;
+    let (handle, workspace) = open(cx);
+    let _tab = chart_tab(handle, &workspace, 12, ChartStyle::StackedBars, cx);
+    // Too narrow for all 12.
+    cx.simulate_window_resize(handle.into(), size(px(600.), px(700.)));
+    // As many as fit on one line, the rest behind "+N more", listed on hover.
+    step(handle, cx, |window, _| {
+        let more = window.find("chart-legend-more");
+        assert!(more.visible());
+        let area = window.find("chart-area").bounds();
+        assert!(more.bounds().right() <= area.right());
+        assert!(more.bounds().bottom() <= area.top());
+    });
+    step(handle, cx, |window, cx| {
+        window.hover("chart-legend-more", cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("chart-legend-all").visible())
+    });
+}
+
+#[gpui_kit::test]
 fn every_value_of_many_series_is_reachable(cx: &mut TestAppContext) {
     use tangul_core::chart::ChartStyle;
     let (handle, workspace) = open(cx);
@@ -4949,12 +4972,9 @@ fn every_value_of_many_series_is_reachable(cx: &mut TestAppContext) {
         assert_eq!(order, top_down, "all listed, in columns");
         assert!(window.try_find("chart-tip-more").is_none());
     });
-    // The legend shows 8; the rest on "+4 more", in the same order.
-    step(handle, cx, |window, cx| {
-        window.hover("chart-legend-more", cx)
-    });
+    // The legend has room for all 12: no "+N more".
     step(handle, cx, |window, _| {
-        assert!(window.find("chart-legend-all").visible())
+        assert!(!window.find("chart-legend-more").visible())
     });
     // A click pins the row: every value listed, s5 marked; Esc releases it.
     step(handle, cx, |window, cx| {

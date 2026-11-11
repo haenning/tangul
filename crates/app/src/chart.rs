@@ -28,8 +28,6 @@ const TOP_PAD: f32 = 8.;
 const RIGHT_PAD: f32 = 8.;
 /// Share of a row's width the bars of that row take.
 const BAR_GROUP: f32 = 0.7;
-/// Most series named in the legend; the rest behind "+N more".
-pub const MAX_LISTED: usize = 8;
 /// Height of one series' line in the tooltip.
 const TIP_ROW: f32 = 18.;
 /// Room in the tooltip for the title, "+N more", the total and the padding.
@@ -37,7 +35,8 @@ const TIP_FRAME: f32 = 64.;
 /// Most columns the tooltip lays its series out in; what doesn't fit then is
 /// the smallest values, in the pinned list (a click).
 const TIP_COLUMNS: usize = 4;
-/// Opacity of the other series while one is under the pointer.
+/// How much of their color the other series keep while one is under the pointer
+/// (mixed with the background, so stacked bands and crossing lines stay opaque).
 const DIMMED: f32 = 0.35;
 /// How close (px) the pointer has to be to a line to pick it.
 const LINE_REACH: f32 = 10.;
@@ -246,12 +245,26 @@ impl ResultChart {
         self.colors[series % self.colors.len().max(1)]
     }
 
-    /// A series' color as drawn: dimmed while another one is highlighted.
-    fn shown(&self, series: usize, color: Hsla) -> Hsla {
+    /// A series' color as drawn: faded towards the background while another one
+    /// is highlighted. Mixed, not made transparent: a transparent band would show
+    /// the ones below it through, as if they weren't stacked.
+    fn shown(&self, series: usize, color: Hsla, background: Hsla) -> Hsla {
         match self.highlighted() {
-            Some((s, focus)) if s != series => color.opacity(1. - (1. - DIMMED) * focus),
+            Some((s, focus)) if s != series => {
+                crate::theme::tint(color, background, 1. - (1. - DIMMED) * focus)
+            }
             _ => color,
         }
+    }
+
+    /// The series in drawing order: the highlighted one last, on top of the others.
+    fn drawing_order(&self) -> Vec<usize> {
+        let top = self.highlighted().map(|(s, _)| s);
+        let mut order: Vec<usize> = (0..self.data.series.len())
+            .filter(|&s| Some(s) != top)
+            .collect();
+        order.extend(top.filter(|&s| s < self.data.series.len()));
+        order
     }
 
     /// A dot in each series' color at the hovered row's data point (lines and areas
@@ -322,6 +335,7 @@ impl ResultChart {
         let series = self.data.series.len();
         let group = l.step * BAR_GROUP;
         let stacks = self.style.is_stacked().then(|| self.data.stacks());
+        let background = cx.theme().background;
         for (s, values) in self.data.series.iter().enumerate() {
             // (left edge, base y, value y) per row.
             let bars: Vec<(f32, f32, f32)> = (0..self.data.x.len())
@@ -345,7 +359,7 @@ impl ResultChart {
             } else {
                 group / series as f32
             };
-            let color = self.shown(s, self.color(s));
+            let color = self.shown(s, self.color(s), background);
             Bar::new()
                 .data(bars)
                 .band_width((width - 1.).max(1.))
@@ -375,8 +389,8 @@ impl ResultChart {
                 for s in (0..stacks.len()).rev() {
                     let color = self.color(s);
                     let (fill, color) = (
-                        self.shown(s, crate::theme::tint(color, background, 0.45)),
-                        self.shown(s, color),
+                        self.shown(s, crate::theme::tint(color, background, 0.45), background),
+                        self.shown(s, color, background),
                     );
                     let points: Vec<(f32, f32)> = (0..rows)
                         .map(|row| (l.x(row), l.y(stacks[s][row].1)))
@@ -394,8 +408,9 @@ impl ResultChart {
                 }
             }
             ChartStyle::Line | ChartStyle::Area => {
-                for (s, series) in self.data.series.iter().enumerate() {
-                    let color = self.shown(s, self.color(s));
+                for s in self.drawing_order() {
+                    let series = &self.data.series[s];
+                    let color = self.shown(s, self.color(s), background);
                     // NULL values are left out.
                     let points: Vec<(f32, f32)> = (0..rows)
                         .filter_map(|row| Some((l.x(row), l.y(series.values[row]?))))

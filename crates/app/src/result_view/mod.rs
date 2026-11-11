@@ -7,7 +7,7 @@ mod filter;
 mod grid;
 mod xlsx;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
@@ -179,6 +179,9 @@ pub struct ResultView {
     pin_focus: FocusHandle,
     /// The pointer is on the legend's "+N more": every series is listed.
     legend_more: bool,
+    /// How many series the legend's one line has room for (measured as it is
+    /// drawn; the rest behind "+N more").
+    legend_fit: Rc<Cell<usize>>,
     /// The last run's statement, when its result can be filtered, sorted and paged.
     base_sql: Option<String>,
     /// While a derived query runs (see [`ResultEvent::Refine`]): whether it appends
@@ -239,6 +242,7 @@ impl ResultView {
             chart_bounds: Rc::default(),
             pin_focus: cx.focus_handle(),
             legend_more: false,
+            legend_fit: Rc::new(Cell::new(usize::MAX)),
             base_sql: None,
             derived: None,
             page_error: None,
@@ -893,9 +897,10 @@ impl ResultView {
         }
     }
 
-    /// The legend: the first few series in the order the tooltip lists them (the
-    /// top of a stack first); the pointer on "+N more" lists them all. Capped, as
-    /// many columns would push the chart off the view.
+    /// The legend: one line of series in the order the tooltip lists them (the
+    /// top of a stack first), as many as fit; the pointer on "+N more" lists them
+    /// all. Every entry is laid out to be measured; those past the room are
+    /// invisible, and the next frame knows how many fit.
     fn render_legend(
         &self,
         data: &ChartData,
@@ -909,10 +914,14 @@ impl ResultView {
             .into_iter()
             .partition(|&s| !data.series[s].grey);
         order.extend(grey);
-        let hidden = order.len().saturating_sub(chart::MAX_LISTED);
+        let count = order.len();
+        let fit = self.legend_fit.get().min(count);
+        let hidden = count - fit;
         let left_out = data.left_out;
         let entry = |s: usize| {
             h_flex()
+                .flex_none()
+                .whitespace_nowrap()
                 .gap_1()
                 .items_center()
                 .child(
@@ -951,31 +960,72 @@ impl ResultView {
                 .with_priority(1),
             )
         });
-        h_flex()
-            .gap_3()
-            .flex_wrap()
-            .children(order.iter().take(chart::MAX_LISTED).map(|&s| entry(s)))
+        // Shown only with something behind it; always laid out, for its width.
+        let more = div()
+            .id("chart-legend-more")
+            .test_support()
+            .flex_none()
+            .whitespace_nowrap()
+            .relative()
+            .cursor_default()
+            .when(hidden == 0, |this| this.invisible())
             .when(hidden > 0, |this| {
-                this.child(
-                    div()
-                        .id("chart-legend-more")
-                        .test_support()
-                        .relative()
-                        .cursor_default()
-                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                            this.legend_more = *hovered;
-                            cx.notify();
-                        }))
-                        .child(format!("+{hidden} more"))
-                        .children(all),
-                )
+                this.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.legend_more = *hovered;
+                    cx.notify();
+                }))
             })
+            .child(format!("+{} more", hidden.max(1)))
+            .children(all);
+        // Widths of the entries and "+N more", in the order laid out below.
+        let widths: Rc<RefCell<Vec<f32>>> = Rc::default();
+        let line = h_flex()
+            .gap_3()
+            .on_children_prepainted({
+                let widths = widths.clone();
+                move |bounds, _, _| {
+                    *widths.borrow_mut() = bounds.iter().map(|b| b.size.width.as_f32()).collect();
+                }
+            })
+            .children(order[..fit].iter().map(|&s| entry(s)))
+            .child(more)
+            .children(order[fit..].iter().map(|&s| entry(s).invisible()));
+        let view = cx.entity().downgrade();
+        let fit_cell = self.legend_fit.clone();
+        let legend = div()
+            .flex_1()
+            .min_w_0()
+            .on_children_prepainted(move |bounds, window, cx| {
+                let Some(room) = bounds.first().map(|b| b.size.width.as_f32()) else {
+                    return;
+                };
+                let widths = widths.borrow();
+                if widths.len() != count + 1 {
+                    return;
+                }
+                // `gap_3`.
+                let gap = window.rem_size().as_f32() * 0.75;
+                let entries = widths[..fit].iter().chain(&widths[fit + 1..]).copied();
+                let fits = legend_fit(entries, widths[fit], gap, room);
+                if fits != fit_cell.get() {
+                    fit_cell.set(fits);
+                    view.update(cx, |_, cx| cx.notify()).ok();
+                }
+            })
+            .child(div().w_full().overflow_hidden().child(line));
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_3()
+            .child(legend)
             // Side-by-side bars beyond `chart.max_series`.
             .when(left_out > 0, |this| {
                 this.child(
                     div()
                         .id("chart-left-out")
                         .test_support()
+                        .flex_none()
+                        .whitespace_nowrap()
                         .child(format!("{left_out} smaller not shown")),
                 )
             })
@@ -1179,7 +1229,8 @@ impl ResultView {
         // One per colored series: the theme's chart colors, or shades of its one.
         let colored = data.series.iter().filter(|s| !s.grey).count();
         let palette = crate::theme::chart_colors(colored.max(1), cx);
-        let grey = cx.theme().muted_foreground.opacity(0.45);
+        // Opaque, so it fades like the others while a series is highlighted.
+        let grey = crate::theme::tint(cx.theme().muted_foreground, cx.theme().background, 0.45);
         let mut next = 0;
         let colors: Vec<Hsla> = data
             .series
@@ -1482,5 +1533,42 @@ impl Render for ResultView {
                 )
             })
             .children(drag_chip)
+    }
+}
+
+/// How many legend entries (`widths`, in order) fit on one line of `room`, `gap`
+/// apart, leaving room for "+N more" (`more`) when not all of them do.
+fn legend_fit(widths: impl IntoIterator<Item = f32>, more: f32, gap: f32, room: f32) -> usize {
+    let widths: Vec<f32> = widths.into_iter().collect();
+    // The right edge of each entry from the line's start.
+    let ends: Vec<f32> = widths
+        .iter()
+        .scan(-gap, |end, w| {
+            *end += gap + w;
+            Some(*end)
+        })
+        .collect();
+    if ends.last().is_none_or(|&end| end <= room) {
+        return widths.len();
+    }
+    ends.iter()
+        .take_while(|&&end| end + gap + more <= room)
+        .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::legend_fit;
+
+    #[test]
+    fn the_legend_keeps_room_for_more() {
+        // All fit: no "+N more" needed.
+        assert_eq!(legend_fit([40., 40., 40.], 50., 10., 140.), 3);
+        // Not all: as many as fit beside "+N more".
+        assert_eq!(legend_fit([40., 40., 40.], 50., 10., 139.), 1);
+        assert_eq!(legend_fit([40., 40., 40., 40.], 30., 10., 130.), 2);
+        // Not even one: only "+N more".
+        assert_eq!(legend_fit([40., 40.], 30., 10., 60.), 0);
+        assert_eq!(legend_fit([], 30., 10., 60.), 0);
     }
 }
