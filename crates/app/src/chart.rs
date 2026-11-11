@@ -9,7 +9,7 @@ use gpui_kit::component::{
     ActiveTheme as _, StyledExt as _, h_flex,
     plot::{
         AxisLabelSide, AxisText, Curve, Grid, IntoPlot, Plot, PlotAxis, axis_gutter,
-        shape::{Area, Bar, Line},
+        shape::{Area, Line},
         tooltip::{CrossLine, Dot, PlotHover, Tooltip, TooltipState},
     },
     v_flex,
@@ -35,6 +35,10 @@ const TIP_FRAME: f32 = 64.;
 /// Most columns the tooltip lays its series out in; what doesn't fit then is
 /// the smallest values, in the pinned list (a click).
 const TIP_COLUMNS: usize = 4;
+/// Radius of the outer corners of a bar, or of a whole stack of them.
+const BAR_RADIUS: f32 = 3.;
+/// Points along each rounded corner.
+const ARC_STEPS: usize = 6;
 /// How much of their color the other series keep while one is under the pointer
 /// (mixed with the background, so stacked bands and crossing lines stay opaque).
 const DIMMED: f32 = 0.35;
@@ -333,41 +337,68 @@ impl ResultChart {
 
     fn paint_bars(&self, l: &Layout, bounds: &Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let series = self.data.series.len();
+        let rows = self.data.x.len();
         let group = l.step * BAR_GROUP;
         let stacks = self.style.is_stacked().then(|| self.data.stacks());
+        // Each row's stack ends, up and down: the corners round there, whichever
+        // segment they fall on.
+        let ends: Vec<(f64, f64)> = (0..rows)
+            .map(|row| {
+                stacks.iter().flatten().fold((0f64, 0f64), |(up, down), s| {
+                    let (a, b) = s[row];
+                    (up.max(a.max(b)), down.min(a.min(b)))
+                })
+            })
+            .collect();
+        let width = if stacks.is_some() {
+            group
+        } else {
+            group / series as f32
+        };
+        let band = (width - 1.).max(1.);
         let background = cx.theme().background;
         for (s, values) in self.data.series.iter().enumerate() {
-            // (left edge, base y, value y) per row.
-            let bars: Vec<(f32, f32, f32)> = (0..self.data.x.len())
-                .filter_map(|row| {
-                    let slot = l.x(row) - group / 2.;
-                    match &stacks {
-                        Some(stacks) => {
-                            let (from, to) = stacks[s][row];
-                            Some((slot, l.y(from), l.y(to)))
+            let color = self.shown(s, self.color(s), background);
+            for row in 0..rows {
+                let slot = l.x(row) - group / 2.;
+                // (left edge, from, to, stack end) in values.
+                let (left, from, to, end) = match &stacks {
+                    Some(stacks) => {
+                        let (from, to) = stacks[s][row];
+                        let end = if to >= from { ends[row].0 } else { ends[row].1 };
+                        (slot, from, to, end)
+                    }
+                    None => {
+                        let Some(v) = values.values[row] else {
+                            continue;
+                        };
+                        (slot + width * s as f32, 0., v, v)
+                    }
+                };
+                if from == to {
+                    continue;
+                }
+                let (x0, x1) = (left, left + band);
+                let (y0, y1) = (l.y(from), l.y(to));
+                let at = |x: f32, y: f32| bounds.origin + point(px(x), px(y));
+                match rounded_segment(x0, x1, y0, y1, l.y(end), BAR_RADIUS) {
+                    Some(points) => {
+                        let mut path = PathBuilder::fill();
+                        path.move_to(at(points[0].0, points[0].1));
+                        for &(x, y) in &points[1..] {
+                            path.line_to(at(x, y));
                         }
-                        None => {
-                            let v = values.values[row]?;
-                            let width = group / series as f32;
-                            Some((slot + width * s as f32, l.y(0.0), l.y(v)))
+                        path.close();
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, color);
                         }
                     }
-                })
-                .collect();
-            let width = if stacks.is_some() {
-                group
-            } else {
-                group / series as f32
-            };
-            let color = self.shown(s, self.color(s), background);
-            Bar::new()
-                .data(bars)
-                .band_width((width - 1.).max(1.))
-                .cross(|b: &(f32, f32, f32)| Some(b.0))
-                .base(|b: &(f32, f32, f32)| b.1)
-                .value(|b: &(f32, f32, f32)| Some(b.2))
-                .fill(move |_, _, _| color)
-                .paint(bounds, window, cx);
+                    None => window.paint_quad(fill(
+                        Bounds::from_corners(at(x0, y0.min(y1)), at(x1, y0.max(y1))),
+                        color,
+                    )),
+                }
+            }
         }
     }
 
@@ -651,6 +682,45 @@ impl ResultChart {
     }
 }
 
+/// A bar segment from `x0` to `x1` and `y0` to `y1` (pixels) whose bar or stack
+/// ends at `tip`, rounded there with `radius`: its outline, or `None` when the
+/// rounding doesn't reach it (a plain rectangle). The rounding belongs to the
+/// whole stack: thin segments at its end share the corners.
+fn rounded_segment(
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+    tip: f32,
+    radius: f32,
+) -> Option<Vec<(f32, f32)>> {
+    let r = radius.min((x1 - x0) / 2.);
+    // Distances from the tip, nearer first; the segment lies on one side of it.
+    let (near, far) = {
+        let (a, b) = ((y0 - tip).abs(), (y1 - tip).abs());
+        (a.min(b), a.max(b))
+    };
+    if r <= 0. || near >= r {
+        return None;
+    }
+    let dir = if y0 + y1 >= 2. * tip { 1. } else { -1. };
+    let inset = |t: f32| r - (r * r - (r - t).powi(2)).max(0.).sqrt();
+    let arc_end = far.min(r);
+    let arc: Vec<f32> = (0..=ARC_STEPS)
+        .map(|i| near + (arc_end - near) * i as f32 / ARC_STEPS as f32)
+        .collect();
+    let mut points: Vec<(f32, f32)> = arc
+        .iter()
+        .map(|&t| (x0 + inset(t), tip + dir * t))
+        .collect();
+    if far > r {
+        points.push((x0, tip + dir * far));
+        points.push((x1, tip + dir * far));
+    }
+    points.extend(arc.iter().rev().map(|&t| (x1 - inset(t), tip + dir * t)));
+    Some(points)
+}
+
 /// A series' name; "Other" says how many it adds up.
 pub fn series_label(series: &tangul_assist::chart::Series) -> SharedString {
     match series.other {
@@ -670,4 +740,32 @@ pub fn total_row(total: f64, cx: &App) -> impl IntoElement {
         .border_color(cx.theme().border)
         .child("Total")
         .child(format_value(total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rounded_segment;
+
+    #[test]
+    fn a_stack_rounds_as_one_bar() {
+        // Far from the tip: a plain rectangle.
+        assert_eq!(rounded_segment(0., 10., 50., 100., 40., 3.), None);
+        // A bar reaching up to its tip: the top corners cut, the bottom square.
+        let bar = rounded_segment(0., 10., 100., 40., 40., 3.).unwrap();
+        assert_eq!(bar.first(), Some(&(3., 40.)));
+        assert!(bar.contains(&(0., 100.)) && bar.contains(&(10., 100.)));
+        assert_eq!(bar.last(), Some(&(7., 40.)));
+        // A 1px segment at the tip of a stack is narrower than the bar…
+        let top = rounded_segment(0., 10., 41., 40., 40., 3.).unwrap();
+        assert!(top.iter().all(|&(x, _)| x > 0. && x < 10.));
+        // …and the one below it continues the same curve.
+        let next = rounded_segment(0., 10., 42., 41., 40., 3.).unwrap();
+        assert_eq!(top[top.len() / 2 - 1].0, next[0].0);
+        // Negative bars round at their bottom.
+        let down = rounded_segment(0., 10., 50., 80., 80., 3.).unwrap();
+        assert_eq!(down.first(), Some(&(3., 80.)));
+        // Narrow bars: never more than half their width.
+        let thin = rounded_segment(0., 2., 100., 40., 40., 3.).unwrap();
+        assert_eq!(thin.first(), Some(&(1., 40.)));
+    }
 }
