@@ -51,6 +51,24 @@ Lines covered, by `cargo llvm-cov`, over all tests including the live and UI tes
 Not measured: what only runs on macOS (the Keychain, the app bundle, Metal drawing),
 since CI runs on Linux. The release build compiles it.
 
+## Performance
+
+`crates/app/src/perf.rs` counts what drawing costs: frames and the time between
+them, chart paints that build their shapes and those that reuse them, and shapes
+built or reused. It records only when asked:
+
+- **In the app:** `TANGUL_PERF=1 make run-dev` prints a line to stderr about once a
+  second while frames are drawn (frame intervals p50/p95/max and how many took
+  longer than 16.7 ms; chart paints building / from cache; shapes built / reused).
+- **In tests:** the UI tests call `perf::record` and read `perf::take`. Counts are
+  exact and run in CI (`a_chart_builds_its_shapes_once_and_reuses_them`); times are
+  only compared on one machine, by hand, in a release build:
+  `cargo test --release -p tangul board_scroll_performance -- --ignored --nocapture`
+  scrolls a board of six large stacked areas with the shape cache and without, and
+  fails if scrolling again builds shapes or the cache saves less than 40 %.
+
+Headless frames have no GPU: they show the CPU's part, not how smooth it feels.
+
 ## Live database tests
 
 `crates/engine/tests/live.rs` runs against the database versions in

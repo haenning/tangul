@@ -5225,64 +5225,176 @@ fn the_bottom_bar_counts_a_run_up_in_its_middle(cx: &mut TestAppContext) {
     });
 }
 
-/// Spike: frame time of a large stacked area (1000 days × 10 series, like the
-/// query in the spike's notes), with and without the shape cache. Run with
-/// `cargo test --release -p tangul chart_frame_time -- --ignored --nocapture`.
-#[gpui_kit::test]
-#[ignore]
-fn chart_frame_time(cx: &mut TestAppContext) {
-    use tangul_core::chart::ChartStyle;
-    let (handle, workspace) = open(cx);
-    let sql = "select day, series, value from t order by 1, 2";
-    for style in [ChartStyle::StackedArea, ChartStyle::Area, ChartStyle::Line] {
-        cx.update_window(handle.into(), |_, window, cx| {
-            let tab = workspace.update(cx, |ws, cx| ws.add_tab(sql, window, cx));
-            tab.update(cx, |t, cx| {
-                t.started(QueryId(1), sql, cx);
-                let cols = ["day", "series", "value"].map(|name| ColumnInfo { name: name.into() });
-                t.on_query_event(QueryEvent::Exec(ExecEvent::ResultStart(cols.into())), cx);
-                let mut batch = RowBatch::default();
-                for i in 0..1000 {
-                    for s in 1..=10 {
-                        let v = 50. + 40. * ((i as f64) / 20. + s as f64).sin();
-                        batch.push_cell(Some(&format!("d{i:04}")));
-                        batch.push_cell(Some(&format!("s{s:02}")));
-                        batch.push_cell(Some(&format!("{v:.1}")));
-                        batch.finish_row();
-                    }
-                }
-                t.on_query_event(QueryEvent::Exec(ExecEvent::Rows(batch)), cx);
-                t.on_query_event(
-                    QueryEvent::Finished {
-                        elapsed: Default::default(),
-                        error: None,
-                        error_position: None,
-                        in_transaction: false,
-                        cancelled: false,
-                    },
-                    cx,
-                );
-                t.set_chart_view(Some(tangul_core::chart::ChartView::new(style)), cx);
-            });
-        })
-        .unwrap();
-        for cache in [true, false] {
-            crate::chart::CACHE_OFF.store(!cache, std::sync::atomic::Ordering::Relaxed);
-            step(handle, cx, |_, _| {});
-            let frames = 30;
-            let start = std::time::Instant::now();
-            for _ in 0..frames {
-                cx.update_window(handle.into(), |_, window, cx| {
-                    window.refresh();
-                    window.render_frame(cx);
-                })
-                .unwrap();
-            }
-            eprintln!(
-                "{style:?} cache={cache}: {:?} per frame",
-                start.elapsed() / frames
-            );
+/// Result rows of the spike's test query: `days` days × `series` series.
+fn wave_rows(days: usize, series: usize) -> RowBatch {
+    let mut batch = RowBatch::default();
+    for i in 0..days {
+        for s in 1..=series {
+            let v = 50. + 40. * ((i as f64) / 20. + s as f64).sin();
+            batch.push_cell(Some(&format!("d{i:04}")));
+            batch.push_cell(Some(&format!("s{s:02}")));
+            batch.push_cell(Some(&format!("{v:.1}")));
+            batch.finish_row();
         }
     }
+    batch
+}
+
+/// What `crate::perf` recorded in the next frame.
+fn frame_stats(handle: WindowHandle<Root>, cx: &mut TestAppContext) -> crate::perf::Stats {
+    crate::perf::take();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.refresh();
+        window.render_frame(cx);
+    })
+    .unwrap();
+    crate::perf::take()
+}
+
+#[gpui_kit::test]
+fn a_chart_builds_its_shapes_once_and_reuses_them(cx: &mut TestAppContext) {
+    use tangul_core::chart::ChartStyle;
+    let (handle, workspace) = open(cx);
+    crate::perf::record(true);
+    let tab = chart_tab(handle, &workspace, 3, ChartStyle::StackedArea, cx);
+    let built = |s: &crate::perf::Stats| (s.shapes_built, s.shapes_reused);
+    // Drawn again unchanged: every shape (one per series) from the cache.
+    let s = frame_stats(handle, cx);
+    assert_eq!(built(&s), (0, 3));
+    assert_eq!((s.cold_paints.len(), s.warm_paints.len()), (0, 1));
+    // The highlight only changes colors.
+    step(handle, cx, |window, cx| {
+        point_chart_at(&tab, 0, 2.0, 0., window, cx)
+    });
+    assert_eq!(built(&frame_stats(handle, cx)), (0, 3));
+    // Other curves: built again, once.
+    step(handle, cx, |window, cx| window.click("smooth-lines", cx));
+    let changed = crate::perf::take();
+    let after = frame_stats(handle, cx);
+    assert_eq!(changed.shapes_built + after.shapes_built, 3);
+    assert_eq!(built(&frame_stats(handle, cx)), (0, 3));
+    // Another size: built again; up to twice, as the legend fits its line a
+    // frame later and that can change the chart's height once more.
+    crate::perf::take();
+    cx.simulate_window_resize(handle.into(), size(px(700.), px(600.)));
+    let resized = crate::perf::take();
+    let after = frame_stats(handle, cx);
+    assert!((3..=6).contains(&(resized.shapes_built + after.shapes_built)));
+    assert_eq!(built(&frame_stats(handle, cx)), (0, 3));
+    // Without the cache: built on every frame.
+    crate::chart::CACHE_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(built(&frame_stats(handle, cx)), (3, 0));
     crate::chart::CACHE_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
+    crate::perf::record(false);
+}
+
+/// A board of six large stacked areas (the spike's query: 999 days × 10
+/// series) scrolled down and up, with the shape cache and without: the time of
+/// each frame and what `crate::perf` counted. Fails when scrolling builds
+/// shapes with the cache, or the cache saves less than 40% of a frame. Run
+/// `cargo test --release -p tangul board_scroll_performance -- --ignored --nocapture`.
+#[gpui_kit::test]
+#[ignore]
+fn board_scroll_performance(cx: &mut TestAppContext) {
+    use gpui_kit::{ScrollDelta, point};
+    use std::time::{Duration, Instant};
+    use tangul_core::ResultSet;
+    use tangul_core::chart::{ChartStyle, ChartView};
+    use tangul_engine::QueryOutput;
+    let (handle, workspace) = open(cx);
+    let sql = "select day, series, value";
+    board_with_tiles(handle, &workspace, &[sql; 6], cx);
+    let board = cx.update(|cx| board_tab(&workspace, cx));
+    for tile in 1..=6 {
+        let view = Some(ChartView::new(ChartStyle::StackedArea));
+        step(handle, cx, |_, cx| {
+            board.update(cx, |b, cx| b.set_tile_view(&format!("t{tile}"), view, cx))
+        });
+    }
+    let ms = |d: Duration| format!("{:.2}ms", d.as_secs_f64() * 1000.);
+    let mut warm_p50 = Vec::new();
+    for cache in [true, false] {
+        crate::chart::CACHE_OFF.store(!cache, std::sync::atomic::Ordering::Relaxed);
+        crate::perf::record(true);
+        // The results arrive: the first frame builds every shape.
+        let mut result = ResultSet::new(
+            ["day", "series", "value"]
+                .map(|name| ColumnInfo { name: name.into() })
+                .to_vec(),
+        );
+        result.append(wave_rows(999, 10));
+        let output = QueryOutput {
+            results: vec![result],
+            rows: Some(9990),
+            ..QueryOutput::default()
+        };
+        cx.update(|cx| board.update(cx, |b, cx| b.show_results(vec![Ok(output)], cx)));
+        cx.run_until_parked();
+        let first = cx
+            .update_window(handle.into(), |_, window, cx| {
+                let start = Instant::now();
+                window.render_frame(cx);
+                start.elapsed()
+            })
+            .unwrap();
+        let first_stats = crate::perf::take();
+        // Scrolled down and back up, a frame per step, twice: the first time
+        // charts coming into view are drawn for the first time.
+        let scroll = |cx: &mut TestAppContext| {
+            let mut frames = Vec::new();
+            for dy in std::iter::repeat_n(-60., 30).chain(std::iter::repeat_n(60., 30)) {
+                frames.push(
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        let delta = ScrollDelta::Pixels(point(px(0.), px(dy)));
+                        window.scroll("board-tiles", delta, cx);
+                        let start = Instant::now();
+                        window.render_frame(cx);
+                        start.elapsed()
+                    })
+                    .unwrap(),
+                );
+            }
+            (frames, crate::perf::take())
+        };
+        let label = if cache { "cache on " } else { "cache off" };
+        eprintln!(
+            "{label} | first frame with the results: {}, shapes built {}",
+            ms(first),
+            first_stats.shapes_built
+        );
+        let mut p50 = Duration::ZERO;
+        for pass in ["1st scroll", "2nd scroll"] {
+            let (frames, stats) = scroll(cx);
+            let q = |p| crate::perf::quantile(&frames, p).unwrap();
+            eprintln!(
+                "{label} | {pass}: frames p50 {}, p95 {}, max {} | charts painted {} from \
+                 cache, {} building | shapes built {}, reused {}",
+                ms(q(0.5)),
+                ms(q(0.95)),
+                ms(q(1.)),
+                stats.warm_paints.len(),
+                stats.cold_paints.len(),
+                stats.shapes_built,
+                stats.shapes_reused,
+            );
+            if cache && pass == "2nd scroll" {
+                assert_eq!(stats.shapes_built, 0, "scrolling again built shapes");
+                assert!(stats.shapes_reused > 0, "no chart painted while scrolling");
+            }
+            p50 = q(0.5);
+        }
+        warm_p50.push(p50);
+    }
+    crate::chart::CACHE_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
+    crate::perf::record(false);
+    let ratio = warm_p50[0].as_secs_f64() / warm_p50[1].as_secs_f64();
+    eprintln!(
+        "scrolling with the cache takes {:.0}% of the time without",
+        ratio * 100.
+    );
+    assert!(
+        ratio <= 0.6,
+        "the cache saves too little: {:.0}%",
+        ratio * 100.
+    );
 }

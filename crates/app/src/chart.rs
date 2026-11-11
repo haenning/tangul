@@ -4,11 +4,13 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui_kit::component::{
     ActiveTheme as _, StyledExt as _, h_flex,
     plot::{
-        AxisLabelSide, AxisText, Curve, Grid, IntoPlot, PathCaches, Plot, PlotAxis, axis_gutter,
+        AxisLabelSide, AxisText, Curve, Grid, IntoPlot, PathCaches, Plot, PlotAxis, ShapeKey,
+        axis_gutter,
         shape::{Area, Line},
         tooltip::{CrossLine, Dot, PlotHover, Tooltip, TooltipState},
     },
@@ -426,6 +428,7 @@ impl ResultChart {
         l: &Layout,
         bounds: &Bounds<Pixels>,
         caches: &mut PathCaches,
+        keys: &mut Vec<(usize, u64)>,
         window: &mut Window,
         cx: &App,
     ) {
@@ -454,6 +457,7 @@ impl ResultChart {
                         .map(|row| (l.x(row), l.y(stacks[s][row].1)))
                         .collect();
                     let points = l.line(points, bounds);
+                    keys.push((s, shape_key(curve, zero, &points)));
                     Area::new()
                         .data(points)
                         .x(|p: &(f32, f32)| Some(p.0))
@@ -476,7 +480,9 @@ impl ResultChart {
                         .filter_map(|row| Some((l.x(row), l.y(series.values[row]?))))
                         .collect();
                     let points = l.line(points, bounds);
+                    keys.push((s, shape_key(curve, f32::NAN, &points)));
                     if self.style == ChartStyle::Area {
+                        keys.push((series_count + s, shape_key(curve, zero, &points)));
                         let (fill_cache, line_cache) = caches.slot_pair(series_count + s);
                         Area::new()
                             .data(points.clone())
@@ -516,6 +522,7 @@ impl Plot for ResultChart {
         // Asked for on every paint, also out of view, so the shapes stay cached
         // while a board scrolls a tile out and back in.
         let caches = PathCaches::for_paint("chart-shapes", window, cx);
+        let last_keys = crate::perf::recording().then(|| ShapeKeys::for_paint(window, cx));
         // Scrolled out of view (a board's other tiles): nothing to paint.
         if !window.content_mask().bounds.intersects(&bounds) {
             return;
@@ -533,18 +540,37 @@ impl Plot for ResultChart {
                 cx.theme().border,
             ));
         }
+        let start = Instant::now();
         if self.style.is_bars() {
             self.paint_bars(&l, &bounds, window, cx);
+            crate::perf::chart_painted(start.elapsed(), None);
+            return;
+        }
+        let mut keys = Vec::new();
+        // Spike only: TANGUL_CHART_CACHE=0 builds every shape on every frame,
+        // to compare.
+        let off = cache_off();
+        if off {
+            let fresh = &mut PathCaches::default();
+            self.paint_lines(&l, &bounds, fresh, &mut keys, window, cx);
         } else {
-            // Spike only: TANGUL_CHART_CACHE=0 builds every shape on every frame,
-            // to compare.
-            if cache_off() {
-                self.paint_lines(&l, &bounds, &mut PathCaches::default(), window, cx);
-            } else {
-                caches.update(cx, |caches, cx| {
-                    self.paint_lines(&l, &bounds, caches, window, cx)
-                });
-            }
+            caches.update(cx, |caches, cx| {
+                self.paint_lines(&l, &bounds, caches, &mut keys, window, cx)
+            });
+        }
+        let took = start.elapsed();
+        if let Some(last) = last_keys {
+            // The shapes whose points changed since the last paint were built
+            // (the caches' rule: a shape is rebuilt when its points change).
+            let built = last.update(cx, |last, _| {
+                let built = keys
+                    .iter()
+                    .filter(|(slot, key)| off || last.0.get(slot) != Some(key))
+                    .count();
+                last.0 = keys.iter().copied().collect();
+                built
+            });
+            crate::perf::chart_painted(took, Some((built, keys.len() - built)));
         }
     }
 
@@ -768,6 +794,26 @@ fn rounded_segment(
     }
     points.extend(arc.iter().rev().map(|&t| (x1 - inset(t), tip + dir * t)));
     Some(points)
+}
+
+/// Each cached shape's points at the last paint, by cache slot (to count what
+/// was built, see `crate::perf`).
+#[derive(Default)]
+struct ShapeKeys(std::collections::HashMap<usize, u64>);
+
+impl ShapeKeys {
+    fn for_paint(window: &mut Window, cx: &mut App) -> Entity<Self> {
+        window.use_keyed_state("chart-shape-keys", cx, |_, _| Self::default())
+    }
+}
+
+/// What a cached shape is built from: its points, curve and base line.
+fn shape_key(curve: Curve, base: f32, points: &[(f32, f32)]) -> u64 {
+    let mut key = ShapeKey::new((curve, base.to_bits()));
+    for &(x, y) in points {
+        key.f32(x).f32(y);
+    }
+    key.finish()
 }
 
 /// Spike only: shapes built on every frame (to compare), from

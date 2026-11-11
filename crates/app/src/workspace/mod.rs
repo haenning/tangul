@@ -504,6 +504,12 @@ impl Render for Workspace {
         v_flex()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            // Counts the frames drawn (`crate::perf`, while recording).
+            .child(
+                canvas(|_, _, _| crate::perf::frame(), |_, _, _, _| {})
+                    .absolute()
+                    .size_0(),
+            )
             // Any input postpones scheduled bookmark runs until it's quiet again.
             .capture_key_down(cx.listener(|this, _, _, _| this.monitor.touch()))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.monitor.touch()))
