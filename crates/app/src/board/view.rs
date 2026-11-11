@@ -444,12 +444,8 @@ impl BoardTab {
                 .dropdown_menu(move |menu, window, cx| match &chart {
                     Some(data) => chart_menu(menu, data, shown, set.clone(), window, cx),
                     None => {
-                        let views = std::iter::once(None).chain(ChartStyle::ALL.map(|style| {
-                            Some(ChartView {
-                                style,
-                                series: None,
-                            })
-                        }));
+                        let views = std::iter::once(None)
+                            .chain(ChartStyle::ALL.map(|style| Some(ChartView::new(style))));
                         views.fold(menu, |menu, view| {
                             let set = set.clone();
                             menu.item(

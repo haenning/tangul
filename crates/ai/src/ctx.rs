@@ -142,8 +142,6 @@ pub struct ShownResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChartRequest {
     pub style: ChartStyle,
-    /// One value column; `None`: all of them.
-    pub column: Option<String>,
 }
 
 /// Where results to show go.

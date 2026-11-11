@@ -9,7 +9,7 @@ publish.workspace = true
 anyhow.workspace = true
 chrono = { version = "0.4", default-features = false }
 async-channel.workspace = true
-gpui-kit = { version = "=0.6.6", features = ["tree-sitter-sql"] }
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter-sql"] }
 lsp-types = { version = "0.97.0", features = ["proposed"] }
 # "Save as" Excel (.xlsx).
 rust_xlsxwriter = "0.101.0"
@@ -31,7 +31,7 @@ demo = ["gpui-kit/test-support", "dep:image"]
 [dev-dependencies]
 async-trait.workspace = true
 # UI tests: headless windows driven by clicks and keys (see workspace/ui_tests.rs).
-gpui-kit = { version = "=0.6.6", features = ["tree-sitter-sql", "test-support"] }
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter-sql", "test-support"] }
 
 [lints]
 workspace = true

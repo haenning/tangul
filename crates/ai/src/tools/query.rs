@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tangul_assist::chart::chart_data;
 use tangul_core::chart::ChartStyle;
 use tangul_core::{ConnId, QueryId, ResultSet};
 use tangul_engine::{Caller, QueryOptions, QueryOutput, ROW_LIMIT};
@@ -49,11 +50,9 @@ struct Show {
     title: Option<String>,
     /// One line on what it shows, above the SQL.
     note: Option<String>,
-    /// Show it as this chart instead of the grid: the first column is the x axis
-    /// (dates or labels), the others are numbers, one series each.
+    /// Show it as this chart instead of the grid. Label columns first, one number
+    /// column last: x and value, or x, series and value (see tangul_features).
     chart: Option<Chart>,
-    /// With `chart`: one number column by name; all of them when left out.
-    column: Option<String>,
 }
 
 /// The chart styles tangul draws (see `tangul_features`).
@@ -210,8 +209,8 @@ impl Tool for RunReadonly {
          get the whole value with get_cell (no need to query again). Set `show` to hand \
          the user the result you got, in a new tab, without running it again: the whole \
          result in the grid, or as a chart (line, area, stacked_area, bars, \
-         stacked_bars; GROUP BY reads best). To hand over a query unrun instead, use \
-         propose_sql."
+         stacked_bars; label columns first, one number column last: tangul_features \
+         has the rules). To hand over a query unrun instead, use propose_sql."
     }
 
     fn input_schema(&self) -> Value {
@@ -246,14 +245,6 @@ impl Tool for RunReadonly {
             return Err(ToolError::NotAllowed(
                 "there is no app to show results in here".into(),
             ));
-        }
-        if let Some(Show {
-            chart: None,
-            column: Some(_),
-            ..
-        }) = &show
-        {
-            return Err(ToolError::BadInput("column needs a chart".into()));
         }
         let conn = ctx.conn(connection.as_deref())?;
         // What of its result the model may see, before anything runs.
@@ -299,21 +290,22 @@ impl Tool for RunReadonly {
             text.push_str(&format!("\n{note}"));
         }
         if let (Some(show), Some(sink)) = (show, ctx.shows()) {
-            let chart = show.chart.map(|c| ChartRequest {
-                style: c.style(),
-                column: one_line(show.column),
-            });
-            let shown = match &chart {
-                Some(ChartRequest {
-                    style,
-                    column: Some(column),
-                }) => format!("as a {} chart of {column}", style.key()),
-                Some(ChartRequest { style, .. }) => format!("as a {} chart", style.key()),
-                None => "in the grid".to_string(),
+            let chart = show.chart.map(|c| ChartRequest { style: c.style() });
+            let fits = set
+                .as_ref()
+                .map(|set| chart_data(&statement, set, out.truncated).map(|_| ()));
+            let shown = match (&chart, fits) {
+                (Some(ChartRequest { style }), Some(Ok(()))) => {
+                    format!("as a {} chart", style.key())
+                }
+                (Some(_), Some(Err(why))) => {
+                    format!("in the grid: it can't be a chart ({why})")
+                }
+                (Some(_), None) => "in the grid: there is no result to chart".to_string(),
+                (None, _) => "in the grid".to_string(),
             };
             text.push_str(&format!(
-                "\nOpened in tangul in a new tab on {}, {shown} (the grid if the result \
-                 doesn't fit the chart).",
+                "\nOpened in tangul in a new tab on {}, {shown}.",
                 conn.name
             ));
             sink(ShownResult {

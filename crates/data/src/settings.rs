@@ -3,9 +3,10 @@
 //!
 //! ```json
 //! {
-//!   "editor": { "font_size": 14, "font_family": "Menlo" },
+//!   "editor": { "font_size": 14, "font_family": "Menlo", "last_run": true },
 //!   "table": { "font_size": 12, "font_family": "Menlo" },
-//!   "chart": { "primary_color": "#2563eb", "font_size": 10, "font_family": null },
+//!   "chart": { "primary_color": "#2563eb", "max_series": 12, "font_size": 10,
+//!              "font_family": null },
 //!   "safety": {
 //!     "read_only_users": ["reporting"],
 //!     "confirm_unfiltered_writes": true,
@@ -52,6 +53,10 @@ const FONT_SIZE_RANGE: (f32, f32) = (8., 32.);
 const TABLE_FONT_SIZE_RANGE: (f32, f32) = (8., 18.);
 /// The chart leaves fixed room for its labels.
 const CHART_FONT_SIZE_RANGE: (f32, f32) = (6., 16.);
+/// Series in color when `chart.max_series` is unset.
+pub const DEFAULT_MAX_SERIES: usize = 12;
+/// `chart.max_series` is kept within this.
+const MAX_SERIES_RANGE: (usize, usize) = (1, 100);
 /// Bounds for how often scheduled bookmarks run.
 const MONITOR_INTERVAL_RANGE: (Duration, Duration) =
     (Duration::from_secs(5 * 60), Duration::from_secs(24 * 3600));
@@ -59,7 +64,7 @@ const MONITOR_INTERVAL_RANGE: (Duration, Duration) =
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub editor: FontSettings,
+    pub editor: EditorSettings,
     /// The result grid.
     pub table: FontSettings,
     /// Result charts.
@@ -373,6 +378,25 @@ impl Settings {
     }
 }
 
+/// The SQL editor: its font, and what it shows beside the SQL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorSettings {
+    #[serde(flatten)]
+    pub font: FontSettings,
+    /// When a statement last ran and what it got, after its last line.
+    pub last_run: bool,
+}
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        Self {
+            font: FontSettings::default(),
+            last_run: true,
+        }
+    }
+}
+
 /// Font of one part of the app; unset values keep the default.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -403,6 +427,9 @@ pub struct ChartSettings {
     /// Hex color (`"#2563eb"`) of the first series; the theme's when unset.
     #[serde(deserialize_with = "color", serialize_with = "write_color")]
     pub primary_color: Option<Rgb>,
+    /// Most series drawn in color (the largest); the rest is grey. Unset:
+    /// [`DEFAULT_MAX_SERIES`].
+    pub max_series: Option<usize>,
     #[serde(flatten)]
     pub font: FontSettings,
 }
@@ -521,11 +548,11 @@ impl Settings {
 
     /// The editor's font size; `None` when unset or not a usable number.
     pub fn font_size(&self) -> Option<f32> {
-        self.editor.size(FONT_SIZE_RANGE)
+        self.editor.font.size(FONT_SIZE_RANGE)
     }
 
     pub fn font_family(&self) -> Option<&str> {
-        self.editor.family()
+        self.editor.font.family()
     }
 
     /// The result grid's font size, if set.
@@ -536,6 +563,15 @@ impl Settings {
     /// The chart labels' font size, if set.
     pub fn chart_font_size(&self) -> Option<f32> {
         self.chart.font.size(CHART_FONT_SIZE_RANGE)
+    }
+
+    /// Most series a chart draws in color.
+    pub fn chart_max_series(&self) -> usize {
+        let (min, max) = MAX_SERIES_RANGE;
+        self.chart
+            .max_series
+            .unwrap_or(DEFAULT_MAX_SERIES)
+            .clamp(min, max)
     }
 }
 
@@ -571,10 +607,8 @@ pub fn create_if_missing(editor_font_size: f32, editor_font_family: &str) -> Opt
     let path = path()?;
     if !path.exists() {
         let mut defaults = defaults();
-        defaults["editor"] = serde_json::json!({
-            "font_size": editor_font_size,
-            "font_family": editor_font_family,
-        });
+        defaults["editor"]["font_size"] = serde_json::json!(editor_font_size);
+        defaults["editor"]["font_family"] = serde_json::json!(editor_font_family);
         let write = || -> std::io::Result<()> {
             std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
             std::fs::write(&path, crate::upgrade::pretty(&defaults))
@@ -729,7 +763,8 @@ mod tests {
         let on = with_read_only(text, "reporting", true).unwrap();
         let s = Settings::parse(&on).unwrap();
         assert!(s.is_read_only("reporting"));
-        assert_eq!(s.editor.font_size, Some(15.));
+        assert_eq!(s.editor.font.font_size, Some(15.));
+        assert!(s.editor.last_run, "on unless turned off");
         assert!(!s.safety.confirm_unfiltered_writes);
         // Twice is still once.
         let again = with_read_only(&on, "reporting", true).unwrap();
@@ -897,6 +932,11 @@ mod tests {
         assert_eq!(Rgb::parse("123456"), None);
         let s = Settings::parse(r#"{"chart": {"primary_color": null}}"#).unwrap();
         assert_eq!(s.chart.primary_color, None);
+        assert_eq!(s.chart_max_series(), DEFAULT_MAX_SERIES);
+        let s = Settings::parse(r#"{"chart": {"max_series": 3}}"#).unwrap();
+        assert_eq!(s.chart_max_series(), 3);
+        let s = Settings::parse(r#"{"chart": {"max_series": 0}}"#).unwrap();
+        assert_eq!(s.chart_max_series(), 1, "kept within its range");
         assert!(Settings::parse(r#"{"chart": {"primary_color": "red"}}"#).is_err());
     }
 

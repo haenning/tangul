@@ -210,11 +210,12 @@ fn millis(d: Duration) -> i64 {
 }
 
 /// SQL for a bookmark's runs over time, for a query tab on `metrics.db`: when it
-/// ran, how long it took, how many rows it returned. Failed runs are left out.
+/// ran and how long it took, as a chart takes it (one value last). The rows each
+/// run returned are in the comment, to swap in. Failed runs are left out.
 pub fn runs_sql(bookmark_id: &str) -> String {
     format!(
         "SELECT datetime(started_at / 1000, 'unixepoch', 'localtime') AS run_at,\n  \
-         duration_ms,\n  rows,\n  scheduled\n\
+         duration_ms -- or: rows\n\
          FROM bookmark_runs\n\
          WHERE bookmark_id = '{}' AND error IS NULL\n\
          ORDER BY started_at",

@@ -104,7 +104,6 @@ fn run(
         if columns > 0 {
             let names = stmt
                 .column_names()
-                .into_iter()
                 .map(|name| ColumnInfo { name: name.into() })
                 .collect();
             sink(ExecEvent::ResultStart(names));

@@ -28,12 +28,9 @@ struct Input {
     title: Option<String>,
     /// One line on what it does and why, shown above it.
     note: Option<String>,
-    /// A query's result as this chart once the user runs it, instead of the grid:
-    /// the first column is the x axis (dates or labels), the others are numbers,
-    /// one series each.
+    /// A query's result as this chart once the user runs it, instead of the grid.
+    /// Label columns first, one number column last (see tangul_features).
     chart: Option<Chart>,
-    /// With `chart`: one number column by name; all of them when left out.
-    column: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -53,7 +50,8 @@ impl Tool for ProposeSql {
          DELETE, DDL, grants), which you never run, but only one the user asked for. \
          For queries the user should run or edit themselves; on a schema-only database \
          (list_connections) this is how you hand over a query, with `chart` to draw its \
-         result. A result you already got goes over with run_readonly and `show`."
+         result (label columns first, one number column last; tangul_features has the \
+         rules). A result you already got goes over with run_readonly and `show`."
     }
 
     fn input_schema(&self) -> Value {
@@ -67,16 +65,12 @@ impl Tool for ProposeSql {
             title,
             note,
             chart,
-            column,
         } = input(value)?;
         let sink = ctx.proposals().ok_or_else(|| {
             ToolError::NotAllowed("there is no app to open proposals in here".into())
         })?;
         if sql.trim().is_empty() {
             return Err(ToolError::BadInput("sql is empty".into()));
-        }
-        if chart.is_none() && column.is_some() {
-            return Err(ToolError::BadInput("column needs a chart".into()));
         }
         let conn = ctx.conn(connection.as_deref())?;
         let reads = guard::not_reads(&sql).is_empty();
@@ -95,10 +89,7 @@ impl Tool for ProposeSql {
             user: conn.user,
             sql,
             title: one_line(title),
-            chart: chart.map(|c| ChartRequest {
-                style: c.style(),
-                column: one_line(column),
-            }),
+            chart: chart.map(|c| ChartRequest { style: c.style() }),
         });
         let mut text = format!(
             "Opened in tangul in a new tab on {name} for the user to review and run. It was \

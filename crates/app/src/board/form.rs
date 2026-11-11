@@ -319,18 +319,17 @@ impl DetailsForm {
                                     .xsmall()
                                     .dropdown_menu(move |mut menu, _, _| {
                                         let views = std::iter::once(None).chain(
-                                            ChartStyle::ALL.map(|style| {
-                                                Some(ChartView {
-                                                    style,
-                                                    series: None,
-                                                })
-                                            }),
+                                            ChartStyle::ALL
+                                                .map(|style| Some(ChartView::new(style))),
                                         );
                                         for view in views {
                                             let this = this.clone();
                                             menu = menu.item(
                                                 PopupMenuItem::new(view_label(view))
-                                                    .checked(view == current)
+                                                    .checked(
+                                                        view.map(|v| v.style)
+                                                            == current.map(|v| v.style),
+                                                    )
                                                     .on_click(move |_, _, cx| {
                                                         let _ = this.update(cx, |f, cx| {
                                                             if let Some(RowTo::Query {
@@ -719,17 +718,13 @@ pub(super) fn view_picker<T: 'static>(
                 .ghost()
                 .xsmall()
                 .dropdown_menu(move |mut menu, _, _| {
-                    let views = std::iter::once(None).chain(ChartStyle::ALL.map(|style| {
-                        Some(ChartView {
-                            style,
-                            series: None,
-                        })
-                    }));
+                    let views = std::iter::once(None)
+                        .chain(ChartStyle::ALL.map(|style| Some(ChartView::new(style))));
                     for view in views {
                         let this = this.clone();
                         menu = menu.item(
                             PopupMenuItem::new(view_label(view))
-                                .checked(view == current)
+                                .checked(view.map(|v| v.style) == current.map(|v| v.style))
                                 .on_click(move |_, _, cx| {
                                     let _ = this.update(cx, |f, cx| {
                                         set(f, view);

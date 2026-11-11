@@ -24,10 +24,10 @@ impl ChartStyle {
         ChartStyle::StackedBars,
     ];
 
-    /// Styles for a single value column.
+    /// Styles for a single series (stacking needs several).
     pub const SINGLE: [ChartStyle; 3] = [ChartStyle::Line, ChartStyle::Area, ChartStyle::Bars];
 
-    /// Name for all value columns in one chart.
+    /// Name with several series.
     pub fn label(self) -> &'static str {
         match self {
             ChartStyle::Line => "Lines",
@@ -38,7 +38,7 @@ impl ChartStyle {
         }
     }
 
-    /// Name for a single value column.
+    /// Name with a single series.
     pub fn single_label(self) -> &'static str {
         match self {
             ChartStyle::Line => "Line",
@@ -76,31 +76,61 @@ impl ChartStyle {
     }
 }
 
-/// What a chart shows: all value columns in one style, or a single one.
+/// What a chart shows: its style. The result's layout decides the rest (label
+/// columns first, one value column last: `tangul-assist`'s `chart`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChartView {
     pub style: ChartStyle,
-    /// Index of the value column (the chart's series); `None` shows all of them.
-    pub series: Option<usize>,
+    /// Stored before charts took one value column (several value columns, or one
+    /// of them picked): the result may not fit any more, and the query may need
+    /// recreating. Kept as stored until the view or the query is changed.
+    pub old_layout: bool,
 }
 
+/// Marks a stored view of the current layout (one value column last).
+const STAMP: &str = "@2";
+
 impl ChartView {
-    /// Stored form: `"line"` for all value columns, `"bars:1"` for one of them.
-    pub fn to_key(self) -> String {
-        match self.series {
-            None => self.style.key().to_string(),
-            Some(i) => format!("{}:{i}", self.style.key()),
+    pub fn new(style: ChartStyle) -> Self {
+        Self {
+            style,
+            old_layout: false,
         }
     }
 
-    /// Reads [`ChartView::to_key`]'s form; `None` for anything else.
+    /// Stored form: `"line@2"`; a view from the old layout keeps its unstamped
+    /// `"line"`, so saving a board doesn't hide that it needs recreating.
+    pub fn to_key(self) -> String {
+        if self.old_layout {
+            self.style.key().to_string()
+        } else {
+            format!("{}{STAMP}", self.style.key())
+        }
+    }
+
+    /// Reads [`ChartView::to_key`]'s form, and the old layout's `"line"` and
+    /// `"bars:1"` (one value column of several) as [`Self::old_layout`]; `None`
+    /// for anything else.
     pub fn from_key(key: &str) -> Option<Self> {
-        let (style, series) = match key.split_once(':') {
-            Some((style, i)) => (style, Some(i.parse().ok()?)),
-            None => (key, None),
+        let (style, old_layout) = match key.strip_suffix(STAMP) {
+            Some(style) => (style, false),
+            None => match key.split_once(':') {
+                Some((style, i)) => {
+                    i.parse::<usize>().ok()?;
+                    (style, true)
+                }
+                None => (key, true),
+            },
         };
-        let style = ChartStyle::ALL.into_iter().find(|s| s.key() == style)?;
-        Some(Self { style, series })
+        let style = ChartStyle::from_key(style)?;
+        Some(Self { style, old_layout })
+    }
+}
+
+impl ChartStyle {
+    /// The style named by [`ChartStyle::key`].
+    pub fn from_key(key: &str) -> Option<Self> {
+        ChartStyle::ALL.into_iter().find(|s| s.key() == key)
     }
 }
 
@@ -111,13 +141,27 @@ mod tests {
     #[test]
     fn view_keys_round_trip() {
         for style in ChartStyle::ALL {
-            for series in [None, Some(0), Some(3)] {
-                let view = ChartView { style, series };
+            for old_layout in [false, true] {
+                let view = ChartView { style, old_layout };
                 assert_eq!(ChartView::from_key(&view.to_key()), Some(view));
             }
         }
+        assert_eq!(ChartView::new(ChartStyle::Bars).to_key(), "bars@2");
+        // The old layout: all value columns, or one of them.
+        let old = |style| {
+            Some(ChartView {
+                style,
+                old_layout: true,
+            })
+        };
+        assert_eq!(
+            ChartView::from_key("stacked_bars"),
+            old(ChartStyle::StackedBars)
+        );
+        assert_eq!(ChartView::from_key("line:1"), old(ChartStyle::Line));
         assert_eq!(ChartView::from_key("bars:x"), None);
         assert_eq!(ChartView::from_key("pie"), None);
+        assert_eq!(ChartView::from_key("pie@2"), None);
         assert_eq!(ChartView::from_key(""), None);
     }
 

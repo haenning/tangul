@@ -164,8 +164,8 @@ impl Panel {
     pub(super) const LEFT: &'static [Panel] = &[
         Panel::Schema,
         Panel::Bookmarks,
-        Panel::Boards,
         Panel::History,
+        Panel::Boards,
     ];
     /// The right sidebar's panels: everything AI. (The value viewer belongs to each
     /// query tab: `tab_values.rs`.)
@@ -369,13 +369,13 @@ mod tests {
     fn cycle_wraps_within_its_panels() {
         let mut s = left();
         assert_eq!(s.cycle(1), Some(Panel::Bookmarks));
-        assert_eq!(s.cycle(1), Some(Panel::Boards));
         assert_eq!(s.cycle(1), Some(Panel::History));
+        assert_eq!(s.cycle(1), Some(Panel::Boards));
         assert_eq!(s.cycle(1), Some(Panel::Schema));
-        assert_eq!(s.cycle(-1), Some(Panel::History));
+        assert_eq!(s.cycle(-1), Some(Panel::Boards));
         // Closed: opens on the panel it had.
         s.open = false;
-        assert_eq!(s.cycle(1), Some(Panel::History));
+        assert_eq!(s.cycle(1), Some(Panel::Boards));
         assert!(s.open);
     }
 

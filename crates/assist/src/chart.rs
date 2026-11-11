@@ -1,7 +1,9 @@
 //! Whether a result can be shown as a chart, and the numbers to draw it. Strict about
-//! the shape, like a spreadsheet's default chart: column 0 is the x axis, every other
-//! column is a numeric series named by its header, all in one chart. Not about the
-//! size: how many rows or columns are readable is the user's call.
+//! the shape ([`RULES`]): label columns first, one number column last; with 3
+//! columns the middle one's labels are the series, so the series come from the data
+//! and needn't be known when the query is written. Not about the size: how many
+//! rows or series are readable is the user's call (beyond `chart.max_series` the
+//! rest is grey).
 //!
 //! Charts are a view of the result, never stored data.
 
@@ -9,124 +11,287 @@ use tangul_core::ResultSet;
 pub use tangul_core::chart::{ChartStyle, ChartView};
 
 use crate::analyze::{significant, statements};
+use crate::lexer::{Token, TokenKind};
 
-/// One value column.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Series {
-    /// The column header.
-    pub name: String,
-    /// Per row; `None` for NULL.
-    pub values: Vec<Option<f64>>,
+/// The rules a result has to follow to be a chart, as the user and AI tools read
+/// them (the messages and the tools' descriptions all use this text).
+pub const RULES: &str = "Charts take label columns first and one number column last:\n\
+- 2 columns: x and value (day, revenue).\n\
+- 3 columns: x, series and value (day, status, count(*)), one row per x and series \
+(GROUP BY both).\n\
+Several values go in rows, with a column naming them: LATERAL (VALUES ('revenue', \
+revenue), ('cost', cost)) or UNION ALL. More labels are combined in SQL: \
+to_char(day, 'YYYY/MM') or a || ' / ' || b. ORDER BY sets the order of x and of \
+the series.";
+
+/// What a stored chart from before [`RULES`] shows instead of the chart.
+pub fn old_layout_message() -> String {
+    format!(
+        "tangul has changed how charts work. Let your agent recreate the query in \
+         this format.\n\n{RULES}"
+    )
 }
 
-/// A chartable result, in the query's row order.
+/// One series: the values of one label in the series column, or the value
+/// column itself when there is no series column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Series {
+    /// The label (or the value column's header).
+    pub name: String,
+    /// Per x; `None` for NULL or no row.
+    pub values: Vec<Option<f64>>,
+    /// Drawn in grey: beyond the colored ones (see [`ChartData::drawn`]).
+    pub grey: bool,
+    /// The grey series added up into one ("Other"): how many.
+    pub other: Option<usize>,
+}
+
+impl Series {
+    fn new(name: String, values: Vec<Option<f64>>) -> Self {
+        Self {
+            name,
+            values,
+            grey: false,
+            other: None,
+        }
+    }
+}
+
+/// A chartable result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChartData {
-    /// Column 0 holds dates or timestamps.
+    /// The x labels are dates or timestamps.
     pub dates: bool,
-    /// Header of column 0.
+    /// Header of the x column.
     pub x_name: String,
-    /// Column 0 per row (NULL shows as "NULL").
+    /// Header of the series column, when there is one.
+    pub series_name: Option<String>,
+    /// The x labels (NULL shows as "NULL").
     pub x: Vec<String>,
     pub series: Vec<Series>,
     /// The query groups rows (`GROUP BY`): a chart is the natural view, so the UI
     /// suggests it.
     pub grouped: bool,
-    /// Line chart whose dates are not ascending (the query decides the order).
+    /// Dates the query puts out of ascending order (lines then go back in time).
     pub unsorted: bool,
     /// The result has more rows than the chart got (the row limit, or pages not
     /// loaded): the chart shows only the first ones.
     pub truncated: bool,
+    /// Series left out of the drawing (grouped bars beyond the colored ones).
+    pub left_out: usize,
 }
 
-/// The chart for a result, or why there is none (shown as the button's tooltip).
+/// The chart for a result, or the rule it breaks (shown instead of the chart).
 /// `truncated`: the result has more rows than `result` holds.
+///
+/// Every column but the last is a label, the last the value (see [`RULES`]): 2
+/// columns are x and value, 3 are x, series and value. x keeps the query's order
+/// when it has an `ORDER BY`; without one, dates and numbers go ascending and
+/// other labels by their total, largest first. Series follow an `ORDER BY` on
+/// their column, else their total.
 pub fn chart_data(sql: &str, result: &ResultSet, truncated: bool) -> Result<ChartData, String> {
     let columns = result.columns();
     let rows = result.row_count();
-    if columns.len() < 2 {
-        return Err("A chart needs a label column followed by number columns".into());
+    match columns.len() {
+        0 | 1 => {
+            return Err("A chart needs a label column and a number column last".into());
+        }
+        2 | 3 => {}
+        n => {
+            return Err(format!(
+                "A chart takes at most 3 columns (x, series, value); this has {n}. \
+                 Combine labels in SQL, e.g. a || ' / ' || b"
+            ));
+        }
     }
     if rows < 2 {
         return Err("A chart needs at least 2 rows".into());
     }
-
-    let mut series = Vec::with_capacity(columns.len() - 1);
-    for (col, info) in columns.iter().enumerate().skip(1) {
-        let mut values = Vec::with_capacity(rows);
-        for row in 0..rows {
-            values.push(match result.cell(row, col) {
-                None => None,
-                Some(v) => Some(number(v).ok_or_else(|| {
-                    format!(
-                        "Only the first column may hold text; {} has “{}”",
-                        info.name,
-                        short(v)
-                    )
-                })?),
-            });
-        }
-        if values.iter().all(Option::is_none) {
-            return Err(format!("{} is only NULL", info.name));
-        }
-        series.push(Series {
-            name: info.name.clone(),
-            values,
+    let last = columns.len() - 1;
+    let value_name = columns[last].name.clone();
+    let mut values = Vec::with_capacity(rows);
+    for row in 0..rows {
+        values.push(match result.cell(row, last) {
+            None => None,
+            Some(v) => Some(number(v).ok_or_else(|| {
+                format!(
+                    "The last column is the value and must be a number; {value_name} has “{}”",
+                    short(v)
+                )
+            })?),
         });
     }
+    if values.iter().all(Option::is_none) {
+        return Err(format!("{value_name} is only NULL"));
+    }
+    let label = |row: usize, col: usize| result.cell(row, col).unwrap_or("NULL").to_string();
+    let order = order_by(sql);
 
-    let x: Vec<Option<&str>> = (0..rows).map(|r| result.cell(r, 0)).collect();
-    let dates = x.iter().flatten().all(|v| is_date(v)) && x.iter().any(Option::is_some);
-    let unsorted = dates && !x.iter().flatten().is_sorted();
+    let (x, series, series_name) = if last == 1 {
+        // One series: every row is a point.
+        let x: Vec<String> = (0..rows).map(|r| label(r, 0)).collect();
+        (x, vec![Series::new(value_name, values)], None)
+    } else {
+        let mut x: Vec<String> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut cells: std::collections::HashMap<(usize, usize), Option<f64>> =
+            std::collections::HashMap::new();
+        for (row, value) in values.into_iter().enumerate() {
+            let (xl, sl) = (label(row, 0), label(row, 1));
+            let xi = x.iter().position(|v| *v == xl).unwrap_or_else(|| {
+                x.push(xl.clone());
+                x.len() - 1
+            });
+            let si = names.iter().position(|v| *v == sl).unwrap_or_else(|| {
+                names.push(sl.clone());
+                names.len() - 1
+            });
+            if cells.insert((xi, si), value).is_some() {
+                return Err(format!(
+                    "{} {xl} with {} {sl} is in more than one row: group by {}, {}",
+                    columns[0].name, columns[1].name, columns[0].name, columns[1].name
+                ));
+            }
+        }
+        let series = names
+            .into_iter()
+            .enumerate()
+            .map(|(si, name)| {
+                let values = (0..x.len())
+                    .map(|xi| cells.get(&(xi, si)).copied().flatten())
+                    .collect();
+                Series::new(name, values)
+            })
+            .collect();
+        (x, series, Some(columns[1].name.clone()))
+    };
 
-    Ok(ChartData {
-        dates,
+    let mut data = ChartData {
+        dates: x.iter().all(|v| is_date(v) || v == "NULL") && x.iter().any(|v| is_date(v)),
         x_name: columns[0].name.clone(),
-        x: x.iter().map(|v| v.unwrap_or("NULL").to_string()).collect(),
+        series_name,
+        x,
         series,
         grouped: groups(sql),
-        unsorted,
+        unsorted: false,
         truncated,
-    })
+        left_out: 0,
+    };
+    if order.is_none() {
+        data.sort_x();
+    }
+    data.unsorted = data.dates && !data.x.iter().filter(|v| *v != "NULL").is_sorted();
+    let series_order = match (&order, data.series_name.as_deref()) {
+        (Some(items), Some(name)) => items.iter().find(|i| i.names(2, name)).map(|i| i.desc),
+        _ => None,
+    };
+    data.sort_series(series_order);
+    Ok(data)
+}
+
+/// Whether a stored chart's result has the old layout: a label column and
+/// several number columns (e.g. `day, revenue, cost`). Read the new way, the
+/// middle column would be series labels, so it isn't drawn.
+pub fn old_layout(result: &ResultSet) -> bool {
+    let columns = result.columns().len();
+    columns >= 3
+        && (1..columns).all(|col| {
+            (0..result.row_count())
+                .all(|row| result.cell(row, col).is_none_or(|v| number(v).is_some()))
+        })
+}
+
+/// Compares labels: numbers as numbers, everything else as text (ISO dates sort
+/// as text), case aside.
+fn compare_labels(a: &str, b: &str) -> std::cmp::Ordering {
+    match (number(a), number(b)) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        _ => a
+            .to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b)),
+    }
 }
 
 impl ChartData {
-    /// Styles for all value columns in one chart; none with a single column (that
-    /// is [`Self::single_styles`]).
-    pub fn multi_styles(&self) -> Vec<ChartStyle> {
-        if self.series.len() < 2 {
-            return Vec::new();
-        }
-        ChartStyle::ALL.to_vec()
+    /// The sum of a series' values by size (its rank among the series).
+    fn weight(&self, s: usize) -> f64 {
+        self.series[s]
+            .values
+            .iter()
+            .flatten()
+            .map(|v| v.abs())
+            .sum()
     }
 
-    /// Styles for one value column.
-    pub fn single_styles(&self) -> Vec<ChartStyle> {
-        ChartStyle::SINGLE.to_vec()
+    /// x without an `ORDER BY`: dates and numbers ascending, other labels by
+    /// their total, largest first.
+    fn sort_x(&mut self) {
+        let natural = self
+            .x
+            .iter()
+            .filter(|v| *v != "NULL")
+            .all(|v| is_date(v) || number(v).is_some());
+        let mut index: Vec<usize> = (0..self.x.len()).collect();
+        if natural {
+            index.sort_by(|&a, &b| compare_labels(&self.x[a], &self.x[b]));
+        } else {
+            let total = |xi: usize| -> f64 {
+                self.series
+                    .iter()
+                    .filter_map(|s| s.values[xi])
+                    .map(f64::abs)
+                    .sum()
+            };
+            index.sort_by(|&a, &b| total(b).total_cmp(&total(a)));
+        }
+        self.x = index.iter().map(|&i| self.x[i].clone()).collect();
+        for series in &mut self.series {
+            series.values = index.iter().map(|&i| series.values[i]).collect();
+        }
+    }
+
+    /// Series by their labels in the `ORDER BY`'s direction (`Some(desc)`), or
+    /// by their total, largest first.
+    fn sort_series(&mut self, by_label: Option<bool>) {
+        let mut index: Vec<usize> = (0..self.series.len()).collect();
+        match by_label {
+            Some(desc) => index.sort_by(|&a, &b| {
+                let order = compare_labels(&self.series[a].name, &self.series[b].name);
+                if desc { order.reverse() } else { order }
+            }),
+            None => index.sort_by(|&a, &b| self.weight(b).total_cmp(&self.weight(a))),
+        }
+        let series = std::mem::take(&mut self.series);
+        let mut slots: Vec<Option<Series>> = series.into_iter().map(Some).collect();
+        self.series = index.iter().filter_map(|&i| slots[i].take()).collect();
+    }
+
+    /// Styles it can be drawn in: stacking needs several series.
+    pub fn styles(&self) -> Vec<ChartStyle> {
+        if self.series.len() < 2 {
+            ChartStyle::SINGLE.to_vec()
+        } else {
+            ChartStyle::ALL.to_vec()
+        }
     }
 
     pub fn fits(&self, view: ChartView) -> bool {
-        match view.series {
-            None => self.multi_styles().contains(&view.style),
-            Some(i) => i < self.series.len() && self.single_styles().contains(&view.style),
-        }
+        self.styles().contains(&view.style)
     }
 
-    /// Lines over time, bars for categories; all columns when there are several.
+    /// Lines over time, bars for categories.
     pub fn default_view(&self) -> ChartView {
-        let style = if self.dates {
+        ChartView::new(if self.dates {
             ChartStyle::Line
         } else {
             ChartStyle::Bars
-        };
-        let series = (self.series.len() < 2).then_some(0);
-        ChartView { style, series }
+        })
     }
 
     /// `view` if it fits this result, or the nearest view that does, otherwise the
     /// default. Views are picked before the result is known (boards, forms, AI
-    /// tools), so "all columns" of a result with one is that one, and a stacked
-    /// style of a single column is the same style unstacked.
+    /// tools), so a stacked style of a single series is the same style unstacked.
     pub fn view_or_default(&self, view: Option<ChartView>) -> ChartView {
         view.and_then(|v| self.nearest(v))
             .unwrap_or_else(|| self.default_view())
@@ -136,56 +301,71 @@ impl ChartData {
         if self.fits(view) {
             return Some(view);
         }
-        let series = match view.series {
-            None if self.series.len() < 2 => 0,
-            None => return None,
-            Some(i) => i,
-        };
-        let single = ChartView {
+        let unstacked = ChartView {
             style: view.style.unstacked(),
-            series: Some(series),
+            ..view
         };
-        self.fits(single).then_some(single)
+        self.fits(unstacked).then_some(unstacked)
     }
 
-    /// The view asked for as a style and a column name (`None`: all columns,
-    /// or the only one); the default view when the result has no such column.
-    pub fn view_for(&self, style: ChartStyle, column: Option<&str>) -> ChartView {
-        let series = match column {
-            Some(name) => {
-                let name = name.trim();
-                match self.series.iter().position(|s| s.name == name).or_else(|| {
-                    self.series
-                        .iter()
-                        .position(|s| s.name.eq_ignore_ascii_case(name))
-                }) {
-                    Some(i) => Some(i),
-                    None => return self.default_view(),
+    /// Name of a view for the status bar: `Stacked bars`, or `Line` for one series.
+    pub fn view_label(&self, view: ChartView) -> String {
+        if self.series.len() < 2 {
+            view.style.single_label().to_string()
+        } else {
+            view.style.label().to_string()
+        }
+    }
+
+    /// The data as drawn in `style` with at most `max` colored series (the largest
+    /// by total): beyond them, lines and areas draw the rest in grey, stacked
+    /// styles add them up into one grey "Other" on top, grouped bars leave them
+    /// out ([`ChartData::left_out`]).
+    pub fn drawn(&self, style: ChartStyle, max: usize) -> ChartData {
+        let max = max.max(1);
+        if self.series.len() <= max {
+            return self.clone();
+        }
+        let mut ranked: Vec<usize> = (0..self.series.len()).collect();
+        ranked.sort_by(|&a, &b| self.weight(b).total_cmp(&self.weight(a)));
+        let colored = |s: usize| ranked[..max].contains(&s);
+        let mut out = self.clone();
+        match style {
+            ChartStyle::Line | ChartStyle::Area => {
+                for (s, series) in out.series.iter_mut().enumerate() {
+                    series.grey = !colored(s);
                 }
             }
-            None => (self.series.len() < 2).then_some(0),
-        };
-        self.view_or_default(Some(ChartView { style, series }))
-    }
-
-    /// Name of a view for the status bar: `Stacked bars`, or `Line · revenue`.
-    pub fn view_label(&self, view: ChartView) -> String {
-        match view.series.and_then(|i| self.series.get(i)) {
-            None => view.style.label().to_string(),
-            Some(_) if self.series.len() < 2 => view.style.single_label().to_string(),
-            Some(s) => format!("{} · {}", view.style.single_label(), s.name),
+            ChartStyle::StackedArea | ChartStyle::StackedBars => {
+                let rest: Vec<&Series> = (0..self.series.len())
+                    .filter(|&s| !colored(s))
+                    .map(|s| &self.series[s])
+                    .collect();
+                let values = (0..self.x.len())
+                    .map(|xi| {
+                        let some: Vec<f64> = rest.iter().filter_map(|s| s.values[xi]).collect();
+                        (!some.is_empty()).then(|| some.iter().sum())
+                    })
+                    .collect();
+                out.series
+                    .retain(|s| !rest.iter().any(|r| r.name == s.name));
+                out.series.push(Series {
+                    name: "Other".into(),
+                    values,
+                    grey: true,
+                    other: Some(rest.len()),
+                });
+            }
+            ChartStyle::Bars => {
+                out.left_out = self.series.len() - max;
+                let keep: Vec<String> = ranked[..max]
+                    .iter()
+                    .map(|&s| self.series[s].name.clone())
+                    .collect();
+                out.series.retain(|s| keep.contains(&s.name));
+            }
         }
-    }
-
-    /// The chart data a view draws.
-    pub fn for_view(&self, view: ChartView) -> ChartData {
-        match view.series {
-            Some(i) if self.series.len() > 1 => ChartData {
-                series: self.series.get(i).into_iter().cloned().collect(),
-                ..self.clone()
-            },
-            _ => self.clone(),
-        }
+        out
     }
 
     /// Per series and row the `(from, to)` of its stacked segment. Positive values
@@ -207,6 +387,86 @@ impl ChartData {
                     .collect()
             })
             .collect()
+    }
+
+    /// The series of a row as they are listed (tooltip), top to bottom. Stacked
+    /// styles follow the stack as drawn: the top segment first, i.e. the positive
+    /// values (NULL as 0) from the last series down, then the negative ones from
+    /// 0 downwards. Other styles have no vertical order: series order.
+    pub fn row_order(&self, style: ChartStyle, row: usize) -> Vec<usize> {
+        let all = 0..self.series.len();
+        if !style.is_stacked() {
+            return all.collect();
+        }
+        let negative = |s: &usize| self.series[*s].values[row].is_some_and(|v| v < 0.0);
+        let mut order: Vec<usize> = all.clone().rev().filter(|s| !negative(s)).collect();
+        order.extend(all.filter(negative));
+        order
+    }
+
+    /// The series as the legend lists them: stacked styles top of the stack first
+    /// (the last series), like the tooltip; others in series order.
+    pub fn legend_order(&self, style: ChartStyle) -> Vec<usize> {
+        let all = 0..self.series.len();
+        if style.is_stacked() {
+            all.rev().collect()
+        } else {
+            all.collect()
+        }
+    }
+
+    /// At most `max` of `order` to list at `row`, still in that order: the largest
+    /// values by size (NULL smallest; ties keep the earlier), always including
+    /// `keep` (the series under the pointer) in place of the smallest. Also how
+    /// many are left out.
+    pub fn pick_listed(
+        &self,
+        order: &[usize],
+        row: usize,
+        max: usize,
+        keep: Option<usize>,
+    ) -> (Vec<usize>, usize) {
+        if order.len() <= max {
+            return (order.to_vec(), 0);
+        }
+        let size = |s: usize| self.series[s].values[row].map_or(-1.0, f64::abs);
+        let mut by_size: Vec<usize> = order.to_vec();
+        by_size.sort_by(|&a, &b| size(b).total_cmp(&size(a)));
+        by_size.truncate(max);
+        if let Some(keep) = keep.filter(|k| order.contains(k) && !by_size.contains(k))
+            && max > 0
+        {
+            by_size.pop();
+            by_size.push(keep);
+        }
+        let listed: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|s| by_size.contains(s))
+            .collect();
+        let hidden = order.len() - listed.len();
+        (listed, hidden)
+    }
+
+    /// The sum of a row's values (NULL left out), as stacked styles show it.
+    pub fn row_total(&self, row: usize) -> f64 {
+        self.series.iter().filter_map(|s| s.values[row]).sum()
+    }
+
+    /// The series whose stacked segment at `row` holds `value` (a value on the
+    /// axis), or `None` above or below the stack. Where segments meet, the one
+    /// with height wins; a zero-height segment only where no other is.
+    pub fn stack_at(&self, row: usize, value: f64) -> Option<usize> {
+        let stacks = self.stacks();
+        let holds = |s: usize| {
+            let (from, to) = stacks[s][row];
+            value >= from.min(to) && value <= from.max(to)
+        };
+        let sized = (0..self.series.len()).find(|&s| {
+            let (from, to) = stacks[s][row];
+            from != to && holds(s)
+        });
+        sized.or_else(|| (0..self.series.len()).find(|&s| holds(s)))
     }
 
     /// Lowest and highest value the chart has to show, including 0 (bars and areas
@@ -329,6 +589,104 @@ fn groups(sql: &str) -> bool {
         .any(|w| w[0].is_word(stmt, "group") && w[1].is_word(stmt, "by"))
 }
 
+/// One item of an `ORDER BY`: what it sorts by, as far as a chart needs it.
+#[derive(Debug, PartialEq)]
+struct OrderItem {
+    /// A column by position (from 1).
+    position: Option<usize>,
+    /// A column by name (unquoted; the last part of `t.col`).
+    name: Option<String>,
+    desc: bool,
+}
+
+impl OrderItem {
+    /// Whether it sorts by result column `position` (from 1) named `name`.
+    fn names(&self, position: usize, name: &str) -> bool {
+        self.position == Some(position)
+            || self
+                .name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    }
+}
+
+/// The items of the last statement's outermost `ORDER BY`, or `None` without
+/// one. Expressions count as items that name no column.
+fn order_by(sql: &str) -> Option<Vec<OrderItem>> {
+    let stmt = statements(sql)
+        .into_iter()
+        .map(|(s, e)| &sql[s..e])
+        .rfind(|s| !s.trim().is_empty())?;
+    let tokens = significant(stmt);
+    let mut depth = 0usize;
+    let mut start = None;
+    for (i, t) in tokens.iter().enumerate() {
+        if t.is_punct(stmt, '(') {
+            depth += 1;
+        } else if t.is_punct(stmt, ')') {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0
+            && t.is_word(stmt, "order")
+            && tokens.get(i + 1).is_some_and(|n| n.is_word(stmt, "by"))
+        {
+            start = Some(i + 2);
+        }
+    }
+    let start = start?;
+    let mut items = Vec::new();
+    let mut item: Vec<Token> = Vec::new();
+    let mut depth = 0usize;
+    let ends = ["limit", "offset", "fetch", "for"];
+    let finish = |item: &mut Vec<Token>, items: &mut Vec<OrderItem>| {
+        if item.is_empty() {
+            return;
+        }
+        let desc = item.iter().any(|t| t.is_word(stmt, "desc"));
+        // Up to ASC / DESC / NULLS: the expression.
+        let expr: Vec<&Token> = item
+            .iter()
+            .take_while(|t| !["asc", "desc", "nulls"].iter().any(|w| t.is_word(stmt, w)))
+            .collect();
+        let position = match expr.as_slice() {
+            [t] if t.kind == TokenKind::Number => t.text(stmt).parse().ok(),
+            _ => None,
+        };
+        let plain = !expr.is_empty()
+            && expr.iter().enumerate().all(|(i, t)| {
+                if i % 2 == 0 {
+                    t.is_ident()
+                } else {
+                    t.is_punct(stmt, '.')
+                }
+            });
+        let name = plain
+            .then(|| expr.last())
+            .flatten()
+            .map(|t| t.text(stmt).trim_matches(['"', '`']).to_string());
+        items.push(OrderItem {
+            position,
+            name,
+            desc,
+        });
+        item.clear();
+    };
+    for t in &tokens[start..] {
+        if t.is_punct(stmt, '(') {
+            depth += 1;
+        } else if t.is_punct(stmt, ')') {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 && ends.iter().any(|w| t.is_word(stmt, w)) {
+            break;
+        } else if depth == 0 && t.is_punct(stmt, ',') {
+            finish(&mut item, &mut items);
+            continue;
+        }
+        item.push(*t);
+    }
+    finish(&mut item, &mut items);
+    Some(items)
+}
+
 fn short(v: &str) -> String {
     const MAX: usize = 30;
     match v.char_indices().nth(MAX) {
@@ -361,106 +719,115 @@ mod tests {
         r
     }
 
+    /// A long result: x, series and value per row.
+    fn long(rows: &[(&str, &str, Option<&str>)]) -> ResultSet {
+        let rows: Vec<[Option<&str>; 3]> = rows
+            .iter()
+            .map(|&(x, s, v)| [Some(x), Some(s), v])
+            .collect();
+        let rows: Vec<&[Option<&str>]> = rows.iter().map(|r| r.as_slice()).collect();
+        result(&["day", "status", "n"], &rows)
+    }
+
+    fn names(c: &ChartData) -> Vec<&str> {
+        c.series.iter().map(|s| s.name.as_str()).collect()
+    }
+
     #[test]
-    fn bars_for_categories() {
+    fn two_columns_are_x_and_value() {
         let r = result(
-            &["status", "orders", "revenue"],
-            &[
-                &[Some("paid"), Some("3"), Some("120.50")],
-                &[None, Some("1"), None],
-            ],
+            &["status", "orders"],
+            &[&[Some("paid"), Some("3")], &[None, Some("5")]],
         );
         let c = chart_data(
-            "select status, count(*) orders, sum(total) revenue from app.orders group by 1",
+            "select status, count(*) orders from app.orders group by 1",
             &r,
             false,
         )
         .unwrap();
-        assert!(!c.dates);
-        let all = ChartView {
-            style: ChartStyle::Bars,
-            series: None,
-        };
-        assert_eq!(c.default_view(), all);
-        assert_eq!(c.multi_styles(), ChartStyle::ALL);
-        assert_eq!(c.view_label(all), "Bars side by side");
-        let revenue = ChartView {
-            style: ChartStyle::Line,
-            series: Some(1),
-        };
-        assert!(c.fits(revenue));
-        assert_eq!(c.view_label(revenue), "Line · revenue");
-        assert_eq!(c.for_view(revenue).series[0].name, "revenue");
-        // Stacking is for all columns only; one column of it is unstacked.
-        let stacked_one = ChartView {
-            style: ChartStyle::StackedBars,
-            series: Some(1),
-        };
-        assert!(!c.fits(stacked_one));
+        assert!(!c.dates && c.grouped && !c.unsorted);
+        // No ORDER BY: categories by their value, largest first.
+        assert_eq!(c.x, ["NULL", "paid"]);
+        assert_eq!(names(&c), ["orders"]);
+        assert_eq!(c.series[0].values, [Some(5.0), Some(3.0)]);
+        assert_eq!(c.series_name, None);
+        // One series: no stacking.
+        assert_eq!(c.styles(), ChartStyle::SINGLE);
+        assert_eq!(c.default_view(), ChartView::new(ChartStyle::Bars));
+        assert_eq!(c.view_label(c.default_view()), "Bars");
         assert_eq!(
-            c.view_or_default(Some(stacked_one)),
-            ChartView {
-                style: ChartStyle::Bars,
-                series: Some(1)
-            }
+            c.view_or_default(Some(ChartView::new(ChartStyle::StackedArea))),
+            ChartView::new(ChartStyle::Area)
         );
-        assert!(c.grouped && !c.unsorted);
+        // With an ORDER BY: the query's order.
+        let c = chart_data("select … order by orders", &r, false).unwrap();
         assert_eq!(c.x, ["paid", "NULL"]);
-        assert_eq!(c.series[1].name, "revenue");
-        assert_eq!(c.series[1].values, [Some(120.5), None]);
     }
 
     #[test]
-    fn lines_for_dates() {
-        let r = result(
-            &["day", "n"],
-            &[
-                &[Some("2024-01-02 00:00:00+00"), Some("5")],
-                &[Some("2024-01-01 00:00:00+00"), Some("7")],
-            ],
+    fn three_columns_are_x_series_and_value() {
+        let r = long(&[
+            ("2024-01-02", "paid", Some("4")),
+            ("2024-01-01", "open", Some("1")),
+            ("2024-01-01", "paid", Some("2")),
+            ("2024-01-02", "lost", None),
+        ]);
+        let c = chart_data("select day, status, count(*) group by 1, 2", &r, false).unwrap();
+        // Dates ascending, series by total (lost has none).
+        assert!(c.dates && !c.unsorted);
+        assert_eq!(c.x, ["2024-01-01", "2024-01-02"]);
+        assert_eq!(names(&c), ["paid", "open", "lost"]);
+        assert_eq!(c.series_name.as_deref(), Some("status"));
+        // A missing combination is NULL, never 0.
+        assert_eq!(c.series[0].values, [Some(2.0), Some(4.0)]);
+        assert_eq!(c.series[1].values, [Some(1.0), None]);
+        assert_eq!(c.series[2].values, [None, None]);
+        assert_eq!(c.styles(), ChartStyle::ALL);
+        assert_eq!(c.default_view(), ChartView::new(ChartStyle::Line));
+        assert_eq!(
+            c.view_label(ChartView::new(ChartStyle::StackedBars)),
+            "Stacked bars"
         );
-        let c = chart_data("select * from app.revenue_by_day", &r, false).unwrap();
-        assert!(c.dates);
-        // One value column: only the single-column styles.
-        assert!(c.multi_styles().is_empty());
-        assert_eq!(c.single_styles(), ChartStyle::SINGLE);
-        let line = ChartView {
-            style: ChartStyle::Line,
-            series: Some(0),
-        };
-        assert_eq!(c.default_view(), line);
-        // Picked without the result: "all columns" is the only one, unstacked.
-        for (style, shown) in [
-            (ChartStyle::Line, ChartStyle::Line),
-            (ChartStyle::Area, ChartStyle::Area),
-            (ChartStyle::StackedArea, ChartStyle::Area),
-            (ChartStyle::Bars, ChartStyle::Bars),
-            (ChartStyle::StackedBars, ChartStyle::Bars),
+        // An ORDER BY on the series column, by name or position, in its direction.
+        for sql in [
+            "select … order by day, status desc",
+            "select … order by 1, 2 desc nulls last",
+            "select … order by t.\"status\" desc limit 10",
         ] {
-            let all = ChartView {
-                style,
-                series: None,
-            };
-            let single = ChartView {
-                style: shown,
-                series: Some(0),
-            };
-            assert_eq!(c.view_or_default(Some(all)), single);
+            let c = chart_data(sql, &r, false).unwrap();
+            assert_eq!(names(&c), ["paid", "open", "lost"], "{sql}");
+            // x in the query's order: here not ascending.
+            assert_eq!(c.x, ["2024-01-02", "2024-01-01"], "{sql}");
+            assert!(c.unsorted, "{sql}");
         }
-        // A column it doesn't have: the default.
-        let missing = ChartView {
-            style: ChartStyle::Bars,
-            series: Some(3),
-        };
-        assert_eq!(c.view_or_default(Some(missing)), line);
-        assert_eq!(c.view_label(line), "Line");
-        assert!(!c.grouped && c.unsorted);
-        // Numbers in column 0 are labels.
-        let r = result(
-            &["year", "n"],
-            &[&[Some("2023"), Some("1")], &[Some("2024"), Some("2")]],
-        );
-        assert!(!chart_data("", &r, false).unwrap().dates);
+        let c = chart_data("select … order by status", &r, false).unwrap();
+        assert_eq!(names(&c), ["lost", "open", "paid"]);
+        // An ORDER BY on something else, or inside a window: series by total.
+        for sql in [
+            "select … order by day",
+            "select …, rank() over (order by status) from t",
+        ] {
+            let c = chart_data(sql, &r, false).unwrap();
+            assert_eq!(names(&c), ["paid", "open", "lost"], "{sql}");
+        }
+    }
+
+    #[test]
+    fn numbers_are_labels_and_sort_as_numbers() {
+        // Years in the series position are labels: no type is needed.
+        let r = long(&[
+            ("10", "2024", Some("1")),
+            ("9", "2023", Some("5")),
+            ("10", "2023", Some("2")),
+            ("9", "2024", Some("1")),
+        ]);
+        let c = chart_data("select … order by 2", &r, false).unwrap();
+        assert_eq!(names(&c), ["2023", "2024"]);
+        // Without ORDER BY: x as numbers (9 before 10), series by total.
+        let c = chart_data("", &r, false).unwrap();
+        assert_eq!(c.x, ["9", "10"]);
+        assert!(!c.dates);
+        assert_eq!(names(&c), ["2023", "2024"]);
     }
 
     #[test]
@@ -473,76 +840,97 @@ mod tests {
         );
         assert_eq!(
             chart_data("", &text_value, false).unwrap_err(),
-            "Only the first column may hold text; b has “n/a”"
+            "The last column is the value and must be a number; b has “n/a”"
         );
         let one_row = result(&["a", "b"], &[&[Some("x"), Some("1")]]);
         assert!(chart_data("", &one_row, false).is_err());
         let nulls = result(&["a", "b"], &[&[Some("x"), None], &[Some("y"), None]]);
-        assert!(chart_data("", &nulls, false).is_err());
+        assert_eq!(chart_data("", &nulls, false).unwrap_err(), "b is only NULL");
+        let four = result(
+            &["a", "b", "c", "d"],
+            &[
+                &[Some("x"), Some("y"), Some("z"), Some("1")],
+                &[Some("x"), Some("y"), Some("w"), Some("2")],
+            ],
+        );
+        assert!(
+            chart_data("", &four, false)
+                .unwrap_err()
+                .contains("at most 3 columns")
+        );
+        // The same x and series twice: never added up.
+        let twice = long(&[
+            ("2024-01-01", "paid", Some("1")),
+            ("2024-01-01", "paid", Some("2")),
+        ]);
+        assert_eq!(
+            chart_data("", &twice, false).unwrap_err(),
+            "day 2024-01-01 with status paid is in more than one row: group by day, status"
+        );
     }
 
     #[test]
-    fn views_asked_for_by_column_name() {
-        let r = result(
-            &["day", "orders", "Revenue"],
+    fn the_old_layout_is_recognized() {
+        let wide = result(
+            &["day", "revenue", "cost"],
             &[
-                &[Some("2024-01-01"), Some("3"), Some("10")],
-                &[Some("2024-01-02"), Some("4"), Some("12")],
+                &[Some("2024-01-01"), Some("5"), Some("7")],
+                &[Some("2024-01-02"), None, Some("3")],
             ],
         );
-        let c = chart_data("", &r, false).unwrap();
-        let view = |style, series| ChartView { style, series };
-        // A column by name, in any case.
-        assert_eq!(
-            c.view_for(ChartStyle::Area, Some("revenue")),
-            view(ChartStyle::Area, Some(1))
+        assert!(old_layout(&wide));
+        let labels = long(&[("a", "x", Some("1")), ("b", "y", Some("2"))]);
+        assert!(!old_layout(&labels));
+        let two = result(
+            &["a", "b"],
+            &[&[Some("1"), Some("2")], &[Some("3"), Some("4")]],
         );
-        // All columns.
-        assert_eq!(
-            c.view_for(ChartStyle::StackedBars, None),
-            view(ChartStyle::StackedBars, None)
-        );
-        // A column the result doesn't have: the default view.
-        assert_eq!(c.view_for(ChartStyle::Bars, Some("nope")), c.default_view());
-        // Stacking one column: unstacked.
-        assert_eq!(
-            c.view_for(ChartStyle::StackedArea, Some("orders")),
-            view(ChartStyle::Area, Some(0))
-        );
-        // With one value column, no column means that one.
-        let one = result(
-            &["a", "n"],
-            &[&[Some("x"), Some("1")], &[Some("y"), Some("2")]],
-        );
-        let c = chart_data("", &one, false).unwrap();
-        assert_eq!(
-            c.view_for(ChartStyle::Line, None),
-            view(ChartStyle::Line, Some(0))
-        );
+        assert!(!old_layout(&two));
+        assert!(old_layout_message().starts_with("tangul has changed how charts work"));
+        assert!(old_layout_message().ends_with(RULES));
+    }
+
+    #[test]
+    fn beyond_the_cap_the_rest_is_grey() {
+        // Series s0..s3 with totals 1, 2, 3, 4.
+        let rows: Vec<(String, String, String)> = (0..4)
+            .flat_map(|s| {
+                ["a", "b"].map(|x| (x.to_string(), format!("s{s}"), format!("{}", s + 1)))
+            })
+            .collect();
+        let rows: Vec<(&str, &str, Option<&str>)> = rows
+            .iter()
+            .map(|(x, s, v)| (x.as_str(), s.as_str(), Some(v.as_str())))
+            .collect();
+        let c = chart_data("select … order by status", &long(&rows), false).unwrap();
+        assert_eq!(names(&c), ["s0", "s1", "s2", "s3"]);
+        assert_eq!(c.drawn(ChartStyle::Line, 4), c, "all fit");
+        // Lines: the largest two colored, the rest grey, in their order.
+        let lines = c.drawn(ChartStyle::Line, 2);
+        let grey: Vec<bool> = lines.series.iter().map(|s| s.grey).collect();
+        assert_eq!(grey, [true, true, false, false]);
+        // Stacked: the rest added up into "Other", on top.
+        let stacked = c.drawn(ChartStyle::StackedBars, 2);
+        assert_eq!(names(&stacked), ["s2", "s3", "Other"]);
+        let other = &stacked.series[2];
+        assert_eq!((other.grey, other.other), (true, Some(2)));
+        assert_eq!(other.values, [Some(3.0), Some(3.0)]);
+        // Grouped bars: left out.
+        let bars = c.drawn(ChartStyle::Bars, 2);
+        assert_eq!((names(&bars), bars.left_out), (vec!["s2", "s3"], 2));
     }
 
     #[test]
     fn size_is_no_reason_to_refuse() {
-        // 10 000 rows and 12 number columns: a chart, with all styles.
-        let cols: Vec<String> = (0..13).map(|c| format!("c{c}")).collect();
-        let cols: Vec<&str> = cols.iter().map(String::as_str).collect();
+        // 10 000 rows: a chart.
         let labels: Vec<String> = (0..10_000).map(|r| format!("r{r}")).collect();
-        let rows: Vec<Vec<Option<&str>>> = labels
+        let rows: Vec<[Option<&str>; 2]> = labels
             .iter()
-            .map(|l| {
-                std::iter::once(Some(l.as_str()))
-                    .chain([Some("1"); 12])
-                    .collect()
-            })
+            .map(|l| [Some(l.as_str()), Some("1")])
             .collect();
-        let rows: Vec<&[Option<&str>]> = rows.iter().map(Vec::as_slice).collect();
-        let c = chart_data("", &result(&cols, &rows), false).unwrap();
-        assert_eq!((c.x.len(), c.series.len()), (10_000, 12));
-        assert_eq!(c.multi_styles(), ChartStyle::ALL);
-        assert!(c.fits(ChartView {
-            style: ChartStyle::Bars,
-            series: Some(11)
-        }));
+        let rows: Vec<&[Option<&str>]> = rows.iter().map(|r| r.as_slice()).collect();
+        let c = chart_data("", &result(&["x", "n"], &rows), false).unwrap();
+        assert_eq!((c.x.len(), c.series.len()), (10_000, 1));
         assert!(!c.truncated);
         // A result cut at the row limit says so.
         let r = result(
@@ -582,17 +970,96 @@ mod tests {
         assert_eq!(min_max_per_pixel(&few, 100.), few);
     }
 
+    /// Series a, b, c over p, q, r: a 2, -1, 0; b 3, NULL, -2; c 1, 4, -3.
+    fn three_series() -> ChartData {
+        let r = long(&[
+            ("p", "a", Some("2")),
+            ("p", "b", Some("3")),
+            ("p", "c", Some("1")),
+            ("q", "a", Some("-1")),
+            ("q", "b", None),
+            ("q", "c", Some("4")),
+            ("r", "a", Some("0")),
+            ("r", "b", Some("-2")),
+            ("r", "c", Some("-3")),
+        ]);
+        chart_data("select … order by 1, 2", &r, false).unwrap()
+    }
+
+    #[test]
+    fn rows_are_listed_like_the_stack() {
+        let c = three_series();
+        // Stacked: the top segment first.
+        for style in [ChartStyle::StackedBars, ChartStyle::StackedArea] {
+            assert_eq!(c.row_order(style, 0), [2, 1, 0]);
+            // Negative ones below 0, from 0 down; NULL sits with the positive ones.
+            assert_eq!(c.row_order(style, 1), [2, 1, 0]);
+            assert_eq!(c.row_order(style, 2), [0, 1, 2]);
+            assert_eq!(c.legend_order(style), [2, 1, 0]);
+        }
+        // No vertical order: series order.
+        for style in [ChartStyle::Line, ChartStyle::Area, ChartStyle::Bars] {
+            assert_eq!(c.row_order(style, 1), [0, 1, 2]);
+            assert_eq!(c.legend_order(style), [0, 1, 2]);
+        }
+        assert_eq!(c.row_total(0), 6.0);
+        assert_eq!(c.row_total(1), 3.0, "NULL left out");
+    }
+
+    #[test]
+    fn the_largest_are_listed_and_the_hovered_one_always() {
+        let c = three_series();
+        let order = [2, 1, 0];
+        // All fit.
+        assert_eq!(c.pick_listed(&order, 0, 3, None), (vec![2, 1, 0], 0));
+        // The two largest, in the given order.
+        assert_eq!(c.pick_listed(&order, 0, 2, None), (vec![1, 0], 1));
+        // The hovered one replaces the smallest.
+        assert_eq!(c.pick_listed(&order, 0, 2, Some(2)), (vec![2, 1], 1));
+        // By size: -3 is larger than 0; NULL is the smallest.
+        assert_eq!(c.pick_listed(&[0, 1, 2], 2, 2, None), (vec![1, 2], 1));
+        assert_eq!(c.pick_listed(&[0, 1, 2], 1, 2, None), (vec![0, 2], 1));
+        // A hovered one already listed changes nothing.
+        assert_eq!(c.pick_listed(&order, 0, 2, Some(1)), (vec![1, 0], 1));
+        assert_eq!(c.pick_listed(&order, 0, 0, Some(1)), (vec![], 3));
+    }
+
+    #[test]
+    fn the_segment_under_a_value() {
+        let c = three_series();
+        // Row 0: a 0..2, b 2..5, c 5..6.
+        assert_eq!(c.stack_at(0, 1.0), Some(0));
+        assert_eq!(c.stack_at(0, 3.0), Some(1));
+        assert_eq!(c.stack_at(0, 5.5), Some(2));
+        assert_eq!(c.stack_at(0, 6.5), None, "above the stack");
+        assert_eq!(c.stack_at(0, -0.5), None);
+        // Row 1: a 0..-1 below, b NULL (0..0), c 0..4.
+        assert_eq!(c.stack_at(1, -0.5), Some(0));
+        assert_eq!(c.stack_at(1, 0.0), Some(0), "a segment with height first");
+        assert_eq!(c.stack_at(1, 2.0), Some(2));
+        // Row 2: a 0 (0..0), b 0..-2, c -2..-5.
+        assert_eq!(c.stack_at(2, -4.0), Some(2));
+        assert_eq!(c.stack_at(2, 0.5), None);
+        // Only a zero-height segment there.
+        let r = result(
+            &["x", "a"],
+            &[&[Some("p"), Some("0")], &[Some("q"), Some("1")]],
+        );
+        let zero = chart_data("", &r, false).unwrap();
+        assert_eq!(zero.stack_at(0, 0.0), Some(0));
+    }
+
     #[test]
     fn stacks_and_ranges() {
-        let r = result(
-            &["x", "a", "b"],
-            &[
-                &[Some("p"), Some("2"), Some("3")],
-                &[Some("q"), Some("-1"), None],
-                &[Some("r"), Some("4"), Some("-2")],
-            ],
-        );
-        let c = chart_data("", &r, false).unwrap();
+        let r = long(&[
+            ("p", "a", Some("2")),
+            ("p", "b", Some("3")),
+            ("q", "a", Some("-1")),
+            ("q", "b", None),
+            ("r", "a", Some("4")),
+            ("r", "b", Some("-2")),
+        ]);
+        let c = chart_data("select … order by 1, 2", &r, false).unwrap();
         assert_eq!(
             c.stacks(),
             [

@@ -31,7 +31,9 @@ use crate::{
     assets::Lucide,
     completion::Snippets,
     connection::{ConnStatus, Connection},
+    notes::Overlay,
     result_view::{CellValue, ResultEvent, ResultView},
+    settings,
 };
 use editor::{EditorEvent, RunTake, SqlEditor};
 
@@ -311,6 +313,11 @@ impl QueryTab {
         self.results.read(cx).running().is_some()
     }
 
+    /// A run is over and its result is shown ([`ResultView::finished`]).
+    pub fn finished(&self, cx: &App) -> bool {
+        self.results.read(cx).finished()
+    }
+
     /// The engine's id of the tab's connection.
     pub fn conn_id(&self, cx: &App) -> Option<ConnId> {
         Some(self.conn.as_ref()?.read(cx).id)
@@ -321,6 +328,37 @@ impl QueryTab {
     }
 
     /// Switching connection releases a pinned session (the engine rolls it back).
+    /// The editor's statements, with its text and how the database reads it (for
+    /// the notes on when each last ran).
+    pub fn statements(
+        &self,
+        cx: &App,
+    ) -> (
+        String,
+        tangul_assist::lexer::Lexing,
+        Vec<tangul_assist::statement::Statement>,
+    ) {
+        let editor = self.editor.read(cx);
+        (editor.text(cx), editor.lexing(), editor.statements(cx))
+    }
+
+    /// When each statement last ran: (end of the statement, the note).
+    pub fn set_last_runs(&mut self, notes: Vec<(usize, SharedString)>, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.set_last_runs(notes, cx));
+    }
+
+    /// The notes after the statements (tests).
+    #[cfg(test)]
+    pub fn last_runs(&self, cx: &App) -> Vec<(usize, SharedString)> {
+        self.editor.read(cx).last_runs().to_vec()
+    }
+
+    /// The gutter marks: (statement, whether ⌘↵ takes it) (tests).
+    #[cfg(test)]
+    pub fn statement_marks(&self, cx: &App) -> Vec<(std::ops::Range<usize>, bool)> {
+        self.editor.read(cx).statement_marks().to_vec()
+    }
+
     pub fn set_conn(&mut self, conn: Entity<Connection>, cx: &mut Context<Self>) {
         // The same SQL can be valid on one connection and not on another.
         self.editor.update(cx, |e, cx| e.revalidate(cx));
@@ -611,14 +649,8 @@ impl QueryTab {
     }
 
     /// See [`ResultView::request_chart`].
-    pub fn request_chart(
-        &mut self,
-        style: ChartStyle,
-        column: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.results
-            .update(cx, |r, cx| r.request_chart(style, column, cx));
+    pub fn request_chart(&mut self, style: ChartStyle, cx: &mut Context<Self>) {
+        self.results.update(cx, |r, cx| r.request_chart(style, cx));
     }
 
     /// Timing and row count of the last run, shown in the workspace status bar.
@@ -652,6 +684,38 @@ impl QueryTab {
                 }))
                 .into_any_element(),
         )
+    }
+
+    /// When each statement last ran, over the editor, as the settings say.
+    fn render_overlay(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        let settings = &settings::current(cx).editor;
+        let editor = self.editor.read(cx);
+        let overlay = Overlay {
+            notes: if settings.last_run {
+                editor.last_runs()
+            } else {
+                Rc::default()
+            },
+            note_color: cx.theme().muted_foreground.opacity(0.6),
+        };
+        (!overlay.is_empty()).then(|| overlay.element(editor.state().clone()))
+    }
+
+    /// How many statements the editor has, top right in the muted color; only
+    /// with several.
+    fn render_statement_count(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        let count = self.editor.read(cx).statement_count();
+        (count > 1).then(|| {
+            div()
+                .id("statement-count")
+                .test_support()
+                .absolute()
+                .top_1()
+                .right_4()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("{count} statements"))
+        })
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -806,6 +870,8 @@ impl Render for QueryTab {
                                         .size_full()
                                         .overflow_hidden()
                                         .child(Editor::new(&editor).h_full().bordered(false))
+                                        .children(self.render_overlay(cx))
+                                        .children(self.render_statement_count(cx))
                                         .children(self.render_hints(cx)),
                                 ),
                         )

@@ -739,7 +739,7 @@ impl ResultsDelegate {
                         cx.stop_propagation();
                         let d = table.delegate_mut();
                         d.start_drag(Drag::Rows(row_ix), e.position);
-                        d.mark.click_row(row_ix, keys(e.modifiers), n_cols);
+                        d.mark.click_row(row_ix, keys(e.modifiers, cx), n_cols);
                         d.marked();
                         cx.notify();
                     }),
@@ -1337,10 +1337,10 @@ impl IntoElement for Clipped {
 }
 
 /// The keys held, as the mark takes them.
-fn keys(modifiers: Modifiers) -> Keys {
+fn keys(modifiers: Modifiers, cx: &App) -> Keys {
     Keys {
         shift: modifiers.shift,
-        secondary: modifiers.secondary(),
+        secondary: modifiers.secondary(cx),
     }
 }
 
@@ -1668,7 +1668,7 @@ impl TableDelegate for ResultsDelegate {
                         MouseButton::Left,
                         cx.listener(move |table, e: &MouseDownEvent, _, cx| {
                             let d = table.delegate_mut();
-                            d.mark.click_column(col_ix, keys(e.modifiers));
+                            d.mark.click_column(col_ix, keys(e.modifiers, cx));
                             d.marked();
                             cx.notify();
                         }),
@@ -1953,7 +1953,7 @@ impl TableDelegate for ResultsDelegate {
                     } else {
                         d.start_drag(Drag::Cells(row_ix, col_ix), e.position);
                         d.selecting(row_ix, col_ix);
-                        d.mark.click_cell(row_ix, col_ix, keys(e.modifiers));
+                        d.mark.click_cell(row_ix, col_ix, keys(e.modifiers, cx));
                         d.marked();
                     }
                     cx.notify();

@@ -23,6 +23,34 @@ const LINES: usize = 3;
 /// [`LINES`] lines (an estimate: a clamped text still shows "Show all").
 const LINE_CHARS: usize = 48;
 
+/// How often a running time is redrawn while it counts up.
+const COUNT_UP_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Redraws the view every [`COUNT_UP_EVERY`] as long as `running` says so: a time
+/// counting up while something runs. Ends by itself; dropping the task ends it too.
+pub fn count_up<T: 'static>(cx: &mut Context<T>, running: fn(&T) -> bool) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor().timer(COUNT_UP_EVERY).await;
+            let more = this.update(cx, |this, cx| {
+                let more = running(this);
+                if more {
+                    cx.notify();
+                }
+                more
+            });
+            if !matches!(more, Ok(true)) {
+                break;
+            }
+        }
+    })
+}
+
+/// A time as the status bar shows it: `12 ms`.
+pub fn millis(time: std::time::Duration) -> SharedString {
+    format!("{} ms", time.as_millis()).into()
+}
+
 /// A tooltip whose text wraps at [`TEXT_WIDTH`].
 pub fn wrapped_tooltip(
     text: impl Into<SharedString>,

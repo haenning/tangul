@@ -272,8 +272,10 @@ impl Workspace {
             })
     }
 
-    /// Zed-style bottom bar: sidebar panels, then (planned) AI and schema-graph
-    /// tools; the active query's timing on the right.
+    /// Zed-style bottom bar: the left sidebar's panels in groups (schema |
+    /// bookmarks, history | boards); in the middle the active query's rows, time and
+    /// chart (a board's: its refresh's time), counting up while it runs; the AI and
+    /// the value viewer on the right.
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let button = |panel: Panel, cx: &mut Context<Self>| {
             let shown = self.left.shows(panel) || self.right.shows(panel);
@@ -285,7 +287,16 @@ impl Workspace {
                 .tooltip(panel.label())
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(panel, cx)))
         };
-        let left: Vec<_> = self.left.panels.iter().map(|&p| button(p, cx)).collect();
+        let border = cx.theme().border;
+        let separator = || div().w(px(1.)).h_3p5().mx_1().bg(border);
+        // Schema | bookmarks, history | boards.
+        let mut left = Vec::new();
+        for &panel in self.left.panels {
+            if matches!(panel, Panel::Bookmarks | Panel::Boards) && !left.is_empty() {
+                left.push(separator().into_any_element());
+            }
+            left.push(button(panel, cx).into_any_element());
+        }
         // Right: the AI (the assistant, the MCP server), then the value viewer.
         let assistant = button(Panel::Assistant, cx);
         // The active query tab's own viewer.
@@ -300,19 +311,18 @@ impl Workspace {
         let mcp = self.render_mcp_button(cx).into_any_element();
         let theme = cx.theme();
         // File tabs (settings) have no results to time or chart.
-        let (query_text, running, chart) = self
-            .tabs
-            .active_query()
-            .map(|tab| {
+        let (status, chart) = match self.tabs.active() {
+            Some(TabItem::Query(tab)) => {
                 let t = tab.read(cx);
-                let chart = (t.chart(cx), t.chart_shown(cx));
-                (
-                    t.status_text(cx),
-                    t.is_running(cx),
-                    Some((tab.clone(), chart)),
-                )
-            })
-            .unwrap_or_default();
+                // The chart button once there is a result to chart.
+                let chart = t
+                    .finished(cx)
+                    .then(|| (tab.clone(), (t.chart(cx), t.chart_shown(cx))));
+                (t.status_text(cx), chart)
+            }
+            Some(TabItem::Board(board)) => (board.read(cx).status_text(), None),
+            _ => Default::default(),
+        };
         let chart_button = chart.map(|(tab, (data, shown))| {
             chart_button(
                 tab,
@@ -322,16 +332,6 @@ impl Workspace {
                 theme.muted_foreground,
             )
         });
-        let separator = || div().w(px(1.)).h_3p5().mx_1().bg(theme.border);
-
-        let planned = |id: &'static str, icon: Lucide, tooltip: &'static str| {
-            Button::new(id)
-                .icon(Icon::new(icon))
-                .ghost()
-                .xsmall()
-                .disabled(true)
-                .tooltip(tooltip)
-        };
         h_flex()
             .h_7()
             .px_1()
@@ -342,22 +342,28 @@ impl Workspace {
             .bg(theme.title_bar)
             .text_xs()
             .text_color(theme.muted_foreground)
-            .children(left)
-            .child(separator())
-            .child(planned(
-                "schema-graph",
-                Lucide::Network,
-                "Schema graph (tables and their relations) — planned",
-            ))
-            .child(div().flex_1())
-            .when(running, |this| this.child(Spinner::new().xsmall()))
-            .child(div().pr_1().child(query_text))
-            .children(chart_button)
-            .child(assistant)
-            .child(mcp)
-            .child(separator())
-            .child(value)
-            .child(div().w_1())
+            // Both sides take the same width: the middle stays centered.
+            .child(h_flex().flex_1().gap_0p5().children(left))
+            .child(
+                h_flex()
+                    .id("status-middle")
+                    .test_support()
+                    .flex_none()
+                    .gap_0p5()
+                    .child(div().px_1().child(status))
+                    .children(chart_button),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .justify_end()
+                    .gap_0p5()
+                    .child(assistant)
+                    .child(mcp)
+                    .child(separator())
+                    .child(value)
+                    .child(div().w_1()),
+            )
     }
 
     /// The status dot's hover card: live state only (status, pool, what the schema

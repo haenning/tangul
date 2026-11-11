@@ -467,10 +467,7 @@ mod tests {
             revision: "kqzmwa".into(),
             tiles: vec![
                 Tile {
-                    view: Some(ChartView {
-                        style: ChartStyle::StackedBars,
-                        series: Some(1),
-                    }),
+                    view: Some(ChartView::new(ChartStyle::StackedBars)),
                     description: "per day".into(),
                     ..tile("t", Width::Half)
                 },
@@ -491,7 +488,7 @@ mod tests {
             json.contains(r#""ai":{"by":"mcp","held":"heavy"}"#),
             "{json}"
         );
-        assert!(json.contains(r#""view":"stacked_bars:1""#), "{json}");
+        assert!(json.contains(r#""view":"stacked_bars@2""#), "{json}");
         assert!(json.contains(r#""width":"half""#), "{json}");
         assert_eq!(serde_json::from_str::<Board>(&json).unwrap(), board);
 

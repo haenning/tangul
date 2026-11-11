@@ -25,9 +25,10 @@ and stays out of your way.
   rows that reference them. The three relations you use most come first; the rest are
   under *Show all*.
 - **Charts from a query.** A grouped query becomes a chart in two clicks: lines, areas,
-  stacked areas, bars side by side or stacked bars, for all columns or a single one,
-  with a hover tooltip for exact values. Charts are a view of the result and are never
-  stored.
+  stacked areas, bars side by side or stacked bars. Label columns first, one number
+  last: with `day, status, count(*)` every status is a series, without naming them in
+  the query. Hover lists every value, a click pins them to copy. Charts are a view of
+  the result and are never stored.
 - **Copy what you see.** Mark cells, rows or whole columns (click a column name; ⇧-click
   or drag for a rectangle, ⌘-click to take a row out or add it) and copy them, with
   headers if you like; the format pastes cleanly into spreadsheets. Copy as CSV, JSON,
