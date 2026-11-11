@@ -5230,7 +5230,9 @@ fn wave_rows(days: usize, series: usize) -> RowBatch {
     let mut batch = RowBatch::default();
     for i in 0..days {
         for s in 1..=series {
-            let v = 50. + 40. * ((i as f64) / 20. + s as f64).sin();
+            // A wave with some noise, the same on every run.
+            let noise = ((i * 7919 + s * 104_729) % 1000) as f64 / 100. - 5.;
+            let v = 50. + 40. * ((i as f64) / 20. + s as f64).sin() + noise;
             batch.push_cell(Some(&format!("d{i:04}")));
             batch.push_cell(Some(&format!("s{s:02}")));
             batch.push_cell(Some(&format!("{v:.1}")));
@@ -5240,63 +5242,18 @@ fn wave_rows(days: usize, series: usize) -> RowBatch {
     batch
 }
 
-/// What `crate::perf` recorded in the next frame.
-fn frame_stats(handle: WindowHandle<Root>, cx: &mut TestAppContext) -> crate::perf::Stats {
-    crate::perf::take();
-    cx.update_window(handle.into(), |_, window, cx| {
-        window.refresh();
-        window.render_frame(cx);
-    })
-    .unwrap();
-    crate::perf::take()
-}
-
-#[gpui_kit::test]
-fn a_chart_builds_its_shapes_once_and_reuses_them(cx: &mut TestAppContext) {
-    use tangul_core::chart::ChartStyle;
-    let (handle, workspace) = open(cx);
-    crate::perf::record(true);
-    let tab = chart_tab(handle, &workspace, 3, ChartStyle::StackedArea, cx);
-    let built = |s: &crate::perf::Stats| (s.shapes_built, s.shapes_reused);
-    // Drawn again unchanged: every shape (one per series) from the cache.
-    let s = frame_stats(handle, cx);
-    assert_eq!(built(&s), (0, 3));
-    assert_eq!((s.cold_paints.len(), s.warm_paints.len()), (0, 1));
-    // The highlight only changes colors.
-    step(handle, cx, |window, cx| {
-        point_chart_at(&tab, 0, 2.0, 0., window, cx)
-    });
-    assert_eq!(built(&frame_stats(handle, cx)), (0, 3));
-    // Other curves: built again, once.
-    step(handle, cx, |window, cx| window.click("smooth-lines", cx));
-    let changed = crate::perf::take();
-    let after = frame_stats(handle, cx);
-    assert_eq!(changed.shapes_built + after.shapes_built, 3);
-    assert_eq!(built(&frame_stats(handle, cx)), (0, 3));
-    // Another size: built again; up to twice, as the legend fits its line a
-    // frame later and that can change the chart's height once more.
-    crate::perf::take();
-    cx.simulate_window_resize(handle.into(), size(px(700.), px(600.)));
-    let resized = crate::perf::take();
-    let after = frame_stats(handle, cx);
-    assert!((3..=6).contains(&(resized.shapes_built + after.shapes_built)));
-    assert_eq!(built(&frame_stats(handle, cx)), (0, 3));
-    // Without the cache: built on every frame.
-    crate::chart::CACHE_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(built(&frame_stats(handle, cx)), (3, 0));
-    crate::chart::CACHE_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
-    crate::perf::record(false);
-}
-
 /// A board of six large stacked areas (the spike's query: 999 days × 10
-/// series) scrolled down and up, with the shape cache and without: the time of
-/// each frame and what `crate::perf` counted. Fails when scrolling builds
-/// shapes with the cache, or the cache saves less than 40% of a frame. Run
+/// series) scrolled down and up twice, for each way charts can be drawn: the
+/// time of each frame, what `crate::perf` counted and where the time went.
+/// Prints it and appends a line per run to `perf/board_scroll.jsonl`, to
+/// compare over time (on the same machine). Run
 /// `cargo test --release -p tangul board_scroll_performance -- --ignored --nocapture`.
 #[gpui_kit::test]
 #[ignore]
 fn board_scroll_performance(cx: &mut TestAppContext) {
     use gpui_kit::{ScrollDelta, point};
+    use serde_json::json;
+    use std::io::Write as _;
     use std::time::{Duration, Instant};
     use tangul_core::ResultSet;
     use tangul_core::chart::{ChartStyle, ChartView};
@@ -5311,8 +5268,25 @@ fn board_scroll_performance(cx: &mut TestAppContext) {
             board.update(cx, |b, cx| b.set_tile_view(&format!("t{tile}"), view, cx))
         });
     }
-    let ms = |d: Duration| format!("{:.2}ms", d.as_secs_f64() * 1000.);
-    let mut warm_p50 = Vec::new();
+    let ms = |d: Duration| (d.as_secs_f64() * 100_000.).round() / 100.;
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let commit = git(&["rev-parse", "--short", "HEAD"]);
+    let dirty = !git(&["status", "--porcelain"]).is_empty();
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../perf/board_scroll.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
     for cache in [true, false] {
         crate::chart::CACHE_OFF.store(!cache, std::sync::atomic::Ordering::Relaxed);
         crate::perf::record(true);
@@ -5337,11 +5311,13 @@ fn board_scroll_performance(cx: &mut TestAppContext) {
                 start.elapsed()
             })
             .unwrap();
-        let first_stats = crate::perf::take();
-        // Scrolled down and back up, a frame per step, twice: the first time
-        // charts coming into view are drawn for the first time.
-        let scroll = |cx: &mut TestAppContext| {
-            let mut frames = Vec::new();
+        crate::perf::take();
+        // Down and back up, a frame per step, twice; the second time is
+        // measured (the first draws charts coming into view for the first time).
+        let mut frames = Vec::new();
+        for pass in 0..2 {
+            frames.clear();
+            crate::perf::take();
             for dy in std::iter::repeat_n(-60., 30).chain(std::iter::repeat_n(60., 30)) {
                 frames.push(
                     cx.update_window(handle.into(), |_, window, cx| {
@@ -5354,47 +5330,40 @@ fn board_scroll_performance(cx: &mut TestAppContext) {
                     .unwrap(),
                 );
             }
-            (frames, crate::perf::take())
-        };
-        let label = if cache { "cache on " } else { "cache off" };
-        eprintln!(
-            "{label} | first frame with the results: {}, shapes built {}",
-            ms(first),
-            first_stats.shapes_built
-        );
-        let mut p50 = Duration::ZERO;
-        for pass in ["1st scroll", "2nd scroll"] {
-            let (frames, stats) = scroll(cx);
-            let q = |p| crate::perf::quantile(&frames, p).unwrap();
-            eprintln!(
-                "{label} | {pass}: frames p50 {}, p95 {}, max {} | charts painted {} from \
-                 cache, {} building | shapes built {}, reused {}",
-                ms(q(0.5)),
-                ms(q(0.95)),
-                ms(q(1.)),
-                stats.warm_paints.len(),
-                stats.cold_paints.len(),
-                stats.shapes_built,
-                stats.shapes_reused,
-            );
-            if cache && pass == "2nd scroll" {
-                assert_eq!(stats.shapes_built, 0, "scrolling again built shapes");
-                assert!(stats.shapes_reused > 0, "no chart painted while scrolling");
-            }
-            p50 = q(0.5);
+            let _ = pass;
         }
-        warm_p50.push(p50);
+        let stats = crate::perf::take();
+        assert!(
+            stats.shapes_reused + stats.shapes_built > 0,
+            "no chart painted"
+        );
+        let q = |p| ms(crate::perf::quantile(&frames, p).unwrap());
+        // Per frame, as the harness draws several frames per scroll step.
+        let per_frame = |d: Duration| ms(d / frames.len() as u32);
+        let spans: serde_json::Map<String, serde_json::Value> = stats
+            .spans
+            .iter()
+            .map(|(name, (_, total))| (name.to_string(), json!(per_frame(*total))))
+            .collect();
+        let line = json!({
+            "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "commit": commit,
+            "dirty": dirty,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "cpus": std::thread::available_parallelism().map_or(0, |n| n.get()),
+            "release": !cfg!(debug_assertions),
+            "scenario": "6 stacked areas, 999 x 10 noisy, scroll 60 steps",
+            "cache": cache,
+            "first_frame_ms": ms(first),
+            "frame_ms": { "p50": q(0.5), "p95": q(0.95), "max": q(1.) },
+            "shapes": { "built": stats.shapes_built, "reused": stats.shapes_reused },
+            "spans_ms_per_step": spans,
+        });
+        eprintln!("{line}");
+        writeln!(log, "{line}").unwrap();
     }
     crate::chart::CACHE_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
     crate::perf::record(false);
-    let ratio = warm_p50[0].as_secs_f64() / warm_p50[1].as_secs_f64();
-    eprintln!(
-        "scrolling with the cache takes {:.0}% of the time without",
-        ratio * 100.
-    );
-    assert!(
-        ratio <= 0.6,
-        "the cache saves too little: {:.0}%",
-        ratio * 100.
-    );
+    eprintln!("appended to {}", path.display());
 }

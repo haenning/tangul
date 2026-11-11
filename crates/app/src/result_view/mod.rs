@@ -158,6 +158,9 @@ pub struct ResultView {
     last_rows: Option<u64>,
     /// The last result as a chart, or why it cannot be one.
     chart: Result<Rc<ChartData>, SharedString>,
+    /// The chart as drawn (`ChartData::drawn`), kept while the data, style and
+    /// `chart.max_series` stay: not made again on every frame.
+    drawn: RefCell<Option<DrawnChart>>,
     /// The chart picked in the status bar, shown instead of the grid when the result
     /// can be charted; `None` shows the grid. Kept across runs.
     chart_view: Option<ChartView>,
@@ -234,6 +237,7 @@ impl ResultView {
             truncated: false,
             last_rows: None,
             chart: Err(NO_RESULT.into()),
+            drawn: RefCell::default(),
             chart_view: None,
             chart_request: None,
             old_result: false,
@@ -897,6 +901,34 @@ impl ResultView {
         }
     }
 
+    /// `data` as drawn in `style`, made once while they and `max_series` stay.
+    fn drawn_chart(&self, data: &ChartData, style: ChartStyle, max_series: usize) -> Rc<ChartData> {
+        let mut drawn = self.drawn.borrow_mut();
+        let source = std::ptr::from_ref(data);
+        if let Some(d) = drawn
+            .as_ref()
+            .filter(|d| std::ptr::eq(Rc::as_ptr(&d.source), source))
+            .filter(|d| (d.style, d.max_series) == (style, max_series))
+        {
+            return d.data.clone();
+        }
+        let source = match &self.chart {
+            Ok(chart) if std::ptr::eq(Rc::as_ptr(chart), source) => chart.clone(),
+            // Not this view's own data: made each time.
+            _ => return Rc::new(data.drawn(style, max_series)),
+        };
+        let data = Rc::new(crate::perf::span("result.drawn", || {
+            data.drawn(style, max_series)
+        }));
+        *drawn = Some(DrawnChart {
+            source,
+            style,
+            max_series,
+            data: data.clone(),
+        });
+        data
+    }
+
     /// The legend: one line of series in the order the tooltip lists them (the
     /// top of a stack first), as many as fit; the pointer on "+N more" lists them
     /// all. Every entry is laid out to be measured; those past the room are
@@ -1225,7 +1257,7 @@ impl ResultView {
         let style = view.style;
         // The largest series in color, the rest grey (`chart.max_series`).
         let max_series = settings::current(cx).chart_max_series();
-        let data = Rc::new(data.drawn(style, max_series));
+        let data = self.drawn_chart(data, style, max_series);
         // One per colored series: the theme's chart colors, or shades of its one.
         let colored = data.series.iter().filter(|s| !s.grey).count();
         let palette = crate::theme::chart_colors(colored.max(1), cx);
@@ -1484,7 +1516,7 @@ impl ResultView {
             Status::Done { .. }
                 if let (Some(view), Ok(data)) = (self.chart_shown(), &self.chart) =>
             {
-                self.render_chart(data, view, cx)
+                crate::perf::span("result.render_chart", || self.render_chart(data, view, cx))
             }
             _ => DataTable::new(&self.table)
                 .stripe(true)
@@ -1554,6 +1586,15 @@ fn legend_fit(widths: impl IntoIterator<Item = f32>, more: f32, gap: f32, room: 
     ends.iter()
         .take_while(|&&end| end + gap + more <= room)
         .count()
+}
+
+/// A chart as drawn, with what it was made from (see `ResultView::drawn`).
+struct DrawnChart {
+    /// Kept, so its address isn't reused while it is compared.
+    source: Rc<ChartData>,
+    style: ChartStyle,
+    max_series: usize,
+    data: Rc<ChartData>,
 }
 
 #[cfg(test)]

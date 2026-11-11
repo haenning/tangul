@@ -32,6 +32,8 @@ pub struct Stats {
     pub uncached_paints: Vec<Duration>,
     pub shapes_built: usize,
     pub shapes_reused: usize,
+    /// Named steps of drawing (see [`span`]): how often and how long in all.
+    pub spans: std::collections::BTreeMap<&'static str, (usize, Duration)>,
 }
 
 thread_local! {
@@ -102,6 +104,22 @@ pub fn chart_painted(took: Duration, shapes: Option<(usize, usize)>) {
             }
         }
     });
+}
+
+/// Times a named step of drawing, while recording.
+pub fn span<R>(name: &'static str, f: impl FnOnce() -> R) -> R {
+    if !recording() {
+        return f();
+    }
+    let start = Instant::now();
+    let out = f();
+    let took = start.elapsed();
+    STATS.with_borrow_mut(|s| {
+        let entry = s.spans.entry(name).or_default();
+        entry.0 += 1;
+        entry.1 += took;
+    });
+    out
 }
 
 /// The `q` quantile (0..=1) of `values`, nearest rank.
