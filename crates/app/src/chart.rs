@@ -4,19 +4,23 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui_kit::component::{
     ActiveTheme as _, StyledExt as _, h_flex,
     plot::{
-        AxisLabelSide, AxisText, Curve, Grid, IntoPlot, Plot, PlotAxis, axis_gutter,
-        shape::{Area, Bar, Line},
+        AxisLabelSide, AxisText, Curve, Grid, IntoPlot, PathCaches, Plot, PlotAxis, ShapeKey,
+        axis_gutter,
+        shape::{Area, Line},
         tooltip::{CrossLine, Dot, PlotHover, Tooltip, TooltipState},
     },
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use tangul_assist::chart::{ChartData, ChartStyle, format_value, min_max_per_pixel, ticks};
+use tangul_assist::chart::{
+    ChartData, ChartStyle, format_value, min_max_per_pixel, peak_per_pixel, simplify, ticks,
+};
 
 /// Room left of the plot for the value labels, at the default label size.
 const VALUE_GUTTER: f32 = 44.;
@@ -28,8 +32,6 @@ const TOP_PAD: f32 = 8.;
 const RIGHT_PAD: f32 = 8.;
 /// Share of a row's width the bars of that row take.
 const BAR_GROUP: f32 = 0.7;
-/// Most series named in the legend; the rest behind "+N more".
-pub const MAX_LISTED: usize = 8;
 /// Height of one series' line in the tooltip.
 const TIP_ROW: f32 = 18.;
 /// Room in the tooltip for the title, "+N more", the total and the padding.
@@ -37,7 +39,16 @@ const TIP_FRAME: f32 = 64.;
 /// Most columns the tooltip lays its series out in; what doesn't fit then is
 /// the smallest values, in the pinned list (a click).
 const TIP_COLUMNS: usize = 4;
-/// Opacity of the other series while one is under the pointer.
+/// Radius of the outer corners of a bar, or of a whole stack of them.
+const BAR_RADIUS: f32 = 3.;
+/// Points of a line closer than this (px) to the line without them are left out.
+const LINE_TOLERANCE: f32 = 0.5;
+/// Below this (narrow bars) no rounding.
+const MIN_RADIUS: f32 = 1.5;
+/// Points along each rounded corner.
+const ARC_STEPS: usize = 6;
+/// How much of their color the other series keep while one is under the pointer
+/// (mixed with the background, so stacked bands and crossing lines stay opaque).
 const DIMMED: f32 = 0.35;
 /// How close (px) the pointer has to be to a line to pick it.
 const LINE_REACH: f32 = 10.;
@@ -216,9 +227,12 @@ impl Layout {
     }
 
     /// A line's points, reduced to each pixel column's lowest and highest when
-    /// there are many more rows than pixels (see `min_max_per_pixel`).
+    /// there are many more rows than pixels (see `min_max_per_pixel`), then to
+    /// those that move it by half a pixel or more (`simplify`): it looks the
+    /// same, with fewer points to draw on every frame.
     fn line(&self, points: Vec<(f32, f32)>, bounds: &Bounds<Pixels>) -> Vec<(f32, f32)> {
-        min_max_per_pixel(&points, bounds.size.width.as_f32() - self.left)
+        let points = min_max_per_pixel(&points, bounds.size.width.as_f32() - self.left);
+        simplify(&points, LINE_TOLERANCE)
     }
 
     fn y(&self, v: f64) -> f32 {
@@ -246,12 +260,26 @@ impl ResultChart {
         self.colors[series % self.colors.len().max(1)]
     }
 
-    /// A series' color as drawn: dimmed while another one is highlighted.
-    fn shown(&self, series: usize, color: Hsla) -> Hsla {
+    /// A series' color as drawn: faded towards the background while another one
+    /// is highlighted. Mixed, not made transparent: a transparent band would show
+    /// the ones below it through, as if they weren't stacked.
+    fn shown(&self, series: usize, color: Hsla, background: Hsla) -> Hsla {
         match self.highlighted() {
-            Some((s, focus)) if s != series => color.opacity(1. - (1. - DIMMED) * focus),
+            Some((s, focus)) if s != series => {
+                crate::theme::tint(color, background, 1. - (1. - DIMMED) * focus)
+            }
             _ => color,
         }
+    }
+
+    /// The series in drawing order: the highlighted one last, on top of the others.
+    fn drawing_order(&self) -> Vec<usize> {
+        let top = self.highlighted().map(|(s, _)| s);
+        let mut order: Vec<usize> = (0..self.data.series.len())
+            .filter(|&s| Some(s) != top)
+            .collect();
+        order.extend(top.filter(|&s| s < self.data.series.len()));
+        order
     }
 
     /// A dot in each series' color at the hovered row's data point (lines and areas
@@ -288,11 +316,11 @@ impl ResultChart {
             origin: bounds.origin + point(px(l.left), px(0.)),
             size: size(bounds.size.width - px(l.left), bounds.size.height),
         };
-        Grid::new()
+        // Solid and faint: a dashed line is a rectangle per dash, on every frame.
+        let grid = Grid::new()
             .y(l.ticks.iter().map(|&t| px(l.y(t))))
-            .stroke(theme.border)
-            .dash_array(&[px(4.), px(2.)])
-            .paint(&plot, window);
+            .stroke(crate::theme::tint(theme.border, theme.background, 0.6));
+        crate::perf::span("chart.grid", || grid.paint(&plot, window));
 
         // About one x label per 80 px, always including the first.
         let rows = self.data.x.len();
@@ -307,123 +335,293 @@ impl ResultChart {
                 .align(TextAlign::Right)
                 .font_size(px(self.label_size))
         });
-        PlotAxis::new()
+        let axis = PlotAxis::new()
             .stroke(theme.border)
             .x(px(l.y(0.0)))
             .x_label(x_labels)
             .y(px(l.left - 4.))
             .y_axis(false)
             .y_label_side(AxisLabelSide::Start)
-            .y_label(y_labels)
-            .paint(bounds, window, cx);
+            .y_label(y_labels);
+        crate::perf::span("chart.axis_labels", || axis.paint(bounds, window, cx));
     }
 
     fn paint_bars(&self, l: &Layout, bounds: &Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let series = self.data.series.len();
+        let rows = self.data.x.len();
         let group = l.step * BAR_GROUP;
         let stacks = self.style.is_stacked().then(|| self.data.stacks());
+        // Each row's stack ends, up and down: the corners round there, whichever
+        // segment they fall on.
+        let ends: Vec<(f64, f64)> = (0..rows)
+            .map(|row| {
+                stacks.iter().flatten().fold((0f64, 0f64), |(up, down), s| {
+                    let (a, b) = s[row];
+                    (up.max(a.max(b)), down.min(a.min(b)))
+                })
+            })
+            .collect();
+        let width = if stacks.is_some() {
+            group
+        } else {
+            group / series as f32
+        };
+        let band = (width - 1.).max(1.);
+        // More rows than pixels: one bar per pixel column, the tallest.
+        let xs: Vec<f32> = (0..rows).map(|row| l.x(row)).collect();
+        let extents: Vec<f64> = match &stacks {
+            Some(_) => ends.iter().map(|(up, down)| up - down).collect(),
+            None => (0..rows)
+                .map(|row| {
+                    let values = self.data.series.iter().filter_map(|s| s.values[row]);
+                    values.map(f64::abs).fold(0., f64::max)
+                })
+                .collect(),
+        };
+        let drawn = peak_per_pixel(&xs, &extents);
+        let background = cx.theme().background;
         for (s, values) in self.data.series.iter().enumerate() {
-            // (left edge, base y, value y) per row.
-            let bars: Vec<(f32, f32, f32)> = (0..self.data.x.len())
-                .filter_map(|row| {
-                    let slot = l.x(row) - group / 2.;
-                    match &stacks {
-                        Some(stacks) => {
-                            let (from, to) = stacks[s][row];
-                            Some((slot, l.y(from), l.y(to)))
+            let color = self.shown(s, self.color(s), background);
+            for &row in &drawn {
+                let slot = l.x(row) - group / 2.;
+                // (left edge, from, to, stack end) in values.
+                let (left, from, to, end) = match &stacks {
+                    Some(stacks) => {
+                        let (from, to) = stacks[s][row];
+                        let end = if to >= from { ends[row].0 } else { ends[row].1 };
+                        (slot, from, to, end)
+                    }
+                    None => {
+                        let Some(v) = values.values[row] else {
+                            continue;
+                        };
+                        (slot + width * s as f32, 0., v, v)
+                    }
+                };
+                if from == to {
+                    continue;
+                }
+                let (x0, x1) = (left, left + band);
+                let (y0, y1) = (l.y(from), l.y(to));
+                let at = |x: f32, y: f32| bounds.origin + point(px(x), px(y));
+                match rounded_segment(x0, x1, y0, y1, l.y(end), BAR_RADIUS) {
+                    Some(points) => {
+                        let mut path = PathBuilder::fill();
+                        path.move_to(at(points[0].0, points[0].1));
+                        for &(x, y) in &points[1..] {
+                            path.line_to(at(x, y));
                         }
-                        None => {
-                            let v = values.values[row]?;
-                            let width = group / series as f32;
-                            Some((slot + width * s as f32, l.y(0.0), l.y(v)))
+                        path.close();
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, color);
                         }
                     }
-                })
-                .collect();
-            let width = if stacks.is_some() {
-                group
-            } else {
-                group / series as f32
-            };
-            let color = self.shown(s, self.color(s));
-            Bar::new()
-                .data(bars)
-                .band_width((width - 1.).max(1.))
-                .cross(|b: &(f32, f32, f32)| Some(b.0))
-                .base(|b: &(f32, f32, f32)| b.1)
-                .value(|b: &(f32, f32, f32)| Some(b.2))
-                .fill(move |_, _, _| color)
-                .paint(bounds, window, cx);
+                    None => window.paint_quad(fill(
+                        Bounds::from_corners(at(x0, y0.min(y1)), at(x1, y0.max(y1))),
+                        color,
+                    )),
+                }
+            }
         }
     }
 
-    fn paint_lines(&self, l: &Layout, bounds: &Bounds<Pixels>, window: &mut Window, cx: &App) {
-        let background = cx.theme().background;
-        // Straight segments are exact; curves can swing past the values between points.
-        let curve = if self.smooth {
+    /// The points of every line and area, by cache slot: stacked areas at their
+    /// series; lines at theirs, areas' fills after them.
+    fn shapes(&self, l: &Layout, bounds: &Bounds<Pixels>) -> Vec<Shape> {
+        let rows = self.data.x.len();
+        let zero = l.y(0.0);
+        let curve = self.curve();
+        let shape = |slot, base, points: Vec<(f32, f32)>| {
+            let points = l.line(points, bounds);
+            Shape {
+                slot,
+                key: shape_key(curve, base, &points),
+                points,
+            }
+        };
+        match self.style {
+            ChartStyle::StackedArea => {
+                let stacks = self.data.stacks();
+                (0..stacks.len())
+                    .map(|s| {
+                        let points = (0..rows).map(|row| (l.x(row), l.y(stacks[s][row].1)));
+                        shape(s, zero, points.collect())
+                    })
+                    .collect()
+            }
+            ChartStyle::Line | ChartStyle::Area => {
+                let series_count = self.data.series.len();
+                let mut shapes: Vec<Shape> = self
+                    .data
+                    .series
+                    .iter()
+                    .enumerate()
+                    .map(|(s, series)| {
+                        // NULL values are left out.
+                        let points =
+                            (0..rows).filter_map(|row| Some((l.x(row), l.y(series.values[row]?))));
+                        shape(s, f32::NAN, points.collect())
+                    })
+                    .collect();
+                if self.style == ChartStyle::Area {
+                    let fills: Vec<Shape> = shapes
+                        .iter()
+                        .map(|line| Shape {
+                            slot: series_count + line.slot,
+                            key: shape_key(curve, zero, &line.points),
+                            points: line.points.clone(),
+                        })
+                        .collect();
+                    shapes.extend(fills);
+                }
+                shapes
+            }
+            ChartStyle::Bars | ChartStyle::StackedBars => Vec::new(),
+        }
+    }
+
+    /// Straight segments are exact; curves can swing past the values between points.
+    fn curve(&self) -> Curve {
+        if self.smooth {
             Curve::Natural
         } else {
             Curve::Linear
-        };
-        let rows = self.data.x.len();
+        }
+    }
+
+    /// Lines and areas (`shapes`), through `caches`: their tessellated shapes
+    /// are reused while the points stay the same (scrolling only moves them; the
+    /// highlight only changes colors).
+    fn paint_lines(
+        &self,
+        l: &Layout,
+        shapes: &[Shape],
+        bounds: &Bounds<Pixels>,
+        caches: &mut PathCaches,
+        window: &mut Window,
+        cx: &App,
+    ) {
+        let background = cx.theme().background;
+        let curve = self.curve();
         let zero = l.y(0.0);
+        let xy = |p: &(f32, f32)| Some(p.0);
+        let yy = |p: &(f32, f32)| Some(p.1);
         match self.style {
             ChartStyle::StackedArea => {
                 // Top layer first, each filled down to 0, so every band shows between
-                // its own line and the one below.
-                let stacks = self.data.stacks();
-                for s in (0..stacks.len()).rev() {
+                // its own line and the one below. Its top line is the same shape in
+                // the line's color, 1px above the fill: one tessellated shape per
+                // band instead of a fill and a (costlier) stroke.
+                let plot = Bounds::from_corners(
+                    bounds.origin,
+                    bounds.origin + point(bounds.size.width, px(l.bottom)),
+                );
+                for shape in shapes.iter().rev() {
+                    let s = shape.slot;
                     let color = self.color(s);
-                    let (fill, color) = (
-                        self.shown(s, crate::theme::tint(color, background, 0.45)),
-                        self.shown(s, color),
+                    let (fill, line) = (
+                        self.shown(s, crate::theme::tint(color, background, 0.45), background),
+                        self.shown(s, color, background),
                     );
-                    let points: Vec<(f32, f32)> = (0..rows)
-                        .map(|row| (l.x(row), l.y(stacks[s][row].1)))
-                        .collect();
-                    let points = l.line(points, bounds);
-                    Area::new()
-                        .data(points)
-                        .x(|p: &(f32, f32)| Some(p.0))
-                        .y0(zero)
-                        .y1(|p: &(f32, f32)| Some(p.1))
-                        .fill(fill)
-                        .stroke(color)
-                        .curve(curve)
-                        .paint(bounds, window);
+                    let cache = caches.slot(s);
+                    let build = || area_path(&shape.points, zero, curve);
+                    if let Some(path) = cache.get(shape.key, bounds.origin, build) {
+                        window.paint_path(path, line);
+                    }
+                    let below = bounds.origin + point(px(0.), px(1.));
+                    if let Some(path) = cache.get(shape.key, below, || None) {
+                        window.with_content_mask(Some(ContentMask { bounds: plot }), |window| {
+                            window.paint_path(path, fill)
+                        });
+                    }
                 }
             }
             ChartStyle::Line | ChartStyle::Area => {
-                for (s, series) in self.data.series.iter().enumerate() {
-                    let color = self.shown(s, self.color(s));
-                    // NULL values are left out.
-                    let points: Vec<(f32, f32)> = (0..rows)
-                        .filter_map(|row| Some((l.x(row), l.y(series.values[row]?))))
-                        .collect();
-                    let points = l.line(points, bounds);
-                    if self.style == ChartStyle::Area {
+                let series_count = self.data.series.len();
+                for s in self.drawing_order() {
+                    let color = self.shown(s, self.color(s), background);
+                    if self.style == ChartStyle::Area
+                        && let Some(fill) = shapes.iter().find(|f| f.slot == series_count + s)
+                    {
+                        let (fill_cache, line_cache) = caches.slot_pair(fill.slot);
                         Area::new()
-                            .data(points.clone())
-                            .x(|p: &(f32, f32)| Some(p.0))
+                            .data(fill.points.iter().copied())
+                            .x(xy)
                             .y0(zero)
-                            .y1(|p: &(f32, f32)| Some(p.1))
+                            .y1(yy)
                             .fill(color.opacity(0.18))
                             .stroke(transparent_black())
                             .curve(curve)
-                            .paint(bounds, window);
+                            .paint_cached(bounds, fill_cache, line_cache, window);
                     }
-                    Line::new()
-                        .data(points)
-                        .x(|p: &(f32, f32)| Some(p.0))
-                        .y(|p: &(f32, f32)| Some(p.1))
-                        .stroke(color)
-                        .stroke_width(2.)
-                        .curve(curve)
-                        .paint(bounds, window);
+                    if let Some(line) = shapes.get(s) {
+                        Line::new()
+                            .data(line.points.iter().copied())
+                            .x(xy)
+                            .y(yy)
+                            .stroke(color)
+                            .stroke_width(2.)
+                            .curve(curve)
+                            .paint_cached(bounds, caches.slot(s), window);
+                    }
                 }
             }
             ChartStyle::Bars | ChartStyle::StackedBars => {}
         }
+    }
+}
+
+/// The outline of an area under `points` down to `base` (relative to the
+/// chart's origin), straight or as `Curve::Natural` draws it (Catmull-Rom).
+fn area_path(points: &[(f32, f32)], base: f32, curve: Curve) -> Option<Path<Pixels>> {
+    let at = |p: (f32, f32)| point(px(p.0), px(p.1));
+    let (&first, &last) = (points.first()?, points.last()?);
+    let mut path = PathBuilder::fill();
+    path.move_to(at(first));
+    match curve {
+        Curve::Natural if points.len() > 2 => {
+            let n = points.len();
+            for i in 0..n - 1 {
+                let p0 = points[i.saturating_sub(1)];
+                let (p1, p2) = (points[i], points[i + 1]);
+                let p3 = points[(i + 2).min(n - 1)];
+                let c1 = (p1.0 + (p2.0 - p0.0) / 6., p1.1 + (p2.1 - p0.1) / 6.);
+                let c2 = (p2.0 - (p3.0 - p1.0) / 6., p2.1 - (p3.1 - p1.1) / 6.);
+                path.cubic_bezier_to(at(p2), at(c1), at(c2));
+            }
+        }
+        _ => {
+            for &p in &points[1..] {
+                path.line_to(at(p));
+            }
+        }
+    }
+    path.line_to(at((last.0, base)));
+    path.line_to(at((first.0, base)));
+    path.close();
+    path.build().ok()
+}
+
+/// One line or area as drawn: its points (relative to the chart's origin), the
+/// cache slot it is painted through and what it is built from.
+struct Shape {
+    slot: usize,
+    points: Vec<(f32, f32)>,
+    key: u64,
+}
+
+/// A chart's layout and shapes, kept while its data, size, style and curves
+/// stay: scrolling and hovering don't compute them again.
+#[derive(Default)]
+struct Geometry {
+    made_of: Option<(Rc<ChartData>, ChartStyle, bool, u32, u32, u32)>,
+    layout: Option<Rc<Layout>>,
+    shapes: Rc<Vec<Shape>>,
+}
+
+impl Geometry {
+    fn for_paint(window: &mut Window, cx: &mut App) -> Entity<Self> {
+        window.use_keyed_state("chart-geometry", cx, |_, _| Self::default())
     }
 }
 
@@ -437,8 +635,40 @@ impl Plot for ResultChart {
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let l = self.layout(bounds);
-        self.paint_axes(&l, &bounds, window, cx);
+        // Asked for on every paint, also out of view, so the shapes stay cached
+        // while a board scrolls a tile out and back in.
+        let caches = PathCaches::for_paint("chart-shapes", window, cx);
+        let last_keys = crate::perf::recording().then(|| ShapeKeys::for_paint(window, cx));
+        // Scrolled out of view (a board's other tiles): nothing to paint.
+        if !window.content_mask().bounds.intersects(&bounds) {
+            return;
+        }
+        let geometry = Geometry::for_paint(window, cx);
+        let made_of = (
+            self.data.clone(),
+            self.style,
+            self.smooth,
+            bounds.size.width.as_f32().to_bits(),
+            bounds.size.height.as_f32().to_bits(),
+            self.label_size.to_bits(),
+        );
+        let (l, shapes) = geometry.update(cx, |g, _| {
+            let same = g.made_of.as_ref().is_some_and(|m| {
+                Rc::ptr_eq(&m.0, &made_of.0)
+                    && (m.1, m.2, m.3, m.4, m.5)
+                        == (made_of.1, made_of.2, made_of.3, made_of.4, made_of.5)
+            });
+            if !same || g.layout.is_none() {
+                crate::perf::span("chart.geometry", || {
+                    let l = self.layout(bounds);
+                    g.shapes = Rc::new(self.shapes(&l, &bounds));
+                    g.layout = Some(Rc::new(l));
+                });
+                g.made_of = Some(made_of);
+            }
+            (g.layout.clone().unwrap(), g.shapes.clone())
+        });
+        crate::perf::span("chart.axes", || self.paint_axes(&l, &bounds, window, cx));
         if let Some(pin) = self.pin.filter(|p| p.row < self.data.x.len()) {
             // The pinned row, marked like the hover's band.
             let width = if self.style.is_bars() { l.step } else { 1. };
@@ -450,10 +680,31 @@ impl Plot for ResultChart {
                 cx.theme().border,
             ));
         }
+        let start = Instant::now();
         if self.style.is_bars() {
             self.paint_bars(&l, &bounds, window, cx);
-        } else {
-            self.paint_lines(&l, &bounds, window, cx);
+            crate::perf::chart_painted(start.elapsed(), None);
+            return;
+        }
+        let keys: Vec<(usize, u64)> = shapes.iter().map(|s| (s.slot, s.key)).collect();
+        crate::perf::span("chart.paint_shapes", || {
+            caches.update(cx, |caches, cx| {
+                self.paint_lines(&l, &shapes, &bounds, caches, window, cx)
+            })
+        });
+        let took = start.elapsed();
+        if let Some(last) = last_keys {
+            // The shapes whose points changed since the last paint were built
+            // (the caches' rule: a shape is rebuilt when its points change).
+            let built = last.update(cx, |last, _| {
+                let built = keys
+                    .iter()
+                    .filter(|(slot, key)| last.0.get(slot) != Some(key))
+                    .count();
+                last.0 = keys.iter().copied().collect();
+                built
+            });
+            crate::perf::chart_painted(took, Some((built, keys.len() - built)));
         }
     }
 
@@ -636,6 +887,69 @@ impl ResultChart {
     }
 }
 
+/// A bar segment from `x0` to `x1` and `y0` to `y1` (pixels) whose bar or stack
+/// ends at `tip`, rounded there with `radius`: its outline, or `None` when the
+/// rounding doesn't reach it (a plain rectangle). The rounding belongs to the
+/// whole stack: thin segments at its end share the corners.
+fn rounded_segment(
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+    tip: f32,
+    radius: f32,
+) -> Option<Vec<(f32, f32)>> {
+    let r = radius.min((x1 - x0) / 2.);
+    // Too thin to show a rounding: a rectangle, cheaper to draw.
+    if r < MIN_RADIUS {
+        return None;
+    }
+    // Distances from the tip, nearer first; the segment lies on one side of it.
+    let (near, far) = {
+        let (a, b) = ((y0 - tip).abs(), (y1 - tip).abs());
+        (a.min(b), a.max(b))
+    };
+    if near >= r {
+        return None;
+    }
+    let dir = if y0 + y1 >= 2. * tip { 1. } else { -1. };
+    let inset = |t: f32| r - (r * r - (r - t).powi(2)).max(0.).sqrt();
+    let arc_end = far.min(r);
+    let arc: Vec<f32> = (0..=ARC_STEPS)
+        .map(|i| near + (arc_end - near) * i as f32 / ARC_STEPS as f32)
+        .collect();
+    let mut points: Vec<(f32, f32)> = arc
+        .iter()
+        .map(|&t| (x0 + inset(t), tip + dir * t))
+        .collect();
+    if far > r {
+        points.push((x0, tip + dir * far));
+        points.push((x1, tip + dir * far));
+    }
+    points.extend(arc.iter().rev().map(|&t| (x1 - inset(t), tip + dir * t)));
+    Some(points)
+}
+
+/// Each cached shape's points at the last paint, by cache slot (to count what
+/// was built, see `crate::perf`).
+#[derive(Default)]
+struct ShapeKeys(std::collections::HashMap<usize, u64>);
+
+impl ShapeKeys {
+    fn for_paint(window: &mut Window, cx: &mut App) -> Entity<Self> {
+        window.use_keyed_state("chart-shape-keys", cx, |_, _| Self::default())
+    }
+}
+
+/// What a cached shape is built from: its points, curve and base line.
+fn shape_key(curve: Curve, base: f32, points: &[(f32, f32)]) -> u64 {
+    let mut key = ShapeKey::new((curve, base.to_bits()));
+    for &(x, y) in points {
+        key.f32(x).f32(y);
+    }
+    key.finish()
+}
+
 /// A series' name; "Other" says how many it adds up.
 pub fn series_label(series: &tangul_assist::chart::Series) -> SharedString {
     match series.other {
@@ -655,4 +969,33 @@ pub fn total_row(total: f64, cx: &App) -> impl IntoElement {
         .border_color(cx.theme().border)
         .child("Total")
         .child(format_value(total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rounded_segment;
+
+    #[test]
+    fn a_stack_rounds_as_one_bar() {
+        // Far from the tip: a plain rectangle.
+        assert_eq!(rounded_segment(0., 10., 50., 100., 40., 3.), None);
+        // A bar reaching up to its tip: the top corners cut, the bottom square.
+        let bar = rounded_segment(0., 10., 100., 40., 40., 3.).unwrap();
+        assert_eq!(bar.first(), Some(&(3., 40.)));
+        assert!(bar.contains(&(0., 100.)) && bar.contains(&(10., 100.)));
+        assert_eq!(bar.last(), Some(&(7., 40.)));
+        // A 1px segment at the tip of a stack is narrower than the bar…
+        let top = rounded_segment(0., 10., 41., 40., 40., 3.).unwrap();
+        assert!(top.iter().all(|&(x, _)| x > 0. && x < 10.));
+        // …and the one below it continues the same curve.
+        let next = rounded_segment(0., 10., 42., 41., 40., 3.).unwrap();
+        assert_eq!(top[top.len() / 2 - 1].0, next[0].0);
+        // Negative bars round at their bottom.
+        let down = rounded_segment(0., 10., 50., 80., 80., 3.).unwrap();
+        assert_eq!(down.first(), Some(&(3., 80.)));
+        // Narrow bars: never more than half their width, none when too thin.
+        let thin = rounded_segment(0., 4., 100., 40., 40., 3.).unwrap();
+        assert_eq!(thin.first(), Some(&(2., 40.)));
+        assert_eq!(rounded_segment(0., 2., 100., 40., 40., 3.), None);
+    }
 }

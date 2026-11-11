@@ -516,6 +516,68 @@ pub fn min_max_per_pixel(points: &[(f32, f32)], width: f32) -> Vec<(f32, f32)> {
     out
 }
 
+/// A line's points (x ascending) without those that don't move it by more than
+/// `tolerance` pixels (Ramer–Douglas–Peucker): it looks the same, and painting
+/// it costs the points that shape it. First and last stay.
+pub fn simplify(points: &[(f32, f32)], tolerance: f32) -> Vec<(f32, f32)> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    let mut spans = vec![(0, points.len() - 1)];
+    while let Some((a, b)) = spans.pop() {
+        let ((ax, ay), (bx, by)) = (points[a], points[b]);
+        let (dx, dy) = (bx - ax, by - ay);
+        let length = (dx * dx + dy * dy).sqrt();
+        let mut far = (0., a);
+        for (i, &(x, y)) in points.iter().enumerate().take(b).skip(a + 1) {
+            let d = if length > 0. {
+                (dy * (x - ax) - dx * (y - ay)).abs() / length
+            } else {
+                ((x - ax).powi(2) + (y - ay).powi(2)).sqrt()
+            };
+            if d > far.0 {
+                far = (d, i);
+            }
+        }
+        if far.0 > tolerance {
+            keep[far.1] = true;
+            spans.push((a, far.1));
+            spans.push((far.1, b));
+        }
+    }
+    points
+        .iter()
+        .zip(keep)
+        .filter_map(|(p, k)| k.then_some(*p))
+        .collect()
+}
+
+/// The rows to draw as bars when there are more rows than pixel columns: per
+/// column (`xs`, the rows' centers in pixels, ascending) the one reaching
+/// furthest (`extents`), as the others would be drawn over anyway. Bars cost the
+/// width then, not the row count. With room for each row: all of them.
+pub fn peak_per_pixel(xs: &[f32], extents: &[f64]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < xs.len() {
+        let column = xs[i].floor();
+        let mut best = i;
+        let mut j = i;
+        while j < xs.len() && xs[j].floor() == column {
+            if extents[j] > extents[best] {
+                best = j;
+            }
+            j += 1;
+        }
+        out.push(best);
+        i = j;
+    }
+    out
+}
+
 /// About `count` round axis values covering `min..=max` (steps of 1, 2 or 5 times a
 /// power of ten), from at or below `min` to at or above `max`.
 pub fn ticks(min: f64, max: f64, count: usize) -> Vec<f64> {
@@ -697,6 +759,33 @@ fn short(v: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn simplify_keeps_what_shapes_the_line() {
+        // A straight line: its ends.
+        let straight: Vec<(f32, f32)> = (0..10).map(|i| (i as f32, 2. * i as f32)).collect();
+        assert_eq!(simplify(&straight, 0.5), vec![(0., 0.), (9., 18.)]);
+        // A peak stays; points less than the tolerance off the line go.
+        let peak = [(0., 0.), (1., 2.6), (2., 5.), (3., 2.4), (4., 0.)];
+        assert_eq!(simplify(&peak, 0.5), vec![(0., 0.), (2., 5.), (4., 0.)]);
+        assert_eq!(simplify(&peak, 0.), peak.to_vec());
+        assert_eq!(simplify(&[(0., 1.)], 0.5), vec![(0., 1.)]);
+    }
+
+    #[test]
+    fn one_bar_per_pixel_column() {
+        // Room for each: all.
+        assert_eq!(
+            peak_per_pixel(&[0.5, 1.5, 2.5], &[1., 2., 3.]),
+            vec![0, 1, 2]
+        );
+        // Three rows in column 0, two in column 1: the furthest of each.
+        assert_eq!(
+            peak_per_pixel(&[0.1, 0.4, 0.8, 1.2, 1.6], &[1., 5., 2., 4., 3.]),
+            vec![1, 3]
+        );
+        assert!(peak_per_pixel(&[], &[]).is_empty());
+    }
+
     use super::*;
     use tangul_core::{ColumnInfo, RowBatch};
 
