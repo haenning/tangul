@@ -365,6 +365,8 @@ impl Workspace {
                 generation,
                 statements,
             } => {
+                // The text settled: when each statement last ran, too.
+                self.refresh_last_runs(tab, cx);
                 let Some(conn) = tab.read(cx).conn_id(cx) else {
                     return;
                 };

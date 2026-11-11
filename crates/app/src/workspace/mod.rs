@@ -508,7 +508,7 @@ impl Render for Workspace {
             .capture_key_down(cx.listener(|this, _, _, _| this.monitor.touch()))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.monitor.touch()))
             .on_mouse_move(cx.listener(|this, _, _, _| this.monitor.touch()))
-            .on_scroll_wheel(cx.listener(|this, _, _, _| this.monitor.touch()))
+            .on_scroll(cx.listener(|this, _, _, _| this.monitor.touch()))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(|this, _: &NewDatabase, window, cx| {
                 this.open_form(FormMode::NewDatabase, None, None, window, cx)
@@ -557,7 +557,5 @@ impl Render for Workspace {
                 div().flex_1().min_h_0().child(body)
             })
             .child(self.render_status_bar(cx))
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
     }
 }

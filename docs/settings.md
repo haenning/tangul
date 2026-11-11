@@ -32,7 +32,7 @@ the editor, so you look before you save.
 ```json
 {
   "version": "0.1.2",
-  "editor": { "font_size": null, "font_family": null },
+  "editor": { "font_size": null, "font_family": null, "last_run": true },
   "table": { "font_size": null, "font_family": null },
   "chart": { "primary_color": null, "max_series": null, "font_size": null, "font_family": null },
   "safety": {
@@ -73,6 +73,7 @@ means unset (the app's own value) or no limit.
 | Key | Meaning |
 |---|---|
 | `editor`, `table`, `chart`: `font_size`, `font_family` | Fonts of the SQL editor, the result grid and chart labels (sizes are kept within 8–32, 8–18 and 6–16) |
+| `editor.last_run` | After a statement's last line, very muted: when it last ran and what it got (`5 h ago · 105 rows`) |
 | `chart.primary_color` | First series' color, e.g. `"#2563eb"`; else the theme's |
 | `chart.max_series` | Most series a chart draws in color, the largest (1–100; unset: 12). Beyond them lines and areas are grey, stacked styles add the rest up into a grey "Other", side-by-side bars leave them out |
 | `safety.read_only_users` | Database users in read-only mode |

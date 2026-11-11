@@ -21,6 +21,52 @@ impl Workspace {
         cx.notify();
     }
 
+    /// After each statement of `tab`: when it last ran and what it got, from the
+    /// user's own runs on its database (`editor.last_run`). Exactly the same SQL
+    /// (comments and spacing aside); an edited statement has no note.
+    pub(super) fn refresh_last_runs(&self, tab: &Entity<QueryTab>, cx: &mut App) {
+        let notes = if settings::current(cx).editor.last_run {
+            self.last_runs(tab, cx)
+        } else {
+            Vec::new()
+        };
+        tab.update(cx, |t, cx| t.set_last_runs(notes, cx));
+    }
+
+    fn last_runs(&self, tab: &Entity<QueryTab>, cx: &App) -> Vec<(usize, SharedString)> {
+        use tangul_assist::last_run::{Run, key, note};
+        let Some(db) = tab
+            .read(cx)
+            .conn_id(cx)
+            .and_then(|conn| self.connections.tab_user(conn))
+            .and_then(|user| self.find_user(user))
+            .map(|(db, _)| db.id.clone())
+        else {
+            return Vec::new();
+        };
+        let (text, lexing, statements) = tab.read(cx).statements(cx);
+        let now = now_ms();
+        statements
+            .iter()
+            .filter_map(|statement| {
+                let sql = statement.text(&text);
+                // The history keeps SQL with its passwords taken out.
+                let kept = tangul_assist::redact::redact(sql);
+                let wanted = key(&kept, lexing);
+                let run = self
+                    .data
+                    .local
+                    .last_run(&db, &fingerprint(&kept), |h| key(h, lexing) == wanted)?;
+                let run = Run {
+                    ago: (now - run.started_at) / 1000,
+                    rows: run.rows,
+                    failed: run.error.is_some(),
+                };
+                Some((statement.body.end, note(sql, lexing, run).into()))
+            })
+            .collect()
+    }
+
     /// Shows or hides `source`'s runs among the chosen ones.
     pub(super) fn toggle_history_source(&mut self, source: Source, cx: &mut Context<Self>) {
         let sources = &mut self.panels.history.sources;
@@ -90,6 +136,9 @@ impl Workspace {
         };
         if let Err(e) = self.data.local.add_history(&entry) {
             eprintln!("could not record history: {e:#}");
+        }
+        if let Some(tab) = &tab {
+            self.refresh_last_runs(tab, cx);
         }
         if succeeded && accounts_changed {
             self.check_ai_user(cx);

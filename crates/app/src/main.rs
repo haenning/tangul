@@ -10,6 +10,7 @@ mod connection_form;
 mod file_tab;
 mod menu;
 mod monitor;
+mod notes;
 mod palette;
 mod query_router;
 mod query_tab;
@@ -122,53 +123,79 @@ fn main() {
 
 /// The app's key bindings (also used by the UI tests).
 fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
+    let bindings = [
         // Must win over the editor's own `secondary-enter` (newline), hence the
         // same depth ("Input") and registration after gpui_kit::init.
-        KeyBinding::new("secondary-enter", RunQuery, Some("QueryEditor > Input")),
-        KeyBinding::new("secondary-shift-enter", RunAll, Some("QueryEditor > Input")),
-        KeyBinding::new("secondary-d", BookmarkQuery, Some("QueryEditor > Input")),
+        key("secondary-enter", RunQuery, Some("QueryEditor > Input"), cx),
+        key(
+            "secondary-shift-enter",
+            RunAll,
+            Some("QueryEditor > Input"),
+            cx,
+        ),
+        key(
+            "secondary-d",
+            BookmarkQuery,
+            Some("QueryEditor > Input"),
+            cx,
+        ),
         // DataGrip's "Reformat code".
-        KeyBinding::new("alt-secondary-l", FormatQuery, Some("QueryEditor > Input")),
-        KeyBinding::new("secondary-s", SaveFile, Some("QueryEditor > Input")),
-        KeyBinding::new("secondary-t", NewTab, Some("Workspace")),
-        KeyBinding::new("secondary-w", CloseTab, Some("Workspace")),
-        KeyBinding::new("secondary-b", ToggleSidebar, Some("Workspace")),
-        KeyBinding::new("alt-secondary-b", ToggleRightSidebar, Some("Workspace")),
+        key(
+            "alt-secondary-l",
+            FormatQuery,
+            Some("QueryEditor > Input"),
+            cx,
+        ),
+        key("secondary-s", SaveFile, Some("QueryEditor > Input"), cx),
+        key("secondary-t", NewTab, Some("Workspace"), cx),
+        key("secondary-w", CloseTab, Some("Workspace"), cx),
+        key("secondary-b", ToggleSidebar, Some("Workspace"), cx),
+        key("alt-secondary-b", ToggleRightSidebar, Some("Workspace"), cx),
         // On a result: open the value viewer on the selected cell, or close it (like
         // Quick Look).
-        KeyBinding::new("space", InspectValue, Some("DataTable")),
+        key("space", InspectValue, Some("DataTable"), cx),
         // In a text field Space is text, before the grid's binding above and a
         // popover's (gpui-kit confirms with Space): a column filter's value.
-        KeyBinding::new("space", NoAction, Some("Input")),
+        key("space", NoAction, Some("Input"), cx),
         // The result grid's mark. Esc: registered before the viewer's, so it is tried
         // after it (the viewer propagates when closed), then the table's own Esc.
-        KeyBinding::new("secondary-c", CopyMark, Some("DataTable")),
-        KeyBinding::new("secondary-a", MarkAll, Some("DataTable")),
-        KeyBinding::new("shift-up", ExtendMarkUp, Some("DataTable")),
-        KeyBinding::new("shift-down", ExtendMarkDown, Some("DataTable")),
-        KeyBinding::new("shift-left", ExtendMarkLeft, Some("DataTable")),
-        KeyBinding::new("shift-right", ExtendMarkRight, Some("DataTable")),
-        KeyBinding::new("escape", ClearMark, Some("DataTable")),
+        key("secondary-c", CopyMark, Some("DataTable"), cx),
+        key("secondary-a", MarkAll, Some("DataTable"), cx),
+        key("shift-up", ExtendMarkUp, Some("DataTable"), cx),
+        key("shift-down", ExtendMarkDown, Some("DataTable"), cx),
+        key("shift-left", ExtendMarkLeft, Some("DataTable"), cx),
+        key("shift-right", ExtendMarkRight, Some("DataTable"), cx),
+        key("escape", ClearMark, Some("DataTable"), cx),
         // Before the table's own Esc (clears the selection), which runs when the
         // viewer is closed. Popovers, inputs and dialogs inside are deeper and
         // close first.
-        KeyBinding::new("escape", CloseValueViewer, Some("DataTable")),
-        KeyBinding::new("escape", CloseValueViewer, Some("ValueViewer")),
-        KeyBinding::new("secondary-shift-p", OpenPalette, Some("Workspace")),
-        KeyBinding::new("secondary-,", OpenSettings, Some("Workspace")),
+        key("escape", CloseValueViewer, Some("DataTable"), cx),
+        key("escape", CloseValueViewer, Some("ValueViewer"), cx),
+        key("secondary-shift-p", OpenPalette, Some("Workspace"), cx),
+        key("secondary-,", OpenSettings, Some("Workspace"), cx),
         // In the command palette: switch the sidebar panel.
-        KeyBinding::new("tab", NextSidebarPanel, Some("Palette")),
-        KeyBinding::new("shift-tab", PrevSidebarPanel, Some("Palette")),
-        KeyBinding::new("secondary-q", Quit, None),
-        KeyBinding::new("secondary-o", OpenSqliteFile, Some("Workspace")),
-    ]);
+        key("tab", NextSidebarPanel, Some("Palette"), cx),
+        key("shift-tab", PrevSidebarPanel, Some("Palette"), cx),
+        key("secondary-q", Quit, None, cx),
+        key("secondary-o", OpenSqliteFile, Some("Workspace"), cx),
+    ];
+    cx.bind_keys(bindings);
     // The macOS app menu's usual keys (elsewhere ctrl-h is no shortcut).
     #[cfg(target_os = "macos")]
-    cx.bind_keys([
-        KeyBinding::new("cmd-h", HideApp, None),
-        KeyBinding::new("alt-cmd-h", HideOthers, None),
-    ]);
+    {
+        let bindings = [
+            key("cmd-h", HideApp, None, cx),
+            key("alt-cmd-h", HideOthers, None, cx),
+        ];
+        cx.bind_keys(bindings);
+    }
+}
+
+/// A key binding; `secondary-` is cmd on macOS and ctrl elsewhere.
+fn key<A: Action>(keys: &str, action: A, context: Option<&str>, cx: &App) -> KeyBinding {
+    let context = context
+        .map(|c| std::rc::Rc::new(KeyBindingContextPredicate::parse(c).expect("a key context")));
+    KeyBinding::load(keys, Box::new(action), context, false, None, cx).expect("a key binding")
 }
 
 /// Opens the workspace window. Only one exists at a time: the engine's event stream

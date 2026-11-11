@@ -8,7 +8,7 @@ use std::rc::Rc;
 use gpui_kit::component::{
     ActiveTheme as _, StyledExt as _, h_flex,
     plot::{
-        AXIS_GAP, AxisLabelSide, AxisText, Grid, IntoPlot, Plot, PlotAxis, StrokeStyle,
+        AxisLabelSide, AxisText, Curve, Grid, IntoPlot, Plot, PlotAxis, axis_gutter,
         shape::{Area, Bar, Line},
         tooltip::{CrossLine, Dot, PlotHover, Tooltip, TooltipState},
     },
@@ -202,7 +202,7 @@ impl Layout {
         Self {
             left,
             top: TOP_PAD,
-            bottom: (height - AXIS_GAP * scale).max(TOP_PAD + 1.),
+            bottom: (height - axis_gutter(px(LABEL_SIZE * scale))).max(TOP_PAD + 1.),
             step: (width - left - RIGHT_PAD).max(1.) / rows,
             lo: ticks.first().copied().unwrap_or(min),
             hi: ticks.last().copied().unwrap_or(max),
@@ -289,7 +289,7 @@ impl ResultChart {
             size: size(bounds.size.width - px(l.left), bounds.size.height),
         };
         Grid::new()
-            .y(l.ticks.iter().map(|&t| l.y(t)).collect())
+            .y(l.ticks.iter().map(|&t| px(l.y(t))))
             .stroke(theme.border)
             .dash_array(&[px(4.), px(2.)])
             .paint(&plot, window);
@@ -361,9 +361,9 @@ impl ResultChart {
         let background = cx.theme().background;
         // Straight segments are exact; curves can swing past the values between points.
         let curve = if self.smooth {
-            StrokeStyle::Natural
+            Curve::Natural
         } else {
-            StrokeStyle::Linear
+            Curve::Linear
         };
         let rows = self.data.x.len();
         let zero = l.y(0.0);
@@ -389,7 +389,7 @@ impl ResultChart {
                         .y1(|p: &(f32, f32)| Some(p.1))
                         .fill(fill)
                         .stroke(color)
-                        .stroke_style(curve)
+                        .curve(curve)
                         .paint(bounds, window);
                 }
             }
@@ -409,7 +409,7 @@ impl ResultChart {
                             .y1(|p: &(f32, f32)| Some(p.1))
                             .fill(color.opacity(0.18))
                             .stroke(transparent_black())
-                            .stroke_style(curve)
+                            .curve(curve)
                             .paint(bounds, window);
                     }
                     Line::new()
@@ -418,7 +418,7 @@ impl ResultChart {
                         .y(|p: &(f32, f32)| Some(p.1))
                         .stroke(color)
                         .stroke_width(2.)
-                        .stroke_style(curve)
+                        .curve(curve)
                         .paint(bounds, window);
                 }
             }
@@ -491,7 +491,7 @@ impl Plot for ResultChart {
         let p = state.cross_line;
         self.hovered = self
             .series_at(&l, state.index, p.x.as_f32(), p.y.as_f32())
-            .map(|s| (s, hover.focus()));
+            .map(|s| (s, hover.progress()));
     }
 
     fn tooltip(

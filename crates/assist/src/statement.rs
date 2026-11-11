@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use crate::dialect::Dialect;
-use crate::lexer::{Token, TokenKind, tokenize_with};
+use crate::lexer::{Lexing, Token, TokenKind, tokenize_with};
 
 /// One statement in the editor. Byte ranges into the text it was split from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +32,11 @@ impl Statement {
 /// `DELIMITER` line set. `DELIMITER` lines belong to no statement; stretches with
 /// only whitespace and comments are none.
 pub fn split(sql: &str, dialect: &dyn Dialect) -> Vec<Statement> {
-    let lexing = dialect.lexing();
+    split_with(sql, dialect.lexing())
+}
+
+/// [`split`] with a database's lexical rules.
+pub fn split_with(sql: &str, lexing: Lexing) -> Vec<Statement> {
     let tokens = tokenize_with(sql, lexing);
     let mut out = Vec::new();
     // `None`: the usual `;`.
@@ -78,11 +82,15 @@ pub fn split(sql: &str, dialect: &dyn Dialect) -> Vec<Statement> {
 /// statements (blank lines, comments, `DELIMITER` lines): which one is meant is
 /// unclear.
 pub fn statement_at(sql: &str, cursor: usize, dialect: &dyn Dialect) -> Option<Statement> {
-    let statements = split(sql, dialect);
+    statement_at_with(sql, cursor, dialect.lexing())
+}
+
+/// [`statement_at`] with a database's lexical rules.
+pub fn statement_at_with(sql: &str, cursor: usize, lexing: Lexing) -> Option<Statement> {
+    let statements = split_with(sql, lexing);
     if let [only] = statements.as_slice() {
         return Some(only.clone());
     }
-    let lexing = dialect.lexing();
     let last = statements.len().checked_sub(1)?;
     statements.into_iter().enumerate().find_map(|(n, s)| {
         let line_start = sql[..s.range.start].rfind('\n').map_or(0, |i| i + 1);

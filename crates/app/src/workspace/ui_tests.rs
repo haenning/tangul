@@ -488,13 +488,25 @@ fn esc_closes_a_filter_popover_before_the_viewer(cx: &mut TestAppContext) {
     });
 }
 
+/// The system the tests run on, for parsing keys typed at run time.
+fn os() -> gpui_kit::OperatingSystem {
+    if cfg!(target_os = "macos") {
+        gpui_kit::OperatingSystem::Mac
+    } else if cfg!(target_os = "windows") {
+        gpui_kit::OperatingSystem::Windows
+    } else {
+        gpui_kit::OperatingSystem::Linux
+    }
+}
+
 /// Types `text` as the keyboard sends it: a space is the key `space` with its text,
 /// so key bindings for Space see it.
 fn type_keys(window: &mut Window, text: &str, cx: &mut App) {
     for c in text.chars() {
         let text = c.to_string();
         let mut key =
-            gpui_kit::Keystroke::parse(if c == ' ' { "space" } else { &text }).expect("a key");
+            gpui_kit::Keystroke::parse_with_os(if c == ' ' { "space" } else { &text }, os())
+                .expect("a key");
         key.key_char = Some(text);
         window.dispatch_keystroke(key, cx);
         window.refresh();
@@ -3889,7 +3901,7 @@ fn clicks_mark_cells_rectangles_and_toggle_rows(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| {
         // The rectangle between the cells.
         assert_eq!(marked(&tab, 4, cx), (vec![1, 2, 3], vec![0, 1]));
-        click_cell(window, 2, 0, Modifiers::secondary_key(), cx);
+        click_cell(window, 2, 0, Modifiers::secondary_key(cx), cx);
     });
     step(handle, cx, |_, cx| {
         // ⌘-click takes the row out.
@@ -4022,13 +4034,23 @@ fn secondary_click_toggles_a_column(cx: &mut TestAppContext) {
         assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2, 3], vec![0, 1]));
     });
     step(handle, cx, |window, cx| {
-        click_with(window, ("th-name", 0usize), Modifiers::secondary_key(), cx)
+        click_with(
+            window,
+            ("th-name", 0usize),
+            Modifiers::secondary_key(cx),
+            cx,
+        )
     });
     step(handle, cx, |_, cx| {
         assert_eq!(marked(&tab, 4, cx), (vec![0, 1, 2, 3], vec![1]));
     });
     step(handle, cx, |window, cx| {
-        click_with(window, ("th-name", 1usize), Modifiers::secondary_key(), cx)
+        click_with(
+            window,
+            ("th-name", 1usize),
+            Modifiers::secondary_key(cx),
+            cx,
+        )
     });
     step(handle, cx, |_, cx| {
         assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
@@ -4291,7 +4313,7 @@ fn the_row_handle_marks_whole_rows(cx: &mut TestAppContext) {
         // ⇧: the rows from the first.
         assert_eq!(marked(&tab, 5, cx), (vec![1, 2, 3], all.clone()));
         let at = handle_center(window, 2);
-        click_at(window, at, Modifiers::secondary_key(), cx);
+        click_at(window, at, Modifiers::secondary_key(cx), cx);
     });
     step(handle, cx, |window, cx| {
         // ⌘: takes the row out.
@@ -4599,7 +4621,7 @@ fn copy_without_a_mark_copies_the_selected_cell(cx: &mut TestAppContext) {
     });
     // ⌘-click takes the only row out: no mark, the cell stays selected.
     step(handle, cx, |window, cx| {
-        click_cell(window, 1, 1, Modifiers::secondary_key(), cx)
+        click_cell(window, 1, 1, Modifiers::secondary_key(cx), cx)
     });
     step(handle, cx, |window, cx| {
         assert_eq!(marked(&tab, 4, cx), (vec![], vec![]));
@@ -5033,5 +5055,152 @@ fn beyond_the_cap_a_stack_adds_the_rest_up_as_other(cx: &mut TestAppContext) {
         let (order, hovered) = listed(window, "chart-tip", 13);
         assert_eq!(hovered, Some(12), "Other, under the pointer");
         assert_eq!(order[0], 12, "on top of the stack");
+    });
+}
+
+/// A tab with `sql` on the shop's connection.
+fn sql_tab(
+    handle: WindowHandle<Root>,
+    workspace: &Entity<Workspace>,
+    sql: &str,
+    cx: &mut TestAppContext,
+) -> Entity<QueryTab> {
+    cx.update_window(handle.into(), |_, window, cx| {
+        workspace.update(cx, |ws, cx| {
+            shop_for_the_assistant(ws, cx);
+            ws.active_db = Some("db".into());
+            ws.active_user = Some("app".into());
+            ws.add_tab(sql, window, cx)
+        })
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn several_statements_are_counted_and_marked(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let sql = "select 1;\nselect 2;";
+    let tab = sql_tab(handle, &workspace, sql, cx);
+    step(handle, cx, |window, cx| {
+        assert!(window.find("statement-count").visible());
+        // A bar along each; the one ⌘↵ takes (the cursor's) stands out.
+        let marks = tab.read(cx).statement_marks(cx);
+        let ranges: Vec<_> = marks.iter().map(|(r, _)| &sql[r.clone()]).collect();
+        assert_eq!(ranges, ["select 1", "select 2"]);
+        assert_eq!(marks.iter().filter(|(_, here)| *here).count(), 1);
+    });
+    // One statement: neither.
+    let one = sql_tab(handle, &workspace, "select 1", cx);
+    step(handle, cx, |window, cx| {
+        assert!(window.try_find("statement-count").is_none());
+        assert!(one.read(cx).statement_marks(cx).is_empty());
+    });
+}
+
+#[gpui_kit::test]
+fn a_statement_says_when_it_last_ran_until_it_is_edited(cx: &mut TestAppContext) {
+    use tangul_data::local::{HistoryEntry, NewHistory, Source};
+    let (handle, workspace) = open(cx);
+    let sql = "select * from orders where id = 5;\nupdate orders set paid = true;";
+    let tab = sql_tab(handle, &workspace, sql, cx);
+    let ran = |sql: &str, rows, ws: &mut Workspace| {
+        let fp = tangul_assist::lexer::fingerprint(sql);
+        ws.data
+            .local
+            .add_history(&NewHistory {
+                database_id: "db",
+                user_id: "app",
+                sql,
+                fingerprint: &fp,
+                entry: HistoryEntry {
+                    sql: sql.into(),
+                    source: Source::App,
+                    started_at: super::now_ms() - 5 * 3_600_000,
+                    duration_ms: 1,
+                    rows: Some(rows),
+                    error: None,
+                },
+            })
+            .unwrap();
+    };
+    step(handle, cx, |_, cx| {
+        workspace.update(cx, |ws, cx| {
+            // The same query, spaced differently; another id isn't it.
+            ran("SELECT *  FROM orders\nWHERE id = 5", 1, ws);
+            ran("select * from orders where id = 6", 9, ws);
+            ran("update orders set paid = true", 3, ws);
+            ws.refresh_last_runs(&tab, cx);
+        })
+    });
+    step(handle, cx, |window, cx| {
+        let notes: Vec<_> = tab
+            .read(cx)
+            .last_runs(cx)
+            .into_iter()
+            .map(|(at, note)| (sql[..at].lines().count(), note.to_string()))
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                (1, "5 h ago · 1 row".to_string()),
+                (2, "5 h ago · 3 rows changed".to_string())
+            ]
+        );
+        assert!(window.find("editor-overlay").visible());
+    });
+    // Typing in one statement: its run is of other SQL; the other one keeps its
+    // note, where it ends now, without waiting for the history.
+    step(handle, cx, |window, cx| {
+        QueryTab::focus_editor(&tab, window, cx)
+    });
+    step(handle, cx, |window, cx| type_keys(window, "x", cx));
+    step(handle, cx, |_, cx| {
+        let text = tab.read(cx).sql(cx);
+        assert!(text.starts_with("xselect"));
+        assert_eq!(
+            tab.read(cx).last_runs(cx),
+            [(text.len() - 1, "5 h ago · 3 rows changed".into())]
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn the_bottom_bar_counts_a_run_up_in_its_middle(cx: &mut TestAppContext) {
+    let (handle, workspace) = open(cx);
+    let tab = sql_tab(handle, &workspace, "select 1", cx);
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.started(QueryId(1), "select 1", cx));
+    });
+    step(handle, cx, |window, cx| {
+        // Running: only the time so far.
+        let text = tab.read(cx).status_text(cx);
+        assert!(text.ends_with(" ms") && !text.contains("row"), "{text}");
+        // No chart button before there is a result.
+        assert!(window.try_find("chart").is_none());
+        // As far from the left as from the right.
+        let middle = window.find("status-middle").bounds().center().x;
+        let width = window.viewport_size().width;
+        assert!(
+            (middle - width / 2.).abs() < px(1.),
+            "{middle:?} of {width:?}"
+        );
+    });
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| {
+            t.on_query_event(
+                QueryEvent::Finished {
+                    elapsed: Duration::from_millis(12),
+                    error: None,
+                    error_position: None,
+                    in_transaction: false,
+                    cancelled: false,
+                },
+                cx,
+            )
+        });
+    });
+    step(handle, cx, |window, cx| {
+        assert_eq!(tab.read(cx).status_text(cx).as_ref(), "12 ms");
+        assert!(window.try_find("chart").is_some());
     });
 }

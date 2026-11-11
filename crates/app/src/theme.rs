@@ -191,6 +191,31 @@ pub fn chart_colors(n: usize, cx: &App) -> Vec<Hsla> {
         .collect()
 }
 
+/// Hue steps of a rainbow from red: orange, yellow, green, blue, indigo, violet.
+const RAINBOW: [f32; 7] = [0., 30., 52., 140., 215., 240., 275.];
+
+/// Colors for the editor's statements, one each in turn: the theme's chart colors
+/// when it has several (the rainbow themes), else a rainbow from its one chart
+/// color (red, orange, yellow, …), at its saturation and lightness.
+pub fn statement_colors(cx: &App) -> Vec<Hsla> {
+    rainbow(&current(cx).charts)
+}
+
+/// [`statement_colors`] of a theme's chart colors.
+fn rainbow(charts: &[Rgb]) -> Vec<Hsla> {
+    if charts.len() > 1 {
+        return charts.iter().map(|&c| color(c)).collect();
+    }
+    let base = color(charts[0]);
+    RAINBOW
+        .iter()
+        .map(|step| Hsla {
+            h: (base.h + step / 360.).fract(),
+            ..base
+        })
+        .collect()
+}
+
 /// The wordmark on the empty content area, engraved: its fill, the edge above (a
 /// shadow) and the edge below (a highlight).
 pub struct Engraving {
@@ -409,6 +434,8 @@ pub fn config(theme: &ThemeFile) -> ThemeConfig {
         ("chart.3", chart(2)),
         ("chart.4", chart(3)),
         ("chart.5", chart(4)),
+        // The chart draws its grid in the border color.
+        ("chart.grid", hex(c.border)),
         ("chart.bullish", hex(c.success)),
         ("chart.bearish", hex(c.danger)),
         ("base.red", hex(c.danger)),
@@ -515,6 +542,23 @@ pub fn config(theme: &ThemeFile) -> ThemeConfig {
 mod tests {
     use super::*;
     use gpui_kit::BorrowAppContext as _;
+
+    #[test]
+    fn statements_go_through_a_rainbow() {
+        for theme in themes::built_in() {
+            let colors = rainbow(&theme.charts);
+            assert!(colors.len() >= 6, "{}", theme.name);
+            assert_eq!(
+                colors[0],
+                color(theme.charts[0]),
+                "{}: red first",
+                theme.name
+            );
+            let mut hues: Vec<_> = colors.iter().map(|c| (c.h * 360.).round() as i32).collect();
+            hues.dedup();
+            assert_eq!(hues.len(), colors.len(), "{}: each its own", theme.name);
+        }
+    }
 
     #[test]
     fn every_theme_maps_onto_gpui_kit() {

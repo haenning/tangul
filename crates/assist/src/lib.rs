@@ -18,6 +18,7 @@ pub mod guard;
 pub mod hints;
 pub mod join_graph;
 pub mod json;
+pub mod last_run;
 pub mod lexer;
 pub mod mark;
 pub mod nl;
