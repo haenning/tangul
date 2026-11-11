@@ -4934,6 +4934,29 @@ fn a_stacked_chart_lists_its_top_segment_first_and_the_one_under_the_pointer(
 }
 
 #[gpui_kit::test]
+fn a_long_legend_keeps_to_one_line(cx: &mut TestAppContext) {
+    use tangul_core::chart::ChartStyle;
+    let (handle, workspace) = open(cx);
+    let _tab = chart_tab(handle, &workspace, 12, ChartStyle::StackedBars, cx);
+    // Too narrow for all 12.
+    cx.simulate_window_resize(handle.into(), size(px(600.), px(700.)));
+    // As many as fit on one line, the rest behind "+N more", listed on hover.
+    step(handle, cx, |window, _| {
+        let more = window.find("chart-legend-more");
+        assert!(more.visible());
+        let area = window.find("chart-area").bounds();
+        assert!(more.bounds().right() <= area.right());
+        assert!(more.bounds().bottom() <= area.top());
+    });
+    step(handle, cx, |window, cx| {
+        window.hover("chart-legend-more", cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.find("chart-legend-all").visible())
+    });
+}
+
+#[gpui_kit::test]
 fn every_value_of_many_series_is_reachable(cx: &mut TestAppContext) {
     use tangul_core::chart::ChartStyle;
     let (handle, workspace) = open(cx);
@@ -4949,12 +4972,9 @@ fn every_value_of_many_series_is_reachable(cx: &mut TestAppContext) {
         assert_eq!(order, top_down, "all listed, in columns");
         assert!(window.try_find("chart-tip-more").is_none());
     });
-    // The legend shows 8; the rest on "+4 more", in the same order.
-    step(handle, cx, |window, cx| {
-        window.hover("chart-legend-more", cx)
-    });
+    // The legend has room for all 12: no "+N more".
     step(handle, cx, |window, _| {
-        assert!(window.find("chart-legend-all").visible())
+        assert!(!window.find("chart-legend-more").visible())
     });
     // A click pins the row: every value listed, s5 marked; Esc releases it.
     step(handle, cx, |window, cx| {
@@ -5203,4 +5223,143 @@ fn the_bottom_bar_counts_a_run_up_in_its_middle(cx: &mut TestAppContext) {
         assert_eq!(tab.read(cx).status_text(cx).as_ref(), "12 ms");
         assert!(window.try_find("chart").is_some());
     });
+}
+
+/// Rows like those of a schema-free test query (`generate_series`): `days` days × `series` series.
+fn wave_rows(days: usize, series: usize) -> RowBatch {
+    let mut batch = RowBatch::default();
+    for i in 0..days {
+        for s in 1..=series {
+            // A wave with some noise, the same on every run.
+            let noise = ((i * 7919 + s * 104_729) % 1000) as f64 / 100. - 5.;
+            let v = 50. + 40. * ((i as f64) / 20. + s as f64).sin() + noise;
+            batch.push_cell(Some(&format!("d{i:04}")));
+            batch.push_cell(Some(&format!("s{s:02}")));
+            batch.push_cell(Some(&format!("{v:.1}")));
+            batch.finish_row();
+        }
+    }
+    batch
+}
+
+/// A board of six large stacked areas (999 days × 10 series, see
+/// `wave_rows`) scrolled down and up twice: the time of each frame, what `crate::perf` counted and where the time went.
+/// Prints it and appends a line per run to `perf/board_scroll.jsonl`, to
+/// compare over time (on the same machine). Run
+/// `cargo test --release -p tangul board_scroll_performance -- --ignored --nocapture`.
+#[gpui_kit::test]
+#[ignore]
+fn board_scroll_performance(cx: &mut TestAppContext) {
+    use gpui_kit::{ScrollDelta, point};
+    use serde_json::json;
+    use std::io::Write as _;
+    use std::time::{Duration, Instant};
+    use tangul_core::ResultSet;
+    use tangul_core::chart::{ChartStyle, ChartView};
+    use tangul_engine::QueryOutput;
+    let (handle, workspace) = open(cx);
+    let sql = "select day, series, value";
+    board_with_tiles(handle, &workspace, &[sql; 6], cx);
+    let board = cx.update(|cx| board_tab(&workspace, cx));
+    for tile in 1..=6 {
+        let view = Some(ChartView::new(ChartStyle::StackedArea));
+        step(handle, cx, |_, cx| {
+            board.update(cx, |b, cx| b.set_tile_view(&format!("t{tile}"), view, cx))
+        });
+    }
+    let ms = |d: Duration| (d.as_secs_f64() * 100_000.).round() / 100.;
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let commit = git(&["rev-parse", "--short", "HEAD"]);
+    let dirty = !git(&["status", "--porcelain"]).is_empty();
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../perf/board_scroll.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    {
+        crate::perf::record(true);
+        // The results arrive: the first frame builds every shape.
+        let mut result = ResultSet::new(
+            ["day", "series", "value"]
+                .map(|name| ColumnInfo { name: name.into() })
+                .to_vec(),
+        );
+        result.append(wave_rows(999, 10));
+        let output = QueryOutput {
+            results: vec![result],
+            rows: Some(9990),
+            ..QueryOutput::default()
+        };
+        cx.update(|cx| board.update(cx, |b, cx| b.show_results(vec![Ok(output)], cx)));
+        cx.run_until_parked();
+        let first = cx
+            .update_window(handle.into(), |_, window, cx| {
+                let start = Instant::now();
+                window.render_frame(cx);
+                start.elapsed()
+            })
+            .unwrap();
+        crate::perf::take();
+        // Down and back up, a frame per step, twice; the second time is
+        // measured (the first draws charts coming into view for the first time).
+        let mut frames = Vec::new();
+        for pass in 0..2 {
+            frames.clear();
+            crate::perf::take();
+            for dy in std::iter::repeat_n(-60., 30).chain(std::iter::repeat_n(60., 30)) {
+                frames.push(
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        let delta = ScrollDelta::Pixels(point(px(0.), px(dy)));
+                        window.scroll("board-tiles", delta, cx);
+                        let start = Instant::now();
+                        window.render_frame(cx);
+                        start.elapsed()
+                    })
+                    .unwrap(),
+                );
+            }
+            let _ = pass;
+        }
+        let stats = crate::perf::take();
+        assert!(
+            stats.shapes_reused + stats.shapes_built > 0,
+            "no chart painted"
+        );
+        let q = |p| ms(crate::perf::quantile(&frames, p).unwrap());
+        // Per frame, as the harness draws several frames per scroll step.
+        let per_frame = |d: Duration| ms(d / frames.len() as u32);
+        let spans: serde_json::Map<String, serde_json::Value> = stats
+            .spans
+            .iter()
+            .map(|(name, (_, total))| (name.to_string(), json!(per_frame(*total))))
+            .collect();
+        let line = json!({
+            "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "commit": commit,
+            "dirty": dirty,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "cpus": std::thread::available_parallelism().map_or(0, |n| n.get()),
+            "release": !cfg!(debug_assertions),
+            "scenario": "6 stacked areas, 999 x 10 noisy, scroll 60 steps",
+            "first_frame_ms": ms(first),
+            "frame_ms": { "p50": q(0.5), "p95": q(0.95), "max": q(1.) },
+            "shapes": { "built": stats.shapes_built, "reused": stats.shapes_reused },
+            "spans_ms_per_step": spans,
+        });
+        eprintln!("{line}");
+        writeln!(log, "{line}").unwrap();
+    }
+    crate::perf::record(false);
+    eprintln!("appended to {}", path.display());
 }

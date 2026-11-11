@@ -12,6 +12,7 @@ mod menu;
 mod monitor;
 mod notes;
 mod palette;
+mod perf;
 mod query_router;
 mod query_tab;
 mod result_view;
