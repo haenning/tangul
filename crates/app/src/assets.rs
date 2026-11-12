@@ -37,6 +37,8 @@ gpui_kit::assets::icon_assets!(
         LayoutDashboard,
         Lightbulb,
         Link,
+        Lock,
+        LockOpen,
         List,
         ListOrdered,
         ListTree,

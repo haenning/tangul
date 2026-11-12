@@ -8,6 +8,7 @@
 //! a board that isn't shown doesn't refresh, and a timer only asks for a redraw.
 
 mod form;
+mod scroll_lock;
 mod view;
 
 pub use form::{AddForm, Adding, BookmarkChoice, Choices, DetailsForm, Target};
@@ -106,6 +107,12 @@ pub struct BoardTab {
     /// Redraws the refresh's time while it counts up.
     _count_up: Task<()>,
     focus_handle: FocusHandle,
+    /// The tiles' scroll position (a locked table scrolls the board instead).
+    scroll: ScrollHandle,
+    /// The tile whose table scrolls (`scroll_lock`); the others' are locked.
+    unlocked: Option<String>,
+    /// The tile whose table the pointer is on (its lock hint shows).
+    hovered_table: Option<String>,
 }
 
 impl EventEmitter<BoardEvent> for BoardTab {}
@@ -156,9 +163,25 @@ impl BoardTab {
             _tick: tick,
             _count_up: Task::ready(()),
             focus_handle: cx.focus_handle(),
+            scroll: ScrollHandle::new(),
+            unlocked: None,
+            hovered_table: None,
         };
         tab.sync(board, window, cx);
         tab
+    }
+
+    /// Locks the unlocked table again (see `scroll_lock`).
+    fn lock_tables(&mut self, cx: &mut Context<Self>) {
+        if self.unlocked.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The tile whose table scrolls now (tests).
+    #[cfg(test)]
+    pub fn unlocked_table(&self) -> Option<&str> {
+        self.unlocked.as_deref()
     }
 
     pub fn board(&self) -> &Board {
