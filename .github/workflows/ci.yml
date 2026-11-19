@@ -9,6 +9,8 @@ name: CI
 #   (badges, tests.json, summary.md)
 # - update-macos: the updater's tests where its install runs, every update that must
 #   never be installed among them
+# - windows: clippy on Windows, so it keeps building there (testing only: nothing is
+#   run or packaged; see CONTRIBUTING.md, "Windows")
 #
 # Tested once per step, before it is taken: a pull request's run tests its merge
 # into the target (what the target becomes). Into dev: each change; dev → main: all
@@ -96,6 +98,24 @@ jobs:
         run: rustup toolchain install
       - name: tangul-update's tests
         run: cargo test -p tangul-update
+
+  # Builds on Windows (clippy, every crate and test): code behind cfg(windows) is
+  # checked nowhere else. Nothing runs; Windows is for testing only.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
+      # WARM: the build for the cache.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   tests:
     runs-on: ubuntu-latest
