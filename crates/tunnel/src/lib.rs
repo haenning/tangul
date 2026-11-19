@@ -298,35 +298,78 @@ async fn authenticate(session: &mut Handle<Client>, target: &SshTarget) -> Resul
             session.authenticate_publickey(user, key).await?.success()
         }
         SshAuth::Agent => {
-            let mut agent = AgentClient::connect_env()
-                .await
-                .context("no ssh-agent (SSH_AUTH_SOCK) available")?;
-            let identities = agent.request_identities().await?;
-            if identities.is_empty() {
-                bail!("ssh-agent has no keys (add one with ssh-add)");
-            }
             let hash = rsa_hash().await;
-            let mut ok = false;
-            for identity in identities {
-                let AgentIdentity::PublicKey { key, .. } = identity else {
-                    continue;
-                };
-                let result = session
-                    .authenticate_publickey_with(user, key, hash, &mut agent)
-                    .await
-                    .map_err(|e| anyhow!("{e:?}"))?;
-                if result.success() {
-                    ok = true;
-                    break;
-                }
-            }
-            ok
+            authenticate_with_agent(session, user, hash).await?
         }
     };
     if !ok {
         bail!("SSH authentication as {user}@{} failed", cfg.host);
     }
     Ok(())
+}
+
+/// The Windows OpenSSH agent's pipe (the "OpenSSH Authentication Agent" service).
+#[cfg(windows)]
+const OPENSSH_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+/// Logs in with a key of the running ssh-agent: `SSH_AUTH_SOCK`'s.
+#[cfg(unix)]
+async fn authenticate_with_agent(
+    session: &mut Handle<Client>,
+    user: &str,
+    hash: Option<HashAlg>,
+) -> Result<bool> {
+    let agent = AgentClient::connect_env()
+        .await
+        .context("no ssh-agent (SSH_AUTH_SOCK) available")?;
+    authenticate_with(session, user, hash, agent).await
+}
+
+/// Logs in with a key of the running ssh-agent: Windows' OpenSSH agent, else Pageant.
+#[cfg(windows)]
+async fn authenticate_with_agent(
+    session: &mut Handle<Client>,
+    user: &str,
+    hash: Option<HashAlg>,
+) -> Result<bool> {
+    match AgentClient::connect_named_pipe(OPENSSH_AGENT_PIPE).await {
+        Ok(agent) => authenticate_with(session, user, hash, agent).await,
+        Err(_) => {
+            let agent = AgentClient::connect_pageant()
+                .await
+                .context("no ssh-agent running (OpenSSH Authentication Agent or Pageant)")?;
+            authenticate_with(session, user, hash, agent).await
+        }
+    }
+}
+
+/// Tries each of the agent's keys until one is accepted.
+async fn authenticate_with<S>(
+    session: &mut Handle<Client>,
+    user: &str,
+    hash: Option<HashAlg>,
+    mut agent: AgentClient<S>,
+) -> Result<bool>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+    let identities = agent.request_identities().await?;
+    if identities.is_empty() {
+        bail!("ssh-agent has no keys (add one with ssh-add)");
+    }
+    for identity in identities {
+        let AgentIdentity::PublicKey { key, .. } = identity else {
+            continue;
+        };
+        let result = session
+            .authenticate_publickey_with(user, key, hash, &mut agent)
+            .await
+            .map_err(|e| anyhow!("{e:?}"))?;
+        if result.success() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn expand_home(path: &str) -> PathBuf {
