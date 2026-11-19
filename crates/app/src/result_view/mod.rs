@@ -180,6 +180,8 @@ pub struct ResultView {
     chart_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Takes Esc while a row is pinned.
     pin_focus: FocusHandle,
+    /// Where the pinned row's list was drawn last (to know where it is grabbed).
+    pinned_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The pointer is on the legend's "+N more": every series is listed.
     legend_more: bool,
     /// How many series the legend's one line has room for (measured as it is
@@ -208,7 +210,15 @@ struct ChartPin {
     pin: Pin,
     view: ChartView,
     source: Weak<ChartData>,
+    /// Where its list was moved to (its top left, from the chart's), so it moves
+    /// along with the chart; beside the chart until then.
+    at: Option<Point<Pixels>>,
+    /// Where in the list the pointer holds it while it is moved.
+    grab: Point<Pixels>,
 }
+
+/// Moving a pinned row's list (its header dragged).
+struct PinDrag;
 
 impl ResultView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -245,6 +255,7 @@ impl ResultView {
             chart_pin: None,
             chart_bounds: Rc::default(),
             pin_focus: cx.focus_handle(),
+            pinned_bounds: Rc::default(),
             legend_more: false,
             legend_fit: Rc::new(Cell::new(usize::MAX)),
             base_sql: None,
@@ -1063,18 +1074,19 @@ impl ResultView {
             })
     }
 
-    /// The chart, and the pinned row's values over it. A click pins the row under
-    /// the pointer; another click or Esc releases it.
+    /// The chart, and the pinned row's values beside it. A click pins the row
+    /// under the pointer; another click or Esc releases it.
     fn render_chart_area(
         &self,
         chart: ResultChart,
         view: ChartView,
         source: Option<Weak<ChartData>>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let bounds = self.chart_bounds.get();
         let pin = chart.pin();
-        let pinned = pin.map(|pin| self.render_pinned(&chart, pin, bounds, cx));
+        let pinned = pin.map(|pin| self.render_pinned(&chart, pin, bounds, window, cx));
         // The same chart for mapping a click to its row.
         let hit = chart.for_hits();
         let chart_bounds = self.chart_bounds.clone();
@@ -1099,6 +1111,8 @@ impl ResultView {
                         pin: Pin { row, series },
                         view,
                         source,
+                        at: None,
+                        grab: Point::default(),
                     });
                     window.focus(&this.pin_focus.clone(), cx);
                     cx.notify();
@@ -1109,19 +1123,28 @@ impl ResultView {
     }
 
     /// A pinned row's values: every series, in the tooltip's order, scrollable;
-    /// Copy copies them as tab-separated lines.
+    /// Copy copies them as tab-separated lines. It opens where the tooltip was
+    /// (beside the chart) and its header drags it anywhere in the window.
     fn render_pinned(
         &self,
         chart: &ResultChart,
         pin: Pin,
         bounds: Bounds<Pixels>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let data = chart.data();
         let row = pin.row;
         let order = data.row_order(chart.style(), row);
-        let x = chart.row_x(bounds, row);
-        let width = bounds.size.width.as_f32();
+        let at = self.chart_pin.as_ref().and_then(|p| p.at);
+        let viewport = window.viewport_size().height;
+        let margin = px(chart::TIP_MARGIN);
+        // Below or above the chart, whichever has more room; anywhere once moved.
+        let max_h = match at {
+            None => (viewport - bounds.bottom()).max(bounds.top()) - margin * 3.,
+            Some(_) => viewport - margin * 2.,
+        }
+        .max(px(120.));
         let mut text = format!("{}\t{}\n", data.x_name, data.x[row]);
         for &s in &order {
             let series = &data.series[s];
@@ -1137,7 +1160,7 @@ impl ResultView {
             .iter()
             .map(|&s| chart.value_row(s, row, pin.series == Some(s), cx))
             .collect();
-        v_flex()
+        let list = v_flex()
             .id("chart-pinned")
             .test_support()
             .track_focus(&self.pin_focus)
@@ -1151,16 +1174,14 @@ impl ResultView {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .occlude()
-            .absolute()
-            .top(px(8.))
-            .map(|this| {
-                if x < width / 2. {
-                    this.left(px(x + 12.))
-                } else {
-                    this.right(px(width - x + 12.))
+            .on_drag_move(cx.listener(move |this, e: &DragMoveEvent<PinDrag>, _, cx| {
+                if let Some(pin) = this.chart_pin.as_mut() {
+                    let chart = this.chart_bounds.get().origin;
+                    pin.at = Some(e.event.position - pin.grab - chart);
+                    cx.notify();
                 }
-            })
-            .max_h(px((bounds.size.height.as_f32() - 16.).max(80.)))
+            }))
+            .max_h(max_h)
             .min_w(px(180.))
             .p_2()
             .gap_1()
@@ -1175,7 +1196,28 @@ impl ResultView {
                 h_flex()
                     .gap_2()
                     .justify_between()
-                    .child(div().font_semibold().child(data.x[row].clone()))
+                    .child(
+                        // The handle to move the list by.
+                        div()
+                            .id("chart-pinned-grip")
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .cursor_grab()
+                            .font_semibold()
+                            .child(data.x[row].clone())
+                            .on_mouse_down(MouseButton::Left, {
+                                let placed = self.pinned_bounds.clone();
+                                cx.listener(move |this, e: &MouseDownEvent, _, _| {
+                                    // Where in the list it is grabbed, kept while it moves.
+                                    if let Some(pin) = this.chart_pin.as_mut() {
+                                        pin.grab = e.position - placed.get().origin;
+                                    }
+                                })
+                            })
+                            .on_drag(PinDrag, |_, _, _, cx| cx.new(|_| EmptyView)),
+                    )
                     .child(
                         h_flex()
                             .child(
@@ -1209,7 +1251,25 @@ impl ResultView {
                     .overflow_y_scroll()
                     .children(rows),
             )
-            .children(total.map(|total| chart::total_row(total, cx)))
+            .children(total.map(|total| chart::total_row(total, cx)));
+        // Measured, so a drag knows where in the list it was grabbed.
+        let placed = self.pinned_bounds.clone();
+        let list = div()
+            .on_children_prepainted(move |b, _, _| {
+                if let Some(b) = b.first() {
+                    placed.set(*b);
+                }
+            })
+            .child(list);
+        let placed = match at {
+            None => chart::beside_chart(bounds, list),
+            Some(at) => anchored()
+                .position(bounds.origin + at)
+                .snap_to_window_with_margin(margin)
+                .child(list),
+        };
+        // Over everything else, like the tooltip.
+        deferred(placed).with_priority(1)
     }
 
     /// Instead of a stored chart from before charts took one value column: why,
@@ -1252,6 +1312,7 @@ impl ResultView {
         &self,
         data: &ChartData,
         view: ChartView,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let style = view.style;
@@ -1352,6 +1413,7 @@ impl ResultView {
                     .bounds_out(self.chart_bounds.clone()),
                     view,
                     source,
+                    window,
                     cx,
                 ),
             )
@@ -1488,7 +1550,7 @@ impl ResultView {
         )
     }
 
-    fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         match &self.status {
             Status::Done { error: Some(_), .. } => div()
@@ -1516,7 +1578,9 @@ impl ResultView {
             Status::Done { .. }
                 if let (Some(view), Ok(data)) = (self.chart_shown(), &self.chart) =>
             {
-                crate::perf::span("result.render_chart", || self.render_chart(data, view, cx))
+                crate::perf::span("result.render_chart", || {
+                    self.render_chart(data, view, window, cx)
+                })
             }
             _ => DataTable::new(&self.table)
                 .stripe(true)
@@ -1528,7 +1592,7 @@ impl ResultView {
 
 impl Render for ResultView {
     /// The result, with the active filters and sort above it.
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let error = match &self.status {
             Status::Done { error: Some(e), .. } => Some(e.clone()),
             _ => None,
@@ -1539,7 +1603,7 @@ impl Render for ResultView {
         }
         let chips = self.render_refine_bar(cx);
         let drag_chip = self.render_drag_chip(cx);
-        let body = self.render_body(cx);
+        let body = self.render_body(window, cx);
         let theme = cx.theme();
         v_flex()
             .size_full()

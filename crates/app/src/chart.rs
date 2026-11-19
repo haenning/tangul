@@ -39,6 +39,12 @@ const TIP_FRAME: f32 = 64.;
 /// Most columns the tooltip lays its series out in; what doesn't fit then is
 /// the smallest values, in the pinned list (a click).
 const TIP_COLUMNS: usize = 4;
+/// Most lines per column of the tooltip, however much room the window has.
+const TIP_LINES: usize = 12;
+/// Space between the chart and the box with a row's values.
+const TIP_GAP: f32 = 8.;
+/// Space the box keeps from the window's edges.
+pub const TIP_MARGIN: f32 = 8.;
 /// Radius of the outer corners of a bar, or of a whole stack of them.
 const BAR_RADIUS: f32 = 3.;
 /// Points of a line closer than this (px) to the line without them are left out.
@@ -133,11 +139,6 @@ impl ResultChart {
         }
         let row = l.row_at(x, self.data.x.len())?;
         Some((row, self.series_at(&l, row, x, y)))
-    }
-
-    /// Horizontal center of a row, relative to the chart's origin.
-    pub fn row_x(&self, bounds: Bounds<Pixels>, row: usize) -> f32 {
-        self.layout(bounds).x(row)
     }
 
     fn series_at(&self, l: &Layout, row: usize, x: f32, y: f32) -> Option<usize> {
@@ -750,7 +751,7 @@ impl Plot for ResultChart {
         state: &TooltipState,
         cursor: Point<Pixels>,
         bounds: Bounds<Pixels>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
         let l = self.layout(bounds);
@@ -763,8 +764,9 @@ impl Plot for ResultChart {
         }
         let p = state.cross_line;
         let under = self.series_at(&l, row, p.x.as_f32(), p.y.as_f32());
-        // As many lines per column as the plot is high, up to a few columns.
-        let per_column = (((bounds.size.height.as_f32() - TIP_FRAME) / TIP_ROW) as usize).max(3);
+        // As many lines per column as there is room for beside the chart, up to a
+        // few columns.
+        let per_column = tip_lines(bounds, window);
         let order = self.data.row_order(self.style, row);
         let (listed, hidden) = self
             .data
@@ -802,14 +804,42 @@ impl Plot for ResultChart {
             })
             .when(self.style.is_stacked(), |this| {
                 this.child(total_row(self.data.row_total(row), cx))
-            });
+            })
+            .min_w(px(150.))
+            .p_2()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .shadow_md();
+        // The crosshair and dots on the plot; the values beside the chart, not over it.
         let tooltip = Tooltip::new(cursor, bounds.size)
-            .gap(px(8.))
+            .appearance(false)
             .cross_line(cross)
             .dots(self.hover_dots(&l, row, cx))
-            .child(content);
+            .child(beside_chart(bounds, content));
         Some(tooltip.into_any_element())
     }
+}
+
+/// Where a row's values go: centered below the chart, or above it where the
+/// window has more room; over the chart only where the window has no room at all.
+pub fn beside_chart(chart: Bounds<Pixels>, content: impl IntoElement) -> Anchored {
+    anchored()
+        .anchor(Anchor::TopCenter)
+        .attach(chart, Anchor::BottomCenter)
+        .offset(point(px(0.), px(TIP_GAP)))
+        .snap_to_window_with_margin(px(TIP_MARGIN))
+        .child(content)
+}
+
+/// Lines per column the box with a row's values has room for, below or above
+/// the chart (see [`beside_chart`]).
+fn tip_lines(chart: Bounds<Pixels>, window: &Window) -> usize {
+    let below = window.viewport_size().height - chart.bottom();
+    let room = below.max(chart.top()).as_f32() - TIP_GAP - TIP_MARGIN - TIP_FRAME;
+    ((room / TIP_ROW).max(0.) as usize).clamp(3, TIP_LINES)
 }
 
 impl ResultChart {
