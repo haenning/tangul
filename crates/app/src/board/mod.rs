@@ -261,6 +261,7 @@ impl BoardTab {
                     view.result.update(cx, |r, cx| {
                         r.set_chart_view(tile.view, cx);
                         r.set_smooth_lines(tile.smooth, cx);
+                        r.set_missing_as_null(tile.missing_as_null, cx);
                     });
                 }
                 None => {
@@ -282,6 +283,7 @@ impl BoardTab {
             }
             r.set_chart_view(tile.view, cx);
             r.set_smooth_lines(tile.smooth, cx);
+            r.set_missing_as_null(tile.missing_as_null, cx);
         });
         let sql = tile.sql.as_str();
         let tile = tile.id.clone();
@@ -486,6 +488,7 @@ impl BoardTab {
             description: options.description,
             view: options.view,
             smooth: options.smooth,
+            missing_as_null: options.missing_as_null,
         }));
     }
 

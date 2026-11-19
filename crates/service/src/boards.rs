@@ -48,6 +48,7 @@ pub enum Edit {
         description: String,
         view: Option<ChartView>,
         smooth: bool,
+        missing_as_null: bool,
     },
     /// The SQL and how its result is shown ("Update tile" from a tab).
     SetQuery {
@@ -391,6 +392,7 @@ fn edit_board(board: &mut Board, edit: Edit) -> Result<(), String> {
             description,
             view,
             smooth,
+            missing_as_null,
         } => {
             let tile = tile_mut(board, &tile)?;
             tile.title = title.trim().into();
@@ -400,6 +402,7 @@ fn edit_board(board: &mut Board, edit: Edit) -> Result<(), String> {
                 tile.view = view.map(current_layout);
             }
             tile.smooth = smooth;
+            tile.missing_as_null = missing_as_null;
         }
         Edit::SetQuery { tile, sql, view } => {
             if sql.trim().is_empty() {
@@ -722,6 +725,7 @@ mod tests {
             description: " Per week ".into(),
             view,
             smooth,
+            missing_as_null: smooth,
         };
         let b = apply(&mut boards, id, options(Some(old), true)).unwrap();
         let t = &b.tiles[3];
@@ -729,7 +733,10 @@ mod tests {
             (t.title.as_str(), t.description.as_str()),
             ("Trend", "Per week")
         );
-        assert_eq!((t.view, t.smooth), (Some(old), true));
+        assert_eq!(
+            (t.view, t.smooth, t.missing_as_null),
+            (Some(old), true, true)
+        );
         let b = apply(&mut boards, id, options(Some(old), false)).unwrap();
         assert_eq!((b.tiles[3].view, b.tiles[3].smooth), (Some(old), false));
         let area = ChartView::new(ChartStyle::Area);
@@ -996,6 +1003,7 @@ mod tests {
                 description: String::new(),
                 view: None,
                 smooth: true,
+                missing_as_null: true,
             },
         ] {
             assert_eq!(

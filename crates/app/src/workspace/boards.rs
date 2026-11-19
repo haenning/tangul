@@ -650,20 +650,15 @@ impl Workspace {
                 .collect(),
             None => Vec::new(),
         };
-        let options = tile.as_ref().map_or(
-            TileOptions {
-                title: String::new(),
-                description: String::new(),
-                view: None,
-                smooth: false,
-            },
-            |t| TileOptions {
+        let options = tile
+            .as_ref()
+            .map_or(TileOptions::default(), |t| TileOptions {
                 title: t.tile.title.clone(),
                 description: t.tile.description.clone(),
                 view: t.tile.view,
                 smooth: t.tile.smooth,
-            },
-        );
+                missing_as_null: t.tile.missing_as_null,
+            });
         let form = cx.new(|cx| {
             AddForm::new(
                 options,
@@ -694,6 +689,7 @@ impl Workspace {
                             description: options.description,
                             view: options.view,
                             smooth: options.smooth,
+                            missing_as_null: options.missing_as_null,
                             ..item.tile
                         }),
                         true => Edit::AddLink(Link {
