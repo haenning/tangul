@@ -175,6 +175,9 @@ pub struct ResultView {
     smooth_lines: bool,
     /// Set by the owner (a board tile keeps it): no Straight / Smooth switch.
     lines_set: bool,
+    /// The chart's hover lists a missing value as `NULL`, not `0` (a board
+    /// tile's choice).
+    missing_as_null: bool,
     /// The chart row a click pinned: its values listed to scroll and copy, until
     /// Esc or another click.
     chart_pin: Option<ChartPin>,
@@ -255,6 +258,7 @@ impl ResultView {
             old_result: false,
             smooth_lines: false,
             lines_set: false,
+            missing_as_null: false,
             chart_pin: None,
             chart_bounds: Rc::default(),
             pin_focus: cx.focus_handle(),
@@ -835,6 +839,14 @@ impl ResultView {
         self.lines_set = true;
         if self.smooth_lines != smooth {
             self.smooth_lines = smooth;
+            cx.notify();
+        }
+    }
+
+    /// The chart's hover lists a missing value as `NULL` instead of `0`.
+    pub fn set_missing_as_null(&mut self, missing_as_null: bool, cx: &mut Context<Self>) {
+        if self.missing_as_null != missing_as_null {
+            self.missing_as_null = missing_as_null;
             cx.notify();
         }
     }
@@ -1441,6 +1453,7 @@ impl ResultView {
                         self.smooth_lines,
                         label_size.unwrap_or(chart::LABEL_SIZE),
                     )
+                    .missing_as_null(self.missing_as_null)
                     .pinned(pin)
                     .bounds_out(self.chart_bounds.clone()),
                     view,

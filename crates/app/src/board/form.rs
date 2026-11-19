@@ -3,7 +3,7 @@
 //! label and what they open, never by where they point.
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState, Textarea, TextareaState},
@@ -22,7 +22,7 @@ use tangul_core::chart::{ChartStyle, ChartView};
 use super::{link_action, link_icon};
 use crate::assets::style_icon;
 use crate::result_view::{SetView, chart_menu};
-use crate::ui::{Severity, alert_card, form_row, segmented};
+use crate::ui::{Severity, alert_card, form_note, form_row, form_section, segmented};
 
 /// What the details form gives back.
 pub struct Details {
@@ -448,22 +448,30 @@ impl Render for DetailsForm {
 }
 
 /// A tile's options as its dialogs edit them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TileOptions {
     pub title: String,
     pub description: String,
     pub view: Option<ChartView>,
     pub smooth: bool,
+    pub missing_as_null: bool,
 }
 
-/// The fields every tile dialog shares (its options, "New tile", "Add to board"):
-/// title, description, what the result is shown as and, for lines and areas,
-/// straight or smooth.
+/// What a missing value means, behind the (i) of its row.
+const MISSING_EXPLAINED: &str = "A series without a value at a row. The chart draws \
+    it as 0; its hover lists it as 0 (counts, sums) or as NULL (averages, \
+    measurements, gaps in the data).";
+
+/// The fields every tile dialog shares (its options, "New tile", "Add to board"),
+/// in two sections: the tile (title, description) and its display (shown as;
+/// for lines and areas straight or smooth; for charts how a missing value is
+/// listed).
 pub struct TileFields {
     title: Entity<InputState>,
     description: Entity<TextareaState>,
     view: Option<ChartView>,
     smooth: bool,
+    missing_as_null: bool,
     /// The tile's result: the charts it fits are offered (none yet: every one).
     chart: Option<Rc<ChartData>>,
     /// Only the title (a link has nothing else).
@@ -493,6 +501,7 @@ impl TileFields {
             description,
             view: options.view,
             smooth: options.smooth,
+            missing_as_null: options.missing_as_null,
             chart,
             title_only: false,
         }
@@ -516,6 +525,7 @@ impl TileFields {
             description: self.description.read(cx).value().trim().to_string(),
             view: self.view,
             smooth: self.smooth,
+            missing_as_null: self.missing_as_null,
         }
     }
 }
@@ -525,9 +535,10 @@ impl Render for TileFields {
         let title = div()
             .id("add-title")
             .test_support()
+            .flex_1()
             .child(Input::new(&self.title));
         if self.title_only {
-            return v_flex().gap_2().child(title);
+            return v_flex().child(form_row("Title", None, title, cx));
         }
         let this = cx.entity().downgrade();
         let set: SetView = Rc::new(move |view, cx| {
@@ -540,8 +551,9 @@ impl Render for TileFields {
         let shown_as = Button::new("tile-view")
             .label(view_label(shown))
             .icon(Icon::new(style_icon(shown.map(|v| v.style))))
-            .ghost()
-            .xsmall()
+            .outline()
+            .small()
+            .dropdown_caret(true)
             .dropdown_menu(move |menu, window, cx| match &chart {
                 Some(data) => chart_menu(menu, data, shown, set.clone(), window, cx),
                 None => {
@@ -558,30 +570,72 @@ impl Render for TileFields {
                     })
                 }
             });
-        let lines = shown.filter(|v| !v.style.is_bars()).map(|_| {
+        // A choice of two, written into this form.
+        let choice = |id: &'static str,
+                      labels: [&'static str; 2],
+                      chosen: bool,
+                      set: fn(&mut Self, bool),
+                      cx: &mut Context<Self>| {
             let this = cx.entity().downgrade();
             segmented(
-                "tile-lines",
-                [(false, "Straight".into()), (true, "Smooth".into())],
-                self.smooth,
-                move |smooth, _, cx| {
+                id,
+                [(false, labels[0].into()), (true, labels[1].into())],
+                chosen,
+                move |value, _, cx| {
                     let _ = this.update(cx, |f, cx| {
-                        f.smooth = *smooth;
+                        set(f, *value);
                         cx.notify();
                     });
                 },
                 cx,
             )
+        };
+        let lines = shown.filter(|v| !v.style.is_bars()).map(|_| {
+            choice(
+                "tile-lines",
+                ["Straight", "Smooth"],
+                self.smooth,
+                |f, v| f.smooth = v,
+                cx,
+            )
         });
-        v_flex()
-            .gap_2()
-            .child(title)
-            .child(Textarea::new(&self.description))
-            .child(form_row("Shown as", None, h_flex().child(shown_as), cx))
+        let missing = shown.map(|_| {
+            choice(
+                "tile-missing",
+                ["0", "NULL"],
+                self.missing_as_null,
+                |f, v| f.missing_as_null = v,
+                cx,
+            )
+        });
+        let tile = form_section("Tile", None, cx)
+            .child(form_row("Title", None, title, cx))
+            .child(top_row(
+                "Description",
+                div().flex_1().child(Textarea::new(&self.description)),
+                cx,
+            ));
+        let display = form_section("Display", None, cx)
+            .child(form_row("Shown as", None, shown_as, cx))
             .when_some(lines, |this, lines| {
                 this.child(form_row("Lines", None, lines, cx))
             })
+            .when_some(missing, |this, missing| {
+                this.child(form_row(
+                    "Missing values",
+                    Some(MISSING_EXPLAINED),
+                    missing,
+                    cx,
+                ))
+            });
+        v_flex().gap_5().child(tile).child(display)
     }
+}
+
+/// A form row whose control is taller than one line (a text area): the label
+/// at its first line, not its middle.
+fn top_row(label: &'static str, control: impl IntoElement, cx: &App) -> Div {
+    form_row(label, None, control, cx).items_start()
 }
 
 /// A tile's options: its fields, saved at once.
@@ -601,6 +655,7 @@ impl TileForm {
             description: tile.description.clone(),
             view: tile.view,
             smooth: tile.smooth,
+            missing_as_null: tile.missing_as_null,
         };
         let fields = cx.new(|cx| TileFields::new(options, chart, window, cx));
         TileFields::focus_title(&fields, window, cx);
@@ -711,17 +766,25 @@ impl Render for AddForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let option = |ix: usize, label: String, chosen: bool, pick: Option<usize>| {
-            div()
+            h_flex()
                 .id(("add-to-board", ix))
                 .test_support()
+                .justify_between()
                 .px_2()
                 .py_1()
                 .rounded(theme.radius)
                 .text_sm()
                 .cursor_pointer()
-                .when(chosen, |this| this.bg(theme.secondary))
-                .hover(|s| s.bg(theme.secondary))
+                .when(chosen, |this| this.bg(theme.muted))
+                .hover(|s| s.bg(theme.muted))
                 .child(label)
+                .when(chosen, |this| {
+                    this.child(
+                        Icon::new(IconName::Check)
+                            .xsmall()
+                            .text_color(theme.primary),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.chosen = pick;
                     this.error = None;
@@ -742,66 +805,61 @@ impl Render for AddForm {
                     this.child(alert_card(Severity::Error, error, cx))
                 });
         }
-        let kind = |id: &'static str, label: &'static str, link: bool| {
-            Button::new(id)
-                .label(label)
-                .xsmall()
-                .ghost()
-                .selected(self.as_link == link)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.as_link = link;
-                    this.fields.update(cx, |f, cx| f.set_title_only(link, cx));
+        let this = cx.entity().downgrade();
+        let kind = segmented(
+            "add-as",
+            [(false, "Tile".into()), (true, "Link".into())],
+            self.as_link,
+            move |link, _, cx| {
+                let link = *link;
+                let _ = this.update(cx, |f, cx| {
+                    f.as_link = link;
+                    f.fields.update(cx, |f, cx| f.set_title_only(link, cx));
                     cx.notify();
-                }))
-        };
+                });
+            },
+            cx,
+        );
         let hint = if self.as_link {
-            "A link on top of the board opens it in a new tab."
+            "On top of the board; opens it in a new tab."
         } else {
-            "A tile shows its result on the board."
+            "Shows its result on the board."
         };
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(kind("add-as-tile", "As a tile", false))
-                    .child(kind("add-as-link", "As a link", true))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(hint),
-                    ),
+        let boards = v_flex()
+            .flex_1()
+            .gap_0p5()
+            .children(
+                self.boards
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, name))| option(i, name.clone(), self.chosen == Some(i), Some(i))),
             )
-            .child(self.fields.clone())
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Board"),
-            )
-            .child(
-                v_flex()
-                    .gap_0p5()
-                    .children(self.boards.iter().enumerate().map(|(i, (_, name))| {
-                        option(i, name.clone(), self.chosen == Some(i), Some(i))
-                    }))
-                    .child(option(
-                        new_ix,
-                        "New board…".into(),
-                        self.chosen.is_none(),
-                        None,
-                    )),
-            )
+            .child(option(
+                new_ix,
+                "New board…".into(),
+                self.chosen.is_none(),
+                None,
+            ))
             .when(self.chosen.is_none(), |this| {
                 this.child(
                     div()
                         .id("new-board-name")
                         .test_support()
+                        .mt_1()
                         .child(Input::new(&self.new_name)),
                 )
-            })
+            });
+        let board = top_row("Board", boards, cx);
+        v_flex()
+            .gap_5()
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(form_row("Add as", None, kind, cx))
+                    .child(form_note(hint, cx))
+                    .child(board),
+            )
+            .child(self.fields.clone())
             .when_some(self.error.clone(), |this, error| {
                 this.child(alert_card(Severity::Error, error, cx))
             })
@@ -817,13 +875,7 @@ pub struct QueryForm {
 
 impl QueryForm {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let options = TileOptions {
-            title: String::new(),
-            description: String::new(),
-            view: None,
-            smooth: false,
-        };
-        let fields = cx.new(|cx| TileFields::new(options, None, window, cx));
+        let fields = cx.new(|cx| TileFields::new(TileOptions::default(), None, window, cx));
         let sql = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(4, 12)
@@ -859,6 +911,7 @@ impl QueryForm {
             sql,
             view: options.view,
             smooth: options.smooth,
+            missing_as_null: options.missing_as_null,
             ..Tile::default()
         })
     }
@@ -869,8 +922,10 @@ impl Render for QueryForm {
         // SQL in the editor's font.
         let mono = cx.theme().mono_font_family.clone();
         v_flex()
-            .gap_2()
-            .child(Textarea::new(&self.sql).font_family(mono))
+            .gap_5()
+            .child(
+                form_section("Query", None, cx).child(Textarea::new(&self.sql).font_family(mono)),
+            )
             .child(self.fields.clone())
             .when_some(self.error.clone(), |this, error| {
                 this.child(alert_card(Severity::Error, error, cx))

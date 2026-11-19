@@ -2812,10 +2812,8 @@ fn board_tiles_show_their_results_and_share_a_statement(cx: &mut TestAppContext)
 /// A tile's options with only how it is shown set.
 fn shown_as(view: Option<tangul_core::chart::ChartView>) -> crate::board::TileOptions {
     crate::board::TileOptions {
-        title: String::new(),
-        description: String::new(),
         view,
-        smooth: false,
+        ..Default::default()
     }
 }
 
@@ -2947,14 +2945,30 @@ fn a_tiles_options_set_its_lines_and_keep_its_title(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| {
         window.click(("tile-lines", 1usize), cx)
     });
+    // Missing values listed as NULL, for charts only.
+    step(handle, cx, |window, cx| {
+        window.click(("tile-missing", 1usize), cx)
+    });
     step(handle, cx, |window, cx| window.click("save", cx));
     cx.update(|cx| {
         let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
         let tile = &board.tiles[0];
-        assert!(tile.smooth, "saved with the board");
+        assert!(tile.smooth && tile.missing_as_null, "saved with the board");
         assert_eq!((tile.title.as_str(), tile.view), ("Tile 1", line));
         let result = tab.read(cx).tile_result("t1").unwrap();
         assert!(result.read(cx).smooth_lines(), "drawn so");
+    });
+    // The table: neither lines nor missing values to choose.
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.set_tile_options("t1", shown_as(None), cx))
+    });
+    step(handle, cx, |window, cx| {
+        window.click(("tile-options", 0usize), cx)
+    });
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("add-title").is_some(), "the dialog is open");
+        assert!(window.try_find(("tile-lines", 0usize)).is_none());
+        assert!(window.try_find(("tile-missing", 0usize)).is_none());
     });
 }
 

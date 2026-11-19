@@ -79,6 +79,8 @@ pub struct ResultChart {
     smooth: bool,
     /// Axis labels, in pixels.
     label_size: f32,
+    /// A missing value listed as `NULL`, not `0` (`listed_value`).
+    missing_as_null: bool,
     /// The pinned row: no hover tooltip then, the row marked instead.
     pin: Option<Pin>,
     /// Where the chart was drawn, for the view to place the pinned list and map
@@ -107,11 +109,18 @@ impl ResultChart {
             colors,
             smooth,
             label_size,
+            missing_as_null: false,
             pin: None,
             bounds_out: None,
             hovered: None,
             bounds: Bounds::default(),
         }
+    }
+
+    /// Lists a missing value as `NULL`, not `0`.
+    pub fn missing_as_null(mut self, missing_as_null: bool) -> Self {
+        self.missing_as_null = missing_as_null;
+        self
     }
 
     pub fn pinned(mut self, pin: Option<Pin>) -> Self {
@@ -845,11 +854,11 @@ fn tip_lines(chart: Bounds<Pixels>, window: &Window) -> usize {
 
 impl ResultChart {
     /// One series' line in a list of a row's values: its color, name and value; the
-    /// highlighted one stands out. NULL is listed as 0, and a 0 is muted, color
-    /// included (`listed_value`).
+    /// highlighted one stands out. NULL is listed as 0 (or `NULL`, if asked), and
+    /// a 0 or `NULL` is muted, color included (`listed_value`).
     pub fn value_row(&self, s: usize, row: usize, highlighted: bool, cx: &App) -> AnyElement {
         let series = &self.data.series[s];
-        let (value, zero) = listed_value(series.values[row]);
+        let (value, zero) = listed_value(series.values[row], self.missing_as_null);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let id = if highlighted {

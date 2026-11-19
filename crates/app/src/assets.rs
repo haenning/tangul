@@ -51,6 +51,7 @@ gpui_kit::assets::icon_assets!(
         RotateCcwClock,
         Rows3,
         Sigma,
+        SlidersHorizontal,
         Star,
         StarFill,
         Table,
@@ -87,5 +88,64 @@ pub fn style_icon(style: Option<tangul_core::chart::ChartStyle>) -> Lucide {
         Some(ChartStyle::Area | ChartStyle::StackedArea) => Lucide::ChartArea,
         Some(ChartStyle::Bars) => Lucide::ChartColumn,
         Some(ChartStyle::StackedBars) => Lucide::ChartColumnStacked,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `Lucide::…` the app's code names, from its sources.
+    fn named_in_sources() -> Vec<String> {
+        fn walk(dir: &std::path::Path, names: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, names);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for part in text.split("Lucide::").skip(1) {
+                        let name: String = part
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric())
+                            .collect();
+                        // An icon (`Pencil`), not a constant (`ALL`).
+                        if name.starts_with(|c: char| c.is_ascii_uppercase())
+                            && name.chars().any(|c| c.is_ascii_lowercase())
+                        {
+                            names.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        let mut names = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut names,
+        );
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    #[test]
+    fn every_icon_the_app_names_is_embedded() {
+        let names = named_in_sources();
+        assert!(names.iter().any(|n| n == "SlidersHorizontal"), "{names:?}");
+        let missing: Vec<&String> = names
+            .iter()
+            .filter(|name| {
+                let icon = Lucide::ALL
+                    .iter()
+                    .find(|i| format!("{i:?}") == **name)
+                    .unwrap_or_else(|| panic!("no such icon: {name}"));
+                AppAssets.load(&icon.path()).unwrap().is_none()
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "not embedded (add to ExtraIcons): {missing:?}"
+        );
     }
 }
