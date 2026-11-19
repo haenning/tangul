@@ -10,7 +10,7 @@ DEV_CONFIG := target/dev-config
 export TANGUL_SIGN_IDENTITY
 
 .DEFAULT_GOAL := help
-.PHONY: help setup tools docker-up db-up db-down db-reset db-logs psql mysql run run-release run-dev demo \
+.PHONY: help setup tools docker-up db-up db-down db-reset db-logs psql mysql run run-release run-dev run-windows demo \
         test test-live test-live-native fmt lint license license-check ci app dmg install signing-cert release
 
 help: ## List targets
@@ -25,13 +25,16 @@ setup: ## Check required tools
 		echo "  run: xcodebuild -downloadComponent MetalToolchain"; exit 1; fi
 	@rustup show active-toolchain >/dev/null && echo "ok"
 
-docker-up: # Start Docker Desktop on macOS if the daemon isn't running (not listed in help)
+docker-up: # Start Docker Desktop (macOS, Windows) if the daemon isn't running (not listed in help)
 	@docker info >/dev/null 2>&1 || { \
-		if [ "$$(uname)" = "Darwin" ]; then \
-			echo "starting Docker Desktop..."; open -ga Docker; \
-			for i in $$(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 2; done; \
-			echo "Docker did not become ready in 2 minutes"; exit 1; \
-		else echo "docker daemon is not running"; exit 1; fi; }
+		case "$$(uname)" in \
+			Darwin) echo "starting Docker Desktop..."; open -ga Docker ;; \
+			MINGW*|MSYS*|CYGWIN*) echo "starting Docker Desktop..."; \
+				"$${ProgramFiles:-C:/Program Files}/Docker/Docker/Docker Desktop.exe" >/dev/null 2>&1 & ;; \
+			*) echo "docker daemon is not running"; exit 1 ;; \
+		esac; \
+		for i in $$(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 2; done; \
+		echo "Docker did not become ready in 2 minutes"; exit 1; }
 
 db-up: docker-up ## Start dev Postgres (:55432), MySQL (:53306) and an SSH bastion (:52222)
 	docker compose up -d --wait
@@ -68,6 +71,8 @@ run-dev: db-up ## Start dev databases and run the app with dev profiles only
 	@mkdir -p $(DEV_CONFIG)
 	@[ -f $(DEV_CONFIG)/profiles.toml ] || cp dev/profiles.toml $(DEV_CONFIG)/profiles.toml
 	TANGUL_CONFIG_DIR=$(DEV_CONFIG) cargo run
+
+run-windows: run-dev ## run-dev on Windows (Git Bash with make; without make: scripts/run-windows.ps1)
 
 test: ## Unit tests (no databases needed)
 	cargo test --workspace

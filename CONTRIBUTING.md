@@ -34,6 +34,9 @@ Mac App Store, whose terms don't fit the AGPL. You keep the copyright in your wo
 - macOS: Xcode's Metal toolchain, which GPUI uses to compile shaders. Newer Xcode
   versions don't ship it by default: `xcodebuild -downloadComponent MetalToolchain`.
 - Linux builds (dev only) need `libxkbcommon-dev libxkbcommon-x11-dev`.
+- Windows (testing only, see [Windows](#windows-testing-only)): Visual Studio Build
+  Tools ("Desktop development with C++": the MSVC compiler and Windows SDK some
+  dependencies build with), Docker Desktop, and Git for Windows.
 
 ## Quick start
 
@@ -68,6 +71,31 @@ dependency policy (advisories, licenses, sources) is in `deny.toml`.
 
 The dev databases use non-default ports bound to localhost, so they don't clash with a
 local Postgres or MySQL.
+
+## Windows (testing only)
+
+tangul is a macOS app; on Windows it runs from source to try things, nothing more: no
+installer, no updates. In Git Bash with `make` (e.g. `winget install ezwinports.make`):
+
+```sh
+make run-windows   # the same as run-dev: dev databases (Docker Desktop) plus the app
+```
+
+Without `make`, in PowerShell: `.\scripts\run-windows.ps1`.
+
+What differs from macOS:
+
+- **Passwords are not kept.** As on Linux, secrets go to an in-memory store and are
+  gone when the app quits; the dev databases need none. Real storage would be the
+  Windows Credential Manager, but it holds at most 2,560 bytes per item, and tangul
+  keeps all secrets in one item (`crates/data/src/secrets.rs`): that needs one item per
+  secret, or the secrets split across items, first.
+- **No menu bar.** Its items are reachable without it: by their keys (ctrl instead of
+  cmd) or, for New Database, the app's own button.
+- **SSH agent:** Windows' OpenSSH agent ("OpenSSH Authentication Agent" service), else
+  Pageant.
+- `.gitattributes` keeps LF in a Windows checkout: the Makefile, scripts and dev files
+  break with CRLF.
 
 ## Branches and CI
 

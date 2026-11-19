@@ -268,7 +268,9 @@ explicit OK, and keep them covered by tests.
 
 ## Commands
 
-- `make run-dev`: dev databases (Docker) plus the app with dev-only profiles
+- `make run-dev`: dev databases (Docker) plus the app with dev-only profiles; on
+  Windows (testing only, see CONTRIBUTING.md) `make run-windows` or
+  `scripts/run-windows.ps1`
 - `make test`, `make test-live` (against the dev databases); without Docker (a cloud
   session on Debian/Ubuntu): `make test-live-native`, which installs and starts the same
   databases and SSH bastion with apt (`scripts/dev-db-native.sh`)
