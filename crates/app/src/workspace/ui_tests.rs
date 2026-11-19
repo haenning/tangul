@@ -2809,6 +2809,16 @@ fn board_tiles_show_their_results_and_share_a_statement(cx: &mut TestAppContext)
     });
 }
 
+/// A tile's options with only how it is shown set.
+fn shown_as(view: Option<tangul_core::chart::ChartView>) -> crate::board::TileOptions {
+    crate::board::TileOptions {
+        title: String::new(),
+        description: String::new(),
+        view,
+        smooth: false,
+    }
+}
+
 #[gpui_kit::test]
 fn a_tile_is_shown_as_the_chart_chosen_in_edit_mode(cx: &mut TestAppContext) {
     use tangul_core::ResultSet;
@@ -2840,15 +2850,15 @@ fn a_tile_is_shown_as_the_chart_chosen_in_edit_mode(cx: &mut TestAppContext) {
         }
     };
     step(handle, cx, |window, cx| window.click("board-edit", cx));
-    // The menu only in edit mode.
+    // The options only in edit mode.
     step(handle, cx, |window, _| {
-        assert!(window.try_find(("tile-view", 0usize)).is_some())
+        assert!(window.try_find(("tile-options", 0usize)).is_some())
     });
     let tab = cx.update(|cx| board_tab(&workspace, cx));
     // Not the default (bars for categories), so the pick has to come through.
     let areas = Some(ChartView::new(ChartStyle::Area));
     step(handle, cx, |_, cx| {
-        tab.update(cx, |t, cx| t.set_tile_view("t1", areas, cx))
+        tab.update(cx, |t, cx| t.set_tile_options("t1", shown_as(areas), cx))
     });
     cx.update(|cx| {
         let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
@@ -2868,7 +2878,7 @@ fn a_tile_is_shown_as_the_chart_chosen_in_edit_mode(cx: &mut TestAppContext) {
     // Stacked bars of one column: bars.
     let stacked = Some(ChartView::new(ChartStyle::StackedBars));
     step(handle, cx, |_, cx| {
-        tab.update(cx, |t, cx| t.set_tile_view("t1", stacked, cx))
+        tab.update(cx, |t, cx| t.set_tile_options("t1", shown_as(stacked), cx))
     });
     step(handle, cx, |_, cx| {
         let result = tab.read(cx).tile_result("t1").unwrap();
@@ -2884,6 +2894,67 @@ fn a_tile_is_shown_as_the_chart_chosen_in_edit_mode(cx: &mut TestAppContext) {
         let result = tab.read(cx).tile_result("t1").unwrap();
         assert_eq!(result.read(cx).chart_shown(), None);
         assert!(window.try_find(("tile-unfit", 0usize)).is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn a_tiles_options_set_its_lines_and_keep_its_title(cx: &mut TestAppContext) {
+    use tangul_core::ResultSet;
+    use tangul_core::chart::{ChartStyle, ChartView};
+    use tangul_engine::QueryOutput;
+    let (handle, workspace) = open(cx);
+    let id = board_with_tiles(handle, &workspace, &["select day, signups"], cx);
+    let tab = cx.update(|cx| board_tab(&workspace, cx));
+    let line = Some(ChartView::new(ChartStyle::Line));
+    let options = crate::board::TileOptions {
+        title: "Tile 1".into(),
+        ..shown_as(line)
+    };
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.set_tile_options("t1", options, cx))
+    });
+    let mut result = ResultSet::new(
+        ["day", "signups"]
+            .map(|name| ColumnInfo { name: name.into() })
+            .into(),
+    );
+    let mut batch = RowBatch::default();
+    for row in [["mon", "3"], ["tue", "5"], ["wed", "4"]] {
+        for cell in row {
+            batch.push_cell(Some(cell));
+        }
+        batch.finish_row();
+    }
+    result.append(batch);
+    let output = QueryOutput {
+        results: vec![result],
+        rows: Some(3),
+        ..QueryOutput::default()
+    };
+    step(handle, cx, |_, cx| {
+        tab.update(cx, |t, cx| t.show_results(vec![Ok(output)], cx))
+    });
+    // A tile's lines are its options', not a switch under its chart.
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("chart-area").is_some());
+        assert!(window.try_find("smooth-lines").is_none());
+    });
+    step(handle, cx, |window, cx| window.click("board-edit", cx));
+    step(handle, cx, |window, cx| {
+        window.click(("tile-options", 0usize), cx)
+    });
+    // Straight / smooth only for lines and areas: this one is a line.
+    step(handle, cx, |window, cx| {
+        window.click(("tile-lines", 1usize), cx)
+    });
+    step(handle, cx, |window, cx| window.click("save", cx));
+    cx.update(|cx| {
+        let board = workspace.read(cx).data.boards.get(&id).unwrap().clone();
+        let tile = &board.tiles[0];
+        assert!(tile.smooth, "saved with the board");
+        assert_eq!((tile.title.as_str(), tile.view), ("Tile 1", line));
+        let result = tab.read(cx).tile_result("t1").unwrap();
+        assert!(result.read(cx).smooth_lines(), "drawn so");
     });
 }
 
@@ -5399,7 +5470,9 @@ fn board_scroll_performance(cx: &mut TestAppContext) {
     for tile in 1..=6 {
         let view = Some(ChartView::new(ChartStyle::StackedArea));
         step(handle, cx, |_, cx| {
-            board.update(cx, |b, cx| b.set_tile_view(&format!("t{tile}"), view, cx))
+            board.update(cx, |b, cx| {
+                b.set_tile_options(&format!("t{tile}"), shown_as(view), cx)
+            })
         });
     }
     let ms = |d: Duration| (d.as_secs_f64() * 100_000.).round() / 100.;

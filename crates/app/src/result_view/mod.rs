@@ -173,6 +173,8 @@ pub struct ResultView {
     old_result: bool,
     /// Curved instead of straight lines; starts straight, which is exact.
     smooth_lines: bool,
+    /// Set by the owner (a board tile keeps it): no Straight / Smooth switch.
+    lines_set: bool,
     /// The chart row a click pinned: its values listed to scroll and copy, until
     /// Esc or another click.
     chart_pin: Option<ChartPin>,
@@ -252,6 +254,7 @@ impl ResultView {
             chart_request: None,
             old_result: false,
             smooth_lines: false,
+            lines_set: false,
             chart_pin: None,
             chart_bounds: Rc::default(),
             pin_focus: cx.focus_handle(),
@@ -826,6 +829,21 @@ impl ResultView {
         self.chart_view
     }
 
+    /// Lines and areas as curves or straight, as the owner keeps it (a board tile):
+    /// the Straight / Smooth switch under the chart is left out then.
+    pub fn set_smooth_lines(&mut self, smooth: bool, cx: &mut Context<Self>) {
+        self.lines_set = true;
+        if self.smooth_lines != smooth {
+            self.smooth_lines = smooth;
+            cx.notify();
+        }
+    }
+
+    /// Whether lines and areas are drawn as curves.
+    pub fn smooth_lines(&self) -> bool {
+        self.smooth_lines
+    }
+
     /// Shows the result as `view`, or as the grid (`None`).
     pub fn set_chart_view(&mut self, view: Option<ChartView>, cx: &mut Context<Self>) {
         self.chart_view = view;
@@ -1351,8 +1369,8 @@ impl ResultView {
                 }
             })
             .collect();
-        // Straight / smooth, for lines and areas only.
-        let curve_switch = (!style.is_bars()).then(|| {
+        // Straight / smooth, for lines and areas only, unless the owner sets it.
+        let curve_switch = (!style.is_bars() && !self.lines_set).then(|| {
             let option = |id: &'static str, label: &'static str, smooth: bool| {
                 Button::new(id)
                     .label(label)

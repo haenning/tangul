@@ -2,7 +2,6 @@
 //! the tiles in rows, full or half width; in edit mode with handles to drag them,
 //! their width, labels and removing them.
 
-use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::{
@@ -20,12 +19,9 @@ use tangul_assist::suggest::one_line;
 use tangul_core::board::{AiCaller, AiMark, LinkTo, Refresh, Row, Tile, Width, is_web, rows};
 use tangul_service::boards::{self, Edit};
 
-use tangul_core::chart::{ChartStyle, ChartView};
-
-use super::form::{AskForm, QueryForm, TileForm, view_label};
+use super::form::{AskForm, QueryForm, TileForm};
 use super::{BoardEvent, BoardTab, link_action, link_icon, scroll_lock};
-use crate::assets::{Lucide, style_icon};
-use crate::result_view::{SetView, chart_menu};
+use crate::assets::Lucide;
 use crate::ui::{dialog_form, enter_saves, info, wrapped_tooltip};
 
 /// Three pulses of a held tile's open button.
@@ -422,48 +418,13 @@ impl BoardTab {
             .filter(|v| v.loaded && tile.view.is_some())
             .and_then(|v| v.result.read(cx).chart().err());
         let actions = if self.editing {
-            let (width_id, label_id, remove_id) = (id.clone(), id.clone(), id.clone());
-            // With a result: the status bar's menu, of what it fits. Before one: the
-            // table and every style, fitted to the result once it is there.
-            let (chart, shown) = match view.filter(|v| v.loaded) {
-                Some(v) => {
-                    let r = v.result.read(cx);
-                    (r.chart().ok(), r.chart_shown())
-                }
-                None => (None, tile.view),
-            };
-            let (view_id, this) = (id.clone(), cx.entity().downgrade());
-            let set: SetView = Rc::new(move |view, cx| {
-                let _ = this.update(cx, |b, cx| b.set_tile_view(&view_id, view, cx));
-            });
-            let shown_as = Button::new(("tile-view", ix))
-                .icon(Icon::new(style_icon(shown.map(|v| v.style))))
-                .ghost()
-                .xsmall()
-                .tooltip("Shown as")
-                .dropdown_menu(move |menu, window, cx| match &chart {
-                    Some(data) => chart_menu(menu, data, shown, set.clone(), window, cx),
-                    None => {
-                        let views = std::iter::once(None)
-                            .chain(ChartStyle::ALL.map(|style| Some(ChartView::new(style))));
-                        views.fold(menu, |menu, view| {
-                            let set = set.clone();
-                            menu.item(
-                                PopupMenuItem::new(view_label(view))
-                                    .icon(Icon::new(style_icon(view.map(|v| v.style))))
-                                    .checked(view.map(|v| v.style) == shown.map(|v| v.style))
-                                    .on_click(move |_, _, cx| set(view, cx)),
-                            )
-                        })
-                    }
-                });
+            let (width_id, options_id, remove_id) = (id.clone(), id.clone(), id.clone());
             let (icon, tooltip, width) = match tile.width {
                 Width::Full => (Lucide::Minimize2, "Half width", Width::Half),
                 Width::Half => (Lucide::Maximize2, "Full width", Width::Full),
             };
             h_flex()
                 .gap_0p5()
-                .child(shown_as)
                 .child(
                     Button::new(("tile-width", ix))
                         .icon(Icon::new(icon))
@@ -478,13 +439,13 @@ impl BoardTab {
                         })),
                 )
                 .child(
-                    Button::new(("tile-label", ix))
-                        .icon(Icon::new(Lucide::Pencil))
+                    Button::new(("tile-options", ix))
+                        .icon(Icon::new(Lucide::SlidersHorizontal))
                         .ghost()
                         .xsmall()
-                        .tooltip("Title and description")
+                        .tooltip("Options")
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_tile_form(&label_id, window, cx)
+                            this.open_tile_form(&options_id, window, cx)
                         })),
                 )
                 .child(open)
@@ -762,26 +723,26 @@ impl BoardTab {
         let Some(tile) = self.board.tile(tile).cloned() else {
             return;
         };
-        let form = cx.new(|cx| TileForm::new(&tile, window, cx));
+        // The charts its result fits, once it has one.
+        let chart = self
+            .tiles
+            .get(&tile.id)
+            .filter(|v| v.loaded)
+            .and_then(|v| v.result.read(cx).chart().ok());
+        let form = cx.new(|cx| TileForm::new(&tile, chart, window, cx));
         let board = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let save = {
                 let (form, board, id) = (form.clone(), board.clone(), tile.id.clone());
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let (title, description) = form.read(cx).submit(cx);
-                    let _ = board.update(cx, |_, cx| {
-                        cx.emit(BoardEvent::Edit(Edit::LabelTile {
-                            tile: id.clone(),
-                            title,
-                            description,
-                        }))
-                    });
+                    let options = form.read(cx).submit(cx);
+                    let _ = board.update(cx, |b, cx| b.set_tile_options(&id, options, cx));
                     window.close_dialog(cx);
                 }
             };
             dialog
                 .on_ok(enter_saves(save.clone()))
-                .title("Tile")
+                .title("Options")
                 .w(px(460.))
                 .child(dialog_form(form.clone()))
                 .footer(footer(save))

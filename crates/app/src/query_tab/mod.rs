@@ -555,6 +555,11 @@ impl QueryTab {
         self.results.read(cx).chart_shown()
     }
 
+    /// Whether its chart draws lines and areas as curves.
+    pub fn smooth_lines(&self, cx: &App) -> bool {
+        self.results.read(cx).smooth_lines()
+    }
+
     /// The editor's ranges shown as comments (tests).
     #[cfg(test)]
     pub fn comments(&self, cx: &App) -> Vec<std::ops::Range<usize>> {

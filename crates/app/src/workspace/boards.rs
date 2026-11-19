@@ -14,6 +14,7 @@ use tangul_service::boards::{self, Edit};
 use super::*;
 use crate::board::{
     AddForm, Adding, BoardEvent, BoardTab, BookmarkChoice, Choices, DetailsForm, Target,
+    TileOptions,
 };
 use crate::query_tab::BoardTile;
 use crate::ui::{dialog_form, enter_saves, hover_actions};
@@ -586,12 +587,17 @@ impl Workspace {
         let Some(db_id) = self.active_db.clone() else {
             return;
         };
-        let (title, sql, view) = {
+        let (title, sql, view, smooth) = {
             let t = tab.read(cx);
-            (t.title.to_string(), t.sql(cx), t.chart_shown(cx))
+            let smooth = t.smooth_lines(cx);
+            (t.title.to_string(), t.sql(cx), t.chart_shown(cx), smooth)
         };
         let adding = Item {
-            tile: boards::tile(&title, &sql, view),
+            // Lines as the tab draws them.
+            tile: Tile {
+                smooth,
+                ..boards::tile(&title, &sql, view)
+            },
             link: Link {
                 label: title,
                 to: LinkTo::Query { sql, view },
@@ -644,16 +650,25 @@ impl Workspace {
                 .collect(),
             None => Vec::new(),
         };
-        let tile_title = tile
-            .as_ref()
-            .map_or(String::new(), |t| t.tile.title.clone());
-        let view = tile.as_ref().and_then(|t| t.tile.view);
+        let options = tile.as_ref().map_or(
+            TileOptions {
+                title: String::new(),
+                description: String::new(),
+                view: None,
+                smooth: false,
+            },
+            |t| TileOptions {
+                title: t.tile.title.clone(),
+                description: t.tile.description.clone(),
+                view: t.tile.view,
+                smooth: t.tile.smooth,
+            },
+        );
         let form = cx.new(|cx| {
             AddForm::new(
-                &tile_title,
+                options,
                 choices,
                 tile.is_some(),
-                view,
                 preselect.as_deref(),
                 window,
                 cx,
@@ -666,22 +681,23 @@ impl Workspace {
                     (form.clone(), workspace.clone(), tile.clone(), db_id.clone());
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let Some(Adding {
-                        title,
+                        options,
                         target,
                         as_link,
-                        view,
                     }) = form.update(cx, |f, cx| f.submit(cx))
                     else {
                         return;
                     };
                     let tile = tile.clone().map(|item| match as_link {
                         false => Edit::AddTile(Tile {
-                            title,
-                            view,
+                            title: options.title,
+                            description: options.description,
+                            view: options.view,
+                            smooth: options.smooth,
                             ..item.tile
                         }),
                         true => Edit::AddLink(Link {
-                            label: title,
+                            label: options.title,
                             ..item.link
                         }),
                     });
