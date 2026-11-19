@@ -2680,6 +2680,91 @@ fn board_edit_mode_resizes_moves_and_removes_tiles(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_table_on_a_board_scrolls_only_once_clicked(cx: &mut TestAppContext) {
+    use gpui_kit::{ScrollDelta, point};
+    use tangul_core::ResultSet;
+    use tangul_engine::QueryOutput;
+    let (handle, workspace) = open(cx);
+    // Eight tables of one statement: taller than the window.
+    board_with_tiles(handle, &workspace, &["select a"; 8], cx);
+    let mut result = ResultSet::new(vec![ColumnInfo { name: "x".into() }]);
+    let mut batch = RowBatch::default();
+    for i in 0..300 {
+        batch.push_cell(Some(&i.to_string()));
+        batch.finish_row();
+    }
+    result.append(batch);
+    let output = QueryOutput {
+        results: vec![result],
+        rows: Some(300),
+        ..QueryOutput::default()
+    };
+    let board = cx.update(|cx| board_tab(&workspace, cx));
+    step(handle, cx, |_, cx| {
+        board.update(cx, |b, cx| b.show_results(vec![Ok(output)], cx))
+    });
+    step(handle, cx, |_, _| {});
+    let table_y = |tile: &str, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let result = board.read(cx).tile_result(tile).unwrap();
+            result.read(cx).table_scroll_y(cx)
+        })
+    };
+    let tiles_y = |cx: &mut TestAppContext| {
+        cx.update_window(handle.into(), |_, window, _| {
+            window.find("board-tiles").bounds();
+            window.find(("tile-body", 0usize)).bounds().origin.y
+        })
+        .unwrap()
+    };
+    let down = ScrollDelta::Pixels(point(px(0.), px(-40.)));
+    // Locked: scrolling over the first table scrolls the board, not the table.
+    let before = tiles_y(cx);
+    step(handle, cx, |window, cx| {
+        window.scroll(("tile-body", 0usize), down, cx)
+    });
+    step(handle, cx, |_, _| {});
+    assert_eq!(table_y("t1", cx), px(0.));
+    assert!(tiles_y(cx) < before, "the board scrolled");
+    // On hover it says how to scroll it.
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("tile-scroll-hint").is_some())
+    });
+    // A click unlocks it: now it scrolls.
+    step(handle, cx, |window, cx| {
+        window.click(("tile-body", 0usize), cx)
+    });
+    assert_eq!(
+        cx.update(|cx| board.read(cx).unlocked_table().map(String::from)),
+        Some("t1".into())
+    );
+    step(handle, cx, |window, cx| {
+        window.scroll(("tile-body", 0usize), down, cx)
+    });
+    step(handle, cx, |_, _| {});
+    assert!(table_y("t1", cx) < px(0.), "the unlocked table scrolled");
+    // Scrolling elsewhere locks it again.
+    step(handle, cx, |window, cx| {
+        window.scroll(("tile-body", 1usize), down, cx)
+    });
+    step(handle, cx, |_, _| {});
+    assert_eq!(
+        cx.update(|cx| board.read(cx).unlocked_table().map(String::from)),
+        None
+    );
+    assert_eq!(table_y("t2", cx), px(0.), "the other table stayed locked");
+    // So does Esc.
+    step(handle, cx, |window, cx| {
+        window.click(("tile-body", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| window.press("escape", cx));
+    assert_eq!(
+        cx.update(|cx| board.read(cx).unlocked_table().map(String::from)),
+        None
+    );
+}
+
+#[gpui_kit::test]
 fn board_tiles_show_their_results_and_share_a_statement(cx: &mut TestAppContext) {
     use tangul_core::ResultSet;
     use tangul_engine::{QueryError, QueryOutput};
