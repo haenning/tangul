@@ -11,7 +11,7 @@ mod form;
 mod scroll_lock;
 mod view;
 
-pub use form::{AddForm, Adding, BookmarkChoice, Choices, DetailsForm, Target};
+pub use form::{AddForm, Adding, BookmarkChoice, Choices, DetailsForm, Target, TileOptions};
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 use tangul_assist::dialect::Dialect;
-use tangul_core::board::{Board, LinkTo, Refresh};
+use tangul_core::board::{Board, LinkTo, Refresh, Tile};
 use tangul_core::chart::ChartView;
 use tangul_core::{ConnId, QueryId, TabId};
 use tangul_engine::{Caller, Command, EngineHandle, QueryError, QueryOptions, QueryOutput};
@@ -258,11 +258,13 @@ impl BoardTab {
                         view.sql = tile.sql.clone();
                         stale = true;
                     }
-                    view.result
-                        .update(cx, |r, cx| r.set_chart_view(tile.view, cx));
+                    view.result.update(cx, |r, cx| {
+                        r.set_chart_view(tile.view, cx);
+                        r.set_smooth_lines(tile.smooth, cx);
+                    });
                 }
                 None => {
-                    let view = self.tile_view(&tile.id, &tile.sql, tile.view, window, cx);
+                    let view = self.tile_view(tile, window, cx);
                     self.tiles.insert(tile.id.clone(), view);
                     stale = true;
                 }
@@ -272,22 +274,17 @@ impl BoardTab {
         stale
     }
 
-    fn tile_view(
-        &self,
-        id: &str,
-        sql: &str,
-        view: Option<ChartView>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> TileView {
+    fn tile_view(&self, tile: &Tile, window: &mut Window, cx: &mut Context<Self>) -> TileView {
         let result = cx.new(|cx| ResultView::new(window, cx));
         result.update(cx, |r, cx| {
             if let Some(dialect) = self.dialect {
                 r.set_dialect(dialect);
             }
-            r.set_chart_view(view, cx);
+            r.set_chart_view(tile.view, cx);
+            r.set_smooth_lines(tile.smooth, cx);
         });
-        let tile = id.to_string();
+        let sql = tile.sql.as_str();
+        let tile = tile.id.clone();
         let events = cx.subscribe(&result, move |this, _, event: &ResultEvent, cx| {
             this.on_result_event(&tile, event.clone(), cx)
         });
@@ -480,12 +477,15 @@ impl BoardTab {
         cx.emit(BoardEvent::Edit(Edit::SetRefresh(refresh)));
     }
 
-    /// Shows `tile` as `view` (a chart, or the table with `None`), saved with the
-    /// board.
-    pub fn set_tile_view(&self, tile: &str, view: Option<ChartView>, cx: &mut Context<Self>) {
-        cx.emit(BoardEvent::Edit(Edit::SetView {
+    /// Saves `tile`'s options (its dialog): title, description, how its result is
+    /// shown and whether lines are smooth.
+    pub fn set_tile_options(&self, tile: &str, options: TileOptions, cx: &mut Context<Self>) {
+        cx.emit(BoardEvent::Edit(Edit::SetOptions {
             tile: tile.to_string(),
-            view,
+            title: options.title,
+            description: options.description,
+            view: options.view,
+            smooth: options.smooth,
         }));
     }
 

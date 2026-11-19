@@ -1,5 +1,5 @@
-//! The board's details (name, description, links), a tile's title and
-//! description, and "Add to board", edited in dialogs. Links are shown by their
+//! The board's details (name, description, links), a tile's options (title,
+//! description, shown as, lines), "New tile" and "Add to board", edited in dialogs. Links are shown by their
 //! label and what they open, never by where they point.
 
 use gpui_kit::component::{
@@ -10,14 +10,19 @@ use gpui_kit::component::{
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     v_flex,
 };
+use std::rc::Rc;
+
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use tangul_assist::chart::ChartData;
 use tangul_assist::suggest::one_line;
 use tangul_core::board::{Board, Link, LinkTo, Tile, web_address};
 use tangul_core::chart::{ChartStyle, ChartView};
 
 use super::{link_action, link_icon};
-use crate::ui::{Severity, alert_card};
+use crate::assets::style_icon;
+use crate::result_view::{SetView, chart_menu};
+use crate::ui::{Severity, alert_card, form_row, segmented};
 
 /// What the details form gives back.
 pub struct Details {
@@ -442,57 +447,182 @@ impl Render for DetailsForm {
     }
 }
 
-pub struct TileForm {
-    title: Entity<InputState>,
-    description: Entity<TextareaState>,
+/// A tile's options as its dialogs edit them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileOptions {
+    pub title: String,
+    pub description: String,
+    pub view: Option<ChartView>,
+    pub smooth: bool,
 }
 
-impl TileForm {
-    pub fn new(tile: &Tile, window: &mut Window, cx: &mut Context<Self>) -> Self {
+/// The fields every tile dialog shares (its options, "New tile", "Add to board"):
+/// title, description, what the result is shown as and, for lines and areas,
+/// straight or smooth.
+pub struct TileFields {
+    title: Entity<InputState>,
+    description: Entity<TextareaState>,
+    view: Option<ChartView>,
+    smooth: bool,
+    /// The tile's result: the charts it fits are offered (none yet: every one).
+    chart: Option<Rc<ChartData>>,
+    /// Only the title (a link has nothing else).
+    title_only: bool,
+}
+
+impl TileFields {
+    pub fn new(
+        options: TileOptions,
+        chart: Option<Rc<ChartData>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let title = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Title")
-                .default_value(tile.title.clone())
+                .default_value(options.title)
         });
         let description = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 6)
                 .placeholder("What it shows")
-                .default_value(tile.description.clone())
+                .default_value(options.description)
         });
-        window.focus(&title.read(cx).focus_handle(cx), cx);
-        Self { title, description }
+        Self {
+            title,
+            description,
+            view: options.view,
+            smooth: options.smooth,
+            chart,
+            title_only: false,
+        }
     }
 
-    /// Title and description.
-    pub fn submit(&self, cx: &App) -> (String, String) {
-        (
-            self.title.read(cx).value().trim().to_string(),
-            self.description.read(cx).value().trim().to_string(),
-        )
+    /// Puts the cursor in `fields`' title.
+    pub fn focus_title(fields: &Entity<Self>, window: &mut Window, cx: &mut App) {
+        let handle = fields.read(cx).title.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    }
+
+    fn set_title_only(&mut self, title_only: bool, cx: &mut Context<Self>) {
+        self.title_only = title_only;
+        cx.notify();
+    }
+
+    /// As filled in, trimmed.
+    pub fn options(&self, cx: &App) -> TileOptions {
+        TileOptions {
+            title: self.title.read(cx).value().trim().to_string(),
+            description: self.description.read(cx).value().trim().to_string(),
+            view: self.view,
+            smooth: self.smooth,
+        }
+    }
+}
+
+impl Render for TileFields {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let title = div()
+            .id("add-title")
+            .test_support()
+            .child(Input::new(&self.title));
+        if self.title_only {
+            return v_flex().gap_2().child(title);
+        }
+        let this = cx.entity().downgrade();
+        let set: SetView = Rc::new(move |view, cx| {
+            let _ = this.update(cx, |f, cx| {
+                f.view = view;
+                cx.notify();
+            });
+        });
+        let (chart, shown) = (self.chart.clone(), self.view);
+        let shown_as = Button::new("tile-view")
+            .label(view_label(shown))
+            .icon(Icon::new(style_icon(shown.map(|v| v.style))))
+            .ghost()
+            .xsmall()
+            .dropdown_menu(move |menu, window, cx| match &chart {
+                Some(data) => chart_menu(menu, data, shown, set.clone(), window, cx),
+                None => {
+                    let views = std::iter::once(None)
+                        .chain(ChartStyle::ALL.map(|style| Some(ChartView::new(style))));
+                    views.fold(menu, |menu, view| {
+                        let set = set.clone();
+                        menu.item(
+                            PopupMenuItem::new(view_label(view))
+                                .icon(Icon::new(style_icon(view.map(|v| v.style))))
+                                .checked(view.map(|v| v.style) == shown.map(|v| v.style))
+                                .on_click(move |_, _, cx| set(view, cx)),
+                        )
+                    })
+                }
+            });
+        let lines = shown.filter(|v| !v.style.is_bars()).map(|_| {
+            let this = cx.entity().downgrade();
+            segmented(
+                "tile-lines",
+                [(false, "Straight".into()), (true, "Smooth".into())],
+                self.smooth,
+                move |smooth, _, cx| {
+                    let _ = this.update(cx, |f, cx| {
+                        f.smooth = *smooth;
+                        cx.notify();
+                    });
+                },
+                cx,
+            )
+        });
+        v_flex()
+            .gap_2()
+            .child(title)
+            .child(Textarea::new(&self.description))
+            .child(form_row("Shown as", None, h_flex().child(shown_as), cx))
+            .when_some(lines, |this, lines| {
+                this.child(form_row("Lines", None, lines, cx))
+            })
+    }
+}
+
+/// A tile's options: its fields, saved at once.
+pub struct TileForm {
+    fields: Entity<TileFields>,
+}
+
+impl TileForm {
+    pub fn new(
+        tile: &Tile,
+        chart: Option<Rc<ChartData>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let options = TileOptions {
+            title: tile.title.clone(),
+            description: tile.description.clone(),
+            view: tile.view,
+            smooth: tile.smooth,
+        };
+        let fields = cx.new(|cx| TileFields::new(options, chart, window, cx));
+        TileFields::focus_title(&fields, window, cx);
+        Self { fields }
+    }
+
+    pub fn submit(&self, cx: &App) -> TileOptions {
+        self.fields.read(cx).options(cx)
     }
 }
 
 impl Render for TileForm {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .gap_2()
-            .child(
-                div()
-                    .id("add-title")
-                    .test_support()
-                    .child(Input::new(&self.title)),
-            )
-            .child(Textarea::new(&self.description))
+        self.fields.clone()
     }
 }
 
-/// What "Add to board" was told.
+/// What "Add to board" was told (a link takes only the title).
 pub struct Adding {
-    pub title: String,
+    pub options: TileOptions,
     pub target: Target,
     pub as_link: bool,
-    pub view: Option<ChartView>,
 }
 
 /// Where "Add to board" puts the tile.
@@ -507,11 +637,9 @@ pub enum Target {
 /// it in a tab), and the board (one of the database's, or a new one). Without
 /// anything to add only a new board's name ("New board").
 pub struct AddForm {
-    title: Entity<InputState>,
+    fields: Entity<TileFields>,
     with_tile: bool,
     as_link: bool,
-    /// How a tile shows its result.
-    view: Option<ChartView>,
     /// The database's boards as (id, name).
     boards: Vec<(String, String)>,
     /// Index into `boards`; `None` is a new board.
@@ -522,34 +650,27 @@ pub struct AddForm {
 
 impl AddForm {
     pub fn new(
-        title: &str,
+        options: TileOptions,
         boards: Vec<(String, String)>,
         with_tile: bool,
-        view: Option<ChartView>,
         preselect: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let title = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Title")
-                .default_value(title.to_string())
-        });
+        let fields = cx.new(|cx| TileFields::new(options, None, window, cx));
         let new_name = cx.new(|cx| InputState::new(window, cx).placeholder("New board's name"));
         let chosen = match preselect.and_then(|id| boards.iter().position(|b| b.0 == id)) {
             Some(at) => Some(at),
             None => (with_tile && !boards.is_empty()).then_some(0),
         };
-        let focus = match chosen {
-            Some(_) => title.read(cx).focus_handle(cx),
-            None => new_name.read(cx).focus_handle(cx),
-        };
-        window.focus(&focus, cx);
+        match chosen {
+            Some(_) => TileFields::focus_title(&fields, window, cx),
+            None => window.focus(&new_name.read(cx).focus_handle(cx), cx),
+        }
         Self {
-            title,
+            fields,
             with_tile,
             as_link: false,
-            view,
             boards,
             chosen,
             new_name,
@@ -560,7 +681,7 @@ impl AddForm {
     /// The title, where it goes and whether as a link, or `None` (and why, in the
     /// form).
     pub fn submit(&mut self, cx: &mut Context<Self>) -> Option<Adding> {
-        let title = self.title.read(cx).value().trim().to_string();
+        let options = self.fields.read(cx).options(cx);
         let target = match self.chosen.and_then(|i| self.boards.get(i)) {
             Some((id, _)) => Target::Board(id.clone()),
             None => {
@@ -573,16 +694,15 @@ impl AddForm {
                 Target::New(name)
             }
         };
-        if self.as_link && title.is_empty() {
+        if self.as_link && options.title.is_empty() {
             self.error = Some("A link needs a title".into());
             cx.notify();
             return None;
         }
         Some(Adding {
-            title,
+            options,
             target,
             as_link: self.as_link,
-            view: self.view,
         })
     }
 }
@@ -630,6 +750,7 @@ impl Render for AddForm {
                 .selected(self.as_link == link)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.as_link = link;
+                    this.fields.update(cx, |f, cx| f.set_title_only(link, cx));
                     cx.notify();
                 }))
         };
@@ -640,12 +761,6 @@ impl Render for AddForm {
         };
         v_flex()
             .gap_2()
-            .child(
-                div()
-                    .id("add-title")
-                    .test_support()
-                    .child(Input::new(&self.title)),
-            )
             .child(
                 h_flex()
                     .gap_1()
@@ -659,14 +774,7 @@ impl Render for AddForm {
                             .child(hint),
                     ),
             )
-            .when(!self.as_link, |this| {
-                this.child(view_picker(
-                    "add-view",
-                    self.view,
-                    cx.entity().downgrade(),
-                    |f: &mut Self, v| f.view = v,
-                ))
-            })
+            .child(self.fields.clone())
             .child(
                 div()
                     .text_xs()
@@ -700,55 +808,22 @@ impl Render for AddForm {
     }
 }
 
-/// "Shown as" and a menu of the table and every chart; `set` stores the pick.
-pub(super) fn view_picker<T: 'static>(
-    id: &'static str,
-    current: Option<ChartView>,
-    this: WeakEntity<T>,
-    set: fn(&mut T, Option<ChartView>),
-) -> impl IntoElement {
-    h_flex()
-        .gap_1()
-        .items_center()
-        .text_xs()
-        .child("Shown as")
-        .child(
-            Button::new(id)
-                .label(view_label(current))
-                .ghost()
-                .xsmall()
-                .dropdown_menu(move |mut menu, _, _| {
-                    let views = std::iter::once(None)
-                        .chain(ChartStyle::ALL.map(|style| Some(ChartView::new(style))));
-                    for view in views {
-                        let this = this.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(view_label(view))
-                                .checked(view.map(|v| v.style) == current.map(|v| v.style))
-                                .on_click(move |_, _, cx| {
-                                    let _ = this.update(cx, |f, cx| {
-                                        set(f, view);
-                                        cx.notify();
-                                    });
-                                }),
-                        );
-                    }
-                    menu
-                }),
-        )
-}
-
-/// A new tile from a query typed in: title, SQL and how it is shown.
+/// A new tile from a query typed in: its SQL and options.
 pub struct QueryForm {
-    title: Entity<InputState>,
+    fields: Entity<TileFields>,
     sql: Entity<TextareaState>,
-    view: Option<ChartView>,
     error: Option<SharedString>,
 }
 
 impl QueryForm {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let title = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
+        let options = TileOptions {
+            title: String::new(),
+            description: String::new(),
+            view: None,
+            smooth: false,
+        };
+        let fields = cx.new(|cx| TileFields::new(options, None, window, cx));
         let sql = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(4, 12)
@@ -756,9 +831,8 @@ impl QueryForm {
         });
         window.focus(&sql.read(cx).focus_handle(cx), cx);
         Self {
-            title,
+            fields,
             sql,
-            view: None,
             error: None,
         }
     }
@@ -766,7 +840,7 @@ impl QueryForm {
     /// Title and SQL as typed so far.
     pub fn draft(&self, cx: &App) -> (String, String) {
         (
-            self.title.read(cx).value().trim().to_string(),
+            self.fields.read(cx).options(cx).title,
             self.sql.read(cx).value().trim().to_string(),
         )
     }
@@ -778,10 +852,13 @@ impl QueryForm {
             cx.notify();
             return None;
         }
+        let options = self.fields.read(cx).options(cx);
         Some(Tile {
-            title: self.title.read(cx).value().trim().to_string(),
+            title: options.title,
+            description: options.description,
             sql,
-            view: self.view,
+            view: options.view,
+            smooth: options.smooth,
             ..Tile::default()
         })
     }
@@ -789,21 +866,12 @@ impl QueryForm {
 
 impl Render for QueryForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // SQL in the editor's font.
+        let mono = cx.theme().mono_font_family.clone();
         v_flex()
             .gap_2()
-            .child(
-                div()
-                    .id("add-title")
-                    .test_support()
-                    .child(Input::new(&self.title)),
-            )
-            .child(Textarea::new(&self.sql))
-            .child(view_picker(
-                "query-view",
-                self.view,
-                cx.entity().downgrade(),
-                |f: &mut Self, v| f.view = v,
-            ))
+            .child(Textarea::new(&self.sql).font_family(mono))
+            .child(self.fields.clone())
             .when_some(self.error.clone(), |this, error| {
                 this.child(alert_card(Severity::Error, error, cx))
             })
