@@ -866,9 +866,11 @@ impl QueryForm {
 
 impl Render for QueryForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // SQL in the editor's font.
+        let mono = cx.theme().mono_font_family.clone();
         v_flex()
             .gap_2()
-            .child(Textarea::new(&self.sql))
+            .child(Textarea::new(&self.sql).font_family(mono))
             .child(self.fields.clone())
             .when_some(self.error.clone(), |this, error| {
                 this.child(alert_card(Severity::Error, error, cx))
