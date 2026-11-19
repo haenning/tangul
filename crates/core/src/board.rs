@@ -205,6 +205,13 @@ pub struct Tile {
         deserialize_with = "view_in"
     )]
     pub view: Option<ChartView>,
+    /// Lines and areas drawn as curves, not straight from point to point.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub smooth: bool,
+    /// A chart's hover lists a series without a value at a row as `NULL`, not as
+    /// `0` (how the chart draws it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing_as_null: bool,
     #[serde(default)]
     pub width: Width,
     /// Set up or changed by an AI.

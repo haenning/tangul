@@ -40,6 +40,16 @@ pub enum Edit {
         title: String,
         description: String,
     },
+    /// A tile's options, from its dialog: title, description, how its result is
+    /// shown and whether lines are smooth. The user's only.
+    SetOptions {
+        tile: String,
+        title: String,
+        description: String,
+        view: Option<ChartView>,
+        smooth: bool,
+        missing_as_null: bool,
+    },
     /// The SQL and how its result is shown ("Update tile" from a tab).
     SetQuery {
         tile: String,
@@ -172,6 +182,7 @@ fn edit_by_ai(board: &mut Board, edits: Vec<Edit>, ai: &ByAi) -> Result<(), Stri
                 (None, None)
             }
             Edit::SetLinks(_)
+            | Edit::SetOptions { .. }
             | Edit::AddLink(_)
             | Edit::SetRefresh(_)
             | Edit::Archive(_)
@@ -374,6 +385,24 @@ fn edit_board(board: &mut Board, edit: Edit) -> Result<(), String> {
             let tile = tile_mut(board, &tile)?;
             tile.title = title.trim().into();
             tile.description = description.trim().into();
+        }
+        Edit::SetOptions {
+            tile,
+            title,
+            description,
+            view,
+            smooth,
+            missing_as_null,
+        } => {
+            let tile = tile_mut(board, &tile)?;
+            tile.title = title.trim().into();
+            tile.description = description.trim().into();
+            // Kept as stored while unchanged, so an old layout's mark stays.
+            if tile.view.map(|v| v.style) != view.map(|v| v.style) {
+                tile.view = view.map(current_layout);
+            }
+            tile.smooth = smooth;
+            tile.missing_as_null = missing_as_null;
         }
         Edit::SetQuery { tile, sql, view } => {
             if sql.trim().is_empty() {
@@ -679,6 +708,45 @@ mod tests {
             "no such tile"
         );
 
+        // The options dialog: all at once. A view stored before charts took one
+        // value column keeps its mark while its style stays, and is current once
+        // another is picked.
+        let old = ChartView::from_key("line").unwrap();
+        let b = apply(
+            &mut boards,
+            id,
+            Edit::AddTile(tile("Old", "select 4", Some(old))),
+        )
+        .unwrap();
+        let added = b.tiles[3].id.clone();
+        let options = |view: Option<ChartView>, smooth| Edit::SetOptions {
+            tile: added.clone(),
+            title: " Trend ".into(),
+            description: " Per week ".into(),
+            view,
+            smooth,
+            missing_as_null: smooth,
+        };
+        let b = apply(&mut boards, id, options(Some(old), true)).unwrap();
+        let t = &b.tiles[3];
+        assert_eq!(
+            (t.title.as_str(), t.description.as_str()),
+            ("Trend", "Per week")
+        );
+        assert_eq!(
+            (t.view, t.smooth, t.missing_as_null),
+            (Some(old), true, true)
+        );
+        let b = apply(&mut boards, id, options(Some(old), false)).unwrap();
+        assert_eq!((b.tiles[3].view, b.tiles[3].smooth), (Some(old), false));
+        let area = ChartView::new(ChartStyle::Area);
+        let b = apply(&mut boards, id, options(Some(area), false)).unwrap();
+        assert_eq!(b.tiles[3].view, Some(area));
+        let b = apply(&mut boards, id, options(None, false)).unwrap();
+        assert_eq!(b.tiles[3].view, None, "the table");
+        let b = apply(&mut boards, id, Edit::RemoveTile(added.clone())).unwrap();
+        assert_eq!(ids(&b), ["t1", "t2", "t3"]);
+
         let width = |tile: &str, width| Edit::SetWidth {
             tile: tile.into(),
             width,
@@ -929,6 +997,14 @@ mod tests {
                 to: LinkTo::Url("https://x.io".into()),
             }),
             Edit::Release("t1".into()),
+            Edit::SetOptions {
+                tile: "t1".into(),
+                title: "x".into(),
+                description: String::new(),
+                view: None,
+                smooth: true,
+                missing_as_null: true,
+            },
         ] {
             assert_eq!(
                 ai(&mut boards, edit).unwrap_err(),

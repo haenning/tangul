@@ -613,6 +613,21 @@ pub fn format_value(v: f64) -> String {
     format!("{text}{suffix}")
 }
 
+/// A row's value as its values are listed (the tooltip, a pinned row): NULL as `0`,
+/// as the chart counts it (stacks add it as 0, bars draw none), or as `NULL` where
+/// the chart's owner asks (`missing_as_null`, a board tile's choice); and whether
+/// it is shown muted: zero and missing, which the chart can't tell apart either.
+/// The grid and copied values keep `NULL`.
+pub fn listed_value(v: Option<f64>, missing_as_null: bool) -> (String, bool) {
+    match v {
+        None if missing_as_null => ("NULL".into(), true),
+        v => {
+            let v = v.unwrap_or(0.0);
+            (format_value(v), v == 0.0)
+        }
+    }
+}
+
 /// A finite number as the server writes it (`12`, `-3.5`, `1e3`); not `NaN`, `inf`
 /// or anything with letters or spaces.
 fn number(v: &str) -> Option<f64> {
@@ -1170,6 +1185,24 @@ mod tests {
         assert_eq!(format_value(1_234_567.0), "1.23M");
         assert_eq!(format_value(0.25), "0.25");
         assert_eq!(format_value(-3.0), "-3");
+    }
+
+    #[test]
+    fn a_missing_value_is_listed_as_a_muted_zero() {
+        assert_eq!(listed_value(None, false), ("0".into(), true));
+        assert_eq!(listed_value(Some(0.0), false), ("0".into(), true));
+        assert_eq!(listed_value(Some(-0.0), false), ("0".into(), true));
+        assert_eq!(listed_value(Some(1500.0), false), ("1500".into(), false));
+        // Shown as 0 but not zero: not muted.
+        assert_eq!(listed_value(Some(0.001), false), ("0".into(), false));
+    }
+
+    #[test]
+    fn a_missing_value_is_listed_as_a_muted_null_where_asked() {
+        assert_eq!(listed_value(None, true), ("NULL".into(), true));
+        // A real zero stays 0.
+        assert_eq!(listed_value(Some(0.0), true), ("0".into(), true));
+        assert_eq!(listed_value(Some(2.5), true), ("2.5".into(), false));
     }
 
     #[test]

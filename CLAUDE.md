@@ -110,7 +110,10 @@ Scope, design and planned work: [CONTRIBUTING.md](CONTRIBUTING.md), [PLAN.md](PL
     (muted track, the chosen one raised); the accent only where it means something,
     switches via `ui::switch` (on: the off color tinted with the accent)
   - `board/`: a board in a tab (header, tiles as `ResultView`s, edit mode with drag and
-    drop; a tile's table scrolls only once clicked, `scroll_lock.rs`); knows nothing
+    drop; a tile's options in one dialog: title, description, shown as, straight or
+    smooth lines, missing values listed as 0 or NULL, the same fields when adding
+    one, `form.rs`; a tile's table scrolls
+    only once clicked, `scroll_lock.rs`); knows nothing
     about the workspace: asks for changes with events, refreshes
     in one batch (`Caller::Board`) only while it is drawn
   - `query_tab/`: the SQL editor (`SqlEditor`) over a `ResultView`; an empty editor shows
