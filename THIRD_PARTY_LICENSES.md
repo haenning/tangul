@@ -5324,7 +5324,7 @@ Used by:
 - [itertools 0.13.0](https://github.com/rust-itertools/itertools)
 - [itertools 0.14.0](https://github.com/rust-itertools/itertools)
 - [lazy_static 1.5.0](https://github.com/rust-lang-nursery/lazy-static.rs)
-- [libz-sys 1.1.31](https://github.com/rust-lang/libz-sys)
+- [libz-sys 1.1.33](https://github.com/rust-lang/libz-sys)
 - [lock_api 0.4.14](https://github.com/Amanieu/parking_lot)
 - [log 0.4.34](https://github.com/rust-lang/log)
 - [markup5ever 0.12.1](https://github.com/servo/html5ever)
