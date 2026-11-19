@@ -2680,6 +2680,91 @@ fn board_edit_mode_resizes_moves_and_removes_tiles(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_table_on_a_board_scrolls_only_once_clicked(cx: &mut TestAppContext) {
+    use gpui_kit::{ScrollDelta, point};
+    use tangul_core::ResultSet;
+    use tangul_engine::QueryOutput;
+    let (handle, workspace) = open(cx);
+    // Eight tables of one statement: taller than the window.
+    board_with_tiles(handle, &workspace, &["select a"; 8], cx);
+    let mut result = ResultSet::new(vec![ColumnInfo { name: "x".into() }]);
+    let mut batch = RowBatch::default();
+    for i in 0..300 {
+        batch.push_cell(Some(&i.to_string()));
+        batch.finish_row();
+    }
+    result.append(batch);
+    let output = QueryOutput {
+        results: vec![result],
+        rows: Some(300),
+        ..QueryOutput::default()
+    };
+    let board = cx.update(|cx| board_tab(&workspace, cx));
+    step(handle, cx, |_, cx| {
+        board.update(cx, |b, cx| b.show_results(vec![Ok(output)], cx))
+    });
+    step(handle, cx, |_, _| {});
+    let table_y = |tile: &str, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let result = board.read(cx).tile_result(tile).unwrap();
+            result.read(cx).table_scroll_y(cx)
+        })
+    };
+    let tiles_y = |cx: &mut TestAppContext| {
+        cx.update_window(handle.into(), |_, window, _| {
+            window.find("board-tiles").bounds();
+            window.find(("tile-body", 0usize)).bounds().origin.y
+        })
+        .unwrap()
+    };
+    let down = ScrollDelta::Pixels(point(px(0.), px(-40.)));
+    // Locked: scrolling over the first table scrolls the board, not the table.
+    let before = tiles_y(cx);
+    step(handle, cx, |window, cx| {
+        window.scroll(("tile-body", 0usize), down, cx)
+    });
+    step(handle, cx, |_, _| {});
+    assert_eq!(table_y("t1", cx), px(0.));
+    assert!(tiles_y(cx) < before, "the board scrolled");
+    // On hover it says how to scroll it.
+    step(handle, cx, |window, _| {
+        assert!(window.try_find("tile-scroll-hint").is_some())
+    });
+    // A click unlocks it: now it scrolls.
+    step(handle, cx, |window, cx| {
+        window.click(("tile-body", 0usize), cx)
+    });
+    assert_eq!(
+        cx.update(|cx| board.read(cx).unlocked_table().map(String::from)),
+        Some("t1".into())
+    );
+    step(handle, cx, |window, cx| {
+        window.scroll(("tile-body", 0usize), down, cx)
+    });
+    step(handle, cx, |_, _| {});
+    assert!(table_y("t1", cx) < px(0.), "the unlocked table scrolled");
+    // Scrolling elsewhere locks it again.
+    step(handle, cx, |window, cx| {
+        window.scroll(("tile-body", 1usize), down, cx)
+    });
+    step(handle, cx, |_, _| {});
+    assert_eq!(
+        cx.update(|cx| board.read(cx).unlocked_table().map(String::from)),
+        None
+    );
+    assert_eq!(table_y("t2", cx), px(0.), "the other table stayed locked");
+    // So does Esc.
+    step(handle, cx, |window, cx| {
+        window.click(("tile-body", 0usize), cx)
+    });
+    step(handle, cx, |window, cx| window.press("escape", cx));
+    assert_eq!(
+        cx.update(|cx| board.read(cx).unlocked_table().map(String::from)),
+        None
+    );
+}
+
+#[gpui_kit::test]
 fn board_tiles_show_their_results_and_share_a_statement(cx: &mut TestAppContext) {
     use tangul_core::ResultSet;
     use tangul_engine::{QueryError, QueryOutput};
@@ -4885,19 +4970,22 @@ fn point_chart_at(
     window.render_frame(cx);
 }
 
-/// The tooltip's lines top to bottom (series), and the highlighted one.
+/// The tooltip's lines (series) column by column, top to bottom, and the
+/// highlighted one.
 fn listed(window: &mut Window, scope: &'static str, series: usize) -> (Vec<usize>, Option<usize>) {
     let scoped = window.within(scope);
-    let mut rows: Vec<(f32, usize, bool)> = (0..series)
+    let mut rows: Vec<(gpui_kit::Point<gpui_kit::Pixels>, usize, bool)> = (0..series)
         .filter_map(|s| {
             if let Some(e) = scoped.try_find(("chart-row-hovered", s)) {
-                return Some((e.bounds().origin.y.as_f32(), s, true));
+                return Some((e.bounds().origin, s, true));
             }
             let e = scoped.try_find(("chart-row", s))?;
-            Some((e.bounds().origin.y.as_f32(), s, false))
+            Some((e.bounds().origin, s, false))
         })
         .collect();
-    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    rows.sort_by(|a, b| {
+        (a.0.x.as_f32().total_cmp(&b.0.x.as_f32())).then(a.0.y.as_f32().total_cmp(&b.0.y.as_f32()))
+    });
     let hovered = rows.iter().find(|r| r.2).map(|r| r.1);
     (rows.into_iter().map(|r| r.1).collect(), hovered)
 }
@@ -4995,6 +5083,53 @@ fn every_value_of_many_series_is_reachable(cx: &mut TestAppContext) {
     step(handle, cx, |window, cx| window.press("escape", cx));
     step(handle, cx, |window, _| {
         assert!(window.try_find("chart-pinned").is_none())
+    });
+}
+
+#[gpui_kit::test]
+fn a_rows_values_sit_beside_the_chart_and_move_once_pinned(cx: &mut TestAppContext) {
+    use tangul_core::chart::ChartStyle;
+    let (handle, workspace) = open(cx);
+    let tab = chart_tab(handle, &workspace, 3, ChartStyle::StackedBars, cx);
+    step(handle, cx, |window, cx| {
+        point_chart_at(&tab, 0, 2.0, 0., window, cx)
+    });
+    // Not over the chart: below it, or above where the window has more room.
+    step(handle, cx, |window, _| {
+        let area = window.find("chart-area").bounds();
+        let tip = window.find("chart-tip").bounds();
+        assert!(!tip.intersects(&area), "{tip:?} over {area:?}");
+        let (tip_x, area_x) = (tip.center().x.as_f32(), area.center().x.as_f32());
+        assert!((tip_x - area_x).abs() < 1., "centered: {tip_x} vs {area_x}");
+    });
+    // Pinned: where the tooltip was.
+    step(handle, cx, |window, cx| {
+        let (chart, bounds) = tab.read(cx).results().read(cx).chart_for_test().unwrap();
+        let at = chart.point_of(bounds, 0, 2.0);
+        let area = window.find("chart-area").bounds();
+        window.click_at("chart-area", at - area.origin, cx);
+    });
+    let before = step(handle, cx, |window, _| {
+        let area = window.find("chart-area").bounds();
+        let pinned = window.find("chart-pinned").bounds();
+        assert!(!pinned.intersects(&area), "{pinned:?} over {area:?}");
+        pinned
+    });
+    // Its header moves it, still pinned.
+    let moved = gpui_kit::point(px(-120.), px(60.));
+    step(handle, cx, |window, cx| {
+        let from = window.find("chart-pinned-grip").bounds().center();
+        let path = [
+            from + gpui_kit::point(px(-10.), px(5.)),
+            from + moved * 0.5,
+            from + moved,
+        ];
+        drag_through(window, from, &path, cx);
+    });
+    step(handle, cx, |window, _| {
+        let after = window.find("chart-pinned").bounds();
+        assert_eq!(after.origin, before.origin + moved);
+        assert_eq!(listed(window, "chart-pinned", 3), (vec![2, 1, 0], Some(1)));
     });
 }
 

@@ -23,7 +23,7 @@ use tangul_service::boards::{self, Edit};
 use tangul_core::chart::{ChartStyle, ChartView};
 
 use super::form::{AskForm, QueryForm, TileForm, view_label};
-use super::{BoardEvent, BoardTab, link_action, link_icon};
+use super::{BoardEvent, BoardTab, link_action, link_icon, scroll_lock};
 use crate::assets::{Lucide, style_icon};
 use crate::result_view::{SetView, chart_menu};
 use crate::ui::{dialog_form, enter_saves, info, wrapped_tooltip};
@@ -562,6 +562,46 @@ impl BoardTab {
                 )
             })
             .child(actions);
+        // A table that scrolls does so only once clicked (`scroll_lock`).
+        let scrolls = tile.held().is_none()
+            && view.is_some_and(|v| v.loaded && v.result.read(cx).table_scrolls(cx));
+        let unlocked = scrolls && self.unlocked.as_deref() == Some(id.as_str());
+        let hovered = self.hovered_table.as_deref() == Some(id.as_str());
+        let body = div()
+            .id(("tile-body", ix))
+            .test_support()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            // Before the table: gpui-kit's scroll areas take scroll events early
+            // too, and the first to register gets them.
+            .when(scrolls, |this| {
+                this.child(scroll_lock::guard(
+                    unlocked,
+                    self.scroll.clone(),
+                    cx.entity().downgrade(),
+                ))
+            })
+            .child(body)
+            .when(scrolls, |this| {
+                let (unlock_id, hover_id) = (id.clone(), id.clone());
+                this.capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                    this.unlocked = Some(unlock_id.clone());
+                    cx.notify();
+                }))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    let id = Some(hover_id.clone());
+                    if *hovered {
+                        this.hovered_table = id;
+                    } else if this.hovered_table == id {
+                        this.hovered_table = None;
+                    }
+                    cx.notify();
+                }))
+                .when(unlocked || hovered, |this| {
+                    this.child(scroll_lock::hint(unlocked, cx))
+                })
+            });
         let drop_id = id.clone();
         v_flex()
             .id(SharedString::from(format!("tile-{id}")))
@@ -570,11 +610,11 @@ impl BoardTab {
             .min_w_0()
             .h(px(TILE_HEIGHT))
             .border_1()
-            .border_color(theme.border)
+            .border_color(if unlocked { theme.ring } else { theme.border })
             .rounded(theme.radius)
             .overflow_hidden()
             .child(header)
-            .child(div().flex_1().min_h_0().child(body))
+            .child(body)
             .when(self.editing, |this| {
                 this.drag_over::<DraggedTile>(|style, _, _, cx| style.border_color(cx.theme().ring))
                     .on_drop(cx.listener(move |_, dragged: &DraggedTile, _, cx| {
@@ -772,6 +812,14 @@ impl Render for BoardTab {
         v_flex()
             .id("board")
             .track_focus(&self.focus_handle)
+            // A click elsewhere or Esc locks the unlocked table again (a click on a
+            // table unlocks it right after, in its own handler).
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.lock_tables(cx)))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.lock_tables(cx);
+                }
+            }))
             .size_full()
             .bg(background)
             .child(header)
@@ -782,6 +830,7 @@ impl Render for BoardTab {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .child(tiles),
             )
     }
