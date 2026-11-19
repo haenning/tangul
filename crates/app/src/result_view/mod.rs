@@ -777,6 +777,20 @@ impl ResultView {
 
     /// The last result as chart data (for the status-bar menu), or why it can't be
     /// charted.
+    /// Whether it shows the table and that has more rows than fit (it scrolls).
+    pub fn table_scrolls(&self, cx: &App) -> bool {
+        matches!(self.status, Status::Done { .. })
+            && self.chart_shown().is_none()
+            && self.table.read(cx).vertical_scroll_handle.is_scrollable()
+    }
+
+    /// How far its table is scrolled down (tests).
+    #[cfg(test)]
+    pub fn table_scroll_y(&self, cx: &App) -> Pixels {
+        let handle = &self.table.read(cx).vertical_scroll_handle;
+        handle.0.borrow().base_handle.offset().y
+    }
+
     pub fn chart(&self) -> Result<Rc<ChartData>, SharedString> {
         self.chart.clone()
     }
