@@ -19,7 +19,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tangul_assist::chart::{
-    ChartData, ChartStyle, format_value, min_max_per_pixel, peak_per_pixel, simplify, ticks,
+    ChartData, ChartStyle, format_value, listed_value, min_max_per_pixel, peak_per_pixel, simplify,
+    ticks,
 };
 
 /// Room left of the plot for the value labels, at the default label size.
@@ -843,12 +844,14 @@ fn tip_lines(chart: Bounds<Pixels>, window: &Window) -> usize {
 }
 
 impl ResultChart {
-    /// One series' line in a list of a row's values: its color, name and value
-    /// (NULL as "NULL"); the highlighted one stands out.
+    /// One series' line in a list of a row's values: its color, name and value; the
+    /// highlighted one stands out. NULL is listed as 0, and a 0 is muted, color
+    /// included (`listed_value`).
     pub fn value_row(&self, s: usize, row: usize, highlighted: bool, cx: &App) -> AnyElement {
         let series = &self.data.series[s];
-        let value = series.values[row].map_or("NULL".into(), format_value);
+        let (value, zero) = listed_value(series.values[row]);
         let theme = cx.theme();
+        let muted = theme.muted_foreground;
         let id = if highlighted {
             ElementId::from(("chart-row-hovered", s))
         } else {
@@ -872,15 +875,15 @@ impl ResultChart {
                             .size_2()
                             .flex_none()
                             .rounded(theme.radius.half())
-                            .bg(self.color(s)),
+                            .bg(if zero { muted } else { self.color(s) }),
                     )
                     .child(
                         div()
-                            .when(!highlighted, |this| this.text_color(theme.muted_foreground))
+                            .when(!highlighted || zero, |this| this.text_color(muted))
                             .child(series_label(series)),
                     ),
             )
-            .child(value)
+            .child(div().when(zero, |this| this.text_color(muted)).child(value))
             .into_any_element()
     }
 
